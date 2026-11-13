@@ -18,6 +18,7 @@
 //! in. When no file is found, [`crate::arp::vendor`] falls back to its small
 //! built-in table.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -94,10 +95,10 @@ impl OuiDb {
                 continue;
             }
             if let Some((bits, prefix, name)) = parse_ieee_csv(t)
-                .or_else(|| parse_manuf(t))
-                .or_else(|| parse_plain(t))
+                .or_else(|| parse_manuf(t).map(|(b, p, n)| (b, p, Cow::Borrowed(n))))
+                .or_else(|| parse_plain(t).map(|(b, p, n)| (b, p, Cow::Borrowed(n))))
             {
-                self.insert(bits, prefix, name);
+                self.insert(bits, prefix, &name);
             }
         }
         if let Some((p, n)) = pending {
@@ -203,7 +204,7 @@ fn block_in(range: &str) -> Option<(u8, u64)> {
 }
 
 /// `MA-L,00000C,"Cisco Systems, Inc","170 West Tasman Dr. San Jose CA US 95134"`
-fn parse_ieee_csv(line: &str) -> Option<(u8, u64, &str)> {
+fn parse_ieee_csv(line: &str) -> Option<(u8, u64, Cow<'_, str>)> {
     let mut parts = line.splitn(3, ',');
     let registry = parts.next()?;
     let assignment = parts.next()?;
@@ -211,7 +212,8 @@ fn parse_ieee_csv(line: &str) -> Option<(u8, u64, &str)> {
     let bits = match registry {
         "MA-L" => 24,
         "MA-M" => 28,
-        "MA-S" => 36,
+        // IAB blocks (iab.csv) are /36 like MA-S.
+        "MA-S" | "IAB" => 36,
         _ => return None,
     };
     if assignment.len() != usize::from(bits / 4) {
@@ -219,20 +221,50 @@ fn parse_ieee_csv(line: &str) -> Option<(u8, u64, &str)> {
     }
     let value = hex(assignment)? << (48 - u32::from(bits));
     let name = match rest.strip_prefix('"') {
-        // A quoted name ends at the next quote (IEEE doubles inner quotes,
-        // which only cuts such rare names short).
-        Some(q) => &q[..q.find('"')?],
-        None => rest.split(',').next()?,
+        Some(quoted) => Cow::Owned(unquote(quoted)?),
+        None => Cow::Borrowed(rest.split(',').next()?),
     };
-    Some((bits, value, name.trim()))
+    Some((bits, value, trim_cow(name)))
 }
 
-/// `00:00:0C\tCisco\tCisco Systems, Inc` or `00:1B:C5:00:00:00/36\tShort\tLong`
+/// The rest of a quoted CSV field (after its opening quote), with doubled
+/// quotes decoded. `None` if the closing quote is missing.
+fn unquote(field: &str) -> Option<String> {
+    let mut out = String::new();
+    let mut chars = field.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '"' {
+            out.push(c);
+        } else if chars.peek() == Some(&'"') {
+            chars.next();
+            out.push('"');
+        } else {
+            return Some(out);
+        }
+    }
+    None
+}
+
+fn trim_cow(s: Cow<'_, str>) -> Cow<'_, str> {
+    match s {
+        Cow::Borrowed(b) => Cow::Borrowed(b.trim()),
+        Cow::Owned(o) => Cow::Owned(o.trim().to_string()),
+    }
+}
+
+/// `00:00:0C\tCisco\tCisco Systems, Inc` or `00:1B:C5:00:00:00/36\tShort\tLong`.
+/// Fields may be separated by tabs or spaces; the long name keeps its spaces.
 fn parse_manuf(line: &str) -> Option<(u8, u64, &str)> {
-    let mut fields = line.split('\t').filter(|f| !f.is_empty());
-    let addr = fields.next()?;
-    let short = fields.next()?.trim();
-    let long = fields.next().map(str::trim);
+    let (addr, rest) = line.split_once([' ', '\t'])?;
+    // Plain "XXXXXX Vendor" lines are parse_plain's: manuf separates bytes.
+    if !addr.contains([':', '-', '.']) {
+        return None;
+    }
+    let rest = rest.trim_start();
+    let (short, long) = match rest.split_once([' ', '\t']) {
+        Some((s, l)) => (s, Some(l.trim())),
+        None => (rest.trim(), None),
+    };
     let (addr, bits) = match addr.split_once('/') {
         Some((a, b)) => (a, b.parse::<u8>().ok()?),
         None => (addr, 24),
@@ -298,6 +330,9 @@ MA-L,B827EB,Raspberry Pi Foundation,Mitchell Wood House Caldecote GB CB23 7NU
 MA-L,000569,\"VMware, Inc.\",\"3401 Hillview Avenue PALO ALTO CA US 94304\"
 MA-M,70B3D51,Example Block Owner,Somewhere
 MA-S,70B3D5F2A,\"Tiny Block, Ltd\",Elsewhere
+IAB,0050C27D5,DEUTA-WERKE GmbH,Paffrather Strasse 140
+MA-L,001122,\"\"\"Acme\"\" Ltd\",\"Road \"\"A\"\", Town\"
+00:00:0D Fibronics Fibronics Ltd.
 # Wireshark manuf
 00:50:56\tVMware\tVMware, Inc.
 00:1B:C5:00:00:00/36\tConverging\tConverging Systems Inc.
@@ -328,8 +363,11 @@ MA-S,70B3D5F2A,\"Tiny Block, Ltd\",Elsewhere
         assert_eq!(l("12:34:56:00:00:00"), None);
         // A /36 from oui36.txt, without claiming the whole /24 it sits in.
         assert_eq!(l("70:b3:d5:f2:f1:23"), Some("TELEPLATFORMS"));
+        assert_eq!(l("00:50:c2:7d:5f:00"), Some("DEUTA-WERKE GmbH"));
+        assert_eq!(l("00:11:22:00:00:01"), Some("\"Acme\" Ltd"));
+        assert_eq!(l("00:00:0d:00:00:01"), Some("Fibronics Ltd."));
         // Header, address and "(base 16)" lines add nothing extra.
-        assert_eq!(db.len(), 10);
+        assert_eq!(db.len(), 13);
     }
 
     #[test]
