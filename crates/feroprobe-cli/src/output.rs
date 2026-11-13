@@ -1,6 +1,6 @@
 //! Rendering scan results.
 
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use anyhow::Result;
 use feroprobe_core::{HostResult, PortResult, PortState, service_name};
@@ -8,7 +8,14 @@ use serde::Serialize;
 
 /// Everything about the run that the renderers need besides the hosts.
 pub struct RunInfo {
+    /// The command line, for the XML report.
+    pub args: String,
+    /// When the scan started.
+    pub start: SystemTime,
     pub scan_types: Vec<&'static str>,
+    /// TCP and UDP ports scanned on each host (empty if that scan did not run).
+    pub tcp_ports: Vec<u16>,
+    pub udp_ports: Vec<u16>,
     pub ports_per_host: usize,
     pub elapsed: Duration,
     /// Only show open (and open|filtered) ports, like nmap's `--open`.
@@ -23,11 +30,11 @@ pub struct RunInfo {
     pub ping_only: bool,
 }
 
-fn is_openish(state: PortState) -> bool {
+pub(crate) fn is_openish(state: PortState) -> bool {
     matches!(state, PortState::Open | PortState::OpenFiltered)
 }
 
-fn visible(host: &HostResult, only_open: bool) -> impl Iterator<Item = &PortResult> {
+pub(crate) fn visible(host: &HostResult, only_open: bool) -> impl Iterator<Item = &PortResult> {
     host.ports
         .iter()
         .filter(move |p| !only_open || is_openish(p.state))
@@ -41,8 +48,30 @@ fn service_label(p: &PortResult) -> String {
     }
 }
 
-fn reported(host: &HostResult, info: &RunInfo) -> bool {
+pub(crate) fn reported(host: &HostResult, info: &RunInfo) -> bool {
     info.assume_up || host.is_up()
+}
+
+/// Like nmap, collapse the most common non-open state into one summary
+/// instead of listing hundreds of closed ports. Returns that state with its
+/// count (none with `--open`) and the ports to list.
+pub(crate) fn port_rows<'a>(
+    host: &'a HostResult,
+    info: &RunInfo,
+) -> (Option<(usize, PortState)>, Vec<&'a PortResult>) {
+    let hidden = [
+        PortState::Closed,
+        PortState::Filtered,
+        PortState::OpenFiltered,
+    ]
+    .into_iter()
+    .map(|s| (host.count(s), s))
+    .filter(|&(n, _)| n > 0)
+    .max_by_key(|&(n, _)| n);
+    let rows = visible(host, info.only_open)
+        .filter(|p| info.only_open || Some(p.state) != hidden.map(|(_, s)| s))
+        .collect();
+    (hidden, rows)
 }
 
 pub fn print_table(hosts: &[HostResult], info: &RunInfo) {
@@ -63,20 +92,7 @@ pub fn print_table(hosts: &[HostResult], info: &RunInfo) {
             continue;
         }
 
-        // Like nmap, collapse the most common non-open state into one line
-        // instead of listing hundreds of closed ports.
-        let hidden = [
-            PortState::Closed,
-            PortState::Filtered,
-            PortState::OpenFiltered,
-        ]
-        .into_iter()
-        .map(|s| (host.count(s), s))
-        .filter(|&(n, _)| n > 0)
-        .max_by_key(|&(n, _)| n);
-        let rows: Vec<_> = visible(host, info.only_open)
-            .filter(|p| info.only_open || Some(p.state) != hidden.map(|(_, s)| s))
-            .collect();
+        let (hidden, rows) = port_rows(host, info);
         if rows.is_empty() {
             match hidden {
                 _ if info.only_open => println!("No open ports found"),

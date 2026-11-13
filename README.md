@@ -15,7 +15,7 @@ no external binaries.
 | Host discovery: ICMP echo + TCP 443/80 probes, `-sn`, `-Pn` | ✅ |
 | Targets: IPs, CIDR, `a.b.c.X-Y` ranges, hostnames, IPv6 (connect and UDP) | ✅ |
 | nmap-style `-p` port specs and top ports | ✅ |
-| Table and JSON output, `--reason`, `--open` | ✅ |
+| Table, JSON and nmap-style XML output, `--reason`, `--open` | ✅ |
 | Service and version detection, `-sV`, with our own probes and rules | ✅ |
 | ARP discovery on the local network | planned |
 | OS fingerprinting | planned |
@@ -43,6 +43,9 @@ sudo ./target/release/feroprobe -sS -p - --reason 10.0.0.5
 
 # Only open ports, as JSON
 ./target/release/feroprobe --top-ports 1000 --open -o json 10.0.0.1-50
+
+# nmap-style XML, for tools that read nmap's -oX reports
+./target/release/feroprobe -sV -o xml 10.0.0.0/24 > scan.xml
 ```
 
 Run `feroprobe --help` for all options (timeout, concurrency, packet rate, retries).

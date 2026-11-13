@@ -1,8 +1,9 @@
 //! `feroprobe`: an nmap-style network scanner, written natively in Rust.
 
 mod output;
+mod xml;
 
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
@@ -49,6 +50,8 @@ enum Format {
     Table,
     /// Machine-readable JSON
     Json,
+    /// XML in nmap's layout, for tools that read nmap's -oX output
+    Xml,
 }
 
 /// Fast, native network scanner with an nmap-style command line.
@@ -207,6 +210,7 @@ async fn main() -> Result<()> {
     };
 
     let started = Instant::now();
+    let start_time = SystemTime::now();
     let mut hosts: Vec<HostResult> = if plan.discovery {
         discover(&targets, &cfg)
             .await
@@ -259,7 +263,15 @@ async fn main() -> Result<()> {
     let ports_per_host =
         plan.tcp.map_or(0, |_| tcp_ports.len()) + if plan.udp { udp_ports.len() } else { 0 };
     let info = RunInfo {
+        args: std::env::args().collect::<Vec<_>>().join(" "),
+        start: start_time,
         scan_types,
+        tcp_ports: if plan.tcp.is_some() && !plan.ping_only {
+            tcp_ports
+        } else {
+            Vec::new()
+        },
+        udp_ports: if plan.udp { udp_ports } else { Vec::new() },
         ports_per_host,
         elapsed: started.elapsed(),
         only_open: args.open,
@@ -271,6 +283,7 @@ async fn main() -> Result<()> {
     match args.output {
         Format::Table => output::print_table(&hosts, &info),
         Format::Json => output::print_json(&hosts, &info)?,
+        Format::Xml => print!("{}", xml::render(&hosts, &info)),
     }
     Ok(())
 }
