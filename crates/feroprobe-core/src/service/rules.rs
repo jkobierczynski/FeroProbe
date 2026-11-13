@@ -226,7 +226,7 @@ static RULES: &[Rule] = &[
     // AMQP: Connection.Start lists the broker's product and version.
     r(
         "amqp",
-        r"^\x01\x00\x00.*product S....RabbitMQ.*version S....([\d.]+)",
+        r"^\x01\x00\x00.*\x07productS....RabbitMQ.*\x07versionS....([\d.]+)",
     )
     .product("RabbitMQ")
     .version("${1}"),
@@ -474,6 +474,19 @@ mod tests {
         );
         let i = match_response("memcached", b"VERSION 1.6.21\r\n").unwrap();
         assert_eq!(i.version.as_deref(), Some("1.6.21"));
+    }
+
+    #[test]
+    fn rabbitmq_connection_start() {
+        // Field table entries: short-string name, type 'S', long string.
+        let mut frame = b"\x01\x00\x00\x00\x00\x01\x00\x00\x0a\x00\x0a\x00\x09".to_vec();
+        frame.extend_from_slice(b"\x00\x00\x00\x40");
+        frame.extend_from_slice(b"\x07productS\x00\x00\x00\x08RabbitMQ");
+        frame.extend_from_slice(b"\x07versionS\x00\x00\x00\x0612.0.3");
+        let i = match_response("amqp", &frame).unwrap();
+        assert_eq!(i.name, "amqp");
+        assert_eq!(i.product.as_deref(), Some("RabbitMQ"));
+        assert_eq!(i.version.as_deref(), Some("12.0.3"));
     }
 
     #[test]

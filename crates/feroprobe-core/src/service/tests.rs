@@ -149,3 +149,26 @@ fn printable_escapes() {
     assert_eq!(printable(b"a\\b\x00\r\n", 10), "a\\\\b\\x00\\r\\n");
     assert_eq!(printable(b"abcdef", 3), "abc");
 }
+
+#[tokio::test]
+async fn slow_trickle_is_cut_off() {
+    // One byte every 100 ms, forever: the reply must end after `wait`.
+    let addr = serve(|mut s| async move {
+        let _ = s.write_all(b"SSH-2.0-").await;
+        loop {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            if s.write_all(b"x").await.is_err() {
+                break;
+            }
+        }
+    })
+    .await;
+    let start = std::time::Instant::now();
+    let info = detect_tcp(addr, None, &cfg(), WAIT).await.unwrap();
+    assert_eq!(info.name, "ssh");
+    assert!(
+        start.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        start.elapsed()
+    );
+}

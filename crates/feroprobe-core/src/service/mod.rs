@@ -18,7 +18,7 @@ mod tls;
 mod udp_info;
 
 use std::net::SocketAddr;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures::stream::{self, StreamExt};
 use serde::Serialize;
@@ -110,7 +110,8 @@ const MAX_RESPONSE: usize = 16 * 1024;
 const IDLE_GAP: Duration = Duration::from_millis(250);
 
 /// Send `payload` (if any) and collect the reply until `wait` passes with no
-/// data, a short pause follows some data, or the peer closes.
+/// data, a short pause follows some data, the peer closes, or `wait` has
+/// passed since the first data.
 async fn exchange<S>(stream: &mut S, payload: &[u8], wait: Duration) -> Vec<u8>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -122,11 +123,17 @@ where
     let mut out = Vec::new();
     let mut buf = [0u8; 4096];
     let mut limit = wait;
+    // Set at the first data: a slow trickle must not hold the scan forever.
+    let mut deadline: Option<Instant> = None;
     while out.len() < MAX_RESPONSE {
         match tokio::time::timeout(limit, stream.read(&mut buf)).await {
             Ok(Ok(n)) if n > 0 => {
                 out.extend_from_slice(&buf[..n]);
-                limit = IDLE_GAP;
+                let end = *deadline.get_or_insert_with(|| Instant::now() + wait);
+                limit = IDLE_GAP.min(end.saturating_duration_since(Instant::now()));
+                if limit.is_zero() {
+                    break;
+                }
             }
             _ => break,
         }
@@ -156,16 +163,21 @@ async fn detect_tls(
     cfg: &ScanConfig,
     wait: Duration,
 ) -> Option<ServiceInfo> {
-    let banner_first = rules::TLS_BANNER_PORTS.contains(&addr.port());
-    let mut probe = if banner_first {
+    // Listen on ports whose service talks first, else send the probe meant
+    // for this port (AMQP on 5671, ...), else HTTP.
+    let port = addr.port();
+    let mut probe = if rules::TLS_BANNER_PORTS.contains(&port) {
         &rules::NULL
     } else {
-        &rules::HTTP
+        rules::PROBES
+            .iter()
+            .find(|p| p.ports.contains(&port))
+            .unwrap_or(&rules::HTTP)
     };
     let (mut stream, cn) = tls::connect(addr, host, cfg.timeout, wait).await?;
     let mut data = exchange(&mut stream, probe.payload, wait).await;
-    if data.is_empty() && banner_first {
-        // Silent after all: ask over a fresh session.
+    if data.is_empty() && probe.name != rules::HTTP.name {
+        // No answer: try HTTP over a fresh session.
         if let Some((mut stream, _)) = tls::connect(addr, host, cfg.timeout, wait).await {
             probe = &rules::HTTP;
             data = exchange(&mut stream, probe.payload, wait).await;
