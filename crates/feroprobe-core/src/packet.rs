@@ -69,12 +69,56 @@ pub fn tcp_syn(src: Ipv4Addr, dst: Ipv4Addr, sport: u16, dport: u16, seq: u32) -
     p
 }
 
+/// Length of the OS-detection SYN: 20-byte header plus 20 bytes of options.
+pub const OS_SYN_LEN: usize = 40;
+
+/// Build a SYN that offers the common TCP options, in the order Linux
+/// clients use (MSS, SACK permitted, timestamps, NOP, window scale), so the
+/// reply shows which options the target supports and how it orders them.
+pub fn tcp_syn_with_options(
+    src: Ipv4Addr,
+    dst: Ipv4Addr,
+    sport: u16,
+    dport: u16,
+    seq: u32,
+    tsval: u32,
+) -> [u8; OS_SYN_LEN] {
+    let mut p = [0u8; OS_SYN_LEN];
+    p[0..2].copy_from_slice(&sport.to_be_bytes());
+    p[2..4].copy_from_slice(&dport.to_be_bytes());
+    p[4..8].copy_from_slice(&seq.to_be_bytes());
+    p[12] = ((OS_SYN_LEN / 4) as u8) << 4;
+    p[13] = TCP_SYN;
+    p[14..16].copy_from_slice(&64240u16.to_be_bytes());
+    p[20..24].copy_from_slice(&[2, 4, 0x05, 0xb4]); // MSS 1460
+    p[24..26].copy_from_slice(&[4, 2]); // SACK permitted
+    p[26..28].copy_from_slice(&[8, 10]); // timestamps: value, echo 0
+    p[28..32].copy_from_slice(&tsval.to_be_bytes());
+    p[36] = 1; // NOP
+    p[37..40].copy_from_slice(&[3, 3, 7]); // window scale 7
+    let sum = checksum_with(pseudo_header_sum(src, dst, IPPROTO_TCP, OS_SYN_LEN), &p);
+    p[16..18].copy_from_slice(&sum.to_be_bytes());
+    p
+}
+
+/// The options area of a TCP header.
+pub fn tcp_options(buf: &[u8]) -> &[u8] {
+    let len = buf
+        .get(12)
+        .map_or(0, |&b| usize::from(b >> 4) * 4)
+        .min(buf.len());
+    buf.get(20..len).unwrap_or(&[])
+}
+
 /// A parsed IPv4 header and its payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Ipv4<'a> {
     pub src: Ipv4Addr,
     pub dst: Ipv4Addr,
     pub protocol: u8,
+    pub ttl: u8,
+    /// The "don't fragment" flag.
+    pub df: bool,
     pub payload: &'a [u8],
 }
 
@@ -97,6 +141,8 @@ pub fn parse_ipv4(buf: &[u8]) -> Option<Ipv4<'_>> {
         src: Ipv4Addr::new(buf[12], buf[13], buf[14], buf[15]),
         dst: Ipv4Addr::new(buf[16], buf[17], buf[18], buf[19]),
         protocol: buf[9],
+        ttl: buf[8],
+        df: buf[6] & 0x40 != 0,
         payload: &buf[ihl..end],
     })
 }
@@ -109,6 +155,7 @@ pub struct Tcp {
     pub seq: u32,
     pub ack: u32,
     pub flags: u8,
+    pub window: u16,
 }
 
 pub fn parse_tcp(buf: &[u8]) -> Option<Tcp> {
@@ -121,6 +168,7 @@ pub fn parse_tcp(buf: &[u8]) -> Option<Tcp> {
         seq: u32::from_be_bytes([buf[4], buf[5], buf[6], buf[7]]),
         ack: u32::from_be_bytes([buf[8], buf[9], buf[10], buf[11]]),
         flags: buf[13],
+        window: u16::from_be_bytes([buf[14], buf[15]]),
     })
 }
 
@@ -187,7 +235,8 @@ mod tests {
                 dport: 443,
                 seq: 0xdead_beef,
                 ack: 0,
-                flags: TCP_SYN
+                flags: TCP_SYN,
+                window: 1024,
             }
         );
         // A correct checksum makes the sum over pseudo-header + segment zero.
@@ -195,6 +244,23 @@ mod tests {
             checksum_with(pseudo_header_sum(src, dst, IPPROTO_TCP, SYN_LEN), &seg),
             0
         );
+    }
+
+    #[test]
+    fn os_syn_options() {
+        let src = Ipv4Addr::new(10, 0, 0, 1);
+        let dst = Ipv4Addr::new(10, 0, 0, 2);
+        let seg = tcp_syn_with_options(src, dst, 40000, 22, 7, 0x0102_0304);
+        let opts = tcp_options(&seg);
+        assert_eq!(opts.len(), 20);
+        assert_eq!(&opts[..8], &[2, 4, 5, 0xb4, 4, 2, 8, 10]);
+        assert_eq!(&opts[16..], &[1, 3, 3, 7]);
+        assert_eq!(parse_tcp(&seg).unwrap().window, 64240);
+        assert_eq!(
+            checksum_with(pseudo_header_sum(src, dst, IPPROTO_TCP, OS_SYN_LEN), &seg),
+            0
+        );
+        assert!(tcp_options(&seg[..10]).is_empty());
     }
 
     #[test]
@@ -226,6 +292,7 @@ mod tests {
         assert_eq!(ip.src, Ipv4Addr::new(192, 168, 1, 1));
         assert_eq!(ip.dst, Ipv4Addr::new(192, 168, 1, 2));
         assert_eq!(ip.protocol, IPPROTO_ICMP);
+        assert_eq!((ip.ttl, ip.df), (64, false));
         let icmp = parse_icmp(ip.payload).unwrap();
         assert_eq!((icmp.kind, icmp.id, icmp.seq), (ICMP_ECHO_REQUEST, 7, 9));
         assert_eq!(checksum(ip.payload), 0);
