@@ -86,7 +86,8 @@ pub fn icmp_available() -> bool {
 
 mod icmp {
     use std::collections::{HashMap, HashSet};
-    use std::io::{self, Read};
+    use std::io;
+    use std::mem::MaybeUninit;
     use std::net::Ipv4Addr;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -147,10 +148,10 @@ mod icmp {
         let receiver = {
             let (sock, stop) = (Arc::clone(&sock), Arc::clone(&stop));
             std::thread::spawn(move || {
-                let mut buf = vec![0u8; 65536];
+                let mut buf = vec![MaybeUninit::<u8>::uninit(); 65536];
                 while !stop.load(Ordering::Relaxed) {
-                    let n = match (&*sock).read(&mut buf) {
-                        Ok(n) => n,
+                    let (n, sender) = match sock.recv_from(&mut buf) {
+                        Ok(r) => r,
                         Err(e)
                             if matches!(
                                 e.kind(),
@@ -163,16 +164,21 @@ mod icmp {
                         }
                         Err(_) => return,
                     };
+                    // SAFETY: recv_from initialised the first `n` bytes.
+                    let data = unsafe { std::slice::from_raw_parts(buf.as_ptr().cast::<u8>(), n) };
+                    // The kernel reports who sent the datagram even when the
+                    // ICMP message comes without an IP header.
+                    let Some(sender) = sender.as_socket_ipv4().map(|a| *a.ip()) else {
+                        continue;
+                    };
                     let at = Instant::now();
                     // Raw sockets (and macOS ping sockets) include the IP
                     // header; Linux ping sockets do not. An echo reply starts
                     // with type 0, never with an IPv4 version nibble of 4.
-                    let (src, icmp) = match packet::parse_ipv4(&buf[..n]) {
-                        Some(ip) if ip.protocol == packet::IPPROTO_ICMP => {
-                            (Some(ip.src), ip.payload)
-                        }
+                    let icmp = match packet::parse_ipv4(data) {
+                        Some(ip) if ip.protocol == packet::IPPROTO_ICMP => ip.payload,
                         Some(_) => continue,
-                        None => (None, &buf[..n]),
+                        None => data,
                     };
                     let Some(msg) = packet::parse_icmp(icmp) else {
                         continue;
@@ -180,8 +186,7 @@ mod icmp {
                     if msg.kind != ICMP_ECHO_REPLY || (!id_rewritten && msg.id != id) {
                         continue;
                     }
-                    // Without an IP header the sequence number tells us who answered.
-                    let _ = tx.send((src.unwrap_or(Ipv4Addr::UNSPECIFIED), msg.seq, at));
+                    let _ = tx.send((sender, msg.seq, at));
                 }
             })
         };
@@ -195,13 +200,14 @@ mod icmp {
         let record = |(src, seq, at): (Ipv4Addr, u16, Instant),
                       sent_at: &HashMap<u16, (Ipv4Addr, Instant)>,
                       replies: &mut HashMap<Ipv4Addr, f64>| {
+            // Only count a reply from the host this sequence number was sent
+            // to, so one host cannot vouch for another by echoing its sequence.
             let Some(&(dst, sent)) = sent_at.get(&seq) else {
                 return;
             };
-            let from = if src.is_unspecified() { dst } else { src };
-            if targets.contains(&from) {
+            if src == dst {
                 let rtt = (at.saturating_duration_since(sent).as_secs_f64() * 1e6).round() / 1000.0;
-                replies.entry(from).or_insert(rtt);
+                replies.entry(dst).or_insert(rtt);
             }
         };
 
@@ -253,9 +259,11 @@ mod tests {
     #[tokio::test]
     async fn localhost_is_up() {
         let cfg = ScanConfig {
-            timeout: Duration::from_millis(500),
+            timeout: Duration::from_secs(5),
             ..Default::default()
         };
+        // Long enough for Windows, which reports a refused connect only ~2s
+        // after the reset (there, only the TCP probes run).
         let hosts = discover(&[Target::new("127.0.0.1".parse().unwrap())], &cfg)
             .await
             .unwrap();
