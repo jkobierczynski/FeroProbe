@@ -19,12 +19,21 @@ fn esc(s: &str) -> String {
             '>' => out.push_str("&gt;"),
             '"' => out.push_str("&quot;"),
             '\'' => out.push_str("&apos;"),
-            // XML 1.0 does not allow most control characters at all.
-            c if c.is_control() && !matches!(c, '\t' | '\n' | '\r') => {}
-            c => out.push(c),
+            c if is_xml_char(c) => out.push(c),
+            // Characters XML 1.0 forbids even escaped: drop them.
+            _ => {}
         }
     }
     out
+}
+
+/// Whether XML 1.0 allows `c` in a document (its `Char` production).
+fn is_xml_char(c: char) -> bool {
+    matches!(c,
+        '\t' | '\n' | '\r'
+        | '\u{20}'..='\u{D7FF}'
+        | '\u{E000}'..='\u{FFFD}'
+        | '\u{10000}'..)
 }
 
 fn unix_secs(t: SystemTime) -> u64 {
@@ -222,6 +231,8 @@ pub fn render(hosts: &[HostResult], info: &RunInfo) -> String {
             port_ranges(ports)
         );
     }
+    // nmap's DTD wants these two after scaninfo, before the hosts.
+    x.push_str("<verbose level=\"0\"/>\n<debugging level=\"0\"/>\n");
     let mut up = 0;
     for host in hosts.iter().filter(|h| reported(h, info)) {
         up += 1;
@@ -272,6 +283,46 @@ mod tests {
             rtt_ms: None,
             service,
         }
+    }
+
+    #[test]
+    fn forbidden_characters_keep_the_report_parseable() {
+        assert_eq!(esc("a\u{1}b\u{FFFE}c\u{FFFF}d\te"), "abcd\te");
+        let mut host = HostResult::new("10.0.0.5".parse().unwrap(), None);
+        host.ports = vec![port(
+            22,
+            PortState::Open,
+            Some(ServiceInfo {
+                name: "x".into(),
+                product: Some("bad\u{FFFF}\u{0}\u{1b}[0m<&>\u{1F600}".into()),
+                ..Default::default()
+            }),
+        )];
+        let xml = render(&[host], &info());
+        let doc = roxmltree::Document::parse_with_options(
+            &xml,
+            roxmltree::ParsingOptions {
+                allow_dtd: true,
+                ..Default::default()
+            },
+        )
+        .expect("well-formed XML");
+        let service = doc
+            .descendants()
+            .find(|n| n.has_tag_name("service"))
+            .unwrap();
+        assert_eq!(service.attribute("product"), Some("bad[0m<&>\u{1F600}"));
+        // Element order nmap's DTD expects at the top level.
+        let top: Vec<_> = doc
+            .root_element()
+            .children()
+            .filter(|n| n.is_element())
+            .map(|n| n.tag_name().name())
+            .collect();
+        assert_eq!(
+            top,
+            ["scaninfo", "verbose", "debugging", "host", "runstats"]
+        );
     }
 
     #[test]
