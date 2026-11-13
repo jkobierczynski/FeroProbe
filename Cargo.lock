@@ -122,8 +122,10 @@ version = "0.1.0"
 dependencies = [
  "futures",
  "ipnet",
+ "libc",
  "serde",
  "serde_json",
+ "socket2",
  "thiserror",
  "tokio",
 ]

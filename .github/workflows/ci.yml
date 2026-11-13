@@ -25,3 +25,18 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test --all
+
+  # The SYN scan and ICMP discovery need raw sockets, so run the whole test
+  # suite again as root on Linux. FEROPROBE_REQUIRE_RAW makes the raw-socket
+  # tests fail instead of skipping if privileges are somehow missing.
+  raw-sockets:
+    name: ubuntu-latest (root, raw sockets)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --all
+        env:
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: sudo -E
+          FEROPROBE_REQUIRE_RAW: "1"
