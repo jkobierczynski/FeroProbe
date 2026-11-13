@@ -1,7 +1,9 @@
 //! Helpers shared by the raw-socket techniques (SYN scan, ICMP discovery).
 
 use std::io;
-use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
+#[cfg(target_os = "linux")]
+use std::net::UdpSocket;
+use std::net::{Ipv4Addr, SocketAddrV4};
 use std::time::{Duration, Instant};
 
 use socket2::{Domain, Protocol, Socket, Type};
@@ -12,6 +14,7 @@ pub fn raw_sockets_available() -> bool {
 }
 
 /// Open a raw IPv4 socket for `proto`, with a friendly error if not allowed.
+#[cfg(target_os = "linux")]
 pub(crate) fn raw_socket(proto: Protocol) -> io::Result<Socket> {
     Socket::new(Domain::IPV4, Type::RAW, Some(proto)).map_err(|e| {
         if e.kind() == io::ErrorKind::PermissionDenied {
@@ -27,6 +30,7 @@ pub(crate) fn raw_socket(proto: Protocol) -> io::Result<Socket> {
 
 /// The local address the OS would use to reach `dst`, found by "connecting" a
 /// UDP socket (which sends nothing).
+#[cfg(target_os = "linux")]
 pub(crate) fn source_addr_for(dst: Ipv4Addr) -> io::Result<Ipv4Addr> {
     let sock = UdpSocket::bind("0.0.0.0:0")?;
     sock.connect(SocketAddrV4::new(dst, 53))?;
@@ -38,8 +42,10 @@ pub(crate) fn source_addr_for(dst: Ipv4Addr) -> io::Result<Ipv4Addr> {
 
 /// A small xorshift generator seeded from the clock and process id. Good
 /// enough to pick source ports and sequence cookies; not cryptographic.
+#[cfg(target_os = "linux")]
 pub(crate) struct Rng(u64);
 
+#[cfg(target_os = "linux")]
 impl Rng {
     pub(crate) fn new() -> Self {
         let nanos = std::time::SystemTime::now()
@@ -94,12 +100,21 @@ pub(crate) fn send_with_backoff(sock: &Socket, pkt: &[u8], to: Ipv4Addr) -> io::
     loop {
         match sock.send_to(pkt, &addr) {
             Ok(_) => return Ok(()),
-            #[cfg(unix)]
-            Err(e) if e.raw_os_error() == Some(libc::ENOBUFS) && attempts < 50 => {
+            Err(e) if is_no_buffer_space(&e) && attempts < 50 => {
                 attempts += 1;
                 std::thread::sleep(Duration::from_millis(10));
             }
             Err(e) => return Err(e),
         }
     }
+}
+
+fn is_no_buffer_space(e: &io::Error) -> bool {
+    #[cfg(unix)]
+    return e.raw_os_error() == Some(libc::ENOBUFS);
+    #[cfg(not(unix))]
+    return {
+        let _ = e;
+        false
+    };
 }
