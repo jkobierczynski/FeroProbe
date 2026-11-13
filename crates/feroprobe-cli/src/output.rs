@@ -88,6 +88,10 @@ pub fn print_table(
         let rows: Vec<_> = visible(host, only_open)
             .filter(|p| only_open || p.state != hidden_state)
             .collect();
+        if rows.is_empty() && only_open {
+            println!("No open ports found");
+            continue;
+        }
         if rows.is_empty() {
             println!(
                 "All {} scanned ports are {}",

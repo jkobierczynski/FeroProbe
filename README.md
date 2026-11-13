@@ -64,9 +64,9 @@ FeroProbe done: 1 host(s) scanned, 1 up, 9000 port(s) each, in 0.22s
 | filtered | No reply before the timeout (after retries), or an ICMP unreachable error |
 
 **Windows note:** Windows waits about 2 seconds after a reset before it reports
-"connection refused". With the default 1.5s timeout, closed ports therefore show
-as filtered on Windows. Use `--timeout 3000` there if you need to tell closed from
-filtered. The raw-socket SYN scan planned next won't have this limitation.
+"connection refused", so the default timeout there is 3000 ms instead of 1500 ms.
+With a lower `--timeout`, closed ports show as filtered on Windows. The raw-socket
+SYN scan planned next won't have this limitation.
 
 ## License
 

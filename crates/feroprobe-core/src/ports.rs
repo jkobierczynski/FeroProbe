@@ -51,11 +51,20 @@ pub fn parse_ports(spec: &str) -> Result<Vec<u16>, Error> {
     Ok(ports)
 }
 
-/// The first `n` entries of [`TOP_PORTS`], sorted ascending.
+/// The `n` most common ports, sorted ascending.
+///
+/// Takes ports from [`TOP_PORTS`] first; if `n` is larger than that list, the
+/// remaining ports are filled in ascending order from 1 up, so the caller always
+/// gets `min(n, 65535)` ports.
 pub fn top_ports(n: usize) -> Vec<u16> {
+    let n = n.min(65535);
     let mut ports: Vec<u16> = TOP_PORTS.iter().copied().take(n).collect();
+    if ports.len() < n {
+        let known: std::collections::HashSet<u16> = ports.iter().copied().collect();
+        let extra = n - ports.len();
+        ports.extend((1..=65535).filter(|p| !known.contains(p)).take(extra));
+    }
     ports.sort_unstable();
-    ports.dedup();
     ports
 }
 
@@ -99,8 +108,15 @@ mod tests {
 
     #[test]
     fn top_ports_has_no_duplicates() {
-        let all = top_ports(usize::MAX);
-        assert_eq!(all.len(), TOP_PORTS.len());
+        let mut list = TOP_PORTS.to_vec();
+        list.sort_unstable();
+        list.dedup();
+        assert_eq!(list.len(), TOP_PORTS.len());
+        for n in [1, 50, 1000, 70000] {
+            let ports = top_ports(n);
+            assert_eq!(ports.len(), n.min(65535));
+            assert!(ports.windows(2).all(|w| w[0] < w[1]));
+        }
         assert_eq!(top_ports(3), vec![23, 80, 443]);
     }
 }

@@ -8,7 +8,7 @@
 //! - **closed**: the host answered with a RST (connection refused)
 //! - **filtered**: no answer before the timeout, or an ICMP unreachable error
 
-use std::io::ErrorKind;
+use std::io::{self, ErrorKind};
 use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 
@@ -82,45 +82,56 @@ pub struct ScanConfig {
 impl Default for ScanConfig {
     fn default() -> Self {
         Self {
-            timeout: Duration::from_millis(1500),
+            timeout: Duration::from_millis(if cfg!(windows) { 3000 } else { 1500 }),
             concurrency: 500,
             retries: 1,
         }
     }
 }
 
+/// Whether a connect error means the network gave no usable answer (the port
+/// is filtered), as opposed to a local problem such as running out of file
+/// descriptors or ephemeral ports, which must not be reported as a port state.
+fn is_network_error(e: &io::Error) -> bool {
+    matches!(
+        e.kind(),
+        ErrorKind::HostUnreachable
+            | ErrorKind::NetworkUnreachable
+            | ErrorKind::TimedOut
+            | ErrorKind::ConnectionReset
+            | ErrorKind::ConnectionAborted
+            // A local firewall rule or a broadcast address (EACCES).
+            | ErrorKind::PermissionDenied
+    )
+}
+
 /// Probe a single TCP port.
-pub async fn probe_port(addr: SocketAddr, cfg: &ScanConfig) -> PortResult {
+///
+/// Returns an error only for local failures (see [`is_network_error`]); every
+/// answer, or lack of one, from the network becomes a [`PortResult`].
+pub async fn probe_port(addr: SocketAddr, cfg: &ScanConfig) -> io::Result<PortResult> {
+    let result = |state, rtt_ms| PortResult {
+        port: addr.port(),
+        state,
+        rtt_ms,
+    };
     for _ in 0..=cfg.retries {
         let start = Instant::now();
         let outcome = tokio::time::timeout(cfg.timeout, TcpStream::connect(addr)).await;
         let rtt = Some((start.elapsed().as_secs_f64() * 1_000_000.0).round() / 1000.0);
-        let state = match outcome {
-            Ok(Ok(_stream)) => PortState::Open,
-            Ok(Err(e)) if e.kind() == ErrorKind::ConnectionRefused => PortState::Closed,
-            // Host/network unreachable and similar ICMP errors: definitive
-            // "filtered", retrying will not help.
-            Ok(Err(_)) => {
-                return PortResult {
-                    port: addr.port(),
-                    state: PortState::Filtered,
-                    rtt_ms: None,
-                };
+        match outcome {
+            Ok(Ok(_stream)) => return Ok(result(PortState::Open, rtt)),
+            Ok(Err(e)) if e.kind() == ErrorKind::ConnectionRefused => {
+                return Ok(result(PortState::Closed, rtt));
             }
+            // ICMP unreachable and similar: definitive, retrying won't help.
+            Ok(Err(e)) if is_network_error(&e) => return Ok(result(PortState::Filtered, None)),
+            Ok(Err(e)) => return Err(io::Error::new(e.kind(), format!("connect to {addr}: {e}"))),
             // Timed out: maybe the packet was dropped, so retry.
             Err(_) => continue,
-        };
-        return PortResult {
-            port: addr.port(),
-            state,
-            rtt_ms: rtt,
-        };
+        }
     }
-    PortResult {
-        port: addr.port(),
-        state: PortState::Filtered,
-        rtt_ms: None,
-    }
+    Ok(result(PortState::Filtered, None))
 }
 
 /// Scan every port on every target with a TCP connect scan.
@@ -128,12 +139,15 @@ pub async fn probe_port(addr: SocketAddr, cfg: &ScanConfig) -> PortResult {
 /// Probes for all hosts are interleaved through one bounded pool, so a slow
 /// or unresponsive host does not stall the others. `on_result` is called as
 /// each probe finishes (for progress reporting).
+///
+/// Stops at the first local error (for example "too many open files"), since
+/// continuing would only produce wrong results; lower the concurrency then.
 pub async fn connect_scan(
     targets: &[Target],
     ports: &[u16],
     cfg: &ScanConfig,
     mut on_result: impl FnMut(usize, &PortResult),
-) -> Vec<HostResult> {
+) -> io::Result<Vec<HostResult>> {
     let mut hosts: Vec<HostResult> = targets
         .iter()
         .map(|t| HostResult {
@@ -157,6 +171,7 @@ pub async fn connect_scan(
         .buffer_unordered(cfg.concurrency.max(1));
 
     while let Some((host_idx, result)) = results.next().await {
+        let result = result?;
         on_result(host_idx, &result);
         hosts[host_idx].ports.push(result);
     }
@@ -164,7 +179,7 @@ pub async fn connect_scan(
     for host in &mut hosts {
         host.ports.sort_by_key(|p| p.port);
     }
-    hosts
+    Ok(hosts)
 }
 
 #[cfg(test)]
@@ -196,7 +211,9 @@ mod tests {
             ..Default::default()
         };
         let mut seen = 0;
-        let hosts = connect_scan(&[localhost()], &[open, closed], &cfg, |_, _| seen += 1).await;
+        let hosts = connect_scan(&[localhost()], &[open, closed], &cfg, |_, _| seen += 1)
+            .await
+            .unwrap();
 
         assert_eq!(seen, 2);
         assert_eq!(hosts.len(), 1);
@@ -216,7 +233,9 @@ mod tests {
             ports.push(closed_port().await);
         }
         ports.sort_unstable_by(|a, b| b.cmp(a));
-        let hosts = connect_scan(&[localhost()], &ports, &cfg, |_, _| {}).await;
+        let hosts = connect_scan(&[localhost()], &ports, &cfg, |_, _| {})
+            .await
+            .unwrap();
         let got: Vec<u16> = hosts[0].ports.iter().map(|p| p.port).collect();
         let mut want = ports.clone();
         want.sort_unstable();

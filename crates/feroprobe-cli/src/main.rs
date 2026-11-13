@@ -8,6 +8,10 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
 use feroprobe_core::{ScanConfig, connect_scan, parse_ports, resolve_targets, top_ports};
 
+/// Windows only reports "connection refused" about 2s after the reset, so a
+/// shorter timeout would show closed ports as filtered there.
+const DEFAULT_TIMEOUT_MS: u64 = if cfg!(windows) { 3000 } else { 1500 };
+
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum Format {
     /// Human-readable table, like nmap's normal output
@@ -37,8 +41,8 @@ struct Args {
     #[arg(long, value_name = "N", default_value_t = 100)]
     top_ports: usize,
 
-    /// Per-connection timeout in milliseconds
-    #[arg(long, value_name = "MS", default_value_t = 1500)]
+    /// Per-connection timeout in milliseconds [default: 1500, or 3000 on Windows]
+    #[arg(long, value_name = "MS", default_value_t = DEFAULT_TIMEOUT_MS, hide_default_value = true)]
     timeout: u64,
 
     /// Maximum connection attempts in flight at once
@@ -81,7 +85,9 @@ async fn main() -> Result<()> {
     };
 
     let started = Instant::now();
-    let hosts = connect_scan(&targets, &ports, &cfg, |_, _| {}).await;
+    let hosts = connect_scan(&targets, &ports, &cfg, |_, _| {})
+        .await
+        .context("scan aborted (try a lower --concurrency)")?;
     let elapsed = started.elapsed();
 
     match args.output {
