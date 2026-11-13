@@ -49,6 +49,8 @@ sudo ./target/release/feroprobe -O 10.0.0.5
 
 # nmap-style XML, for tools that read nmap's -oX reports
 ./target/release/feroprobe -sV -o xml 10.0.0.0/24 > scan.xml
+# The report says scanner="feroprobe". Add --nmap-label for importers
+# that only accept scanner="nmap"; a comment still names FeroProbe.
 ```
 
 Run `feroprobe --help` for all options (timeout, concurrency, packet rate, retries).

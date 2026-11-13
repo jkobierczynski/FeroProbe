@@ -30,6 +30,8 @@ pub struct RunInfo {
     pub assume_up: bool,
     /// `-sn`: discovery only, no port table.
     pub ping_only: bool,
+    /// `--nmap-label`: the XML report says `scanner="nmap"`.
+    pub nmap_label: bool,
 }
 
 pub(crate) fn is_openish(state: PortState) -> bool {
