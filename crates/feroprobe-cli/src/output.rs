@@ -211,7 +211,7 @@ pub fn print_json(hosts: &[HostResult], info: &RunInfo) -> Result<()> {
                     up_reason: h.up_reason,
                     latency_ms: h.latency_ms,
                 },
-                up: h.is_up(),
+                up: reported(h, info),
                 ports: visible(h, info.only_open)
                     .map(|p| JsonPort {
                         result: p,

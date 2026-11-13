@@ -22,6 +22,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Instant;
 
 use futures::stream::{self, StreamExt};
+use socket2::{Domain, Protocol as SockProtocol, Socket, Type};
 use tokio::net::UdpSocket;
 
 use crate::connect::is_network_error;
@@ -63,6 +64,68 @@ fn is_port_unreachable(e: &io::Error) -> bool {
         || (cfg!(windows) && e.kind() == ErrorKind::ConnectionReset)
 }
 
+/// ICMP errors other than "port unreachable" that mean a filter or router
+/// rejected the probe, beyond the ones [`is_network_error`] knows.
+fn is_udp_filtered(e: &io::Error) -> bool {
+    // Linux maps ICMP "protocol unreachable" (code 2) to ENOPROTOOPT.
+    #[cfg(target_os = "linux")]
+    if e.raw_os_error() == Some(libc::ENOPROTOOPT) {
+        return true;
+    }
+    is_network_error(e)
+}
+
+/// Whether the reply was larger than our buffer. Windows reports this as an
+/// error (WSAEMSGSIZE) instead of truncating; either way the port answered.
+fn is_truncated_reply(e: &io::Error) -> bool {
+    cfg!(windows) && e.raw_os_error() == Some(10040)
+}
+
+/// A UDP socket connected to `addr`. On Linux it also asks for all ICMP
+/// errors (`IP_RECVERR`): by default Linux drops "soft" ones such as host
+/// unreachable on UDP sockets, which would turn filtered ports into
+/// open|filtered.
+async fn connected_socket(addr: SocketAddr) -> io::Result<UdpSocket> {
+    let (domain, bind): (Domain, SocketAddr) = match addr.ip() {
+        IpAddr::V4(_) => (Domain::IPV4, (Ipv4Addr::UNSPECIFIED, 0).into()),
+        IpAddr::V6(_) => (Domain::IPV6, (Ipv6Addr::UNSPECIFIED, 0).into()),
+    };
+    let sock = Socket::new(domain, Type::DGRAM, Some(SockProtocol::UDP))?;
+    #[cfg(target_os = "linux")]
+    enable_recverr(&sock, addr.is_ipv4())?;
+    sock.set_nonblocking(true)?;
+    sock.bind(&bind.into())?;
+    let sock = UdpSocket::from_std(sock.into())?;
+    sock.connect(addr).await?;
+    Ok(sock)
+}
+
+#[cfg(target_os = "linux")]
+fn enable_recverr(sock: &Socket, ipv4: bool) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    let (level, name) = if ipv4 {
+        (libc::IPPROTO_IP, libc::IP_RECVERR)
+    } else {
+        (libc::IPPROTO_IPV6, libc::IPV6_RECVERR)
+    };
+    let on: libc::c_int = 1;
+    // SAFETY: valid socket fd, and a pointer/length pair for a c_int.
+    let rc = unsafe {
+        libc::setsockopt(
+            sock.as_raw_fd(),
+            level,
+            name,
+            (&raw const on).cast(),
+            std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+        )
+    };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
 /// Probe a single UDP port.
 pub async fn probe_udp(addr: SocketAddr, cfg: &ScanConfig) -> io::Result<PortResult> {
     let result = |state, reason, rtt_ms| PortResult {
@@ -72,15 +135,10 @@ pub async fn probe_udp(addr: SocketAddr, cfg: &ScanConfig) -> io::Result<PortRes
         reason,
         rtt_ms,
     };
-    let bind: SocketAddr = match addr.ip() {
-        IpAddr::V4(_) => (Ipv4Addr::UNSPECIFIED, 0).into(),
-        IpAddr::V6(_) => (Ipv6Addr::UNSPECIFIED, 0).into(),
-    };
-    let sock = UdpSocket::bind(bind).await?;
     let classify = |e: io::Error, rtt| {
         if is_port_unreachable(&e) {
             Ok(result(PortState::Closed, reason::PORT_UNREACH, rtt))
-        } else if is_network_error(&e) {
+        } else if is_udp_filtered(&e) {
             Ok(result(PortState::Filtered, reason::UNREACHABLE, rtt))
         } else {
             Err(io::Error::new(
@@ -89,9 +147,12 @@ pub async fn probe_udp(addr: SocketAddr, cfg: &ScanConfig) -> io::Result<PortRes
             ))
         }
     };
-    if let Err(e) = sock.connect(addr).await {
-        return classify(e, None);
-    }
+    // Creating, binding and connecting the socket can already fail for
+    // network reasons (no route, IPv6 disabled); classify those too.
+    let sock = match connected_socket(addr).await {
+        Ok(s) => s,
+        Err(e) => return classify(e, None),
+    };
 
     let payload = payload_for(addr.port());
     let mut buf = [0u8; 2048];
@@ -102,6 +163,13 @@ pub async fn probe_udp(addr: SocketAddr, cfg: &ScanConfig) -> io::Result<PortRes
         }
         match tokio::time::timeout(cfg.timeout, sock.recv(&mut buf)).await {
             Ok(Ok(_)) => {
+                return Ok(result(
+                    PortState::Open,
+                    reason::UDP_RESPONSE,
+                    Some(elapsed_ms(start)),
+                ));
+            }
+            Ok(Err(e)) if is_truncated_reply(&e) => {
                 return Ok(result(
                     PortState::Open,
                     reason::UDP_RESPONSE,

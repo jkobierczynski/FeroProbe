@@ -68,8 +68,11 @@ Linux you can instead grant the binary just that capability:
 sudo setcap cap_net_raw+ep ./target/release/feroprobe
 ```
 
-Without it, FeroProbe falls back to a connect scan, and discovery uses TCP
-probes (plus unprivileged ping sockets where the OS allows them).
+Without it, a scan with no `-s` option uses a connect scan instead, and
+discovery uses TCP probes (plus unprivileged ping sockets where the OS allows
+them). An explicit `-sS` still needs the privileges; use `-sT` to ask for an
+unprivileged TCP scan. The default is also a connect scan when any target is
+IPv6, since the SYN scan is IPv4 only for now.
 
 ## Layout
 
