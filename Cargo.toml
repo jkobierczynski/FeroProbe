@@ -7,3 +7,11 @@ version = "0.1.0"
 edition = "2024"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/jkobierczynski/FeroProbe"
+keywords = ["network", "scanner", "nmap", "port-scanner", "security"]
+categories = ["command-line-utilities", "network-programming"]
+
+# Smaller, faster release binaries.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
