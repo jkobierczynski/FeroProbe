@@ -355,8 +355,52 @@ mod imp {
         let mut pacer = Pacer::new(cfg.max_rate);
         let mut buf = vec![0u8; 65536];
 
+        let syn_ack = packet::TCP_SYN | packet::TCP_ACK;
+        // Record one reply. Returns true when it completed a job.
+        let take = |reply: &[u8], found: &mut [Option<TcpTraits>]| -> bool {
+            let Some(ip) = packet::parse_ipv4(reply) else {
+                return false;
+            };
+            let Some(tcp) = packet::parse_tcp(ip.payload) else {
+                return false;
+            };
+            if ip.protocol != packet::IPPROTO_TCP
+                || tcp.dport != sport
+                || tcp.flags & syn_ack != syn_ack
+                || tcp.ack != seq.wrapping_add(1)
+            {
+                return false;
+            }
+            let Some(j) = jobs
+                .iter()
+                .position(|&(_, addr, port)| addr == ip.src && port == tcp.sport)
+            else {
+                return false;
+            };
+            if found[j].is_some() {
+                return false;
+            }
+            // A malformed reply leaves the job open for a valid one.
+            found[j] = TcpTraits::from_reply(ip.ttl, ip.df, ip.payload);
+            found[j].is_some()
+        };
+        let quiet = |e: &io::Error| {
+            matches!(
+                e.kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut | io::ErrorKind::Interrupted
+            )
+        };
+
         for _ in 0..=cfg.retries {
-            let mut waiting = 0;
+            let mut waiting = (0..jobs.len())
+                .filter(|&j| found[j].is_none() && sources[j].is_some())
+                .count();
+            if waiting == 0 {
+                break;
+            }
+            // Drain replies between sends so a large batch of fast
+            // responders cannot overflow the receive buffer.
+            recv_sock.set_nonblocking(true)?;
             for (j, &(_, addr, port)) in jobs.iter().enumerate() {
                 let (None, Some(src)) = (&found[j], sources[j]) else {
                     continue;
@@ -364,49 +408,29 @@ mod imp {
                 let pkt = packet::tcp_syn_with_options(src, addr, sport, port, seq, tsval);
                 send_with_backoff(&send_sock, &pkt, addr)?;
                 pacer.tick();
-                waiting += 1;
+                loop {
+                    match recv_sock.read(&mut buf) {
+                        Ok(n) => {
+                            if take(&buf[..n], &mut found) {
+                                waiting -= 1;
+                            }
+                        }
+                        Err(e) if quiet(&e) => break,
+                        Err(e) => return Err(e),
+                    }
+                }
             }
-            if waiting == 0 {
-                break;
-            }
+            recv_sock.set_nonblocking(false)?;
             let deadline = Instant::now() + cfg.timeout;
             while waiting > 0 && Instant::now() < deadline {
-                let n = match recv_sock.read(&mut buf) {
-                    Ok(n) => n,
-                    Err(e)
-                        if matches!(
-                            e.kind(),
-                            io::ErrorKind::WouldBlock
-                                | io::ErrorKind::TimedOut
-                                | io::ErrorKind::Interrupted
-                        ) =>
-                    {
-                        continue;
+                match recv_sock.read(&mut buf) {
+                    Ok(n) => {
+                        if take(&buf[..n], &mut found) {
+                            waiting -= 1;
+                        }
                     }
+                    Err(e) if quiet(&e) => {}
                     Err(e) => return Err(e),
-                };
-                let Some(ip) = packet::parse_ipv4(&buf[..n]) else {
-                    continue;
-                };
-                let Some(tcp) = packet::parse_tcp(ip.payload) else {
-                    continue;
-                };
-                let syn_ack = packet::TCP_SYN | packet::TCP_ACK;
-                if ip.protocol != packet::IPPROTO_TCP
-                    || tcp.dport != sport
-                    || tcp.flags & syn_ack != syn_ack
-                    || tcp.ack != seq.wrapping_add(1)
-                {
-                    continue;
-                }
-                let job = jobs
-                    .iter()
-                    .position(|&(_, addr, port)| addr == ip.src && port == tcp.sport);
-                if let Some(j) = job
-                    && found[j].is_none()
-                {
-                    found[j] = TcpTraits::from_reply(ip.ttl, ip.df, ip.payload);
-                    waiting -= 1;
                 }
             }
         }
