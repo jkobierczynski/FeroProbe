@@ -58,8 +58,9 @@ impl TcpTraits {
                 _ => {}
             }
             let len = usize::from(*opts.get(i + 1)?);
+            // A malformed option makes the whole reply unusable.
             if len < 2 || i + len > opts.len() {
-                break;
+                return None;
             }
             let body = &opts[i + 2..i + len];
             kinds.push(match kind {
@@ -408,7 +409,10 @@ mod imp {
                 let pkt = packet::tcp_syn_with_options(src, addr, sport, port, seq, tsval);
                 send_with_backoff(&send_sock, &pkt, addr)?;
                 pacer.tick();
-                loop {
+                // Bounded, so constant inbound traffic can't stall sending.
+                // Whatever is left is read by the next drain or the wait.
+                let drain_until = Instant::now() + Duration::from_millis(10);
+                while Instant::now() < drain_until {
                     match recv_sock.read(&mut buf) {
                         Ok(n) => {
                             if take(&buf[..n], &mut found) {
@@ -465,9 +469,15 @@ mod tests {
             t.fingerprint(),
             "ttl=64 df=1 win=65483 opts=M,S,T,N,W mss=65495 ws=7"
         );
-        // Truncated option: stop, don't panic.
-        let t = TcpTraits::from_reply(64, true, &syn_ack(1, &[2, 4, 5, 0xb4, 3, 9, 0, 0])).unwrap();
-        assert_eq!(t.options, "M");
+        // Truncated or bad-length options reject the reply, without panicking.
+        assert_eq!(
+            TcpTraits::from_reply(64, true, &syn_ack(1, &[2, 4, 5, 0xb4, 3, 9, 0, 0])),
+            None
+        );
+        assert_eq!(
+            TcpTraits::from_reply(64, true, &syn_ack(1, &[1, 1, 1, 2])),
+            None
+        );
     }
 
     #[test]
