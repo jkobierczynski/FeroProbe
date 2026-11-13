@@ -62,6 +62,7 @@ enum Format {
 ///   sudo feroprobe -sS -p 1-65535 10.0.0.5
 ///   feroprobe -sT -sU -p 53,123,161 scanme.example.org
 ///   feroprobe -sn 192.168.1.0/24
+///   sudo feroprobe -sn 192.168.1.0/24   (ARP on a local network, shows MAC vendors)
 ///   feroprobe -sV -p 22,80,443 10.0.0.5
 ///   sudo feroprobe -O 10.0.0.5
 ///   feroprobe -Pn --top-ports 1000 --open -o json 10.0.0.1-50
@@ -86,6 +87,17 @@ struct Args {
     /// -Pn: skip host discovery and scan every target as if it were up
     #[arg(short = 'P', value_name = "n", value_enum, hide_possible_values = true)]
     ping: Option<PingMode>,
+
+    /// Don't use ARP for targets on a local Ethernet network; ping them
+    /// with ICMP and TCP probes like remote hosts
+    #[arg(long)]
+    disable_arp_ping: bool,
+
+    /// IEEE OUI list for MAC vendor names (oui.txt, oui.csv, Wireshark manuf).
+    /// Default: the first of /usr/share/hwdata/oui.txt, /usr/share/ieee-data/oui.txt
+    /// and similar system locations that exists, else a small built-in table
+    #[arg(long, value_name = "FILE")]
+    oui_file: Option<std::path::PathBuf>,
 
     /// -O: guess each host's operating system (raw sockets: Linux, root or CAP_NET_RAW)
     #[arg(short = 'O')]
@@ -226,7 +238,13 @@ async fn main() -> Result<()> {
         concurrency: args.concurrency,
         retries: args.retries,
         max_rate: args.max_rate,
+        arp_ping: !args.disable_arp_ping,
     };
+
+    if let Some(path) = &args.oui_file {
+        feroprobe_core::oui::use_file(path)
+            .with_context(|| format!("reading OUI list {}", path.display()))?;
+    }
 
     let started = Instant::now();
     let start_time = SystemTime::now();
@@ -379,5 +397,18 @@ mod tests {
         let a = Args::try_parse_from(["feroprobe", "-sn", "10.0.0.0/24"]).unwrap();
         assert_eq!(a.scan, vec![ScanType::PingOnly]);
         assert!(Args::try_parse_from(["feroprobe", "-sX", "10.0.0.1"]).is_err());
+        let a = Args::try_parse_from([
+            "feroprobe",
+            "--disable-arp-ping",
+            "--oui-file",
+            "/tmp/oui.txt",
+            "10.0.0.1",
+        ])
+        .unwrap();
+        assert!(a.disable_arp_ping);
+        assert_eq!(
+            a.oui_file.as_deref(),
+            Some(std::path::Path::new("/tmp/oui.txt"))
+        );
     }
 }

@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
+use crate::arp::MacInfo;
 use crate::os::OsMatch;
 use crate::service::ServiceInfo;
 
@@ -63,6 +64,7 @@ pub mod reason {
     pub const PORT_UNREACH: &str = "port-unreach";
     pub const UDP_RESPONSE: &str = "udp-response";
     pub const ECHO_REPLY: &str = "echo-reply";
+    pub const ARP_RESPONSE: &str = "arp-response";
     pub const USER_SET: &str = "user-set";
 }
 
@@ -93,6 +95,9 @@ pub struct HostResult {
     /// Round-trip time of the discovery probe that answered.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub latency_ms: Option<f64>,
+    /// The host's MAC address, when ARP discovery found it on a local network.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mac: Option<MacInfo>,
     pub ports: Vec<PortResult>,
     /// What OS detection (`-O`) guessed, if it ran and the host answered.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -106,6 +111,7 @@ impl HostResult {
             hostname,
             up_reason: None,
             latency_ms: None,
+            mac: None,
             ports: Vec::new(),
             os: None,
         }
@@ -141,6 +147,9 @@ pub struct ScanConfig {
     pub retries: u32,
     /// Maximum packets per second for raw-socket scans (SYN, ICMP).
     pub max_rate: u32,
+    /// During host discovery, decide targets on a local Ethernet network by
+    /// ARP (when privileged on Linux) instead of ICMP and TCP probes.
+    pub arp_ping: bool,
 }
 
 impl Default for ScanConfig {
@@ -151,6 +160,7 @@ impl Default for ScanConfig {
             concurrency: 500,
             retries: 1,
             max_rate: 5000,
+            arp_ping: true,
         }
     }
 }

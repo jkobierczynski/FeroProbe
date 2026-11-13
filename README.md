@@ -13,11 +13,12 @@ no external binaries.
 | TCP SYN scan, `-sS` (raw sockets, Linux, root or `CAP_NET_RAW`) | ✅ |
 | UDP scan, `-sU`, with DNS, NTP, SNMP and SSDP payloads | ✅ |
 | Host discovery: ICMP echo + TCP 443/80 probes, `-sn`, `-Pn` | ✅ |
+| ARP discovery on the local network, with MAC address and vendor (Linux, root; `--disable-arp-ping` to turn off) | ✅ |
+| MAC vendor names from the full IEEE OUI list (system `oui.txt` or `--oui-file`) | ✅ |
 | Targets: IPs, CIDR, `a.b.c.X-Y` ranges, hostnames, IPv6 (connect and UDP) | ✅ |
 | nmap-style `-p` port specs and top ports | ✅ |
 | Table, JSON and nmap-style XML output, `--reason`, `--open` | ✅ |
 | Service and version detection, `-sV`, with our own probes and rules | ✅ |
-| ARP discovery on the local network | planned |
 | OS detection, `-O`, from SYN-ACK traits with our own signatures (Linux, root) | ✅ |
 
 ## Install
@@ -40,7 +41,8 @@ cargo build --release
 # connect scan otherwise)
 ./target/release/feroprobe 192.168.1.0/24
 
-# Ping sweep only
+# Ping sweep only (as root on Linux, hosts on the local network are found
+# with ARP, which also shows their MAC address and vendor)
 ./target/release/feroprobe -sn 192.168.1.0/24
 
 # Full SYN scan of one host, showing why each port got its state
@@ -141,6 +143,22 @@ discovery uses TCP probes (plus unprivileged ping sockets where the OS allows
 them). An explicit `-sS` still needs the privileges; use `-sT` to ask for an
 unprivileged TCP scan. The default is also a connect scan when any target is
 IPv6, since the SYN scan is IPv4 only for now.
+
+### MAC vendor names
+
+ARP discovery shows each local host's MAC address and its maker. FeroProbe does
+not ship the IEEE OUI registry; it reads it at run time from the first of
+`/usr/share/hwdata/oui.txt`, `/usr/share/ieee-data/oui.txt` and similar system
+locations (installed by the `hwdata` or `ieee-data` packages, or by Wireshark).
+Point it at another copy with `--oui-file`, for example the IEEE's own
+[oui.csv](https://standards-oui.ieee.org/oui/oui.csv) or
+[oui.txt](https://standards-oui.ieee.org/oui/oui.txt). Without any list, a
+small built-in table of common vendors is used.
+
+```sh
+curl -o oui.csv https://standards-oui.ieee.org/oui/oui.csv
+sudo ./target/release/feroprobe -sn --oui-file oui.csv 192.168.1.0/24
+```
 
 ## Benchmarks
 

@@ -169,6 +169,13 @@ fn write_host(x: &mut String, host: &HostResult, info: &RunInfo, start: u64, end
         "<address addr=\"{}\" addrtype=\"{addrtype}\"/>",
         host.addr
     );
+    if let Some(mac) = &host.mac {
+        let _ = write!(x, "<address addr=\"{}\" addrtype=\"mac\"", mac.addr);
+        if let Some(v) = mac.vendor {
+            let _ = write!(x, " vendor=\"{}\"", esc(v));
+        }
+        x.push_str("/>\n");
+    }
     match &host.hostname {
         Some(name) => {
             let _ = writeln!(
@@ -398,6 +405,11 @@ mod tests {
         let mut host = HostResult::new("10.0.0.5".parse().unwrap(), Some("box".into()));
         host.up_reason = Some("echo-reply");
         host.latency_ms = Some(0.25);
+        // Built by hand: MacInfo::new would consult the system's OUI list.
+        host.mac = Some(feroprobe_core::MacInfo {
+            addr: feroprobe_core::MacAddr([0x00, 0x50, 0x56, 0x01, 0x02, 0x03]),
+            vendor: Some("VMware"),
+        });
         let ssh = ServiceInfo {
             name: "ssh".into(),
             product: Some("OpenSSH".into()),
@@ -416,7 +428,7 @@ mod tests {
             "args=\"feroprobe -sV &lt;x&gt; &amp; &quot;y&quot;\"",
             "<scaninfo type=\"connect\" protocol=\"tcp\" numservices=\"5\" services=\"22,80-82,443\"/>",
             "<status state=\"up\" reason=\"echo-reply\" reason_ttl=\"0\"/>",
-            "<address addr=\"10.0.0.5\" addrtype=\"ipv4\"/>",
+            "<address addr=\"10.0.0.5\" addrtype=\"ipv4\"/>\n<address addr=\"00:50:56:01:02:03\" addrtype=\"mac\" vendor=\"VMware\"/>",
             "<hostname name=\"box\" type=\"user\"/>",
             "<extraports state=\"closed\" count=\"2\">",
             "<port protocol=\"tcp\" portid=\"22\"><state state=\"open\" reason=\"syn-ack\" reason_ttl=\"0\"/><service name=\"ssh\" product=\"OpenSSH\" version=\"9.6\" extrainfo=\"a &lt;b&gt; &amp; &quot;c&quot;\" method=\"probed\" conf=\"10\"/></port>",
