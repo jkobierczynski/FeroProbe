@@ -188,8 +188,11 @@ mod tests {
         let open = listener.local_addr().unwrap().port();
         let closed = closed_port().await;
 
+        // Windows retries a SYN that was answered with RST for about 2s before
+        // reporting "connection refused", so the timeout must be longer than
+        // that for a closed port to be seen as closed rather than filtered.
         let cfg = ScanConfig {
-            timeout: Duration::from_secs(2),
+            timeout: Duration::from_secs(5),
             ..Default::default()
         };
         let mut seen = 0;
