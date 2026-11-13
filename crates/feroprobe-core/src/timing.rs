@@ -129,33 +129,48 @@ pub fn parse_duration(s: &str) -> Result<Duration, String> {
     Duration::try_from_secs_f64(secs).map_err(|_| format!("duration '{s}' is out of range"))
 }
 
-/// When the next probe may go, shared by every technique in this process so
-/// the scan delay holds across all of them (ICMP and TCP discovery running
-/// side by side, retries, service-detection fallbacks).
-static NEXT_SLOT: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+/// When the last probe was let go, shared by every technique in this
+/// process so the scan delay holds across all of them (ICMP and TCP
+/// discovery running side by side, retries, service-detection fallbacks).
+static LAST_START: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
 
-/// Claim the next send slot and return how long to wait for it. Slots are
-/// handed out in call order, each at least `delay` after the previous one
-/// and never in the past, so a pause cannot be made up with a burst.
-fn reserve(delay: Duration) -> Duration {
+/// Try to let a probe go now. On success the probe's start is recorded and
+/// `None` is returned; otherwise returns how long to wait before trying
+/// again. The gap is measured from the previous probe's actual start, not
+/// from a slot booked in advance, so a sender that is held up after waiting
+/// can never end up going together with the next one, and a pause cannot be
+/// made up with a burst.
+fn try_start(delay: Duration) -> Option<Duration> {
     let now = std::time::Instant::now();
-    let mut next = NEXT_SLOT.lock().unwrap_or_else(|e| e.into_inner());
-    let slot = next.map_or(now, |n| n.max(now));
-    *next = Some(slot + delay);
-    slot - now
-}
-
-/// Wait until the next probe may be sent, from async code.
-pub(crate) async fn pace(delay: Duration) {
-    if !delay.is_zero() {
-        tokio::time::sleep(reserve(delay)).await;
+    let mut last = LAST_START.lock().unwrap_or_else(|e| e.into_inner());
+    match *last {
+        Some(prev) if now < prev + delay => Some(prev + delay - now),
+        _ => {
+            *last = Some(now);
+            None
+        }
     }
 }
 
-/// Wait until the next probe may be sent, from a blocking thread.
+/// Wait until the next probe may be sent, from async code. Send right after
+/// this returns.
+pub(crate) async fn pace(delay: Duration) {
+    if delay.is_zero() {
+        return;
+    }
+    while let Some(wait) = try_start(delay) {
+        tokio::time::sleep(wait).await;
+    }
+}
+
+/// Wait until the next probe may be sent, from a blocking thread. Send right
+/// after this returns.
 pub(crate) fn pace_blocking(delay: Duration) {
-    if !delay.is_zero() {
-        std::thread::sleep(reserve(delay));
+    if delay.is_zero() {
+        return;
+    }
+    while let Some(wait) = try_start(delay) {
+        std::thread::sleep(wait);
     }
 }
 
@@ -245,6 +260,36 @@ mod tests {
             "{:?}",
             t.elapsed()
         );
+
+        // Many senders at once, async and blocking, one of them arriving
+        // late: every actual start is still a full delay after the one
+        // before, since the gap is measured from real starts.
+        let starts = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut tasks = Vec::new();
+        for i in 0..4 {
+            let starts = starts.clone();
+            tasks.push(tokio::spawn(async move {
+                if i == 0 {
+                    tokio::time::sleep(Duration::from_millis(60)).await;
+                }
+                pace(delay).await;
+                starts.lock().unwrap().push(std::time::Instant::now());
+            }));
+        }
+        tokio::task::spawn_blocking(move || pace_blocking(delay))
+            .await
+            .unwrap();
+        for t in tasks {
+            t.await.unwrap();
+        }
+        let mut starts = starts.lock().unwrap().clone();
+        starts.sort();
+        for pair in starts.windows(2) {
+            let gap = pair[1] - pair[0];
+            // Starts are timed just after pace returns, so allow for a
+            // little scheduling jitter in the measurement.
+            assert!(gap >= delay - Duration::from_millis(10), "{gap:?}");
+        }
 
         let t = std::time::Instant::now();
         for _ in 0..1000 {
