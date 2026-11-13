@@ -16,8 +16,8 @@ no external binaries.
 | Targets: IPs, CIDR, `a.b.c.X-Y` ranges, hostnames, IPv6 (connect and UDP) | ✅ |
 | nmap-style `-p` port specs and top ports | ✅ |
 | Table and JSON output, `--reason`, `--open` | ✅ |
+| Service and version detection, `-sV`, with our own probes and rules | ✅ |
 | ARP discovery on the local network | planned |
-| Service and version detection | planned |
 | OS fingerprinting | planned |
 
 ## Usage
@@ -37,6 +37,9 @@ sudo ./target/release/feroprobe -sS -p - --reason 10.0.0.5
 
 # TCP and UDP together, skipping discovery
 ./target/release/feroprobe -Pn -sT -sU -p 53,123,161 scanme.example.org
+
+# Which software runs on the open ports
+./target/release/feroprobe -sV -p 22,80,443,6379 10.0.0.5
 
 # Only open ports, as JSON
 ./target/release/feroprobe --top-ports 1000 --open -o json 10.0.0.1-50
@@ -58,6 +61,33 @@ PORT       STATE          SERVICE        REASON
 
 FeroProbe done: 1 host(s), 1 up, 10000 port(s) each, in 2.11s
 ```
+
+With `-sV`:
+
+```
+PORT       STATE          SERVICE        VERSION
+22/tcp     open           ssh            OpenSSH 9.6p1 (Ubuntu-3ubuntu13.5; protocol 2.0)
+443/tcp    open           ssl/http       nginx 1.25.3 (cert CN: example.org)
+6379/tcp   open           redis          Redis key-value store 7.0.15
+```
+
+### Version detection
+
+`-sV` connects to each open port and works out what is running:
+
+1. On usual TLS ports (443, 993, 8443, ...) it tries TLS first and probes
+   the service inside the tunnel. The certificate's subject name is shown.
+2. It sends the probes meant for that port, such as HTTP on 80 or Redis on 6379.
+3. It listens, since SSH, FTP, SMTP, POP3, IMAP, MySQL and VNC talk first.
+4. If the service is still silent, it tries HTTP and then TLS.
+
+Replies are matched against FeroProbe's own rules in
+`crates/feroprobe-core/src/service/rules.rs`. nmap's probe database is not used,
+because its license does not allow redistributing it. Replies that no rule
+recognizes are printed under "Unrecognized service replies", which is the
+starting point for a new rule. Open UDP ports get a DNS `version.bind`, NTP or
+SNMP query. `--version-timeout` sets how long to wait for each reply (default
+3000 ms).
 
 ### Privileges
 

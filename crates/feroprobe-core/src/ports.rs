@@ -1,6 +1,7 @@
 //! Port specification parsing (nmap-style `-p` syntax).
 
 use crate::Error;
+use crate::model::Protocol;
 
 /// A curated list of commonly open TCP ports, ordered roughly by how often
 /// they are seen open on the internet. Used when no ports are specified.
@@ -19,6 +20,62 @@ pub const TOP_UDP_PORTS: &[u16] = &[
     53, 67, 68, 69, 123, 135, 137, 138, 139, 161, 162, 445, 500, 514, 520, 631, 1434, 1900, 4500,
     5353, 49152,
 ];
+
+/// The service usually found on a port, for display when version
+/// detection did not run or learned nothing. Purely a label from the port
+/// number.
+pub fn service_name(protocol: Protocol, port: u16) -> &'static str {
+    match (protocol, port) {
+        (Protocol::Tcp, 21) => "ftp",
+        (Protocol::Tcp, 22) => "ssh",
+        (Protocol::Tcp, 23) => "telnet",
+        (Protocol::Tcp, 25) => "smtp",
+        (_, 53) => "domain",
+        (Protocol::Udp, 67) => "dhcps",
+        (Protocol::Udp, 68) => "dhcpc",
+        (Protocol::Udp, 69) => "tftp",
+        (Protocol::Tcp, 80) => "http",
+        (Protocol::Tcp, 110) => "pop3",
+        (_, 111) => "rpcbind",
+        (Protocol::Udp, 123) => "ntp",
+        (Protocol::Tcp, 135) => "msrpc",
+        (Protocol::Udp, 137) => "netbios-ns",
+        (Protocol::Udp, 138) => "netbios-dgm",
+        (Protocol::Tcp, 139) => "netbios-ssn",
+        (Protocol::Tcp, 143) => "imap",
+        (Protocol::Udp, 161) => "snmp",
+        (Protocol::Udp, 162) => "snmptrap",
+        (Protocol::Tcp, 389) => "ldap",
+        (Protocol::Tcp, 443) => "https",
+        (Protocol::Tcp, 445) => "microsoft-ds",
+        (Protocol::Tcp, 465) => "smtps",
+        (Protocol::Udp, 500) => "isakmp",
+        (Protocol::Udp, 514) => "syslog",
+        (Protocol::Tcp, 587) => "submission",
+        (Protocol::Tcp, 993) => "imaps",
+        (Protocol::Tcp, 995) => "pop3s",
+        (Protocol::Tcp, 1433) => "ms-sql-s",
+        (Protocol::Tcp, 1883) => "mqtt",
+        (Protocol::Udp, 1900) => "upnp",
+        (_, 2049) => "nfs",
+        (Protocol::Tcp, 2375) => "docker",
+        (Protocol::Tcp, 3306) => "mysql",
+        (Protocol::Tcp, 3389) => "ms-wbt-server",
+        (Protocol::Udp, 4500) => "nat-t-ike",
+        (Protocol::Tcp, 5432) => "postgresql",
+        (Protocol::Udp, 5353) => "mdns",
+        (Protocol::Tcp, 5672) => "amqp",
+        (Protocol::Tcp, 5900) => "vnc",
+        (Protocol::Tcp, 6379) => "redis",
+        (Protocol::Tcp, 6443) => "kubernetes",
+        (Protocol::Tcp, 8080) => "http-proxy",
+        (Protocol::Tcp, 8443) => "https-alt",
+        (Protocol::Tcp, 9200) => "elasticsearch",
+        (_, 11211) => "memcache",
+        (Protocol::Tcp, 27017) => "mongodb",
+        _ => "unknown",
+    }
+}
 
 /// Parse an nmap-style port specification.
 ///

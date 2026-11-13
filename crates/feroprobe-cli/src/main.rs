@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
 use feroprobe_core::{
-    HostResult, ScanConfig, Target, connect_scan, discover, parse_ports, raw_sockets_available,
-    resolve_targets, syn_scan, top_ports, top_udp_ports, udp_scan,
+    HostResult, ScanConfig, Target, connect_scan, detect_services, discover, parse_ports,
+    raw_sockets_available, resolve_targets, syn_scan, top_ports, top_udp_ports, udp_scan,
 };
 
 use output::RunInfo;
@@ -31,6 +31,9 @@ enum ScanType {
     /// -sn: host discovery only, no port scan
     #[value(name = "n")]
     PingOnly,
+    /// -sV: detect service and version on open ports
+    #[value(name = "V")]
+    Version,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -55,6 +58,7 @@ enum Format {
 ///   sudo feroprobe -sS -p 1-65535 10.0.0.5
 ///   feroprobe -sT -sU -p 53,123,161 scanme.example.org
 ///   feroprobe -sn 192.168.1.0/24
+///   feroprobe -sV -p 22,80,443 10.0.0.5
 ///   feroprobe -Pn --top-ports 1000 --open -o json 10.0.0.1-50
 #[derive(Debug, Parser)]
 #[command(version, verbatim_doc_comment)]
@@ -63,8 +67,9 @@ struct Args {
     #[arg(required = true)]
     targets: Vec<String>,
 
-    /// Scan technique, nmap style: -sS (SYN), -sT (connect), -sU (UDP), -sn (no port scan).
-    /// Can be repeated, e.g. -sS -sU. Default: -sS when run as root on Linux with only IPv4 targets, else -sT
+    /// Scan technique, nmap style: -sS (SYN), -sT (connect), -sU (UDP), -sn (no port scan),
+    /// -sV (also detect service versions on open ports).
+    /// Can be repeated, e.g. -sS -sU -sV. Default: -sS when run as root on Linux with only IPv4 targets, else -sT
     #[arg(
         short = 's',
         value_name = "TYPE",
@@ -97,6 +102,10 @@ struct Args {
     #[arg(long, value_name = "PPS", default_value_t = 5000)]
     max_rate: u32,
 
+    /// With -sV, how long to wait for each service reply, in milliseconds
+    #[arg(long, value_name = "MS", default_value_t = 3000)]
+    version_timeout: u64,
+
     /// Extra attempts for probes that get no answer
     #[arg(long, value_name = "N", default_value_t = 1)]
     retries: u32,
@@ -119,6 +128,7 @@ struct Args {
 struct Plan {
     tcp: Option<ScanType>,
     udp: bool,
+    version: bool,
     ping_only: bool,
     discovery: bool,
 }
@@ -141,7 +151,7 @@ fn plan(scan: &[ScanType], ping: Option<PingMode>, syn_ok: bool) -> Result<Plan>
         Some(ScanType::Syn)
     } else if has(ScanType::Connect) {
         Some(ScanType::Connect)
-    } else if scan.is_empty() {
+    } else if !has(ScanType::Udp) && !ping_only {
         // nmap's default: SYN scan when privileged, connect scan otherwise.
         Some(if syn_ok && cfg!(target_os = "linux") {
             ScanType::Syn
@@ -154,6 +164,7 @@ fn plan(scan: &[ScanType], ping: Option<PingMode>, syn_ok: bool) -> Result<Plan>
     Ok(Plan {
         tcp,
         udp: has(ScanType::Udp),
+        version: has(ScanType::Version),
         ping_only,
         discovery: ping.is_none(),
     })
@@ -236,6 +247,11 @@ async fn main() -> Result<()> {
             let r = udp_scan(&live, &udp_ports, &cfg).await.context(hint)?;
             merge(&mut hosts, &scanned, r);
         }
+        if plan.version {
+            scan_types.push("version");
+            let wait = Duration::from_millis(args.version_timeout);
+            detect_services(&mut hosts, &cfg, wait).await;
+        }
     } else {
         scan_types.push("ping");
     }
@@ -248,6 +264,7 @@ async fn main() -> Result<()> {
         elapsed: started.elapsed(),
         only_open: args.open,
         show_reason: args.reason,
+        show_version: plan.version,
         assume_up: !plan.discovery,
         ping_only: plan.ping_only,
     };
@@ -296,10 +313,21 @@ mod tests {
     }
 
     #[test]
+    fn version_detection_keeps_default_tcp_scan() {
+        let plan = p(&[ScanType::Version], None, false).unwrap();
+        assert_eq!((plan.tcp, plan.version), (Some(ScanType::Connect), true));
+        let plan = p(&[ScanType::Udp, ScanType::Version], None, false).unwrap();
+        assert_eq!((plan.tcp, plan.udp, plan.version), (None, true, true));
+        let a = Args::try_parse_from(["feroprobe", "-sV", "10.0.0.1"]).unwrap();
+        assert_eq!(a.scan, vec![ScanType::Version]);
+    }
+
+    #[test]
     fn rejects_conflicts() {
         assert!(p(&[ScanType::Syn, ScanType::Connect], None, true).is_err());
         assert!(p(&[ScanType::PingOnly, ScanType::Udp], None, true).is_err());
         assert!(p(&[ScanType::PingOnly], Some(PingMode::Skip), true).is_err());
+        assert!(p(&[ScanType::PingOnly, ScanType::Version], None, true).is_err());
     }
 
     #[test]

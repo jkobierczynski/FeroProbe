@@ -5,6 +5,8 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
+use crate::service::ServiceInfo;
+
 /// Transport protocol of a scanned port.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -73,6 +75,9 @@ pub struct PortResult {
     /// Time until the port answered. `None` when nothing answered.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rtt_ms: Option<f64>,
+    /// What version detection (`-sV`) found, if it ran and learned anything.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub service: Option<ServiceInfo>,
 }
 
 /// All results for one host, ports sorted by protocol then port.

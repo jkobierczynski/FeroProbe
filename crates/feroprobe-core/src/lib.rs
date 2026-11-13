@@ -8,6 +8,8 @@
 //! - [`syn_scan`]: TCP SYN over raw sockets (Linux, root or `CAP_NET_RAW`)
 //! - [`udp_scan`]: UDP with service-specific payloads, no privileges needed
 //! - [`discover`]: host discovery with ICMP echo and TCP probes
+//!
+//! [`detect_services`] then identifies the software on open ports.
 
 pub mod connect;
 pub mod discovery;
@@ -15,6 +17,7 @@ pub mod model;
 pub mod packet;
 pub mod ports;
 pub mod raw;
+pub mod service;
 pub mod syn;
 pub mod target;
 pub mod udp;
@@ -22,8 +25,9 @@ pub mod udp;
 pub use connect::connect_scan;
 pub use discovery::{discover, icmp_available};
 pub use model::{HostResult, PortResult, PortState, Protocol, ScanConfig};
-pub use ports::{parse_ports, top_ports, top_udp_ports};
+pub use ports::{parse_ports, service_name, top_ports, top_udp_ports};
 pub use raw::raw_sockets_available;
+pub use service::{ServiceInfo, detect_services};
 pub use syn::syn_scan;
 pub use target::{Target, TargetSpec, parse_target, resolve_targets};
 pub use udp::udp_scan;

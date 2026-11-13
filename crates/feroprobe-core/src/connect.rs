@@ -51,6 +51,7 @@ pub async fn probe_port(addr: SocketAddr, cfg: &ScanConfig) -> io::Result<PortRe
         state,
         reason,
         rtt_ms,
+        service: None,
     };
     for _ in 0..=cfg.retries {
         let start = Instant::now();
@@ -180,6 +181,7 @@ mod tests {
             state: PortState::Filtered,
             reason: reason::NO_RESPONSE,
             rtt_ms: None,
+            service: None,
         };
         assert_eq!(
             serde_json::to_string(&r).unwrap(),

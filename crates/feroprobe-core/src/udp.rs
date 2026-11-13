@@ -85,7 +85,7 @@ fn is_truncated_reply(e: &io::Error) -> bool {
 /// errors (`IP_RECVERR`): by default Linux drops "soft" ones such as host
 /// unreachable on UDP sockets, which would turn filtered ports into
 /// open|filtered.
-async fn connected_socket(addr: SocketAddr) -> io::Result<UdpSocket> {
+pub(crate) async fn connected_socket(addr: SocketAddr) -> io::Result<UdpSocket> {
     let (domain, bind): (Domain, SocketAddr) = match addr.ip() {
         IpAddr::V4(_) => (Domain::IPV4, (Ipv4Addr::UNSPECIFIED, 0).into()),
         IpAddr::V6(_) => (Domain::IPV6, (Ipv6Addr::UNSPECIFIED, 0).into()),
@@ -134,6 +134,7 @@ pub async fn probe_udp(addr: SocketAddr, cfg: &ScanConfig) -> io::Result<PortRes
         state,
         reason,
         rtt_ms,
+        service: None,
     };
     let classify = |e: io::Error, rtt| {
         if is_port_unreachable(&e) {
