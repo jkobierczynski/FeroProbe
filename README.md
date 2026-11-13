@@ -13,11 +13,11 @@ no external binaries.
 | TCP SYN scan, `-sS` (raw sockets, Linux, root or `CAP_NET_RAW`) | ✅ |
 | UDP scan, `-sU`, with DNS, NTP, SNMP and SSDP payloads | ✅ |
 | Host discovery: ICMP echo + TCP 443/80 probes, `-sn`, `-Pn` | ✅ |
+| ARP discovery on the local network, with MAC address and vendor (Linux, root; `--disable-arp-ping` to turn off) | ✅ |
 | Targets: IPs, CIDR, `a.b.c.X-Y` ranges, hostnames, IPv6 (connect and UDP) | ✅ |
 | nmap-style `-p` port specs and top ports | ✅ |
 | Table, JSON and nmap-style XML output, `--reason`, `--open` | ✅ |
 | Service and version detection, `-sV`, with our own probes and rules | ✅ |
-| ARP discovery on the local network | planned |
 | OS detection, `-O`, from SYN-ACK traits with our own signatures (Linux, root) | ✅ |
 
 ## Install
@@ -40,7 +40,8 @@ cargo build --release
 # connect scan otherwise)
 ./target/release/feroprobe 192.168.1.0/24
 
-# Ping sweep only
+# Ping sweep only (as root on Linux, hosts on the local network are found
+# with ARP, which also shows their MAC address and vendor)
 ./target/release/feroprobe -sn 192.168.1.0/24
 
 # Full SYN scan of one host, showing why each port got its state

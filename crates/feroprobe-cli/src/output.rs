@@ -92,6 +92,12 @@ pub fn print_table(hosts: &[HostResult], info: &RunInfo) {
             (None, Some(why)) => println!("Host is up, {why}."),
             _ => {}
         }
+        if let Some(mac) = &host.mac {
+            match mac.vendor {
+                Some(v) => println!("MAC Address: {} ({v})", mac.addr),
+                None => println!("MAC Address: {} (Unknown)", mac.addr),
+            }
+        }
         if !info.ping_only {
             print_ports(host, info);
         }
@@ -205,6 +211,8 @@ struct JsonHostInfo<'a> {
     up_reason: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     latency_ms: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mac: Option<&'a feroprobe_core::MacInfo>,
 }
 
 #[derive(Serialize)]
@@ -264,6 +272,7 @@ pub fn print_json(hosts: &[HostResult], info: &RunInfo) -> Result<()> {
                     hostname: h.hostname.as_deref(),
                     up_reason: h.up_reason,
                     latency_ms: h.latency_ms,
+                    mac: h.mac.as_ref(),
                 },
                 up: reported(h, info),
                 os: h.os.as_ref(),

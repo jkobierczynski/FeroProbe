@@ -1,7 +1,11 @@
 //! Host discovery: find out which targets are up before port scanning them.
 //!
-//! Like nmap's default ping, several probes are sent to every host and any
-//! answer counts:
+//! Targets on a directly connected Ethernet network are asked for their MAC
+//! address with ARP (see [`crate::arp`]), when the process may send raw
+//! frames on Linux. Their ARP answer, or its absence, decides them alone.
+//!
+//! For every other target, like nmap's default ping, several probes are sent
+//! and any answer counts:
 //!
 //! - an ICMP echo request ("ping"), when the process may send ICMP: with raw
 //!   sockets (root), or an unprivileged ICMP socket where the OS allows one
@@ -12,7 +16,7 @@
 //! Hosts that answer none of them are reported as down and not scanned
 //! (unless discovery is skipped with `-Pn`).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
@@ -20,6 +24,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use futures::stream::{self, StreamExt};
 
+use crate::arp::{self, MacAddr, MacInfo};
 use crate::connect::probe_port;
 use crate::model::{HostResult, PortState, ScanConfig, reason};
 use crate::target::Target;
@@ -40,6 +45,17 @@ impl Drop for CancelOnDrop {
 /// Probe every target and return one [`HostResult`] per target, in order,
 /// with `up_reason` set for the hosts that answered.
 pub async fn discover(targets: &[Target], cfg: &ScanConfig) -> io::Result<Vec<HostResult>> {
+    let mut hosts: Vec<HostResult> = targets
+        .iter()
+        .map(|t| HostResult::new(t.addr, t.hostname.clone()))
+        .collect();
+    // Hosts that ARP already settled, up or down, skip the other probes.
+    let decided = if cfg.arp_ping {
+        arp_phase(targets, cfg, &mut hosts).await?
+    } else {
+        vec![false; targets.len()]
+    };
+
     let index: HashMap<IpAddr, usize> = targets
         .iter()
         .enumerate()
@@ -47,7 +63,9 @@ pub async fn discover(targets: &[Target], cfg: &ScanConfig) -> io::Result<Vec<Ho
         .collect();
     let v4: Vec<Ipv4Addr> = targets
         .iter()
-        .filter_map(|t| match t.addr {
+        .zip(&decided)
+        .filter(|(_, d)| !**d)
+        .filter_map(|(t, _)| match t.addr {
             IpAddr::V4(a) => Some(a),
             IpAddr::V6(_) => None,
         })
@@ -66,15 +84,13 @@ pub async fn discover(targets: &[Target], cfg: &ScanConfig) -> io::Result<Vec<Ho
         })
     };
 
-    let mut hosts: Vec<HostResult> = targets
-        .iter()
-        .map(|t| HostResult::new(t.addr, t.hostname.clone()))
-        .collect();
-    let pinged: Vec<AtomicBool> = targets.iter().map(|_| AtomicBool::new(false)).collect();
+    let pinged: Vec<AtomicBool> = decided.iter().map(|&d| AtomicBool::new(d)).collect();
 
     // An echo reply is the most direct proof of life; prefer its latency.
     let mark_pinged = |hosts: &mut Vec<HostResult>, (addr, rtt): (Ipv4Addr, f64)| {
-        if let Some(&h) = index.get(&IpAddr::V4(addr)) {
+        if let Some(&h) = index.get(&IpAddr::V4(addr))
+            && !decided[h]
+        {
             pinged[h].store(true, Ordering::Relaxed);
             hosts[h].up_reason = Some(reason::ECHO_REPLY);
             hosts[h].latency_ms = Some(rtt);
@@ -121,6 +137,71 @@ pub async fn discover(targets: &[Target], cfg: &ScanConfig) -> io::Result<Vec<Ho
     // a platform without usable ICMP sockets), the TCP probes decide alone.
     let _ = icmp.await.map_err(io::Error::other)?;
     Ok(hosts)
+}
+
+/// ARP every target that sits on a local Ethernet network. Fills in the
+/// hosts that answered and returns, per target, whether ARP decided it. A
+/// network where ARP cannot run (no privileges, not Linux) decides nothing,
+/// so those targets fall back to the ICMP and TCP probes.
+async fn arp_phase(
+    targets: &[Target],
+    cfg: &ScanConfig,
+    hosts: &mut [HostResult],
+) -> io::Result<Vec<bool>> {
+    let mut decided = vec![false; targets.len()];
+    let Ok(nets) = arp::local_networks() else {
+        return Ok(decided);
+    };
+    // Group the targets by the local network they are on.
+    let mut groups: Vec<(arp::LocalNet, Vec<Ipv4Addr>)> = Vec::new();
+    let mut seen: HashSet<Ipv4Addr> = HashSet::new();
+    for t in targets {
+        let IpAddr::V4(ip) = t.addr else { continue };
+        let Some(net) = arp::local_net_for(ip, &nets) else {
+            continue;
+        };
+        if !seen.insert(ip) {
+            continue;
+        }
+        match groups.iter_mut().find(|(n, _)| n == net) {
+            Some((_, ips)) => ips.push(ip),
+            None => groups.push((net.clone(), vec![ip])),
+        }
+    }
+    if groups.is_empty() {
+        return Ok(decided);
+    }
+
+    let cancel = CancelOnDrop(Arc::new(AtomicBool::new(false)));
+    let (cfg2, flag) = (cfg.clone(), Arc::clone(&cancel.0));
+    let (settled, replies) = tokio::task::spawn_blocking(move || {
+        let mut settled: HashSet<Ipv4Addr> = HashSet::new();
+        let mut replies: HashMap<Ipv4Addr, (MacAddr, f64)> = HashMap::new();
+        for (net, ips) in &groups {
+            let r = arp::sweep(net, ips, &cfg2, &flag, &mut |ip, mac, rtt| {
+                replies.insert(ip, (mac, rtt));
+            });
+            if r.is_ok() {
+                settled.extend(ips);
+            }
+        }
+        (settled, replies)
+    })
+    .await
+    .map_err(io::Error::other)?;
+
+    for (i, t) in targets.iter().enumerate() {
+        let IpAddr::V4(ip) = t.addr else { continue };
+        decided[i] = settled.contains(&ip);
+        if let Some(&(mac, rtt)) = replies.get(&ip) {
+            hosts[i].up_reason = Some(reason::ARP_RESPONSE);
+            hosts[i].latency_ms = Some(rtt);
+            hosts[i].mac = Some(MacInfo::new(mac));
+            // An answer counts even if a later network failed mid-sweep.
+            decided[i] = true;
+        }
+    }
+    Ok(decided)
 }
 
 /// Whether this process can send ICMP echo requests at all.

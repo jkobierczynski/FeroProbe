@@ -7,11 +7,12 @@
 //! - [`connect_scan`]: TCP connect, no privileges needed
 //! - [`syn_scan`]: TCP SYN over raw sockets (Linux, root or `CAP_NET_RAW`)
 //! - [`udp_scan`]: UDP with service-specific payloads, no privileges needed
-//! - [`discover`]: host discovery with ICMP echo and TCP probes
+//! - [`discover`]: host discovery with ARP (local networks), ICMP echo and TCP probes
 //!
 //! [`detect_services`] then identifies the software on open ports, and
 //! [`os_detect`] guesses each host's operating system.
 
+pub mod arp;
 pub mod connect;
 pub mod discovery;
 pub mod model;
@@ -24,6 +25,7 @@ pub mod syn;
 pub mod target;
 pub mod udp;
 
+pub use arp::{MacAddr, MacInfo};
 pub use connect::connect_scan;
 pub use discovery::{discover, icmp_available};
 pub use model::{HostResult, PortResult, PortState, Protocol, ScanConfig};
