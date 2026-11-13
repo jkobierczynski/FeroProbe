@@ -9,9 +9,6 @@ use std::fmt;
 use std::str::FromStr;
 use std::time::Duration;
 
-use tokio::sync::Mutex;
-use tokio::time::Instant;
-
 use crate::model::ScanConfig;
 
 /// nmap-style timing template, from slowest and stealthiest to fastest.
@@ -132,32 +129,33 @@ pub fn parse_duration(s: &str) -> Result<Duration, String> {
     Duration::try_from_secs_f64(secs).map_err(|_| format!("duration '{s}' is out of range"))
 }
 
-/// Spaces out the start of async probes (connect, UDP, service detection)
-/// by at least the scan delay, whatever the parallelism.
-pub(crate) struct Gate {
-    delay: Duration,
-    next: Mutex<Option<Instant>>,
+/// When the next probe may go, shared by every technique in this process so
+/// the scan delay holds across all of them (ICMP and TCP discovery running
+/// side by side, retries, service-detection fallbacks).
+static NEXT_SLOT: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+
+/// Claim the next send slot and return how long to wait for it. Slots are
+/// handed out in call order, each at least `delay` after the previous one
+/// and never in the past, so a pause cannot be made up with a burst.
+fn reserve(delay: Duration) -> Duration {
+    let now = std::time::Instant::now();
+    let mut next = NEXT_SLOT.lock().unwrap_or_else(|e| e.into_inner());
+    let slot = next.map_or(now, |n| n.max(now));
+    *next = Some(slot + delay);
+    slot - now
 }
 
-impl Gate {
-    pub(crate) fn new(delay: Duration) -> Self {
-        Self {
-            delay,
-            next: Mutex::new(None),
-        }
+/// Wait until the next probe may be sent, from async code.
+pub(crate) async fn pace(delay: Duration) {
+    if !delay.is_zero() {
+        tokio::time::sleep(reserve(delay)).await;
     }
+}
 
-    /// Wait until this probe may start.
-    pub(crate) async fn wait(&self) {
-        if self.delay.is_zero() {
-            return;
-        }
-        // Holding the lock while sleeping lines the probes up in order.
-        let mut next = self.next.lock().await;
-        if let Some(at) = *next {
-            tokio::time::sleep_until(at).await;
-        }
-        *next = Some(Instant::now() + self.delay);
+/// Wait until the next probe may be sent, from a blocking thread.
+pub(crate) fn pace_blocking(delay: Duration) {
+    if !delay.is_zero() {
+        std::thread::sleep(reserve(delay));
     }
 }
 
@@ -217,24 +215,41 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gate_spaces_probes() {
-        let gate = Gate::new(Duration::from_millis(40));
+    async fn probes_share_one_schedule() {
+        // The only test that uses a non-zero delay, since the slot is global.
+        let delay = Duration::from_millis(40);
         let start = std::time::Instant::now();
-        for _ in 0..4 {
-            gate.wait().await;
-        }
-        // Three gaps after the first probe.
+        // Async and blocking callers interleave on the same schedule.
+        pace(delay).await;
+        pace(delay).await;
+        tokio::task::spawn_blocking(move || pace_blocking(delay))
+            .await
+            .unwrap();
+        pace(delay).await;
+        // Three gaps after the first probe, which went at once.
         assert!(
             start.elapsed() >= Duration::from_millis(120),
             "{:?}",
             start.elapsed()
         );
 
-        let open = Gate::new(Duration::ZERO);
-        let start = std::time::Instant::now();
+        // After a pause longer than the delay, the next probe goes at once
+        // but the one after still waits a full delay: no catch-up burst.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let t = std::time::Instant::now();
+        pace(delay).await;
+        assert!(t.elapsed() < Duration::from_millis(20), "{:?}", t.elapsed());
+        pace(delay).await;
+        assert!(
+            t.elapsed() >= Duration::from_millis(40),
+            "{:?}",
+            t.elapsed()
+        );
+
+        let t = std::time::Instant::now();
         for _ in 0..1000 {
-            open.wait().await;
+            pace(Duration::ZERO).await;
         }
-        assert!(start.elapsed() < Duration::from_millis(100));
+        assert!(t.elapsed() < Duration::from_millis(100));
     }
 }

@@ -66,20 +66,22 @@ impl Rng {
 }
 
 /// Spaces out packets so that no more than `rate` are sent per second, and
-/// none closer together than the scan delay.
+/// none closer than the scan delay to any other probe of this process (see
+/// [`crate::timing::pace_blocking`]).
 pub(crate) struct Pacer {
     start: Instant,
     sent: u32,
     interval: Duration,
+    delay: Duration,
 }
 
 impl Pacer {
     pub(crate) fn new(rate: u32, delay: Duration) -> Self {
-        let per_packet = Duration::from_secs_f64(1.0 / f64::from(rate.max(1)));
         Self {
             start: Instant::now(),
             sent: 0,
-            interval: per_packet.max(delay),
+            interval: Duration::from_secs_f64(1.0 / f64::from(rate.max(1))),
+            delay,
         }
     }
 
@@ -87,14 +89,16 @@ impl Pacer {
         Self::new(cfg.max_rate, cfg.scan_delay)
     }
 
-    /// Call after each packet; sleeps if we are ahead of schedule.
-    pub(crate) fn tick(&mut self) {
-        self.sent = self.sent.saturating_add(1);
+    /// Call before each packet; sleeps until it may go. The first packet
+    /// goes at once, and nothing waits after the last one.
+    pub(crate) fn wait(&mut self) {
         let due = self.start + self.interval.saturating_mul(self.sent);
         let now = Instant::now();
         if due > now {
             std::thread::sleep(due - now);
         }
+        self.sent = self.sent.saturating_add(1);
+        crate::timing::pace_blocking(self.delay);
     }
 }
 

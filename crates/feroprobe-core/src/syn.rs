@@ -145,6 +145,7 @@ mod imp {
                 for &(h, p) in &pending {
                     let Some(src) = sources[h] else { continue };
                     let pkt = packet::tcp_syn(src, addrs[h], sport, p, cookie);
+                    pacer.wait();
                     sent_at.insert((h, p), Instant::now());
                     match send_with_backoff(&send_sock, &pkt, addrs[h]) {
                         Ok(()) => {}
@@ -158,7 +159,6 @@ mod imp {
                         }
                         Err(e) => return Err(e),
                     }
-                    pacer.tick();
                     while let Ok(a) = rx.try_recv() {
                         record(&mut results, &sent_at, a);
                     }

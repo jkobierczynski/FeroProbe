@@ -28,7 +28,7 @@ use tokio::net::UdpSocket;
 use crate::connect::is_network_error;
 use crate::model::{HostResult, PortResult, PortState, Protocol, ScanConfig, elapsed_ms, reason};
 use crate::target::Target;
-use crate::timing::Gate;
+use crate::timing::pace;
 
 /// A payload likely to make the service on `port` reply, or empty.
 pub fn payload_for(port: u16) -> &'static [u8] {
@@ -159,6 +159,7 @@ pub async fn probe_udp(addr: SocketAddr, cfg: &ScanConfig) -> io::Result<PortRes
     let payload = payload_for(addr.port());
     let mut buf = [0u8; 2048];
     for _ in 0..=cfg.retries {
+        pace(cfg.scan_delay).await;
         let start = Instant::now();
         if let Err(e) = sock.send(payload).await {
             return classify(e, None);
@@ -198,15 +199,10 @@ pub async fn udp_scan(
     let jobs = ports
         .iter()
         .flat_map(|&port| (0..targets.len()).map(move |h| (h, port)));
-    let gate = Gate::new(cfg.scan_delay);
-    let gate = &gate;
     let mut results = stream::iter(jobs)
         .map(|(h, port)| {
             let addr = SocketAddr::new(targets[h].addr, port);
-            async move {
-                gate.wait().await;
-                (h, probe_udp(addr, cfg).await)
-            }
+            async move { (h, probe_udp(addr, cfg).await) }
         })
         .buffer_unordered(cfg.concurrency.max(1));
     while let Some((h, r)) = results.next().await {

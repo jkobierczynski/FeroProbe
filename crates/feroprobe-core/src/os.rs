@@ -407,8 +407,8 @@ mod imp {
                     continue;
                 };
                 let pkt = packet::tcp_syn_with_options(src, addr, sport, port, seq, tsval);
+                pacer.wait();
                 send_with_backoff(&send_sock, &pkt, addr)?;
-                pacer.tick();
                 // Bounded, so constant inbound traffic can't stall sending.
                 // Whatever is left is read by the next drain or the wait.
                 let drain_until = Instant::now() + Duration::from_millis(10);

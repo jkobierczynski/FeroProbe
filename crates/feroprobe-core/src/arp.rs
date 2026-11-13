@@ -487,9 +487,9 @@ mod linux {
                         return Ok(());
                     }
                     let frame: [u8; ARP_FRAME_LEN] = arp_request(net.mac, net.addr, ip);
+                    pacer.wait();
                     sent_at.insert(ip, Instant::now());
                     send(&fd, net.ifindex, &frame)?;
-                    pacer.tick();
                     while let Ok(r) = rx.try_recv() {
                         record(r, &sent_at, &mut answered);
                     }
