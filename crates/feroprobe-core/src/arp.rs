@@ -523,6 +523,10 @@ mod linux {
         let received = receiver
             .join()
             .unwrap_or_else(|_| Err(io::Error::other("ARP receiver panicked")));
+        // Replies still queued (e.g. when a send failed mid-round) count too.
+        while let Ok(r) = rx.try_recv() {
+            record(r, &sent_at, &mut answered);
+        }
         outcome.and(received)
     }
 }
