@@ -14,6 +14,12 @@ pub const TOP_PORTS: &[u16] = &[
     11211, 5672, 1883, 8883, 2375, 6443, 9090, 9443, 5985, 5986, 161, 162, 69, 123,
 ];
 
+/// Commonly open UDP ports, used for UDP scans when no ports are specified.
+pub const TOP_UDP_PORTS: &[u16] = &[
+    53, 67, 68, 69, 123, 135, 137, 138, 139, 161, 162, 445, 500, 514, 520, 631, 1434, 1900, 4500,
+    5353, 49152,
+];
+
 /// Parse an nmap-style port specification.
 ///
 /// Accepts a comma-separated list of single ports (`22`), ranges (`1-1024`),
@@ -57,8 +63,17 @@ pub fn parse_ports(spec: &str) -> Result<Vec<u16>, Error> {
 /// remaining ports are filled in ascending order from 1 up, so the caller always
 /// gets `min(n, 65535)` ports.
 pub fn top_ports(n: usize) -> Vec<u16> {
+    top_from(TOP_PORTS, n)
+}
+
+/// Like [`top_ports`], for UDP, starting from [`TOP_UDP_PORTS`].
+pub fn top_udp_ports(n: usize) -> Vec<u16> {
+    top_from(TOP_UDP_PORTS, n)
+}
+
+fn top_from(list: &[u16], n: usize) -> Vec<u16> {
     let n = n.min(65535);
-    let mut ports: Vec<u16> = TOP_PORTS.iter().copied().take(n).collect();
+    let mut ports: Vec<u16> = list.iter().copied().take(n).collect();
     if ports.len() < n {
         let known: std::collections::HashSet<u16> = ports.iter().copied().collect();
         let extra = n - ports.len();
@@ -118,5 +133,7 @@ mod tests {
             assert!(ports.windows(2).all(|w| w[0] < w[1]));
         }
         assert_eq!(top_ports(3), vec![23, 80, 443]);
+        assert_eq!(top_udp_ports(2), vec![53, 67]);
+        assert_eq!(top_udp_ports(500).len(), 500);
     }
 }
