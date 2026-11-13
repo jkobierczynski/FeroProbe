@@ -93,6 +93,12 @@ struct Args {
     #[arg(long)]
     disable_arp_ping: bool,
 
+    /// IEEE OUI list for MAC vendor names (oui.txt, oui.csv, Wireshark manuf).
+    /// Default: the first of /usr/share/hwdata/oui.txt, /usr/share/ieee-data/oui.txt
+    /// and similar system locations that exists, else a small built-in table
+    #[arg(long, value_name = "FILE")]
+    oui_file: Option<std::path::PathBuf>,
+
     /// -O: guess each host's operating system (raw sockets: Linux, root or CAP_NET_RAW)
     #[arg(short = 'O')]
     os: bool,
@@ -234,6 +240,11 @@ async fn main() -> Result<()> {
         max_rate: args.max_rate,
         arp_ping: !args.disable_arp_ping,
     };
+
+    if let Some(path) = &args.oui_file {
+        feroprobe_core::oui::use_file(path)
+            .with_context(|| format!("reading OUI list {}", path.display()))?;
+    }
 
     let started = Instant::now();
     let start_time = SystemTime::now();
@@ -386,7 +397,18 @@ mod tests {
         let a = Args::try_parse_from(["feroprobe", "-sn", "10.0.0.0/24"]).unwrap();
         assert_eq!(a.scan, vec![ScanType::PingOnly]);
         assert!(Args::try_parse_from(["feroprobe", "-sX", "10.0.0.1"]).is_err());
-        let a = Args::try_parse_from(["feroprobe", "--disable-arp-ping", "10.0.0.1"]).unwrap();
+        let a = Args::try_parse_from([
+            "feroprobe",
+            "--disable-arp-ping",
+            "--oui-file",
+            "/tmp/oui.txt",
+            "10.0.0.1",
+        ])
+        .unwrap();
         assert!(a.disable_arp_ping);
+        assert_eq!(
+            a.oui_file.as_deref(),
+            Some(std::path::Path::new("/tmp/oui.txt"))
+        );
     }
 }

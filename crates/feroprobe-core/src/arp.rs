@@ -70,7 +70,8 @@ impl MacInfo {
 }
 
 /// Our own small table of well-known OUI prefixes (public IEEE assignments),
-/// biased towards what turns up on lab and home networks.
+/// biased towards what turns up on lab and home networks. Used when no full
+/// IEEE list is installed (see [`crate::oui`]).
 const VENDORS: &[([u8; 3], &str)] = &[
     ([0x00, 0x00, 0x0C], "Cisco Systems"),
     ([0x00, 0x03, 0x93], "Apple"),
@@ -117,8 +118,14 @@ const VENDORS: &[([u8; 3], &str)] = &[
     ([0xFC, 0xEC, 0xDA], "Ubiquiti"),
 ];
 
-/// Guess who made the network card with this address.
+/// Guess who made the network card with this address: from the full IEEE
+/// list when one is available, else from the built-in table.
 pub fn vendor(mac: MacAddr) -> Option<&'static str> {
+    crate::oui::lookup(mac).or_else(|| builtin_vendor(mac))
+}
+
+/// [`vendor`] with only the built-in table.
+pub fn builtin_vendor(mac: MacAddr) -> Option<&'static str> {
     let oui = mac.oui();
     VENDORS
         .binary_search_by(|(p, _)| p.cmp(&oui))
@@ -589,22 +596,25 @@ mod tests {
     fn vendor_lookup() {
         assert!(VENDORS.is_sorted_by_key(|(p, _)| *p), "keep VENDORS sorted");
         let mac = |b: [u8; 6]| MacAddr(b);
-        assert_eq!(vendor(mac([0x00, 0x50, 0x56, 1, 2, 3])), Some("VMware"));
         assert_eq!(
-            vendor(mac([0xb8, 0x27, 0xeb, 1, 2, 3])),
+            builtin_vendor(mac([0x00, 0x50, 0x56, 1, 2, 3])),
+            Some("VMware")
+        );
+        assert_eq!(
+            builtin_vendor(mac([0xb8, 0x27, 0xeb, 1, 2, 3])),
             Some("Raspberry Pi")
         );
         // QEMU's prefix is locally administered but still named.
         assert_eq!(
-            vendor(mac([0x52, 0x54, 0x00, 1, 2, 3])),
+            builtin_vendor(mac([0x52, 0x54, 0x00, 1, 2, 3])),
             Some("QEMU/KVM virtual NIC")
         );
         assert!(
-            vendor(mac([0x02, 0x42, 0xac, 0x11, 0, 2]))
+            builtin_vendor(mac([0x02, 0x42, 0xac, 0x11, 0, 2]))
                 .unwrap()
                 .contains("Locally")
         );
-        assert_eq!(vendor(mac([0x00, 0x00, 0x01, 1, 2, 3])), None);
+        assert_eq!(builtin_vendor(mac([0x00, 0x00, 0x01, 1, 2, 3])), None);
         assert_eq!(
             mac([0x00, 0x0c, 0x29, 0xab, 0xcd, 0xef]).to_string(),
             "00:0C:29:AB:CD:EF"

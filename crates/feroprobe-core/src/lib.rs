@@ -17,6 +17,7 @@ pub mod connect;
 pub mod discovery;
 pub mod model;
 pub mod os;
+pub mod oui;
 pub mod packet;
 pub mod ports;
 pub mod raw;

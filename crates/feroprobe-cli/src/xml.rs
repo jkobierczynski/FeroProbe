@@ -405,9 +405,11 @@ mod tests {
         let mut host = HostResult::new("10.0.0.5".parse().unwrap(), Some("box".into()));
         host.up_reason = Some("echo-reply");
         host.latency_ms = Some(0.25);
-        host.mac = Some(feroprobe_core::MacInfo::new(feroprobe_core::MacAddr([
-            0x00, 0x50, 0x56, 0x01, 0x02, 0x03,
-        ])));
+        // Built by hand: MacInfo::new would consult the system's OUI list.
+        host.mac = Some(feroprobe_core::MacInfo {
+            addr: feroprobe_core::MacAddr([0x00, 0x50, 0x56, 0x01, 0x02, 0x03]),
+            vendor: Some("VMware"),
+        });
         let ssh = ServiceInfo {
             name: "ssh".into(),
             product: Some("OpenSSH".into()),
