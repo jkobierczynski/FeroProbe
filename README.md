@@ -20,6 +20,17 @@ no external binaries.
 | ARP discovery on the local network | planned |
 | OS fingerprinting | planned |
 
+## Install
+
+Download a binary for Linux (x86_64, static musl, or arm64), macOS (Apple
+silicon) or Windows from the
+[releases page](https://github.com/jkobierczynski/FeroProbe/releases), or build
+it:
+
+```sh
+cargo install --git https://github.com/jkobierczynski/FeroProbe feroprobe
+```
+
 ## Usage
 
 ```sh
@@ -108,6 +119,23 @@ discovery uses TCP probes (plus unprivileged ping sockets where the OS allows
 them). An explicit `-sS` still needs the privileges; use `-sT` to ask for an
 unprivileged TCP scan. The default is also a connect scan when any target is
 IPv6, since the SYN scan is IPv4 only for now.
+
+## Benchmarks
+
+```sh
+cargo bench -p feroprobe-core
+```
+
+measures packet building and parsing, port-spec parsing, and a connect scan of
+1000 closed localhost ports. On a cloud VM: a SYN packet builds in about 10 ns,
+a SYN-ACK parses in about 3.5 ns, the checksum runs at about 11 GiB/s, and the
+connect scan takes about 18 ms (about 55,000 ports per second).
+
+## Releases
+
+Pushing a tag such as `v0.2.0` runs `.github/workflows/release.yml`, which
+builds the binaries above, smoke-tests each one, and publishes them with
+SHA-256 checksums as a GitHub release.
 
 ## Layout
 
