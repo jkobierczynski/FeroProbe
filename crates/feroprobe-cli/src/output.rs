@@ -3,63 +3,8 @@
 use std::time::Duration;
 
 use anyhow::Result;
-use feroprobe_core::{HostResult, PortResult, PortState, Protocol};
+use feroprobe_core::{HostResult, PortResult, PortState, service_name};
 use serde::Serialize;
-
-/// Well-known service names for display. Purely a label from the port
-/// number; real service detection comes later.
-fn service_name(protocol: Protocol, port: u16) -> &'static str {
-    match (protocol, port) {
-        (Protocol::Tcp, 21) => "ftp",
-        (Protocol::Tcp, 22) => "ssh",
-        (Protocol::Tcp, 23) => "telnet",
-        (Protocol::Tcp, 25) => "smtp",
-        (_, 53) => "domain",
-        (Protocol::Udp, 67) => "dhcps",
-        (Protocol::Udp, 68) => "dhcpc",
-        (Protocol::Udp, 69) => "tftp",
-        (Protocol::Tcp, 80) => "http",
-        (Protocol::Tcp, 110) => "pop3",
-        (_, 111) => "rpcbind",
-        (Protocol::Udp, 123) => "ntp",
-        (Protocol::Tcp, 135) => "msrpc",
-        (Protocol::Udp, 137) => "netbios-ns",
-        (Protocol::Udp, 138) => "netbios-dgm",
-        (Protocol::Tcp, 139) => "netbios-ssn",
-        (Protocol::Tcp, 143) => "imap",
-        (Protocol::Udp, 161) => "snmp",
-        (Protocol::Udp, 162) => "snmptrap",
-        (Protocol::Tcp, 389) => "ldap",
-        (Protocol::Tcp, 443) => "https",
-        (Protocol::Tcp, 445) => "microsoft-ds",
-        (Protocol::Tcp, 465) => "smtps",
-        (Protocol::Udp, 500) => "isakmp",
-        (Protocol::Udp, 514) => "syslog",
-        (Protocol::Tcp, 587) => "submission",
-        (Protocol::Tcp, 993) => "imaps",
-        (Protocol::Tcp, 995) => "pop3s",
-        (Protocol::Tcp, 1433) => "ms-sql-s",
-        (Protocol::Tcp, 1883) => "mqtt",
-        (Protocol::Udp, 1900) => "upnp",
-        (_, 2049) => "nfs",
-        (Protocol::Tcp, 2375) => "docker",
-        (Protocol::Tcp, 3306) => "mysql",
-        (Protocol::Tcp, 3389) => "ms-wbt-server",
-        (Protocol::Udp, 4500) => "nat-t-ike",
-        (Protocol::Tcp, 5432) => "postgresql",
-        (Protocol::Udp, 5353) => "mdns",
-        (Protocol::Tcp, 5672) => "amqp",
-        (Protocol::Tcp, 5900) => "vnc",
-        (Protocol::Tcp, 6379) => "redis",
-        (Protocol::Tcp, 6443) => "kubernetes",
-        (Protocol::Tcp, 8080) => "http-proxy",
-        (Protocol::Tcp, 8443) => "https-alt",
-        (Protocol::Tcp, 9200) => "elasticsearch",
-        (_, 11211) => "memcache",
-        (Protocol::Tcp, 27017) => "mongodb",
-        _ => "unknown",
-    }
-}
 
 /// Everything about the run that the renderers need besides the hosts.
 pub struct RunInfo {
@@ -70,6 +15,8 @@ pub struct RunInfo {
     pub only_open: bool,
     /// Show why each port got its state.
     pub show_reason: bool,
+    /// `-sV` ran: show the VERSION column.
+    pub show_version: bool,
     /// `-Pn`: discovery was skipped, so report every host.
     pub assume_up: bool,
     /// `-sn`: discovery only, no port table.
@@ -84,6 +31,14 @@ fn visible(host: &HostResult, only_open: bool) -> impl Iterator<Item = &PortResu
     host.ports
         .iter()
         .filter(move |p| !only_open || is_openish(p.state))
+}
+
+/// The service name to show: what `-sV` found, else the usual one for the port.
+fn service_label(p: &PortResult) -> String {
+    match &p.service {
+        Some(s) => s.full_name(),
+        None => service_name(p.protocol, p.port).to_string(),
+    }
 }
 
 fn reported(host: &HostResult, info: &RunInfo) -> bool {
@@ -133,18 +88,37 @@ pub fn print_table(hosts: &[HostResult], info: &RunInfo) {
         if let (false, Some((n, state))) = (info.only_open, hidden) {
             println!("Not shown: {n} {state} ports");
         }
+        let mut header = vec![format!("{:<10} {:<14} {:<14}", "PORT", "STATE", "SERVICE")];
         if info.show_reason {
-            println!("{:<10} {:<14} {:<14} REASON", "PORT", "STATE", "SERVICE");
-        } else {
-            println!("{:<10} {:<14} SERVICE", "PORT", "STATE");
+            header.push(format!("{:<14}", "REASON"));
         }
-        for p in rows {
+        if info.show_version {
+            header.push("VERSION".into());
+        }
+        println!("{}", header.join(" ").trim_end());
+        let mut unrecognized = Vec::new();
+        for p in &rows {
             let port = format!("{}/{}", p.port, p.protocol);
-            let service = service_name(p.protocol, p.port);
+            let mut line = vec![format!(
+                "{port:<10} {:<14} {:<14}",
+                p.state,
+                service_label(p)
+            )];
             if info.show_reason {
-                println!("{port:<10} {:<14} {service:<14} {}", p.state, p.reason);
-            } else {
-                println!("{port:<10} {:<14} {service}", p.state);
+                line.push(format!("{:<14}", p.reason));
+            }
+            if let (true, Some(s)) = (info.show_version, &p.service) {
+                line.push(s.version_line());
+                if let Some(fp) = &s.fingerprint {
+                    unrecognized.push(format!("{port}: \"{fp}\""));
+                }
+            }
+            println!("{}", line.join(" ").trim_end());
+        }
+        if !unrecognized.is_empty() {
+            println!("Unrecognized service replies:");
+            for u in unrecognized {
+                println!("  {u}");
             }
         }
     }
@@ -191,9 +165,45 @@ struct JsonHostInfo<'a> {
 
 #[derive(Serialize)]
 struct JsonPort<'a> {
-    #[serde(flatten)]
-    result: &'a PortResult,
-    service: &'static str,
+    port: u16,
+    protocol: feroprobe_core::Protocol,
+    state: PortState,
+    reason: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rtt_ms: Option<f64>,
+    service: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    product: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    version: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    extra_info: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tunnel: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fingerprint: Option<&'a str>,
+}
+
+impl<'a> JsonPort<'a> {
+    fn new(p: &'a PortResult) -> Self {
+        let s = p.service.as_ref();
+        Self {
+            port: p.port,
+            protocol: p.protocol,
+            state: p.state,
+            reason: p.reason,
+            rtt_ms: p.rtt_ms,
+            service: s.map_or_else(
+                || service_name(p.protocol, p.port).to_string(),
+                |s| s.name.clone(),
+            ),
+            product: s.and_then(|s| s.product.as_deref()),
+            version: s.and_then(|s| s.version.as_deref()),
+            extra_info: s.and_then(|s| s.extra_info.as_deref()),
+            tunnel: s.and_then(|s| s.tunnel),
+            fingerprint: s.and_then(|s| s.fingerprint.as_deref()),
+        }
+    }
 }
 
 pub fn print_json(hosts: &[HostResult], info: &RunInfo) -> Result<()> {
@@ -212,12 +222,7 @@ pub fn print_json(hosts: &[HostResult], info: &RunInfo) -> Result<()> {
                     latency_ms: h.latency_ms,
                 },
                 up: reported(h, info),
-                ports: visible(h, info.only_open)
-                    .map(|p| JsonPort {
-                        result: p,
-                        service: service_name(p.protocol, p.port),
-                    })
-                    .collect(),
+                ports: visible(h, info.only_open).map(JsonPort::new).collect(),
             })
             .collect(),
     };

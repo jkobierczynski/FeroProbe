@@ -100,6 +100,7 @@ mod imp {
             state,
             reason,
             rtt_ms,
+            service: None,
         };
 
         // Hosts we cannot route to get every port marked filtered up front.
@@ -234,6 +235,7 @@ mod imp {
                 state,
                 reason,
                 rtt_ms,
+                service: None,
             },
         );
         true
