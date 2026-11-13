@@ -121,6 +121,11 @@ struct Args {
     #[arg(long)]
     reason: bool,
 
+    /// In XML output, write scanner="nmap" for tools that only accept
+    /// nmap's own reports (FeroProbe is still named in a comment)
+    #[arg(long)]
+    nmap_label: bool,
+
     /// Output format
     #[arg(short = 'o', long, value_enum, default_value_t = Format::Table)]
     output: Format,
@@ -279,6 +284,7 @@ async fn main() -> Result<()> {
         show_version: plan.version,
         assume_up: !plan.discovery,
         ping_only: plan.ping_only,
+        nmap_label: args.nmap_label,
     };
     match args.output {
         Format::Table => output::print_table(&hosts, &info),
