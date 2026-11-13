@@ -9,11 +9,13 @@
 //! - [`udp_scan`]: UDP with service-specific payloads, no privileges needed
 //! - [`discover`]: host discovery with ICMP echo and TCP probes
 //!
-//! [`detect_services`] then identifies the software on open ports.
+//! [`detect_services`] then identifies the software on open ports, and
+//! [`os_detect`] guesses each host's operating system.
 
 pub mod connect;
 pub mod discovery;
 pub mod model;
+pub mod os;
 pub mod packet;
 pub mod ports;
 pub mod raw;
@@ -25,6 +27,7 @@ pub mod udp;
 pub use connect::connect_scan;
 pub use discovery::{discover, icmp_available};
 pub use model::{HostResult, PortResult, PortState, Protocol, ScanConfig};
+pub use os::{OsMatch, TcpTraits, os_detect};
 pub use ports::{parse_ports, service_name, top_ports, top_udp_ports};
 pub use raw::raw_sockets_available;
 pub use service::{ServiceInfo, detect_services};

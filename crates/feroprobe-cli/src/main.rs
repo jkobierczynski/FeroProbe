@@ -8,8 +8,9 @@ use std::time::{Duration, Instant, SystemTime};
 use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
 use feroprobe_core::{
-    HostResult, ScanConfig, Target, connect_scan, detect_services, discover, parse_ports,
-    raw_sockets_available, resolve_targets, syn_scan, top_ports, top_udp_ports, udp_scan,
+    HostResult, ScanConfig, Target, connect_scan, detect_services, discover, os_detect,
+    parse_ports, raw_sockets_available, resolve_targets, syn_scan, top_ports, top_udp_ports,
+    udp_scan,
 };
 
 use output::RunInfo;
@@ -62,6 +63,7 @@ enum Format {
 ///   feroprobe -sT -sU -p 53,123,161 scanme.example.org
 ///   feroprobe -sn 192.168.1.0/24
 ///   feroprobe -sV -p 22,80,443 10.0.0.5
+///   sudo feroprobe -O 10.0.0.5
 ///   feroprobe -Pn --top-ports 1000 --open -o json 10.0.0.1-50
 #[derive(Debug, Parser)]
 #[command(version, verbatim_doc_comment)]
@@ -84,6 +86,10 @@ struct Args {
     /// -Pn: skip host discovery and scan every target as if it were up
     #[arg(short = 'P', value_name = "n", value_enum, hide_possible_values = true)]
     ping: Option<PingMode>,
+
+    /// -O: guess each host's operating system (raw sockets: Linux, root or CAP_NET_RAW)
+    #[arg(short = 'O')]
+    os: bool,
 
     /// Ports to scan, e.g. "22", "1-1024", "22,80,443", "-" for all
     #[arg(short = 'p', long, conflicts_with = "top_ports")]
@@ -189,6 +195,14 @@ async fn main() -> Result<()> {
         .context("resolving targets")?;
     let all_ipv4 = targets.iter().all(|t| t.addr.is_ipv4());
     let plan = plan(&args.scan, args.ping, all_ipv4 && raw_sockets_available())?;
+    if args.os {
+        if plan.ping_only {
+            bail!("-O needs a port scan, so it cannot be combined with -sn");
+        }
+        if !raw_sockets_available() {
+            bail!("-O sends raw packets: run as root or grant CAP_NET_RAW");
+        }
+    }
 
     let tcp_ports = match (&args.ports, args.top_ports) {
         (Some(spec), _) => parse_ports(spec)?,
@@ -256,6 +270,12 @@ async fn main() -> Result<()> {
             let wait = Duration::from_millis(args.version_timeout);
             detect_services(&mut hosts, &cfg, wait).await;
         }
+        if args.os {
+            scan_types.push("os");
+            os_detect(&mut hosts, &cfg)
+                .await
+                .context("OS detection failed")?;
+        }
     } else {
         scan_types.push("ping");
     }
@@ -277,6 +297,7 @@ async fn main() -> Result<()> {
         only_open: args.open,
         show_reason: args.reason,
         show_version: plan.version,
+        show_os: args.os,
         assume_up: !plan.discovery,
         ping_only: plan.ping_only,
     };

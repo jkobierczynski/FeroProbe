@@ -186,6 +186,21 @@ fn write_host(x: &mut String, host: &HostResult, info: &RunInfo, start: u64, end
         }
         x.push_str("</ports>\n");
     }
+    if let Some(os) = &host.os {
+        let _ = writeln!(
+            x,
+            "<os><portused state=\"open\" proto=\"tcp\" portid=\"{}\"/>\n<osmatch name=\"{}\" accuracy=\"{}\" line=\"0\"><osclass type=\"{}\" vendor=\"{}\" osfamily=\"{}\" accuracy=\"{}\"/></osmatch>\n<osfingerprint fingerprint=\"{}\"/>\n</os>",
+            os.port,
+            esc(&os.name),
+            os.accuracy,
+            os.device_type,
+            esc(os.vendor),
+            esc(os.family),
+            os.accuracy,
+            esc(&os.traits.fingerprint())
+        );
+        let _ = writeln!(x, "<distance value=\"{}\"/>", os.distance);
+    }
     if let Some(ms) = host.latency_ms {
         // nmap reports times in microseconds.
         let us = (ms * 1000.0).round() as u64;
@@ -258,6 +273,7 @@ mod tests {
             only_open: false,
             show_reason: false,
             show_version: true,
+            show_os: false,
             assume_up: false,
             ping_only: false,
         }
