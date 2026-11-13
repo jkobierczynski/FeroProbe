@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
+use crate::os::OsMatch;
 use crate::service::ServiceInfo;
 
 /// Transport protocol of a scanned port.
@@ -93,6 +94,9 @@ pub struct HostResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub latency_ms: Option<f64>,
     pub ports: Vec<PortResult>,
+    /// What OS detection (`-O`) guessed, if it ran and the host answered.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub os: Option<OsMatch>,
 }
 
 impl HostResult {
@@ -103,6 +107,7 @@ impl HostResult {
             up_reason: None,
             latency_ms: None,
             ports: Vec::new(),
+            os: None,
         }
     }
 

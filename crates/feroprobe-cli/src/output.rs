@@ -24,6 +24,8 @@ pub struct RunInfo {
     pub show_reason: bool,
     /// `-sV` ran: show the VERSION column.
     pub show_version: bool,
+    /// `-O` ran: show each host's OS guess.
+    pub show_os: bool,
     /// `-Pn`: discovery was skipped, so report every host.
     pub assume_up: bool,
     /// `-sn`: discovery only, no port table.
@@ -90,54 +92,11 @@ pub fn print_table(hosts: &[HostResult], info: &RunInfo) {
             (None, Some(why)) => println!("Host is up, {why}."),
             _ => {}
         }
-        if info.ping_only {
-            continue;
+        if !info.ping_only {
+            print_ports(host, info);
         }
-
-        let (hidden, rows) = port_rows(host, info);
-        if rows.is_empty() {
-            match hidden {
-                _ if info.only_open => println!("No open ports found"),
-                Some((n, state)) => println!("All {n} scanned ports are {state}"),
-                None => {}
-            }
-            continue;
-        }
-        if let (false, Some((n, state))) = (info.only_open, hidden) {
-            println!("Not shown: {n} {state} ports");
-        }
-        let mut header = vec![format!("{:<10} {:<14} {:<14}", "PORT", "STATE", "SERVICE")];
-        if info.show_reason {
-            header.push(format!("{:<14}", "REASON"));
-        }
-        if info.show_version {
-            header.push("VERSION".into());
-        }
-        println!("{}", header.join(" ").trim_end());
-        let mut unrecognized = Vec::new();
-        for p in &rows {
-            let port = format!("{}/{}", p.port, p.protocol);
-            let mut line = vec![format!(
-                "{port:<10} {:<14} {:<14}",
-                p.state,
-                service_label(p)
-            )];
-            if info.show_reason {
-                line.push(format!("{:<14}", p.reason));
-            }
-            if let (true, Some(s)) = (info.show_version, &p.service) {
-                line.push(s.version_line());
-                if let Some(fp) = &s.fingerprint {
-                    unrecognized.push(format!("{port}: \"{fp}\""));
-                }
-            }
-            println!("{}", line.join(" ").trim_end());
-        }
-        if !unrecognized.is_empty() {
-            println!("Unrecognized service replies:");
-            for u in unrecognized {
-                println!("  {u}");
-            }
+        if info.show_os {
+            print_os(host);
         }
     }
     let what = if info.ping_only {
@@ -151,6 +110,71 @@ pub fn print_table(hosts: &[HostResult], info: &RunInfo) {
         up,
         info.elapsed.as_secs_f64()
     );
+}
+
+/// The port table for one host.
+fn print_ports(host: &HostResult, info: &RunInfo) {
+    let (hidden, rows) = port_rows(host, info);
+    if rows.is_empty() {
+        match hidden {
+            _ if info.only_open => println!("No open ports found"),
+            Some((n, state)) => println!("All {n} scanned ports are {state}"),
+            None => {}
+        }
+        return;
+    }
+    if let (false, Some((n, state))) = (info.only_open, hidden) {
+        println!("Not shown: {n} {state} ports");
+    }
+    let mut header = vec![format!("{:<10} {:<14} {:<14}", "PORT", "STATE", "SERVICE")];
+    if info.show_reason {
+        header.push(format!("{:<14}", "REASON"));
+    }
+    if info.show_version {
+        header.push("VERSION".into());
+    }
+    println!("{}", header.join(" ").trim_end());
+    let mut unrecognized = Vec::new();
+    for p in &rows {
+        let port = format!("{}/{}", p.port, p.protocol);
+        let mut line = vec![format!(
+            "{port:<10} {:<14} {:<14}",
+            p.state,
+            service_label(p)
+        )];
+        if info.show_reason {
+            line.push(format!("{:<14}", p.reason));
+        }
+        if let (true, Some(s)) = (info.show_version, &p.service) {
+            line.push(s.version_line());
+            if let Some(fp) = &s.fingerprint {
+                unrecognized.push(format!("{port}: \"{fp}\""));
+            }
+        }
+        println!("{}", line.join(" ").trim_end());
+    }
+    if !unrecognized.is_empty() {
+        println!("Unrecognized service replies:");
+        for u in unrecognized {
+            println!("  {u}");
+        }
+    }
+}
+
+/// The OS guess for one host, after `-O`.
+fn print_os(host: &HostResult) {
+    match &host.os {
+        Some(os) => {
+            println!(
+                "OS guess: {} ({}%), from {}/tcp",
+                os.name, os.accuracy, os.port
+            );
+            println!("OS fingerprint: {}", os.traits.fingerprint());
+            let hops = if os.distance == 1 { "hop" } else { "hops" };
+            println!("Network distance: {} {hops}", os.distance);
+        }
+        None => println!("OS guess: none (needs an open TCP port that answers a SYN)"),
+    }
 }
 
 #[derive(Serialize)]
@@ -168,6 +192,8 @@ struct JsonHost<'a> {
     host: JsonHostInfo<'a>,
     up: bool,
     ports: Vec<JsonPort<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    os: Option<&'a feroprobe_core::OsMatch>,
 }
 
 #[derive(Serialize)]
@@ -240,6 +266,7 @@ pub fn print_json(hosts: &[HostResult], info: &RunInfo) -> Result<()> {
                     latency_ms: h.latency_ms,
                 },
                 up: reported(h, info),
+                os: h.os.as_ref(),
                 ports: visible(h, info.only_open).map(JsonPort::new).collect(),
             })
             .collect(),

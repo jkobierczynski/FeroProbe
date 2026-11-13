@@ -18,7 +18,7 @@ no external binaries.
 | Table, JSON and nmap-style XML output, `--reason`, `--open` | ✅ |
 | Service and version detection, `-sV`, with our own probes and rules | ✅ |
 | ARP discovery on the local network | planned |
-| OS fingerprinting | planned |
+| OS detection, `-O`, from SYN-ACK traits with our own signatures (Linux, root) | ✅ |
 
 ## Install
 
@@ -51,6 +51,9 @@ sudo ./target/release/feroprobe -sS -p - --reason 10.0.0.5
 
 # Which software runs on the open ports
 ./target/release/feroprobe -sV -p 22,80,443,6379 10.0.0.5
+
+# Guess the operating system (raw sockets, so root)
+sudo ./target/release/feroprobe -O 10.0.0.5
 
 # Only open ports, as JSON
 ./target/release/feroprobe --top-ports 1000 --open -o json 10.0.0.1-50
@@ -104,6 +107,25 @@ recognizes are printed under "Unrecognized service replies", which is the
 starting point for a new rule. Open UDP ports get a DNS `version.bind`, NTP or
 SNMP query. `--version-timeout` sets how long to wait for each reply (default
 3000 ms).
+
+### OS detection
+
+`-O` sends one SYN that offers every common TCP option to an open port and
+reads the SYN-ACK. The initial TTL (64, 128 or 255), the order of the TCP
+options that come back and the "don't fragment" bit tell operating system
+families apart, and the TTL also gives the number of hops:
+
+```
+OS guess: Linux 3.x - 6.x (90%), from 22/tcp
+OS fingerprint: ttl=64 df=1 win=65483 opts=M,S,T,N,W mss=65495 ws=7
+Network distance: 1 hop
+```
+
+The signatures are FeroProbe's own (in `crates/feroprobe-core/src/os.rs`), not
+nmap's database, so the guess is per family (Linux, Windows, macOS, FreeBSD,
+OpenBSD, network devices) rather than an exact version. The fingerprint line
+shows the raw traits, which is what a new signature is written from. It needs
+raw sockets, so Linux with root or `CAP_NET_RAW`, and at least one open TCP port.
 
 ### Privileges
 
