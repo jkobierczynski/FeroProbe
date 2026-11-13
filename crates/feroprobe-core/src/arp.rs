@@ -441,15 +441,17 @@ mod linux {
                         ) {
                             continue;
                         }
-                        return;
+                        // E.g. ENETDOWN: the sweep must not pass for complete.
+                        return Err(e);
                     }
                     let at = Instant::now();
                     if let Some((ip, mac)) = parse_arp_reply(&buf[..n as usize])
                         && tx.send((ip, mac, at)).is_err()
                     {
-                        return;
+                        return Ok(());
                     }
                 }
+                Ok(())
             })
         };
 
@@ -508,8 +510,13 @@ mod linux {
         })();
 
         stop.store(true, Ordering::Relaxed);
-        let _ = receiver.join();
-        outcome
+        // If receiving failed, silence proves nothing: report the error so
+        // the caller keeps the unanswered hosts for its other probes. Replies
+        // that arrived before the failure have already been passed on.
+        let received = receiver
+            .join()
+            .unwrap_or_else(|_| Err(io::Error::other("ARP receiver panicked")));
+        outcome.and(received)
     }
 }
 
