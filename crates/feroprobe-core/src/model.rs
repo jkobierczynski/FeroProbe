@@ -147,6 +147,9 @@ pub struct ScanConfig {
     pub retries: u32,
     /// Maximum packets per second for raw-socket scans (SYN, ICMP).
     pub max_rate: u32,
+    /// Minimum time between probes (nmap's `--scan-delay`), whatever the
+    /// parallelism. Zero means no extra spacing.
+    pub scan_delay: Duration,
     /// During host discovery, decide targets on a local Ethernet network by
     /// ARP (when privileged on Linux) instead of ICMP and TCP probes.
     pub arp_ping: bool,
@@ -160,6 +163,7 @@ impl Default for ScanConfig {
             concurrency: 500,
             retries: 1,
             max_rate: 5000,
+            scan_delay: Duration::ZERO,
             arp_ping: true,
         }
     }

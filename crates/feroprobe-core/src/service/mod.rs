@@ -27,6 +27,7 @@ use tokio::net::TcpStream;
 
 use crate::model::{HostResult, PortState, Protocol, ScanConfig};
 use crate::ports::service_name;
+use crate::timing::Gate;
 use rules::Probe;
 
 /// What version detection learned about a port.
@@ -292,8 +293,11 @@ pub async fn detect_services(hosts: &mut [HostResult], cfg: &ScanConfig, wait: D
                 })
         })
         .collect();
+    let gate = Gate::new(cfg.scan_delay);
+    let gate = &gate;
     let found: Vec<_> = stream::iter(jobs)
         .map(|(h, i, addr, hostname, protocol)| async move {
+            gate.wait().await;
             let info = match protocol {
                 Protocol::Tcp => detect_tcp(addr, hostname.as_deref(), cfg, wait).await,
                 Protocol::Udp => detect_udp(addr, cfg, wait).await,

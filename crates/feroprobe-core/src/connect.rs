@@ -17,6 +17,7 @@ use tokio::net::TcpStream;
 
 use crate::model::{HostResult, PortResult, PortState, Protocol, ScanConfig, elapsed_ms, reason};
 use crate::target::Target;
+use crate::timing::Gate;
 
 /// Whether an error means the network gave no usable answer (the port is
 /// filtered), as opposed to a local problem such as running out of file
@@ -99,10 +100,15 @@ pub async fn connect_scan(
         .iter()
         .flat_map(|&port| (0..targets.len()).map(move |host_idx| (host_idx, port)));
 
+    let gate = Gate::new(cfg.scan_delay);
+    let gate = &gate;
     let mut results = stream::iter(jobs)
         .map(|(host_idx, port)| {
             let addr = SocketAddr::new(targets[host_idx].addr, port);
-            async move { (host_idx, probe_port(addr, cfg).await) }
+            async move {
+                gate.wait().await;
+                (host_idx, probe_port(addr, cfg).await)
+            }
         })
         .buffer_unordered(cfg.concurrency.max(1));
 

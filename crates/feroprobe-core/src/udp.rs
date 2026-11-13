@@ -28,6 +28,7 @@ use tokio::net::UdpSocket;
 use crate::connect::is_network_error;
 use crate::model::{HostResult, PortResult, PortState, Protocol, ScanConfig, elapsed_ms, reason};
 use crate::target::Target;
+use crate::timing::Gate;
 
 /// A payload likely to make the service on `port` reply, or empty.
 pub fn payload_for(port: u16) -> &'static [u8] {
@@ -197,10 +198,15 @@ pub async fn udp_scan(
     let jobs = ports
         .iter()
         .flat_map(|&port| (0..targets.len()).map(move |h| (h, port)));
+    let gate = Gate::new(cfg.scan_delay);
+    let gate = &gate;
     let mut results = stream::iter(jobs)
         .map(|(h, port)| {
             let addr = SocketAddr::new(targets[h].addr, port);
-            async move { (h, probe_udp(addr, cfg).await) }
+            async move {
+                gate.wait().await;
+                (h, probe_udp(addr, cfg).await)
+            }
         })
         .buffer_unordered(cfg.concurrency.max(1));
     while let Some((h, r)) = results.next().await {

@@ -28,6 +28,7 @@ use crate::arp::{self, MacAddr, MacInfo};
 use crate::connect::probe_port;
 use crate::model::{HostResult, PortState, ScanConfig, reason};
 use crate::target::Target;
+use crate::timing::Gate;
 
 /// TCP ports probed during discovery.
 pub const DISCOVERY_PORTS: [u16; 2] = [443, 80];
@@ -100,12 +101,17 @@ pub async fn discover(targets: &[Target], cfg: &ScanConfig) -> io::Result<Vec<Ho
     let jobs = DISCOVERY_PORTS
         .iter()
         .flat_map(|&port| (0..targets.len()).map(move |h| (h, port)));
+    let gate = Gate::new(cfg.scan_delay);
+    let gate = &gate;
     let mut probes = stream::iter(jobs)
         // Checked when a probe is about to start: skip hosts already pinged.
         .filter(|&(h, _)| std::future::ready(!pinged[h].load(Ordering::Relaxed)))
         .map(|(h, port)| {
             let addr = SocketAddr::new(targets[h].addr, port);
-            async move { (h, probe_port(addr, cfg).await) }
+            async move {
+                gate.wait().await;
+                (h, probe_port(addr, cfg).await)
+            }
         })
         .buffer_unordered(cfg.concurrency.max(1));
 
@@ -349,7 +355,7 @@ mod icmp {
 
         let outcome = (|| -> io::Result<()> {
             for _ in 0..=cfg.retries {
-                let mut pacer = Pacer::new(cfg.max_rate);
+                let mut pacer = Pacer::for_config(cfg);
                 for &(seq, addr) in &pending {
                     if cancel.load(Ordering::Relaxed) {
                         return Ok(());

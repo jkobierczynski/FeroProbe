@@ -8,16 +8,12 @@ use std::time::{Duration, Instant, SystemTime};
 use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
 use feroprobe_core::{
-    HostResult, ScanConfig, Target, connect_scan, detect_services, discover, os_detect,
+    HostResult, ScanConfig, Target, Timing, connect_scan, detect_services, discover, os_detect,
     parse_ports, raw_sockets_available, resolve_targets, syn_scan, top_ports, top_udp_ports,
     udp_scan,
 };
 
 use output::RunInfo;
-
-/// Windows only reports "connection refused" about 2s after the reset, so a
-/// shorter timeout would show closed ports as filtered there.
-const DEFAULT_TIMEOUT_MS: u64 = if cfg!(windows) { 3000 } else { 1500 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum ScanType {
@@ -66,6 +62,8 @@ enum Format {
 ///   feroprobe -sV -p 22,80,443 10.0.0.5
 ///   sudo feroprobe -O 10.0.0.5
 ///   feroprobe -Pn --top-ports 1000 --open -o json 10.0.0.1-50
+///   feroprobe -T4 -p- 10.0.0.5             (aggressive timing)
+///   feroprobe -T2 --scan-delay 1s 10.0.0.5
 #[derive(Debug, Parser)]
 #[command(version, verbatim_doc_comment)]
 struct Args {
@@ -111,25 +109,36 @@ struct Args {
     #[arg(long, value_name = "N")]
     top_ports: Option<usize>,
 
-    /// Per-probe timeout in milliseconds [default: 1500, or 3000 on Windows]
-    #[arg(long, value_name = "MS", default_value_t = DEFAULT_TIMEOUT_MS, hide_default_value = true)]
-    timeout: u64,
+    /// Timing template: 0-5 or paranoid, sneaky, polite, normal, aggressive,
+    /// insane (-T4 = aggressive). Sets timeout, retries, concurrency, rate and
+    /// scan delay; those flags still override it. [default: 3, normal]
+    #[arg(short = 'T', value_name = "0-5", value_parser = parse_timing)]
+    timing: Option<Timing>,
 
-    /// Maximum connect/UDP probes in flight at once
-    #[arg(short = 'c', long, value_name = "N", default_value_t = 500)]
-    concurrency: usize,
+    /// Per-probe timeout in milliseconds [default: from -T; normally 1500, or 3000 on Windows]
+    #[arg(long, value_name = "MS")]
+    timeout: Option<u64>,
 
-    /// Maximum packets per second for raw-socket probes (SYN, ICMP)
-    #[arg(long, value_name = "PPS", default_value_t = 5000)]
-    max_rate: u32,
+    /// Maximum connect/UDP probes in flight at once [default: from -T; normally 500]
+    #[arg(short = 'c', long, value_name = "N")]
+    concurrency: Option<usize>,
+
+    /// Maximum packets per second for raw-socket probes (SYN, ICMP, ARP) [default: from -T; normally 5000]
+    #[arg(long, value_name = "PPS")]
+    max_rate: Option<u32>,
+
+    /// Minimum time between probes, e.g. 500ms, 2s, 5m (a bare number is seconds)
+    /// [default: from -T; normally none]
+    #[arg(long, value_name = "TIME", value_parser = feroprobe_core::timing::parse_duration)]
+    scan_delay: Option<Duration>,
 
     /// With -sV, how long to wait for each service reply, in milliseconds
     #[arg(long, value_name = "MS", default_value_t = 3000)]
     version_timeout: u64,
 
-    /// Extra attempts for probes that get no answer
-    #[arg(long, value_name = "N", default_value_t = 1)]
-    retries: u32,
+    /// Extra attempts for probes that get no answer [default: from -T; normally 1]
+    #[arg(long, value_name = "N")]
+    retries: Option<u32>,
 
     /// Only show open (and open|filtered) ports
     #[arg(long)]
@@ -196,6 +205,23 @@ fn plan(scan: &[ScanType], ping: Option<PingMode>, syn_ok: bool) -> Result<Plan>
     })
 }
 
+fn parse_timing(s: &str) -> Result<Timing, String> {
+    s.parse()
+}
+
+/// The timing template's settings, with any explicit flags on top.
+fn scan_config(args: &Args) -> ScanConfig {
+    let base = args.timing.unwrap_or_default().config();
+    ScanConfig {
+        timeout: args.timeout.map_or(base.timeout, Duration::from_millis),
+        concurrency: args.concurrency.unwrap_or(base.concurrency).max(1),
+        retries: args.retries.unwrap_or(base.retries),
+        max_rate: args.max_rate.unwrap_or(base.max_rate).max(1),
+        scan_delay: args.scan_delay.unwrap_or(base.scan_delay),
+        arp_ping: !args.disable_arp_ping,
+    }
+}
+
 /// Add each scan's port results to the matching host in `hosts`.
 fn merge(hosts: &mut [HostResult], scanned: &[usize], results: Vec<HostResult>) {
     for (&idx, r) in scanned.iter().zip(results) {
@@ -233,13 +259,7 @@ async fn main() -> Result<()> {
         bail!("no ports to scan");
     }
 
-    let cfg = ScanConfig {
-        timeout: Duration::from_millis(args.timeout),
-        concurrency: args.concurrency,
-        retries: args.retries,
-        max_rate: args.max_rate,
-        arp_ping: !args.disable_arp_ping,
-    };
+    let cfg = scan_config(&args);
 
     if let Some(path) = &args.oui_file {
         feroprobe_core::oui::use_file(path)
@@ -386,6 +406,62 @@ mod tests {
         assert!(p(&[ScanType::PingOnly, ScanType::Udp], None, true).is_err());
         assert!(p(&[ScanType::PingOnly], Some(PingMode::Skip), true).is_err());
         assert!(p(&[ScanType::PingOnly, ScanType::Version], None, true).is_err());
+    }
+
+    #[test]
+    fn timing_templates_and_overrides() {
+        let a = Args::try_parse_from(["feroprobe", "-T4", "10.0.0.1"]).unwrap();
+        assert_eq!(a.timing, Some(Timing::Aggressive));
+        let cfg = scan_config(&a);
+        assert_eq!(cfg.concurrency, Timing::Aggressive.config().concurrency);
+        assert_eq!(cfg.timeout, Timing::Aggressive.config().timeout);
+
+        // Explicit flags win over the template.
+        let a = Args::try_parse_from([
+            "feroprobe",
+            "-T",
+            "sneaky",
+            "-c",
+            "50",
+            "--timeout",
+            "800",
+            "--scan-delay",
+            "250ms",
+            "10.0.0.1",
+        ])
+        .unwrap();
+        let cfg = scan_config(&a);
+        assert_eq!(cfg.concurrency, 50);
+        assert_eq!(cfg.timeout, Duration::from_millis(800));
+        assert_eq!(cfg.scan_delay, Duration::from_millis(250));
+        assert_eq!(cfg.retries, Timing::Sneaky.config().retries);
+
+        // No -T means the normal template, which is the old default.
+        let a = Args::try_parse_from(["feroprobe", "10.0.0.1"]).unwrap();
+        let (cfg, d) = (scan_config(&a), ScanConfig::default());
+        assert_eq!(
+            (
+                cfg.timeout,
+                cfg.concurrency,
+                cfg.retries,
+                cfg.max_rate,
+                cfg.scan_delay
+            ),
+            (
+                d.timeout,
+                d.concurrency,
+                d.retries,
+                d.max_rate,
+                d.scan_delay
+            )
+        );
+        // -sT and -T stay distinct.
+        let a = Args::try_parse_from(["feroprobe", "-sT", "-T5", "10.0.0.1"]).unwrap();
+        assert_eq!(
+            (a.scan[0], a.timing),
+            (ScanType::Connect, Some(Timing::Insane))
+        );
+        assert!(Args::try_parse_from(["feroprobe", "-T9", "10.0.0.1"]).is_err());
     }
 
     #[test]

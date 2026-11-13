@@ -141,7 +141,7 @@ mod imp {
 
         let outcome = (|| -> io::Result<()> {
             for _round in 0..=cfg.retries {
-                let mut pacer = Pacer::new(cfg.max_rate);
+                let mut pacer = Pacer::for_config(cfg);
                 for &(h, p) in &pending {
                     let Some(src) = sources[h] else { continue };
                     let pkt = packet::tcp_syn(src, addrs[h], sport, p, cookie);

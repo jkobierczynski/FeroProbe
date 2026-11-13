@@ -481,7 +481,7 @@ mod linux {
         let mut pending: Vec<Ipv4Addr> = targets.to_vec();
         let outcome = (|| -> io::Result<()> {
             for _ in 0..=cfg.retries {
-                let mut pacer = Pacer::new(cfg.max_rate);
+                let mut pacer = Pacer::for_config(cfg);
                 for &ip in &pending {
                     if cancel.load(Ordering::Relaxed) {
                         return Ok(());

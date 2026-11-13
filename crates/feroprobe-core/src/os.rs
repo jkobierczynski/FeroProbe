@@ -353,7 +353,7 @@ mod imp {
             .iter()
             .map(|&(_, addr, _)| source_addr_for(addr).ok())
             .collect();
-        let mut pacer = Pacer::new(cfg.max_rate);
+        let mut pacer = Pacer::for_config(cfg);
         let mut buf = vec![0u8; 65536];
 
         let syn_ack = packet::TCP_SYN | packet::TCP_ACK;
