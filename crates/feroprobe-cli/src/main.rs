@@ -64,7 +64,7 @@ struct Args {
     targets: Vec<String>,
 
     /// Scan technique, nmap style: -sS (SYN), -sT (connect), -sU (UDP), -sn (no port scan).
-    /// Can be repeated, e.g. -sS -sU. Default: -sS when run as root on Linux, else -sT
+    /// Can be repeated, e.g. -sS -sU. Default: -sS when run as root on Linux with only IPv4 targets, else -sT
     #[arg(
         short = 's',
         value_name = "TYPE",
@@ -123,7 +123,9 @@ struct Plan {
     discovery: bool,
 }
 
-fn plan(scan: &[ScanType], ping: Option<PingMode>, privileged: bool) -> Result<Plan> {
+/// `syn_ok` says whether a SYN scan can serve as the default: the process is
+/// privileged and every target is IPv4 (the SYN scan is IPv4 only for now).
+fn plan(scan: &[ScanType], ping: Option<PingMode>, syn_ok: bool) -> Result<Plan> {
     let has = |t| scan.contains(&t);
     if has(ScanType::Syn) && has(ScanType::Connect) {
         bail!("choose one TCP scan type: -sS or -sT");
@@ -141,7 +143,7 @@ fn plan(scan: &[ScanType], ping: Option<PingMode>, privileged: bool) -> Result<P
         Some(ScanType::Connect)
     } else if scan.is_empty() {
         // nmap's default: SYN scan when privileged, connect scan otherwise.
-        Some(if privileged && cfg!(target_os = "linux") {
+        Some(if syn_ok && cfg!(target_os = "linux") {
             ScanType::Syn
         } else {
             ScanType::Connect
@@ -168,7 +170,11 @@ fn merge(hosts: &mut [HostResult], scanned: &[usize], results: Vec<HostResult>) 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
-    let plan = plan(&args.scan, args.ping, raw_sockets_available())?;
+    let targets = resolve_targets(&args.targets)
+        .await
+        .context("resolving targets")?;
+    let all_ipv4 = targets.iter().all(|t| t.addr.is_ipv4());
+    let plan = plan(&args.scan, args.ping, all_ipv4 && raw_sockets_available())?;
 
     let tcp_ports = match (&args.ports, args.top_ports) {
         (Some(spec), _) => parse_ports(spec)?,
@@ -181,10 +187,6 @@ async fn main() -> Result<()> {
     if !plan.ping_only && tcp_ports.is_empty() {
         bail!("no ports to scan");
     }
-
-    let targets = resolve_targets(&args.targets)
-        .await
-        .context("resolving targets")?;
 
     let cfg = ScanConfig {
         timeout: Duration::from_millis(args.timeout),
@@ -260,8 +262,8 @@ async fn main() -> Result<()> {
 mod tests {
     use super::*;
 
-    fn p(scan: &[ScanType], ping: Option<PingMode>, privileged: bool) -> Result<Plan> {
-        plan(scan, ping, privileged)
+    fn p(scan: &[ScanType], ping: Option<PingMode>, syn_ok: bool) -> Result<Plan> {
+        plan(scan, ping, syn_ok)
     }
 
     #[test]
