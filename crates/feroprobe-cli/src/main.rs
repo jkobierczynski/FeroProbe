@@ -1098,7 +1098,10 @@ mod tests {
     #[test]
     fn report_paths_compare_by_real_location() {
         let dir = std::env::temp_dir().join(format!("feroprobe-out-{}", std::process::id()));
-        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        // Exclusive creation: never write through a directory someone else made.
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::create_dir(dir.join("sub")).unwrap();
         let plain = dir.join("r").display().to_string();
         let dotted = dir.join("sub").join("..").join("r").display().to_string();
         assert_eq!(report_key(&plain), report_key(&dotted));
