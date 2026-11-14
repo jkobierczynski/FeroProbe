@@ -1097,10 +1097,18 @@ mod tests {
 
     #[test]
     fn report_paths_compare_by_real_location() {
-        let dir = std::env::temp_dir().join(format!("feroprobe-out-{}", std::process::id()));
-        // Exclusive creation: never write through a directory someone else made.
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir(&dir).unwrap();
+        // A fresh name, created exclusively and private to this user, so the
+        // test never writes through a directory or link someone else made.
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("feroprobe-out-{}-{nanos}", std::process::id()));
+        let mut builder = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+        builder.create(&dir).unwrap();
         std::fs::create_dir(dir.join("sub")).unwrap();
         let plain = dir.join("r").display().to_string();
         let dotted = dir.join("sub").join("..").join("r").display().to_string();
