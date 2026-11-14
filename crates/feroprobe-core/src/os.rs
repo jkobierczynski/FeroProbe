@@ -419,16 +419,25 @@ mod imp {
                 }
             }
         }
-        let v4_out = if v4.is_empty() {
-            Vec::new()
-        } else {
-            probe_blocking_v4(&v4, cfg)?
+        // One family's failure must not discard the other's completed guesses,
+        // so a non-timeout error degrades that family to "no guesses" rather
+        // than propagating. A timeout still propagates, so `--host-timeout`
+        // keeps marking the host (the caller reads ErrorKind::TimedOut).
+        let family = |empty: bool,
+                      run: &dyn Fn() -> io::Result<Vec<Option<TcpTraits>>>,
+                      n: usize|
+         -> io::Result<Vec<Option<TcpTraits>>> {
+            if empty {
+                return Ok(Vec::new());
+            }
+            match run() {
+                Ok(v) => Ok(v),
+                Err(e) if e.kind() == io::ErrorKind::TimedOut => Err(e),
+                Err(_) => Ok(vec![None; n]),
+            }
         };
-        let v6_out = if v6.is_empty() {
-            Vec::new()
-        } else {
-            probe_blocking_v6(&v6, cfg)?
-        };
+        let v4_out = family(v4.is_empty(), &|| probe_blocking_v4(&v4, cfg), v4.len())?;
+        let v6_out = family(v6.is_empty(), &|| probe_blocking_v6(&v6, cfg), v6.len())?;
         Ok(slot
             .into_iter()
             .map(|(is_v6, i)| {
