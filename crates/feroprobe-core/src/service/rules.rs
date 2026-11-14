@@ -74,6 +74,72 @@ pub(super) const PROBES: &[Probe] = &[
         payload: b"\x10\x15\x00\x04MQTT\x04\x02\x00\x3c\x00\x09feroprobe",
         ports: &[1883],
     },
+    Probe {
+        name: "rdp",
+        // TPKT + X.224 Connection Request with an RDP negotiation request
+        // offering TLS and CredSSP.
+        payload: b"\x03\x00\x00\x13\x0e\xe0\x00\x00\x00\x00\x00\x01\x00\x08\x00\x03\x00\x00\x00",
+        ports: &[3389],
+    },
+    Probe {
+        name: "mssql",
+        // TDS PRELOGIN: VERSION, ENCRYPTION, INSTOPT, THREADID and MARS.
+        payload: b"\x12\x01\x00\x2f\x00\x00\x01\x00\
+            \x00\x00\x1a\x00\x06\x01\x00\x20\x00\x01\x02\x00\x21\x00\x01\
+            \x03\x00\x22\x00\x04\x04\x00\x26\x00\x01\xff\
+            \x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00",
+        ports: &[1433],
+    },
+    Probe {
+        name: "smb",
+        // NetBIOS session header + SMB2 NEGOTIATE offering 2.0.2 to 3.0.2.
+        payload: b"\x00\x00\x00\x6c\xfeSMB\x40\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01\x00\
+            \x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\
+            \x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\
+            \x00\x00\x00\x00\x00\x00\x00\x00\x24\x00\x04\x00\x01\x00\x00\x00\x00\x00\x00\x00\
+            \x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\
+            \x00\x00\x00\x00\x02\x02\x10\x02\x00\x03\x02\x03",
+        ports: &[445],
+    },
+    Probe {
+        name: "ldap",
+        // SearchRequest for the rootDSE: base "", scope base,
+        // (objectClass=*), asking for the vendor, host and naming context.
+        payload: b"\x30\x79\x02\x01\x01\x63\x74\x04\x00\x0a\x01\x00\x0a\x01\x00\x02\x01\x00\
+            \x02\x01\x00\x01\x01\x00\x87\x0bobjectClass\x30\x54\x04\x01*\x04\x01+\
+            \x04\x0avendorName\x04\x0dvendorVersion\x04\x14defaultNamingContext\
+            \x04\x0bdnsHostName\x04\x0enamingContexts",
+        ports: &[389, 636, 3268, 3269],
+    },
+    Probe {
+        name: "mongodb",
+        // OP_MSG {buildinfo: 1, $db: "admin"}, which needs no login.
+        payload: b"\x38\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00\xdd\x07\x00\x00\
+            \x00\x00\x00\x00\x00\x23\x00\x00\x00\x10buildinfo\x00\x01\x00\x00\x00\
+            \x02$db\x00\x06\x00\x00\x00admin\x00\x00",
+        ports: &[27017, 27018, 27019],
+    },
+    Probe {
+        name: "zookeeper",
+        // The "srvr" four-letter command, allowed by default.
+        payload: b"srvr\n",
+        ports: &[2181],
+    },
+    Probe {
+        name: "rtsp",
+        payload: b"OPTIONS * RTSP/1.0\r\nCSeq: 1\r\n\r\n",
+        ports: &[554, 8554],
+    },
+    Probe {
+        name: "sip",
+        payload: b"OPTIONS sip:feroprobe.invalid SIP/2.0\r\n\
+            Via: SIP/2.0/TCP feroprobe.invalid;branch=z9hG4bKferoprobe\r\n\
+            From: <sip:feroprobe@feroprobe.invalid>;tag=feroprobe\r\n\
+            To: <sip:feroprobe.invalid>\r\n\
+            Call-ID: feroprobe@feroprobe.invalid\r\nCSeq: 1 OPTIONS\r\n\
+            Max-Forwards: 70\r\nContent-Length: 0\r\n\r\n",
+        ports: &[5060, 5061],
+    },
 ];
 
 /// Ports where TLS is tried before anything else.
@@ -130,6 +196,10 @@ impl Rule {
 /// newlines, and `\xNN` matches the byte NN.
 static RULES: &[Rule] = &[
     // SSH
+    r("ssh", r"^SSH-([\d.]+)-OpenSSH_for_Windows_([\w.]+)")
+        .product("OpenSSH for Windows")
+        .version("${2}")
+        .info(&["protocol ${1}"]),
     r("ssh", r"^SSH-([\d.]+)-OpenSSH_([\w.]+)[ -]([^\r\n]+)")
         .product("OpenSSH")
         .version("${2}")
@@ -142,6 +212,42 @@ static RULES: &[Rule] = &[
         .product("Dropbear sshd")
         .version("${2}")
         .info(&["protocol ${1}"]),
+    r("ssh", r"^SSH-([\d.]+)-libssh[_-]([\d.]+)")
+        .product("libssh")
+        .version("${2}")
+        .info(&["protocol ${1}"]),
+    r("ssh", r"^SSH-([\d.]+)-Cisco-([\d.]+)")
+        .product("Cisco SSH")
+        .version("${2}")
+        .info(&["protocol ${1}"]),
+    r("ssh", r"^SSH-([\d.]+)-ROSSSH")
+        .product("MikroTik RouterOS sshd")
+        .info(&["protocol ${1}"]),
+    r("ssh", r"^SSH-([\d.]+)-paramiko_([\d.]+)")
+        .product("Paramiko")
+        .version("${2}")
+        .info(&["protocol ${1}"]),
+    r("ssh", r"^SSH-([\d.]+)-AsyncSSH_([\d.]+)")
+        .product("AsyncSSH")
+        .version("${2}")
+        .info(&["protocol ${1}"]),
+    r("ssh", r"^SSH-([\d.]+)-Erlang/([\d.]+)")
+        .product("Erlang sshd")
+        .version("${2}")
+        .info(&["protocol ${1}"]),
+    r("ssh", r"^SSH-([\d.]+)-Go\r?\n")
+        .product("Go x/crypto/ssh")
+        .info(&["protocol ${1}"]),
+    r("ssh", r"^SSH-([\d.]+)-mod_sftp")
+        .product("ProFTPD mod_sftp")
+        .info(&["protocol ${1}"]),
+    r(
+        "ssh",
+        r"^SSH-([\d.]+)-[\d.]+ FlowSsh: Bitvise SSH Server \(WinSSHD\) ([\d.]+)",
+    )
+    .product("Bitvise WinSSHD")
+    .version("${2}")
+    .info(&["protocol ${1}"]),
     r("ssh", r"^SSH-([\d.]+)-([^\r\n]+)")
         .product("${2}")
         .info(&["protocol ${1}"]),
@@ -163,6 +269,10 @@ static RULES: &[Rule] = &[
     r("smtp", r"^220[ -](\S+) Microsoft ESMTP MAIL Service")
         .product("Microsoft ESMTP")
         .info(&["host: ${1}"]),
+    r("smtp", r"^220[ -](\S+) ESMTP Haraka[/ ]([\d.]+)")
+        .product("Haraka smtpd")
+        .version("${2}")
+        .info(&["host: ${1}"]),
     r("smtp", r"^220[ -](\S+) [^\r\n]*\bE?SMTP\b").info(&["host: ${1}"]),
     // FTP
     r("ftp", r"^220[ -][^\r\n]*\(vsFTPd ([\w.]+)\)")
@@ -177,11 +287,39 @@ static RULES: &[Rule] = &[
         .product("FileZilla ftpd")
         .version("${1}"),
     r("ftp", r"^220[ -]Microsoft FTP Service").product("Microsoft ftpd"),
+    r("ftp", r"^220[ -]Serv-U FTP Server v([\d.]+)")
+        .product("Serv-U ftpd")
+        .version("${1}"),
+    r("ftp", r"^220[ -](\S+) FTP server \(MikroTik ([\d.]+)\)")
+        .product("MikroTik RouterOS ftpd")
+        .version("${2}")
+        .info(&["host: ${1}"]),
+    r("ftp", r"^220[ -]bftpd ([\d.]+)")
+        .product("bftpd")
+        .version("${1}"),
     r("ftp", r"^220[ -][^\r\n]*\bFTP\b"),
     // POP3 and IMAP
     r("pop3", r"^\+OK [^\r\n]*Dovecot").product("Dovecot pop3d"),
+    r(
+        "pop3",
+        r"^\+OK The Microsoft Exchange POP3 service is ready",
+    )
+    .product("Microsoft Exchange pop3d"),
+    r("pop3", r"^\+OK [^\r\n]*Cyrus POP3 v?([\w.\-]+)")
+        .product("Cyrus pop3d")
+        .version("${1}"),
+    r("pop3", r"^\+OK Hello there").product("Courier pop3d"),
     r("pop3", r"^\+OK [^\r\n]*POP3"),
     r("imap", r"^\* OK [^\r\n]*Dovecot").product("Dovecot imapd"),
+    r(
+        "imap",
+        r"^\* OK The Microsoft Exchange IMAP4 service is ready",
+    )
+    .product("Microsoft Exchange imapd"),
+    r("imap", r"^\* OK [^\r\n]*Cyrus IMAP[^\r\n]*? v?(\d[\w.\-]*)")
+        .product("Cyrus imapd")
+        .version("${1}"),
+    r("imap", r"^\* OK [^\r\n]*Courier-IMAP").product("Courier imapd"),
     r("imap", r"^\* OK [^\r\n]*IMAP"),
     // MySQL and MariaDB: a handshake packet, protocol version 10.
     r("mysql", r"^.\x00\x00\x00\x0a5\.5\.5-([\d.]+)-MariaDB")
@@ -234,6 +372,37 @@ static RULES: &[Rule] = &[
     r("amqp", r"^AMQP\x00\x00\x09\x01").probe("amqp"),
     // MQTT: CONNACK.
     r("mqtt", r"^\x20\x02\x00[\x00-\x05]").probe("mqtt"),
+    // MongoDB: an OP_MSG reply (opcode 2013) to buildinfo.
+    r(
+        "mongodb",
+        r"^.{12}\xdd\x07\x00\x00.*\x02version\x00....(\d[\w.\-]*)\x00",
+    )
+    .probe("mongodb")
+    .product("MongoDB")
+    .version("${1}"),
+    r("mongodb", r"^.{12}\xdd\x07\x00\x00")
+        .probe("mongodb")
+        .product("MongoDB"),
+    // ZooKeeper: the version, without the build hash after it.
+    r("zookeeper", r"^Zookeeper version: ([\w.]+)")
+        .product("Apache ZooKeeper")
+        .version("${1}"),
+    r(
+        "zookeeper",
+        r"^srvr is not executed because it is not in the whitelist",
+    )
+    .product("Apache ZooKeeper")
+    .info(&["four-letter commands restricted"]),
+    // Talk-first services.
+    r("rsync", r"^@RSYNCD: ([\d.]+)").info(&["protocol ${1}"]),
+    r("nntp", r"^20[01] [^\r\n]*InterNetNews server INN ([\d.]+)")
+        .product("INN")
+        .version("${1}"),
+    r("nntp", r"^20[01] [^\r\n]*\b(?i:nntp|news)\b"),
+    r(
+        "irc",
+        r"^:\S+ NOTICE (?:AUTH|\*) :\*\*\* (?:Looking up|Checking|Processing)",
+    ),
     // Others
     r("vnc", r"^RFB (\d{3})\.(\d{3})\n")
         .product("VNC")
@@ -259,7 +428,10 @@ pub(super) fn match_response(probe: &str, data: &[u8]) -> Option<ServiceInfo> {
     if data.is_empty() {
         return None;
     }
-    if let Some(info) = parse_http(data) {
+    if let Some(info) = parse_headers(data) {
+        return Some(info);
+    }
+    if let Some(info) = super::parsers::parse(probe, data) {
         return Some(info);
     }
     COMPILED.iter().find_map(|(rule, re)| {
@@ -303,33 +475,43 @@ pub(super) fn clean(bytes: &[u8]) -> Option<String> {
     (!text.is_empty()).then(|| text.to_string())
 }
 
-static HTTP_STATUS: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?-u)^HTTP/\d(?:\.\d)? \d{3}").expect("valid regex"));
+static STATUS_LINE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?-u)^(HTTP|RTSP|SIP)/\d(?:\.\d)? \d{3}").expect("valid regex"));
 static ES_VERSION: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"(?-u)"number"\s*:\s*"([\w.\-]+)""#).expect("valid regex"));
+static COUCHDB_VERSION: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?-u)"couchdb"\s*:\s*"Welcome".*?"version"\s*:\s*"([\w.\-]+)""#)
+        .expect("valid regex")
+});
 
-/// HTTP responses, with the product taken from the Server header.
-fn parse_http(data: &[u8]) -> Option<ServiceInfo> {
-    if !HTTP_STATUS.is_match(data) {
-        return None;
-    }
+/// HTTP, RTSP and SIP responses, which share a header format. The product
+/// comes from the Server header (or SIP's User-Agent).
+fn parse_headers(data: &[u8]) -> Option<ServiceInfo> {
+    let caps = STATUS_LINE.captures(data)?;
     let split = data
         .windows(4)
         .position(|w| w == b"\r\n\r\n")
         .unwrap_or(data.len());
     let (head, body) = data.split_at(split);
-    let mut info = ServiceInfo::named("http");
-    if let Some(server) = header(head, "server") {
+    let mut info = ServiceInfo::named(match &caps[1] {
+        b"RTSP" => "rtsp",
+        b"SIP" => "sip",
+        _ => "http",
+    });
+    if let Some(server) = header(head, "server").or_else(|| header(head, "user-agent")) {
         let (product, version, extra) = split_server(&server);
         info.product = Some(product);
         info.version = version;
         info.extra_info = extra;
     }
-    // Elasticsearch's root endpoint describes itself in JSON.
+    // Some HTTP APIs describe themselves in a JSON body at /.
     let body_has = |s: &[u8]| body.windows(s.len()).any(|w| w == s);
     if body_has(b"\"cluster_name\"") && body_has(b"\"lucene_version\"") {
         info.product = Some("Elasticsearch REST API".into());
         info.version = ES_VERSION.captures(body).and_then(|c| clean(&c[1]));
+    } else if let Some(c) = COUCHDB_VERSION.captures(body) {
+        info.product = Some("CouchDB httpd".into());
+        info.version = clean(&c[1]);
     }
     Some(info)
 }
@@ -348,15 +530,27 @@ fn header(head: &[u8], name: &str) -> Option<String> {
 /// version and extra info.
 fn split_server(server: &str) -> (String, Option<String>, Option<String>) {
     let (first, rest) = server.split_once(' ').unwrap_or((server, ""));
+    // Jetty writes `Jetty(9.4.53.v20231009)`.
     let (name, version) = match first.split_once('/') {
         Some((n, v)) => (n, Some(v.to_string()).filter(|v| !v.is_empty())),
-        None => (first, None),
+        None => match first.strip_suffix(')').and_then(|f| f.split_once('(')) {
+            Some((n, v)) => (n, Some(v.to_string()).filter(|v| !v.is_empty())),
+            None => (first, None),
+        },
     };
     let product = match name {
         "Apache" => "Apache httpd",
+        "Apache-Coyote" => "Apache Tomcat/Coyote JSP engine",
         "Microsoft-IIS" => "Microsoft IIS httpd",
         "Microsoft-HTTPAPI" => "Microsoft HTTPAPI httpd",
+        "Kestrel" => "Microsoft Kestrel httpd",
         "SimpleHTTP" => "Python SimpleHTTPServer",
+        "BaseHTTP" => "Python BaseHTTPServer",
+        "Werkzeug" => "Werkzeug httpd",
+        "gunicorn" => "Gunicorn",
+        "uvicorn" => "Uvicorn",
+        "openresty" => "OpenResty web app server",
+        "LiteSpeed" => "LiteSpeed httpd",
         "Docker" => "Docker API",
         other => other,
     };
@@ -407,7 +601,12 @@ mod tests {
         let i = m(b"SSH-2.0-OpenSSH_8.0\r\n");
         assert_eq!(i.extra_info.as_deref(), Some("protocol 2.0"));
         let i = m(b"SSH-2.0-Cisco-1.25\r\n");
-        assert_eq!(i.product.as_deref(), Some("Cisco-1.25"));
+        assert_eq!(
+            (i.product.as_deref(), i.version.as_deref()),
+            (Some("Cisco SSH"), Some("1.25"))
+        );
+        let i = m(b"SSH-2.0-SomethingElse_1.0\r\n");
+        assert_eq!(i.product.as_deref(), Some("SomethingElse_1.0"));
     }
 
     #[test]
@@ -487,6 +686,139 @@ mod tests {
         assert_eq!(i.name, "amqp");
         assert_eq!(i.product.as_deref(), Some("RabbitMQ"));
         assert_eq!(i.version.as_deref(), Some("12.0.3"));
+    }
+
+    #[test]
+    fn probe_payload_lengths() {
+        let len = |name: &str| {
+            PROBES
+                .iter()
+                .find(|p| p.name == name)
+                .unwrap()
+                .payload
+                .len()
+        };
+        // Each length matches the one written inside the payload.
+        assert_eq!(len("rdp"), 0x13);
+        assert_eq!(len("mssql"), 0x2f);
+        assert_eq!(len("smb"), 4 + 0x6c);
+        assert_eq!(len("ldap"), 2 + 0x79);
+        assert_eq!(len("mongodb"), 0x38);
+        let names: Vec<_> = PROBES.iter().map(|p| p.name).collect();
+        let mut unique = names.clone();
+        unique.dedup();
+        assert_eq!(names, unique);
+    }
+
+    #[test]
+    fn more_ssh_and_mail() {
+        let i = m(b"SSH-2.0-OpenSSH_for_Windows_9.5\r\n");
+        assert_eq!(
+            (i.product.as_deref(), i.version.as_deref()),
+            (Some("OpenSSH for Windows"), Some("9.5"))
+        );
+        let i = m(b"SSH-2.0-libssh_0.10.6\r\n");
+        assert_eq!(
+            (i.product.as_deref(), i.version.as_deref()),
+            (Some("libssh"), Some("0.10.6"))
+        );
+        assert_eq!(
+            m(b"SSH-2.0-ROSSSH\r\n").product.as_deref(),
+            Some("MikroTik RouterOS sshd")
+        );
+        assert_eq!(
+            m(b"SSH-2.0-Go\r\n").product.as_deref(),
+            Some("Go x/crypto/ssh")
+        );
+        let i = m(b"220 ftp.example.org FTP server (MikroTik 7.14.2) ready\r\n");
+        assert_eq!(
+            (i.product.as_deref(), i.version.as_deref()),
+            (Some("MikroTik RouterOS ftpd"), Some("7.14.2"))
+        );
+        let i = m(b"* OK The Microsoft Exchange IMAP4 service is ready.\r\n");
+        assert_eq!(i.product.as_deref(), Some("Microsoft Exchange imapd"));
+        let i = m(b"* OK mail.example.org Cyrus IMAP v3.8.1-Debian server ready\r\n");
+        assert_eq!(
+            (i.product.as_deref(), i.version.as_deref()),
+            (Some("Cyrus imapd"), Some("3.8.1-Debian"))
+        );
+        assert_eq!(
+            m(b"+OK Hello there.\r\n").product.as_deref(),
+            Some("Courier pop3d")
+        );
+        let i = m(b"@RSYNCD: 31.0\n");
+        assert_eq!(
+            (i.name.as_str(), i.extra_info.as_deref()),
+            ("rsync", Some("protocol 31.0"))
+        );
+        let i = m(b"200 news.example.org InterNetNews server INN 2.7.1 ready\r\n");
+        assert_eq!(
+            (i.name.as_str(), i.version.as_deref()),
+            ("nntp", Some("2.7.1"))
+        );
+        let i = m(b":irc.example.org NOTICE * :*** Looking up your hostname...\r\n");
+        assert_eq!(i.name, "irc");
+    }
+
+    #[test]
+    fn databases_and_coordinators() {
+        let mut reply = vec![0u8; 12];
+        reply.extend_from_slice(b"\xdd\x07\x00\x00\x00\x00\x00\x00\x00");
+        reply.extend_from_slice(b"\x40\x00\x00\x00\x02version\x00\x06\x00\x00\x007.0.5\x00");
+        let i = match_response("mongodb", &reply).unwrap();
+        assert_eq!(
+            (i.name.as_str(), i.version.as_deref()),
+            ("mongodb", Some("7.0.5"))
+        );
+        // Without the probe, those bytes mean nothing.
+        assert!(match_response("null", &reply).is_none());
+        let i = match_response(
+            "zookeeper",
+            b"Zookeeper version: 3.8.4-9316c2a7a97e1666d8f4593f34dd6fc36ecc436c, built on 2024-02-12\n",
+        )
+        .unwrap();
+        assert_eq!(
+            (i.product.as_deref(), i.version.as_deref()),
+            (Some("Apache ZooKeeper"), Some("3.8.4"))
+        );
+    }
+
+    #[test]
+    fn rtsp_sip_and_more_http() {
+        let i = match_response(
+            "rtsp",
+            b"RTSP/1.0 200 OK\r\nCSeq: 1\r\nServer: GStreamer RTSP server\r\n\r\n",
+        )
+        .unwrap();
+        assert_eq!(
+            (i.name.as_str(), i.product.as_deref()),
+            ("rtsp", Some("GStreamer"))
+        );
+        let i = match_response(
+            "sip",
+            b"SIP/2.0 200 OK\r\nUser-Agent: Asterisk PBX 20.5.0\r\n\r\n",
+        )
+        .unwrap();
+        assert_eq!(
+            (i.name.as_str(), i.product.as_deref()),
+            ("sip", Some("Asterisk"))
+        );
+        let i = m(b"HTTP/1.1 200 OK\r\nServer: Jetty(9.4.53.v20231009)\r\n\r\n");
+        assert_eq!(
+            (i.product.as_deref(), i.version.as_deref()),
+            (Some("Jetty"), Some("9.4.53.v20231009"))
+        );
+        let i = m(b"HTTP/1.1 200 OK\r\nServer: Werkzeug/3.0.1 Python/3.12.3\r\n\r\n");
+        assert_eq!(
+            (i.product.as_deref(), i.extra_info.as_deref()),
+            (Some("Werkzeug httpd"), Some("Python/3.12.3"))
+        );
+        let couch = b"HTTP/1.1 200 OK\r\nServer: CouchDB/3.3.3 (Erlang OTP/24)\r\n\r\n{\"couchdb\":\"Welcome\",\"version\":\"3.3.3\"}";
+        let i = m(couch);
+        assert_eq!(
+            (i.product.as_deref(), i.version.as_deref()),
+            (Some("CouchDB httpd"), Some("3.3.3"))
+        );
     }
 
     #[test]

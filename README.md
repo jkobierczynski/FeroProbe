@@ -105,8 +105,12 @@ PORT       STATE          SERVICE        VERSION
 
 1. On usual TLS ports (443, 993, 8443, ...) it tries TLS first and probes
    the service inside the tunnel. The certificate's subject name is shown.
-2. It sends the probes meant for that port, such as HTTP on 80 or Redis on 6379.
-3. It listens, since SSH, FTP, SMTP, POP3, IMAP, MySQL and VNC talk first.
+2. It sends the probes meant for that port: HTTP, Redis, memcached,
+   PostgreSQL, AMQP, MQTT, RDP (with its security mode), Microsoft SQL Server
+   (with its release, such as 2019), SMB (dialect and signing), LDAP (vendor,
+   host and naming context), MongoDB, ZooKeeper, RTSP and SIP.
+3. It listens, since SSH, FTP, SMTP, POP3, IMAP, MySQL, VNC, rsync, NNTP and
+   IRC talk first.
 4. If the service is still silent, it tries HTTP and then TLS.
 
 Replies are matched against FeroProbe's own rules in
@@ -132,7 +136,8 @@ Network distance: 1 hop
 
 The signatures are FeroProbe's own (in `crates/feroprobe-core/src/os.rs`), not
 nmap's database, so the guess is per family (Linux, Windows, macOS, FreeBSD,
-OpenBSD, network devices) rather than an exact version. The fingerprint line
+OpenBSD, network devices) rather than an exact version. Linux is still
+recognized when SACK, timestamps or window scaling are turned off. The fingerprint line
 shows the raw traits, which is what a new signature is written from. It needs
 raw sockets, so Linux with root or `CAP_NET_RAW`, and at least one open TCP port.
 IPv6 hosts are skipped for now: the signatures rely on IPv4 header fields.
