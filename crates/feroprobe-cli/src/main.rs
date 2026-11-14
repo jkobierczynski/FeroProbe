@@ -1035,7 +1035,8 @@ impl ScanJob<'_> {
             let shared = &shared;
             async move {
                 let mut cfg = shared.clone();
-                cfg.deadline = Some(Instant::now() + limit);
+                // A limit too far out to represent never expires.
+                cfg.deadline = Instant::now().checked_add(limit);
                 let mut one = [host];
                 let outcome = tokio::time::timeout(
                     limit,
