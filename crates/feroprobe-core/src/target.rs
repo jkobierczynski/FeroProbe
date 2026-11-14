@@ -116,6 +116,18 @@ pub async fn resolve_targets_with<S: AsRef<str>>(
 ) -> Result<Vec<Target>, Error> {
     let mut out: Vec<Target> = Vec::new();
     let mut seen = std::collections::HashSet::new();
+    // Interfaces given for link-local targets in this request. A host is
+    // identified by its address alone, so one address cannot be scanned on
+    // two interfaces in the same run.
+    let mut scopes: HashMap<Ipv6Addr, u32> = HashMap::new();
+    let mut add_scope = |ip: Ipv6Addr, index: u32| -> Result<(), Error> {
+        match scopes.insert(ip, index) {
+            Some(old) if old != index => Err(Error::InvalidTarget(format!(
+                "{ip} is given on two interfaces ({old} and {index}); scan each in its own run"
+            ))),
+            _ => Ok(()),
+        }
+    };
     for spec in specs {
         match parse_target(spec.as_ref())? {
             TargetSpec::Addrs(addrs) => {
@@ -126,13 +138,16 @@ pub async fn resolve_targets_with<S: AsRef<str>>(
                 }
             }
             TargetSpec::Scoped(ip, index) => {
-                set_scope(ip, index);
+                add_scope(ip, index)?;
                 if seen.insert(IpAddr::V6(ip)) {
                     out.push(Target::new(IpAddr::V6(ip)));
                 }
             }
             TargetSpec::Hostname(name) => {
-                let addr = resolve_hostname(&name, version).await?;
+                let (addr, scope) = resolve_hostname(&name, version).await?;
+                if let (IpAddr::V6(v6), Some(index)) = (addr, scope) {
+                    add_scope(v6, index)?;
+                }
                 if seen.insert(addr) {
                     out.push(Target {
                         addr,
@@ -147,12 +162,16 @@ pub async fn resolve_targets_with<S: AsRef<str>>(
             )));
         }
     }
+    for (ip, index) in scopes {
+        set_scope(ip, index);
+    }
     Ok(out)
 }
 
 /// Resolve a hostname to a single address: IPv4 first like nmap, or only
-/// IPv6 with [`IpVersion::V6`].
-async fn resolve_hostname(name: &str, version: IpVersion) -> Result<IpAddr, Error> {
+/// IPv6 with [`IpVersion::V6`]. A link-local answer comes with the
+/// interface it was found on.
+async fn resolve_hostname(name: &str, version: IpVersion) -> Result<(IpAddr, Option<u32>), Error> {
     let found: Vec<SocketAddr> = tokio::net::lookup_host((name, 0))
         .await
         .map_err(|e| Error::Resolve(name.to_string(), e.to_string()))?
@@ -168,14 +187,11 @@ async fn resolve_hostname(name: &str, version: IpVersion) -> Result<IpAddr, Erro
         };
         return Err(Error::Resolve(name.to_string(), why.into()));
     };
-    // A link-local answer comes with the interface it was found on.
-    if let SocketAddr::V6(v6) = sa
-        && is_link_local(*v6.ip())
-        && v6.scope_id() != 0
-    {
-        set_scope(*v6.ip(), v6.scope_id());
-    }
-    Ok(sa.ip())
+    let scope = match sa {
+        SocketAddr::V6(v6) if is_link_local(*v6.ip()) && v6.scope_id() != 0 => Some(v6.scope_id()),
+        _ => None,
+    };
+    Ok((sa.ip(), scope))
 }
 
 /// Whether `ip` is a link-local unicast address (`fe80::/10`).
@@ -374,7 +390,16 @@ mod tests {
     #[tokio::test]
     async fn scope_reaches_socket_addresses() {
         // fe80::99 is only used by this test, since scopes are process-wide.
-        let t = resolve_targets(&["fe80::99%9"]).await.unwrap();
+        // One address on two interfaces cannot be told apart in results.
+        assert!(
+            resolve_targets(&["fe80::98%3", "fe80::98%4"])
+                .await
+                .is_err()
+        );
+        let t = resolve_targets(&["fe80::99%9", "fe80::99%9"])
+            .await
+            .unwrap();
+        assert_eq!(t.len(), 1);
         assert_eq!(t[0].addr.to_string(), "fe80::99");
         match socket_addr(t[0].addr, 80) {
             SocketAddr::V6(a) => assert_eq!((a.port(), a.scope_id()), (80, 9)),

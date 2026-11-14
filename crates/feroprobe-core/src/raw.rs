@@ -161,14 +161,21 @@ where
     if targets.is_empty() || cancel.load(Ordering::Relaxed) {
         return Ok(());
     }
+    let wanted: HashSet<A> = targets.iter().copied().collect();
     let stop = Arc::new(AtomicBool::new(false));
-    let (tx, rx) = mpsc::channel::<(A, R, Instant)>();
+    // Bounded, and only answers from targets we ask, so that a flood on the
+    // link cannot grow it while the sender waits between probes. When it is
+    // full an answer is dropped; the retry round asks that target again.
+    let (tx, rx) = mpsc::sync_channel::<(A, R, Instant)>(wanted.len().clamp(64, 4096));
     let receiver = {
         let stop = Arc::clone(&stop);
+        let wanted = wanted.clone();
         std::thread::spawn(move || -> io::Result<()> {
             while !stop.load(Ordering::Relaxed) {
                 if let Some((a, r)) = receive()?
-                    && tx.send((a, r, Instant::now())).is_err()
+                    && wanted.contains(&a)
+                    && let Err(mpsc::TrySendError::Disconnected(_)) =
+                        tx.try_send((a, r, Instant::now()))
                 {
                     break;
                 }
@@ -177,7 +184,6 @@ where
         })
     };
 
-    let wanted: HashSet<A> = targets.iter().copied().collect();
     let mut sent_at: HashMap<A, Instant> = HashMap::new();
     let mut answered: HashSet<A> = HashSet::new();
     let mut record =

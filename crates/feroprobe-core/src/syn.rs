@@ -395,24 +395,28 @@ mod imp {
             if !privileged() || !crate::testutil::ipv6_loopback() {
                 return;
             }
-            let listener = std::net::TcpListener::bind("[::]:0").unwrap();
-            let open = listener.local_addr().unwrap().port();
+            // One listener per family, so the test does not rely on
+            // dual-stack sockets (net.ipv6.bindv6only).
+            let v6 = std::net::TcpListener::bind("[::1]:0").unwrap();
+            let v4 = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let open6 = v6.local_addr().unwrap().port();
+            let open4 = v4.local_addr().unwrap().port();
             let closed = {
-                let l = std::net::TcpListener::bind("[::]:0").unwrap();
+                let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
                 l.local_addr().unwrap().port()
             };
             let cfg = ScanConfig {
                 timeout: Duration::from_millis(500),
                 ..Default::default()
             };
-            // A dual-stack listener answers on both families.
             let targets = [
                 Target::new("::1".parse().unwrap()),
                 Target::new("127.0.0.1".parse().unwrap()),
             ];
-            let hosts = syn_scan_blocking(&targets, &[open, closed], &cfg).unwrap();
+            let hosts = syn_scan_blocking(&targets, &[open6, open4, closed], &cfg).unwrap();
             for host in &hosts {
                 let state_of = |p| host.ports.iter().find(|r| r.port == p).unwrap().state;
+                let open = if host.addr.is_ipv6() { open6 } else { open4 };
                 assert_eq!(state_of(open), PortState::Open, "{}", host.addr);
                 assert_eq!(state_of(closed), PortState::Closed, "{}", host.addr);
             }

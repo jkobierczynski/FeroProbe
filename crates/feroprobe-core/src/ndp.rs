@@ -44,8 +44,11 @@ impl LocalLink {
 }
 
 /// The link to reach `ip` on: for a global address, the most specific
-/// matching prefix.
+/// matching prefix. `None` for one of our own addresses.
 pub fn link_for(ip: Ipv6Addr, links: &[LocalLink]) -> Option<&LocalLink> {
+    if links.iter().any(|l| l.addr == ip) {
+        return None;
+    }
     links
         .iter()
         .filter(|l| l.reaches(ip))
@@ -204,6 +207,11 @@ mod tests {
         assert!(link_for(ip("ff02::1"), &links).is_none());
         // A /128 has no neighbours.
         assert!(!link("2001:db8::10", 128, 2).reaches(ip("2001:db8::11")));
+        // Two of our addresses in one prefix: neither is a neighbour.
+        let two = [link("2001:db8::10", 64, 2), link("2001:db8::20", 64, 2)];
+        assert!(link_for(ip("2001:db8::10"), &two).is_none());
+        assert!(link_for(ip("2001:db8::20"), &two).is_none());
+        assert!(link_for(ip("2001:db8::30"), &two).is_some());
     }
 
     #[tokio::test]
