@@ -4,15 +4,17 @@ mod grep;
 mod output;
 mod xml;
 
+use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
+use feroprobe_core::discovery::{DEFAULT_TCP_PING_PORT, DEFAULT_UDP_PING_PORT};
 use feroprobe_core::{
-    Exclusions, HostResult, IpVersion, RawTcpScan, ScanConfig, Target, TcpScanKind, Timing,
-    connect_scan, detect_services, discover, os_detect, parse_ports, parse_scanflags,
-    raw_ipv6_available, raw_sockets_available, raw_tcp_scan, resolve_targets_with, top_ports,
-    top_udp_ports, traceroute, udp_scan,
+    Exclusions, HostResult, IpVersion, PingProbes, RawTcpScan, ScanConfig, Target, TcpScanKind,
+    Timing, connect_scan, detect_services, discover, os_detect, parse_ports, parse_scanflags,
+    raw_ipv6_available, raw_sockets_available, raw_tcp_scan, resolve_targets_with, reverse_lookup,
+    top_ports, top_udp_ports, traceroute, udp_scan,
 };
 
 use output::RunInfo;
@@ -98,11 +100,106 @@ impl ScanType {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-enum PingMode {
-    /// -Pn: skip host discovery and treat every host as up
-    #[value(name = "n")]
+/// One `-P` option: how to look for live hosts, or `-Pn` to not look.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PingArg {
     Skip,
+    Syn(Vec<u16>),
+    Ack(Vec<u16>),
+    Udp(Vec<u16>),
+    Echo,
+    Timestamp,
+    Mask,
+}
+
+/// Parse what follows `-P`: `n`, `E`, `P`, `M`, or `S`, `A`, `U` with an
+/// optional port list run on, as nmap writes them (`-PS22,443`).
+fn parse_ping(s: &str) -> Result<PingArg, String> {
+    let kind = s.chars().next().unwrap_or(' ');
+    let rest = &s[kind.len_utf8().min(s.len())..];
+    let ports = |default: u16| -> Result<Vec<u16>, String> {
+        if rest.is_empty() {
+            Ok(vec![default])
+        } else {
+            parse_ports(rest).map_err(|e| e.to_string())
+        }
+    };
+    let alone = |arg: PingArg| {
+        if rest.is_empty() {
+            Ok(arg)
+        } else {
+            Err(format!("-P{kind} takes no ports"))
+        }
+    };
+    match kind {
+        // -P0 is nmap's old spelling of -Pn.
+        'n' | '0' => alone(PingArg::Skip),
+        'E' => alone(PingArg::Echo),
+        'P' => alone(PingArg::Timestamp),
+        'M' => alone(PingArg::Mask),
+        'S' => Ok(PingArg::Syn(ports(DEFAULT_TCP_PING_PORT)?)),
+        'A' => Ok(PingArg::Ack(ports(DEFAULT_TCP_PING_PORT)?)),
+        'U' => Ok(PingArg::Udp(ports(DEFAULT_UDP_PING_PORT)?)),
+        'O' | 'Y' | 'R' => Err(format!(
+            "-P{kind} is not supported; use -PS, -PA, -PU, -PE, -PP or -PM"
+        )),
+        _ => Err(format!(
+            "unknown ping type -P{s}; use -Pn, -PS, -PA, -PU, -PE, -PP or -PM"
+        )),
+    }
+}
+
+/// The discovery probes the `-P` options ask for: `None` for the default
+/// set, and an error if `-Pn` comes with probe types.
+fn ping_probes(args: &[PingArg]) -> Result<Option<PingProbes>> {
+    let skip = args.contains(&PingArg::Skip);
+    let chosen: Vec<&PingArg> = args.iter().filter(|a| **a != PingArg::Skip).collect();
+    if chosen.is_empty() {
+        return Ok(None);
+    }
+    if skip {
+        bail!("-Pn skips host discovery, so it cannot be combined with other -P options");
+    }
+    let mut probes = PingProbes::none();
+    for arg in chosen {
+        match arg {
+            PingArg::Syn(p) => probes.syn.extend(p),
+            PingArg::Ack(p) => probes.ack.extend(p),
+            PingArg::Udp(p) => probes.udp.extend(p),
+            PingArg::Echo => probes.echo = true,
+            PingArg::Timestamp => probes.timestamp = true,
+            PingArg::Mask => probes.mask = true,
+            PingArg::Skip => {}
+        }
+    }
+    for ports in [&mut probes.syn, &mut probes.ack, &mut probes.udp] {
+        let mut seen = std::collections::HashSet::new();
+        ports.retain(|p| seen.insert(*p));
+    }
+    Ok(Some(probes))
+}
+
+/// A DNS server for `--dns-servers`: an address, with port 53 unless one
+/// is given (`192.0.2.53:5353`, `[2001:db8::53]:53`).
+fn parse_dns_server(s: &str) -> Result<SocketAddr, String> {
+    s.parse::<SocketAddr>()
+        .or_else(|_| s.parse::<IpAddr>().map(|ip| SocketAddr::new(ip, 53)))
+        .map_err(|_| format!("{s} is not an IP address"))
+}
+
+/// Shuffle `items` in place (Fisher-Yates) with a small xorshift generator
+/// seeded from the clock, for --randomize-hosts. Not for cryptography.
+fn shuffle<T>(items: &mut [T]) {
+    let nanos = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos() as u64);
+    let mut state = (nanos ^ (u64::from(std::process::id()) << 32)) | 1;
+    for i in (1..items.len()).rev() {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        items.swap(i, (state % (i as u64 + 1)) as usize);
+    }
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -196,14 +293,43 @@ struct Args {
     #[arg(long, value_name = "FLAGS", value_parser = parse_scanflags)]
     scanflags: Option<u8>,
 
-    /// -Pn: skip host discovery and scan every target as if it were up
-    #[arg(short = 'P', value_name = "n", value_enum, hide_possible_values = true)]
-    ping: Option<PingMode>,
+    /// Host discovery, nmap style. -Pn: skip it and scan every target as if
+    /// it were up. Otherwise pick the probes (default: ICMP echo plus TCP
+    /// connects to 443 and 80): -PS[ports] TCP connect (default 80),
+    /// -PA[ports] TCP ACK (raw sockets on Linux, else a connect; default 80),
+    /// -PU[ports] UDP (default 40125), -PE ICMP echo, -PP ICMP timestamp,
+    /// -PM ICMP address mask (the last two IPv4 with raw sockets).
+    /// Ports run on without a space: -PS22,443. Can be repeated
+    #[arg(short = 'P', value_name = "TYPE", value_parser = parse_ping)]
+    ping: Vec<PingArg>,
+
+    /// -n: never look up the names of the addresses (reverse DNS)
+    #[arg(short = 'n', conflicts_with = "always_resolve")]
+    no_resolve: bool,
+
+    /// -R: look up the names of all targets, not only the hosts that are up
+    #[arg(short = 'R')]
+    always_resolve: bool,
+
+    /// Reverse DNS servers to ask, comma-separated (default: the system
+    /// resolver), e.g. 192.0.2.53,192.0.2.54:5353
+    #[arg(
+        long,
+        value_name = "ADDRS",
+        value_delimiter = ',',
+        value_parser = parse_dns_server
+    )]
+    dns_servers: Vec<SocketAddr>,
+
+    /// Scan the targets in random order
+    #[arg(long)]
+    randomize_hosts: bool,
 
     /// Don't use ARP (IPv4) or neighbour discovery (IPv6) for targets on a
-    /// local Ethernet network; ping them with ICMP and TCP probes like
-    /// remote hosts
-    #[arg(long)]
+    /// local Ethernet network; ping them with the -P probes like remote
+    /// hosts. Without it, ARP decides for local hosts and -P probes go only
+    /// to the rest. --send-ip does the same, like nmap's
+    #[arg(long, visible_alias = "send-ip")]
     disable_arp_ping: bool,
 
     /// IEEE OUI list for MAC vendor names (oui.txt, oui.csv, Wireshark manuf).
@@ -529,7 +655,7 @@ struct Plan {
 
 /// `syn_ok` says whether a SYN scan can serve as the default: the process is
 /// privileged, and the system has IPv6 if any target needs it.
-fn plan(scan: &[ScanType], ping: Option<PingMode>, syn_ok: bool, scanflags: bool) -> Result<Plan> {
+fn plan(scan: &[ScanType], skip_discovery: bool, syn_ok: bool, scanflags: bool) -> Result<Plan> {
     let has = |t| scan.contains(&t);
     let tcp_types: Vec<ScanType> = ScanType::TCP.into_iter().filter(|&t| has(t)).collect();
     if tcp_types.len() > 1 {
@@ -568,7 +694,7 @@ fn plan(scan: &[ScanType], ping: Option<PingMode>, syn_ok: bool, scanflags: bool
         udp: has(ScanType::Udp),
         version: has(ScanType::Version),
         ping_only,
-        discovery: ping.is_none(),
+        discovery: !skip_discovery,
     })
 }
 
@@ -669,9 +795,14 @@ async fn main() -> Result<()> {
             bail!("every target is excluded");
         }
     }
+    if args.randomize_hosts {
+        shuffle(&mut targets);
+    }
     let any_ipv6 = targets.iter().any(|t| t.addr.is_ipv6());
     let syn_ok = raw_sockets_available() && (!any_ipv6 || raw_ipv6_available());
-    let mut plan = plan(&args.scan, args.ping, syn_ok, args.scanflags.is_some())?;
+    let probes = ping_probes(&args.ping)?;
+    let skip_discovery = args.ping.contains(&PingArg::Skip);
+    let mut plan = plan(&args.scan, skip_discovery, syn_ok, args.scanflags.is_some())?;
     let (os, trace) = aggressive(&mut plan, &args, raw_sockets_available())?;
     if os {
         if plan.ping_only {
@@ -711,7 +842,8 @@ async fn main() -> Result<()> {
     let start_time = SystemTime::now();
     let mut hosts: Vec<HostResult> = if plan.discovery {
         let done = progress.phase("host discovery", targets.len());
-        let hosts = discover(&targets, &cfg)
+        let probes = probes.unwrap_or_default();
+        let hosts = discover(&targets, &cfg, &probes)
             .await
             .context("host discovery failed")?;
         done(&progress);
@@ -726,6 +858,26 @@ async fn main() -> Result<()> {
             .map(|t| HostResult::new(t.addr, t.hostname.clone()))
             .collect()
     };
+
+    if !args.no_resolve {
+        // Like nmap: the hosts that are up (all of them with -Pn), or every
+        // target with -R.
+        let addrs: Vec<IpAddr> = hosts
+            .iter()
+            .filter(|h| args.always_resolve || !plan.discovery || h.is_up())
+            .map(|h| h.addr)
+            .collect();
+        if !addrs.is_empty() {
+            let done = progress.phase("reverse DNS", addrs.len());
+            let names = reverse_lookup(&addrs, &args.dns_servers, &cfg)
+                .await
+                .context("reverse DNS failed")?;
+            done(&progress);
+            for h in &mut hosts {
+                h.rdns = names.get(&h.addr).cloned();
+            }
+        }
+    }
 
     let mut scan_types = Vec::new();
     if !plan.ping_only {
@@ -857,13 +1009,13 @@ async fn main() -> Result<()> {
 mod tests {
     use super::*;
 
-    fn p(scan: &[ScanType], ping: Option<PingMode>, syn_ok: bool) -> Result<Plan> {
-        plan(scan, ping, syn_ok, false)
+    fn p(scan: &[ScanType], skip: bool, syn_ok: bool) -> Result<Plan> {
+        plan(scan, skip, syn_ok, false)
     }
 
     #[test]
     fn default_scan_type_depends_on_privileges() {
-        let plan = p(&[], None, false).unwrap();
+        let plan = p(&[], false, false).unwrap();
         assert_eq!(plan.tcp, Some(ScanType::Connect));
         assert!(plan.discovery && !plan.udp && !plan.ping_only);
         let expect = if cfg!(target_os = "linux") {
@@ -871,19 +1023,14 @@ mod tests {
         } else {
             ScanType::Connect
         };
-        assert_eq!(p(&[], None, true).unwrap().tcp, Some(expect));
+        assert_eq!(p(&[], false, true).unwrap().tcp, Some(expect));
     }
 
     #[test]
     fn udp_only_and_combined() {
-        let plan = p(&[ScanType::Udp], None, true).unwrap();
+        let plan = p(&[ScanType::Udp], false, true).unwrap();
         assert_eq!((plan.tcp, plan.udp), (None, true));
-        let plan = p(
-            &[ScanType::Connect, ScanType::Udp],
-            Some(PingMode::Skip),
-            true,
-        )
-        .unwrap();
+        let plan = p(&[ScanType::Connect, ScanType::Udp], true, true).unwrap();
         assert_eq!(
             (plan.tcp, plan.udp, plan.discovery),
             (Some(ScanType::Connect), true, false)
@@ -892,9 +1039,9 @@ mod tests {
 
     #[test]
     fn version_detection_keeps_default_tcp_scan() {
-        let plan = p(&[ScanType::Version], None, false).unwrap();
+        let plan = p(&[ScanType::Version], false, false).unwrap();
         assert_eq!((plan.tcp, plan.version), (Some(ScanType::Connect), true));
-        let plan = p(&[ScanType::Udp, ScanType::Version], None, false).unwrap();
+        let plan = p(&[ScanType::Udp, ScanType::Version], false, false).unwrap();
         assert_eq!((plan.tcp, plan.udp, plan.version), (None, true, true));
         let a = Args::try_parse_from(["feroprobe", "-sV", "10.0.0.1"]).unwrap();
         assert_eq!(a.scan, vec![ScanType::Version]);
@@ -902,9 +1049,9 @@ mod tests {
 
     #[test]
     fn rejects_conflicts() {
-        assert!(p(&[ScanType::Syn, ScanType::Connect], None, true).is_err());
-        assert!(p(&[ScanType::PingOnly, ScanType::Udp], None, true).is_err());
-        assert!(p(&[ScanType::PingOnly, ScanType::Version], None, true).is_err());
+        assert!(p(&[ScanType::Syn, ScanType::Connect], false, true).is_err());
+        assert!(p(&[ScanType::PingOnly, ScanType::Udp], false, true).is_err());
+        assert!(p(&[ScanType::PingOnly, ScanType::Version], false, true).is_err());
     }
 
     #[test]
@@ -968,7 +1115,7 @@ mod tests {
         let a = Args::try_parse_from(["feroprobe", "-sS", "-sU", "-Pn", "-p", "22", "10.0.0.1"])
             .unwrap();
         assert_eq!(a.scan, vec![ScanType::Syn, ScanType::Udp]);
-        assert_eq!(a.ping, Some(PingMode::Skip));
+        assert_eq!(a.ping, vec![PingArg::Skip]);
         let a = Args::try_parse_from(["feroprobe", "-sn", "10.0.0.0/24"]).unwrap();
         assert_eq!(a.scan, vec![ScanType::PingOnly]);
         assert!(Args::try_parse_from(["feroprobe", "-sZ", "10.0.0.1"]).is_err());
@@ -985,6 +1132,8 @@ mod tests {
             a.oui_file.as_deref(),
             Some(std::path::Path::new("/tmp/oui.txt"))
         );
+        let a = Args::try_parse_from(["feroprobe", "--send-ip", "10.0.0.1"]).unwrap();
+        assert!(a.disable_arp_ping);
     }
 
     #[test]
@@ -1005,12 +1154,12 @@ mod tests {
         use ScanType::*;
         assert_eq!(a.scan, vec![Fin, Null, Xmas, Ack, Window, Maimon, PingOnly]);
         for t in [Fin, Null, Xmas, Ack, Window, Maimon] {
-            let plan = p(&[t, Udp], None, false).unwrap();
+            let plan = p(&[t, Udp], false, false).unwrap();
             assert_eq!((plan.tcp, plan.udp), (Some(t), true));
         }
-        let err = p(&[Fin, Ack], None, true).unwrap_err().to_string();
+        let err = p(&[Fin, Ack], false, true).unwrap_err().to_string();
         assert!(err.contains("-sF and -sA"), "{err}");
-        assert!(p(&[Xmas, Connect], None, true).is_err());
+        assert!(p(&[Xmas, Connect], false, true).is_err());
         assert_eq!(Ack.raw_kind(), Some(TcpScanKind::Ack));
         assert_eq!(Connect.raw_kind(), None);
     }
@@ -1023,31 +1172,31 @@ mod tests {
         // Read as a SYN scan by default, even when unprivileged, and as the
         // chosen scan otherwise.
         use ScanType::*;
-        assert_eq!(plan(&[], None, false, true).unwrap().tcp, Some(Syn));
-        assert_eq!(plan(&[Ack], None, false, true).unwrap().tcp, Some(Ack));
-        assert!(plan(&[Connect], None, true, true).is_err());
-        assert!(plan(&[PingOnly], None, true, true).is_err());
+        assert_eq!(plan(&[], false, false, true).unwrap().tcp, Some(Syn));
+        assert_eq!(plan(&[Ack], false, false, true).unwrap().tcp, Some(Ack));
+        assert!(plan(&[Connect], false, true, true).is_err());
+        assert!(plan(&[PingOnly], false, true, true).is_err());
     }
 
     #[test]
     fn aggressive_turns_on_detection() {
         let args = |argv: &[&str]| Args::try_parse_from(argv).unwrap();
         let a = args(&["feroprobe", "-A", "10.0.0.1"]);
-        let mut pl = p(&a.scan, a.ping, true).unwrap();
+        let mut pl = p(&a.scan, a.ping.contains(&PingArg::Skip), true).unwrap();
         assert_eq!(aggressive(&mut pl, &a, true).unwrap(), (true, true));
         assert!(pl.version);
         // Unprivileged: only version detection.
-        let mut pl = p(&a.scan, a.ping, false).unwrap();
+        let mut pl = p(&a.scan, a.ping.contains(&PingArg::Skip), false).unwrap();
         assert_eq!(aggressive(&mut pl, &a, false).unwrap(), (false, false));
         assert!(pl.version);
         // -A is not -sA.
         let a = args(&["feroprobe", "-sA", "--traceroute", "10.0.0.1"]);
         assert!(!a.aggressive);
-        let mut pl = p(&a.scan, a.ping, true).unwrap();
+        let mut pl = p(&a.scan, a.ping.contains(&PingArg::Skip), true).unwrap();
         assert_eq!(aggressive(&mut pl, &a, true).unwrap(), (false, true));
         assert!(!pl.version);
         let a = args(&["feroprobe", "-A", "-sn", "10.0.0.1"]);
-        let mut pl = p(&a.scan, a.ping, true).unwrap();
+        let mut pl = p(&a.scan, a.ping.contains(&PingArg::Skip), true).unwrap();
         assert!(aggressive(&mut pl, &a, true).is_err());
     }
 
@@ -1197,6 +1346,99 @@ mod tests {
             assert!(o.open_files().is_err());
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ping_options() {
+        let args = |v: &[&str]| Args::try_parse_from(v.iter().copied());
+        let a = args(&[
+            "feroprobe",
+            "-PS22,443",
+            "-PA",
+            "-PU",
+            "-PE",
+            "-PP",
+            "-PM",
+            "x",
+        ])
+        .unwrap();
+        assert_eq!(
+            a.ping,
+            vec![
+                PingArg::Syn(vec![22, 443]),
+                PingArg::Ack(vec![80]),
+                PingArg::Udp(vec![40125]),
+                PingArg::Echo,
+                PingArg::Timestamp,
+                PingArg::Mask,
+            ]
+        );
+        let probes = ping_probes(&a.ping).unwrap().unwrap();
+        assert_eq!(
+            (probes.syn, probes.ack, probes.udp),
+            (vec![22, 443], vec![80], vec![40125])
+        );
+        assert!(probes.echo && probes.timestamp && probes.mask);
+
+        // Only -Pn, or nothing: the default probes.
+        assert_eq!(ping_probes(&[]).unwrap(), None);
+        assert_eq!(ping_probes(&[PingArg::Skip]).unwrap(), None);
+        assert_eq!(
+            args(&["feroprobe", "-P0", "x"]).unwrap().ping,
+            vec![PingArg::Skip]
+        );
+        // Ports repeat across options without repeating probes.
+        let p = ping_probes(&[PingArg::Syn(vec![22, 80]), PingArg::Syn(vec![80])])
+            .unwrap()
+            .unwrap();
+        assert_eq!(p.syn, vec![22, 80]);
+        assert!(!p.echo);
+
+        assert!(ping_probes(&[PingArg::Skip, PingArg::Echo]).is_err());
+        assert!(args(&["feroprobe", "-PE22", "x"]).is_err());
+        assert!(args(&["feroprobe", "-PO", "x"]).is_err());
+        assert!(args(&["feroprobe", "-PZ", "x"]).is_err());
+        assert!(args(&["feroprobe", "-PS70000", "x"]).is_err());
+    }
+
+    #[test]
+    fn name_resolution_options() {
+        let a = Args::try_parse_from([
+            "feroprobe",
+            "-R",
+            "--dns-servers",
+            "192.0.2.53,[2001:db8::53]:5353",
+            "--randomize-hosts",
+            "x",
+        ])
+        .unwrap();
+        assert!(a.always_resolve && !a.no_resolve && a.randomize_hosts);
+        assert_eq!(
+            a.dns_servers,
+            vec![
+                "192.0.2.53:53".parse::<SocketAddr>().unwrap(),
+                "[2001:db8::53]:5353".parse().unwrap()
+            ]
+        );
+        assert!(
+            Args::try_parse_from(["feroprobe", "-n", "x"])
+                .unwrap()
+                .no_resolve
+        );
+        assert!(Args::try_parse_from(["feroprobe", "-n", "-R", "x"]).is_err());
+        assert!(Args::try_parse_from(["feroprobe", "--dns-servers", "ns.example", "x"]).is_err());
+    }
+
+    #[test]
+    fn shuffle_keeps_every_item() {
+        let mut v: Vec<u32> = (0..1000).collect();
+        shuffle(&mut v);
+        assert_ne!(v, (0..1000).collect::<Vec<_>>(), "1000 items left in order");
+        v.sort();
+        assert_eq!(v, (0..1000).collect::<Vec<_>>());
+        let mut one = [7];
+        shuffle(&mut one);
+        shuffle::<u8>(&mut []);
     }
 
     #[test]

@@ -14,6 +14,8 @@ no external binaries.
 | FIN, NULL, Xmas, ACK, Window and Maimon scans (`-sF`, `-sN`, `-sX`, `-sA`, `-sW`, `-sM`) and custom flags with `--scanflags`, IPv4 and IPv6 (raw sockets, Linux, root) | ✅ |
 | UDP scan, `-sU`, with DNS, NTP, SNMP and SSDP payloads | ✅ |
 | Host discovery: ICMP/ICMPv6 echo + TCP 443/80 probes, `-sn`, `-Pn` | ✅ |
+| Ping types `-PS`, `-PA`, `-PU`, `-PE`, `-PP`, `-PM` | ✅ |
+| Reverse DNS names, `-n`, `-R`, `--dns-servers`; `--randomize-hosts` | ✅ |
 | ARP (IPv4) and neighbour discovery (IPv6) on the local network, with MAC address and vendor (Linux, root; `--disable-arp-ping` to turn off) | ✅ |
 | MAC vendor names from the full IEEE OUI list (system `oui.txt` or `--oui-file`) | ✅ |
 | Timing templates `-T0`…`-T5` and `--scan-delay` | ✅ |
@@ -256,6 +258,11 @@ These work like nmap's:
 | `-oA BASE` | Write `BASE.nmap`, `BASE.xml` and `BASE.gnmap` at once |
 | `-v`, `-vv` | Report progress on standard error: each phase with its time, and the open ports each scan found when it finishes |
 
+A target that the system resolver would read as an old-style IPv4 number
+is refused rather than scanned: a bare number (`2222` would be 0.0.8.174),
+fewer than four parts (`10.1.2`), octal (`010.0.0.1` would be 8.0.0.1) or
+hex (`0x7f000001`). Write addresses as four decimal parts.
+
 Two reports cannot share a file, and `-iL -` cannot be combined with
 `--excludefile -`. A report file of `-` means standard output, which then carries that report
 instead of the table. `-o table|json|xml|grepable` still picks the format of
@@ -264,6 +271,47 @@ standard output.
 ```sh
 feroprobe -iL hosts.txt --exclude 10.0.0.1,10.0.9.0/24 -oA weekly
 feroprobe -v -oG - 192.168.1.0/24 | grep '/open/'
+```
+
+### Host discovery and names
+
+Before scanning, FeroProbe checks which targets are up. By default it sends
+an ICMP echo request and connects to TCP ports 443 and 80; any answer counts.
+Hosts on the local Ethernet network are asked with ARP or neighbour discovery
+instead (Linux, root). The `-P` options pick other probes, as in nmap; given
+any of them, only those run:
+
+| Option | Probe | A live host answers with |
+| --- | --- | --- |
+| `-PS[ports]` | TCP connect (default port 80) | a handshake or a reset |
+| `-PA[ports]` | bare TCP ACK (default port 80; raw sockets on Linux, else a connect like `-PS`) | a reset |
+| `-PU[ports]` | UDP datagram (default port 40125) | a reply, or ICMP port unreachable |
+| `-PE` | ICMP or ICMPv6 echo request | an echo reply |
+| `-PP` | ICMP timestamp request (IPv4, raw sockets) | a timestamp reply |
+| `-PM` | ICMP address mask request (IPv4, raw sockets) | an address mask reply (rare today) |
+| `-Pn` | none: every target counts as up | |
+
+Ports run on without a space (`-PS22,443`, `-PU53`); with a space,
+`-PS 22` is an error because `22` is not a host. The options can be
+repeated. A probe type the process can't send is skipped, so the others
+decide.
+
+As root on Linux, hosts on a directly connected Ethernet network are asked
+with ARP (IPv4) or neighbour discovery (IPv6) first, like nmap does, and the
+answer settles them: the `-P` probes then go only to the other hosts. To
+send the `-P` probes to local hosts too, add `--disable-arp-ping` (or its
+nmap name `--send-ip`). Your own address is probed over the loopback
+interface, so a capture on the Ethernet interface won't show those packets.
+
+Hosts that are up get a reverse DNS lookup, shown as `Scan report for name
+(address)`, as `type="PTR"` hostnames in XML, and in grepable and JSON output.
+`-n` turns the lookups off, `-R` looks up every target, up or not, and
+`--dns-servers 192.0.2.53,192.0.2.54` asks those servers directly instead of
+the system resolver. `--randomize-hosts` scans the targets in random order.
+
+```sh
+sudo feroprobe -sn -PE -PP -PS22,443 -PA80 10.0.0.0/24
+feroprobe -sn -PU53 --dns-servers 10.0.0.53 10.0.0.0/24
 ```
 
 ### Timing templates
