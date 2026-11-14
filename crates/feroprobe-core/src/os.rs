@@ -473,6 +473,8 @@ mod imp {
                 let drain_until = Instant::now() + Duration::from_millis(10);
                 while Instant::now() < drain_until {
                     match recv_sock.read(&mut buf) {
+                        // Late replies do not count, as in the wait below.
+                        Ok(_) if cfg.expired() => break,
                         Ok(n) => {
                             if take(&buf[..n], &mut found) {
                                 waiting -= 1;
