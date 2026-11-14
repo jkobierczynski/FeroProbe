@@ -11,10 +11,17 @@
 //! These traits are matched against FeroProbe's own signature list below.
 //! nmap's OS database is not used (its license does not allow
 //! redistribution), so this is a coarser, family-level guess, like p0f's.
-//! It needs raw sockets: Linux, IPv4, root or `CAP_NET_RAW`.
+//!
+//! It works over IPv4 and IPv6. The hop limit mirrors the IPv4 TTL (initial
+//! 64, 128 or 255), and the same TCP-option layouts apply, so both families
+//! share one signature table. The difference is only in how the SYN-ACK is
+//! read: over IPv4 off a raw TCP socket (which includes the IP header), over
+//! IPv6 off a packet capture (a raw IPv6 socket hands back only the payload,
+//! not the header the hop limit lives in). It needs raw sockets: Linux,
+//! root or `CAP_NET_RAW`.
 
 use std::io;
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::IpAddr;
 
 use serde::Serialize;
 
@@ -323,22 +330,19 @@ pub fn classify(traits: TcpTraits, port: u16, loopback: bool) -> Option<OsMatch>
 }
 
 /// Guess the OS of every host with an open TCP port, filling in
-/// [`HostResult::os`]. Hosts without one, IPv6 hosts and hosts that did not
-/// answer are left alone.
+/// [`HostResult::os`], over both IPv4 and IPv6. Hosts without an open TCP
+/// port and hosts that did not answer are left alone.
 pub async fn os_detect(hosts: &mut [HostResult], cfg: &ScanConfig) -> io::Result<()> {
-    let jobs: Vec<(usize, Ipv4Addr, u16)> = hosts
+    let jobs: Vec<(usize, IpAddr, u16)> = hosts
         .iter()
         .enumerate()
         .filter_map(|(h, host)| {
-            let IpAddr::V4(addr) = host.addr else {
-                return None;
-            };
             let port = host
                 .ports
                 .iter()
                 .find(|p| p.protocol == Protocol::Tcp && p.state == PortState::Open)?
                 .port;
-            Some((h, addr, port))
+            Some((h, host.addr, port))
         })
         .collect();
     if jobs.is_empty() {
@@ -349,8 +353,7 @@ pub async fn os_detect(hosts: &mut [HostResult], cfg: &ScanConfig) -> io::Result
     let replies = tokio::task::spawn_blocking(move || imp::probe_blocking(&probe_jobs, &cfg))
         .await
         .map_err(io::Error::other)??;
-    for (job, traits) in jobs.iter().zip(replies) {
-        let (h, addr, port) = *job;
+    for (&(h, addr, port), traits) in jobs.iter().zip(replies) {
         if let Some(traits) = traits {
             hosts[h].os = classify(traits, port, addr.is_loopback());
         }
@@ -363,7 +366,7 @@ mod imp {
     use super::*;
 
     pub(super) fn probe_blocking(
-        _: &[(usize, Ipv4Addr, u16)],
+        _: &[(usize, IpAddr, u16)],
         _: &ScanConfig,
     ) -> io::Result<Vec<Option<TcpTraits>>> {
         Err(io::Error::new(
@@ -377,16 +380,80 @@ mod imp {
 mod imp {
     use super::*;
 
+    use std::collections::HashMap;
     use std::io::Read;
+    use std::net::{Ipv4Addr, Ipv6Addr};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
-    use socket2::Protocol as SockProto;
+    use socket2::{Domain, Protocol as SockProto};
 
-    use crate::raw::{Pacer, Rng, raw_socket, send_with_backoff_until, source_addr_for};
+    use crate::capture;
+    use crate::raw::{
+        Pacer, Rng, raw_socket, raw_socket_in, send_with_backoff_until, source_addr_for,
+    };
 
-    /// Send one option-rich SYN to each job's port and collect the SYN-ACKs,
-    /// in job order. Unanswered probes are retried `cfg.retries` times.
+    /// Probe every job, reading each family's SYN-ACK the way it must be read:
+    /// IPv4 off a raw TCP socket, IPv6 off a packet capture. The results line
+    /// up with `jobs`, so the caller matches them back by position.
     pub(super) fn probe_blocking(
+        jobs: &[(usize, IpAddr, u16)],
+        cfg: &ScanConfig,
+    ) -> io::Result<Vec<Option<TcpTraits>>> {
+        // Split by family, remembering each job's slot in its sub-list so the
+        // two result vectors can be stitched back into the input order.
+        let mut v4: Vec<(usize, Ipv4Addr, u16)> = Vec::new();
+        let mut v6: Vec<(usize, Ipv6Addr, u16)> = Vec::new();
+        let mut slot: Vec<(bool, usize)> = Vec::with_capacity(jobs.len());
+        for &(h, addr, port) in jobs {
+            match addr {
+                IpAddr::V4(a) => {
+                    slot.push((false, v4.len()));
+                    v4.push((h, a, port));
+                }
+                IpAddr::V6(a) => {
+                    slot.push((true, v6.len()));
+                    v6.push((h, a, port));
+                }
+            }
+        }
+        // One family's failure must not discard the other's completed guesses,
+        // so a non-timeout error degrades that family to "no guesses" rather
+        // than propagating. A timeout still propagates, so `--host-timeout`
+        // keeps marking the host (the caller reads ErrorKind::TimedOut).
+        let family = |empty: bool,
+                      run: &dyn Fn() -> io::Result<Vec<Option<TcpTraits>>>,
+                      n: usize|
+         -> io::Result<Vec<Option<TcpTraits>>> {
+            if empty {
+                return Ok(Vec::new());
+            }
+            match run() {
+                Ok(v) => Ok(v),
+                Err(e) if e.kind() == io::ErrorKind::TimedOut => Err(e),
+                Err(_) => Ok(vec![None; n]),
+            }
+        };
+        let v4_out = family(v4.is_empty(), &|| probe_blocking_v4(&v4, cfg), v4.len())?;
+        let v6_out = family(v6.is_empty(), &|| probe_blocking_v6(&v6, cfg), v6.len())?;
+        Ok(slot
+            .into_iter()
+            .map(|(is_v6, i)| {
+                if is_v6 {
+                    v6_out[i].clone()
+                } else {
+                    v4_out[i].clone()
+                }
+            })
+            .collect())
+    }
+
+    /// Send one option-rich SYN to each IPv4 job's port and collect the
+    /// SYN-ACKs, in job order. Unanswered probes are retried `cfg.retries`
+    /// times.
+    fn probe_blocking_v4(
         jobs: &[(usize, Ipv4Addr, u16)],
         cfg: &ScanConfig,
     ) -> io::Result<Vec<Option<TcpTraits>>> {
@@ -511,6 +578,167 @@ mod imp {
                 return Err(ScanConfig::timed_out());
             }
         }
+        Ok(found)
+    }
+
+    /// Match one captured packet to an IPv6 OS-detection job and read its
+    /// traits. `jobs` maps each target address to its slot and probed port;
+    /// `sport` and `seq` are the probe's source port and sequence number, so
+    /// only our own SYN-ACKs match. IPv6 has no "don't fragment" bit (routers
+    /// never fragment), so the traits are read with `df` set, which keeps a
+    /// general-purpose match at full accuracy.
+    pub(super) fn match_v6_reply(
+        pkt: &capture::Packet<'_>,
+        jobs: &HashMap<Ipv6Addr, (usize, u16)>,
+        sport: u16,
+        seq: u32,
+    ) -> Option<(usize, TcpTraits)> {
+        if pkt.protocol != packet::IPPROTO_TCP {
+            return None;
+        }
+        let IpAddr::V6(src) = pkt.src else {
+            return None;
+        };
+        let &(j, port) = jobs.get(&src)?;
+        let tcp = packet::parse_tcp(pkt.payload)?;
+        let syn_ack = packet::TCP_SYN | packet::TCP_ACK;
+        if tcp.sport != port
+            || tcp.dport != sport
+            || tcp.flags & syn_ack != syn_ack
+            || tcp.ack != seq.wrapping_add(1)
+        {
+            return None;
+        }
+        let traits = TcpTraits::from_reply(pkt.ttl, true, pkt.payload)?;
+        Some((j, traits))
+    }
+
+    /// Send one option-rich SYN to each IPv6 job's port and collect the
+    /// SYN-ACKs, in job order. The SYN goes out on a raw IPv6 socket; the
+    /// reply is read off a packet capture, because a raw IPv6 socket returns
+    /// only the payload, not the header the hop limit is in. A capture thread
+    /// matches each SYN-ACK to its job and hands back its traits; the main
+    /// thread sends paced, drains the channel, and retries up to
+    /// `cfg.retries` times.
+    fn probe_blocking_v6(
+        jobs: &[(usize, Ipv6Addr, u16)],
+        cfg: &ScanConfig,
+    ) -> io::Result<Vec<Option<TcpTraits>>> {
+        let found: Vec<Option<TcpTraits>> = vec![None; jobs.len()];
+        // Without an IPv6 raw socket or a capture (a host with no IPv6 stack,
+        // say) these hosts simply get no guess, the way they did before IPv6
+        // support existed; it must not sink the IPv4 results in the same scan.
+        let Ok(send_sock) = raw_socket_in(Domain::IPV6, SockProto::TCP) else {
+            return Ok(found);
+        };
+
+        let mut found = found;
+        let mut rng = Rng::new();
+        let sport = 40000 + (rng.next_u32() % 20000) as u16;
+        let seq = rng.next_u32();
+        let tsval = rng.next_u32();
+        let sources: Vec<Option<Ipv6Addr>> = jobs
+            .iter()
+            .map(|&(_, addr, _)| match source_addr_for(addr.into()) {
+                Ok(IpAddr::V6(src)) => Some(src),
+                _ => None,
+            })
+            .collect();
+        // Nothing routable: no point opening a capture.
+        if sources.iter().all(Option::is_none) {
+            return Ok(found);
+        }
+
+        let Ok(fd) = capture::open() else {
+            return Ok(found);
+        };
+        let stop = Arc::new(AtomicBool::new(false));
+        // The capture can receive a packet for every job at once; bound the
+        // queue so a flood is dropped rather than growing without limit.
+        let (tx, rx) = mpsc::sync_channel::<(usize, TcpTraits)>(8192);
+        // Map each target address to its slot and probed port, so the capture
+        // thread can match a SYN-ACK back to its job.
+        let job_addrs: HashMap<Ipv6Addr, (usize, u16)> = jobs
+            .iter()
+            .enumerate()
+            .map(|(j, &(_, addr, port))| (addr, (j, port)))
+            .collect();
+        let receiver = {
+            let stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                capture::receive_loop(fd, &stop, &tx, |pkt, _at| {
+                    match_v6_reply(pkt, &job_addrs, sport, seq)
+                });
+            })
+        };
+
+        let drain = |found: &mut [Option<TcpTraits>]| {
+            while let Ok((j, traits)) = rx.try_recv() {
+                if found[j].is_none() {
+                    found[j] = Some(traits);
+                }
+            }
+        };
+        let unanswered = |found: &[Option<TcpTraits>]| {
+            found
+                .iter()
+                .zip(&sources)
+                .any(|(f, s)| f.is_none() && s.is_some())
+        };
+
+        let mut pacer = Pacer::for_config(cfg);
+        let outcome = (|| -> io::Result<()> {
+            for _ in 0..=cfg.retries {
+                if cfg.expired() {
+                    return Err(ScanConfig::timed_out());
+                }
+                for (j, &(_, addr, port)) in jobs.iter().enumerate() {
+                    let (None, Some(src)) = (&found[j], sources[j]) else {
+                        continue;
+                    };
+                    let pkt = packet::tcp_syn_with_options(src, addr, sport, port, seq, tsval);
+                    // The wait gives up at the host deadline (--host-timeout).
+                    if !pacer.wait_until(cfg.deadline) {
+                        return Err(ScanConfig::timed_out());
+                    }
+                    // `socket_addr` restores a link-local target's interface
+                    // scope (fe80::…%iface); a bare `(addr, 0)` would drop it
+                    // and the SYN could leave the wrong interface.
+                    let to = crate::target::socket_addr(addr.into(), 0);
+                    send_with_backoff_until(&send_sock, &pkt, to, cfg.deadline)?;
+                    drain(&mut found);
+                }
+                if !unanswered(&found) {
+                    break;
+                }
+                // Wait for stragglers, up to the per-round timeout or the
+                // host deadline, whichever is sooner.
+                let mut deadline = Instant::now() + cfg.timeout;
+                if let Some(limit) = cfg.deadline {
+                    deadline = deadline.min(limit);
+                }
+                while unanswered(&found)
+                    && let Some(left) = deadline.checked_duration_since(Instant::now())
+                {
+                    match rx.recv_timeout(left) {
+                        Ok((j, traits)) if found[j].is_none() => found[j] = Some(traits),
+                        Ok(_) => {}
+                        Err(_) => break,
+                    }
+                }
+                // The wait ended at the host deadline with probes unanswered.
+                if unanswered(&found) && cfg.expired() {
+                    return Err(ScanConfig::timed_out());
+                }
+            }
+            Ok(())
+        })();
+
+        stop.store(true, Ordering::Relaxed);
+        let _ = receiver.join();
+        // Answers that arrived after the last wait still count.
+        drain(&mut found);
+        outcome?;
         Ok(found)
     }
 
@@ -639,6 +867,112 @@ mod tests {
         let os = hosts[0].os.as_ref().expect("an OS guess");
         assert_eq!(os.family, "Linux", "{:?}", os.traits);
         assert_eq!(os.distance, 0);
+    }
+
+    /// The IPv6 reply matcher, exercised without a network: a synthetic
+    /// captured SYN-ACK is matched to its job and read with `df` set, so the
+    /// Linux match keeps full accuracy. Runs anywhere (no raw sockets).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn matches_a_v6_reply() {
+        use std::collections::HashMap;
+        use std::net::Ipv6Addr;
+
+        let target: Ipv6Addr = "2001:db8::2".parse().unwrap();
+        let sport = 40000u16;
+        let seq = 0x1111_2222u32;
+        let mut jobs = HashMap::new();
+        jobs.insert(target, (0usize, 22u16));
+
+        // A SYN-ACK from port 22 back to our source port, acking our SYN.
+        let mut seg = syn_ack(65160, LINUX_OPTS);
+        seg[0..2].copy_from_slice(&22u16.to_be_bytes());
+        seg[2..4].copy_from_slice(&sport.to_be_bytes());
+        seg[8..12].copy_from_slice(&seq.wrapping_add(1).to_be_bytes());
+
+        let pkt = crate::capture::Packet {
+            src: target.into(),
+            dst: "2001:db8::1".parse::<Ipv6Addr>().unwrap().into(),
+            protocol: packet::IPPROTO_TCP,
+            ttl: 61, // initial 64, three hops away
+            ipid: None,
+            payload: &seg,
+        };
+        let (j, traits) = super::imp::match_v6_reply(&pkt, &jobs, sport, seq).expect("a match");
+        assert_eq!(j, 0);
+        assert_eq!(traits.options, "M,S,T,N,W");
+        let m = classify(traits, 22, false).unwrap();
+        assert_eq!((m.family, m.accuracy, m.distance), ("Linux", 90, 4));
+
+        // Wrong ack, wrong source port, or an unknown source address: no match.
+        let mut bad = seg.clone();
+        bad[8..12].copy_from_slice(&0u32.to_be_bytes());
+        assert!(
+            super::imp::match_v6_reply(
+                &crate::capture::Packet {
+                    payload: &bad,
+                    ..pkt
+                },
+                &jobs,
+                sport,
+                seq
+            )
+            .is_none()
+        );
+        let other: Ipv6Addr = "2001:db8::99".parse().unwrap();
+        assert!(
+            super::imp::match_v6_reply(
+                &crate::capture::Packet {
+                    src: other.into(),
+                    ..pkt
+                },
+                &jobs,
+                sport,
+                seq
+            )
+            .is_none()
+        );
+    }
+
+    /// The same over IPv6, read off the packet capture: a SYN-ACK from `::1`
+    /// is classified Linux at distance 0. Needs raw sockets and IPv6.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn detects_this_linux_host_over_ipv6() {
+        if !crate::raw_sockets_available() {
+            assert!(
+                std::env::var_os("FEROPROBE_REQUIRE_RAW").is_none(),
+                "raw sockets required but unavailable"
+            );
+            return;
+        }
+        // IPv6 may be absent (many cloud containers and CI runners have no
+        // IPv6 stack at all). That is an environment limit, not a raw-socket
+        // privilege problem, so skip rather than fail even when raw is
+        // required. The matching logic is covered by `matches_a_v6_reply`.
+        if !crate::raw_ipv6_available() {
+            return;
+        }
+        let Ok(listener) = std::net::TcpListener::bind("[::1]:0") else {
+            return;
+        };
+        let port = listener.local_addr().unwrap().port();
+        let mut host = HostResult::new("::1".parse().unwrap(), None);
+        host.ports.push(crate::model::PortResult {
+            port,
+            protocol: Protocol::Tcp,
+            state: PortState::Open,
+            reason: crate::model::reason::SYN_ACK,
+            rtt_ms: None,
+            service: None,
+        });
+        let mut hosts = vec![host];
+        os_detect(&mut hosts, &ScanConfig::default()).await.unwrap();
+        let os = hosts[0].os.as_ref().expect("an OS guess");
+        assert_eq!(os.family, "Linux", "{:?}", os.traits);
+        assert_eq!(os.distance, 0);
+        // IPv6 carries no DF bit, so the Linux match keeps full accuracy.
+        assert_eq!(os.accuracy, 90, "{:?}", os.traits);
     }
 
     /// A host deadline that has passed stops OS detection with TimedOut.
