@@ -391,7 +391,9 @@ mod imp {
     use socket2::{Domain, Protocol as SockProto};
 
     use crate::capture;
-    use crate::raw::{Pacer, Rng, raw_socket, raw_socket_in, send_with_backoff_until, source_addr_for};
+    use crate::raw::{
+        Pacer, Rng, raw_socket, raw_socket_in, send_with_backoff_until, source_addr_for,
+    };
 
     /// Probe every job, reading each family's SYN-ACK the way it must be read:
     /// IPv4 off a raw TCP socket, IPv6 off a packet capture. The results line
