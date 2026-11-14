@@ -105,6 +105,15 @@ cleanup() {
 trap cleanup EXIT
 
 start_synthetic() {
+    # The synthetic responder shares the wire with the kernel: if the host
+    # has SCTP, the kernel also ABORTs the unbound open/filtered ports and
+    # skews the results. Auto-select routes such hosts to the real backend;
+    # refuse only when synthetic was forced here.
+    if kernel_sctp; then
+        echo "This host has kernel SCTP, which would answer the test ports and" >&2
+        echo "skew the synthetic backend. Use --backend real (or auto)." >&2
+        exit 1
+    fi
     local f; f="$(mktemp)"
     cat >"$f" <<'PY'
 import socket, struct, sys
@@ -206,7 +215,14 @@ PY
 }
 
 run_scan() {   # args: flag out-file
-    "$BIN" "$1" -p "$OPEN,$CLOSED,$FILTERED" -oJ "$2" 127.0.0.1 >/dev/null 2>&1 || true
+    local rc=0
+    "$BIN" "$1" -p "$OPEN,$CLOSED,$FILTERED" -oJ "$2" 127.0.0.1 >/dev/null 2>&1 || rc=$?
+    # A nonzero exit is a failure even if the JSON looks right; record it but
+    # still run the assertions below for diagnostics.
+    if [ "$rc" -ne 0 ]; then
+        printf '  FAIL  %-26s scan exited %s\n' "$1 exit status" "$rc"
+        fails=$((fails + 1))
+    fi
     if [ "$VERBOSE" = 1 ]; then echo "--- $1 JSON ---"; cat "$2"; echo; fi
 }
 
