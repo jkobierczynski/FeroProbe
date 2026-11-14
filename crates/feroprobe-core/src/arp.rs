@@ -483,11 +483,10 @@ mod linux {
             for _ in 0..=cfg.retries {
                 let mut pacer = Pacer::for_config(cfg);
                 for &ip in &pending {
-                    if cancel.load(Ordering::Relaxed) {
+                    let frame: [u8; ARP_FRAME_LEN] = arp_request(net.mac, net.addr, ip);
+                    if !pacer.wait_or_cancel(cancel) {
                         return Ok(());
                     }
-                    let frame: [u8; ARP_FRAME_LEN] = arp_request(net.mac, net.addr, ip);
-                    pacer.wait();
                     sent_at.insert(ip, Instant::now());
                     send(&fd, net.ifindex, &frame)?;
                     while let Ok(r) = rx.try_recv() {

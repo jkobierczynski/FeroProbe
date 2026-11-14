@@ -67,7 +67,7 @@ impl Rng {
 
 /// Spaces out packets so that no more than `rate` are sent per second, and
 /// none closer than the scan delay to any other probe of this process (see
-/// [`crate::timing::pace_blocking`]).
+/// [`crate::timing::pace_blocking_or_cancel`]).
 pub(crate) struct Pacer {
     start: Instant,
     sent: u32,
@@ -91,14 +91,28 @@ impl Pacer {
 
     /// Call before each packet; sleeps until it may go. The first packet
     /// goes at once, and nothing waits after the last one.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) fn wait(&mut self) {
+        self.wait_or_cancel(&std::sync::atomic::AtomicBool::new(false));
+    }
+
+    /// Like [`wait`](Self::wait), but stops waiting as soon as `cancel` is
+    /// set. Returns whether the packet may be sent; `false` means cancelled.
+    pub(crate) fn wait_or_cancel(&mut self, cancel: &std::sync::atomic::AtomicBool) -> bool {
+        use std::sync::atomic::Ordering;
         let due = self.start + self.interval.saturating_mul(self.sent);
-        let now = Instant::now();
-        if due > now {
-            std::thread::sleep(due - now);
+        loop {
+            if cancel.load(Ordering::Relaxed) {
+                return false;
+            }
+            let now = Instant::now();
+            if due <= now {
+                break;
+            }
+            std::thread::sleep((due - now).min(crate::timing::CANCEL_POLL));
         }
         self.sent = self.sent.saturating_add(1);
-        crate::timing::pace_blocking(self.delay);
+        crate::timing::pace_blocking_or_cancel(self.delay, cancel)
     }
 }
 
@@ -127,4 +141,31 @@ fn is_no_buffer_space(e: &io::Error) -> bool {
         let _ = e;
         false
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn cancel_cuts_a_wait_short() {
+        // One packet a second, so the second one would wait a full second.
+        let mut pacer = Pacer::new(1, Duration::ZERO);
+        let cancel = AtomicBool::new(false);
+        assert!(pacer.wait_or_cancel(&cancel));
+        let t = Instant::now();
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                std::thread::sleep(Duration::from_millis(150));
+                cancel.store(true, Ordering::Relaxed);
+            });
+            assert!(!pacer.wait_or_cancel(&cancel));
+        });
+        assert!(
+            t.elapsed() < Duration::from_millis(600),
+            "{:?}",
+            t.elapsed()
+        );
+    }
 }

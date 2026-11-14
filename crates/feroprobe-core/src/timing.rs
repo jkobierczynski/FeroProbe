@@ -7,6 +7,7 @@
 
 use std::fmt;
 use std::str::FromStr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use crate::model::ScanConfig;
@@ -163,16 +164,26 @@ pub(crate) async fn pace(delay: Duration) {
     }
 }
 
-/// Wait until the next probe may be sent, from a blocking thread. Send right
-/// after this returns.
-pub(crate) fn pace_blocking(delay: Duration) {
-    if delay.is_zero() {
-        return;
-    }
-    while let Some(wait) = try_start(delay) {
-        std::thread::sleep(wait);
+/// Wait until the next probe may be sent, from a blocking thread, giving up
+/// as soon as `cancel` is set (checked at least every [`CANCEL_POLL`]).
+/// Returns whether the probe may be sent; send right after it returns true.
+pub(crate) fn pace_blocking_or_cancel(delay: Duration, cancel: &AtomicBool) -> bool {
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            return false;
+        }
+        if delay.is_zero() {
+            return true;
+        }
+        match try_start(delay) {
+            None => return true,
+            Some(wait) => std::thread::sleep(wait.min(CANCEL_POLL)),
+        }
     }
 }
+
+/// How often a cancellable wait looks at its cancel flag.
+pub(crate) const CANCEL_POLL: Duration = Duration::from_millis(100);
 
 #[cfg(test)]
 mod tests {
@@ -237,9 +248,11 @@ mod tests {
         // Async and blocking callers interleave on the same schedule.
         pace(delay).await;
         pace(delay).await;
-        tokio::task::spawn_blocking(move || pace_blocking(delay))
-            .await
-            .unwrap();
+        tokio::task::spawn_blocking(move || {
+            pace_blocking_or_cancel(delay, &AtomicBool::new(false))
+        })
+        .await
+        .unwrap();
         pace(delay).await;
         // Three gaps after the first probe, which went at once.
         assert!(
@@ -276,9 +289,11 @@ mod tests {
                 starts.lock().unwrap().push(std::time::Instant::now());
             }));
         }
-        tokio::task::spawn_blocking(move || pace_blocking(delay))
-            .await
-            .unwrap();
+        tokio::task::spawn_blocking(move || {
+            pace_blocking_or_cancel(delay, &AtomicBool::new(false))
+        })
+        .await
+        .unwrap();
         for t in tasks {
             t.await.unwrap();
         }
