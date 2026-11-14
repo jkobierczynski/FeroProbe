@@ -428,11 +428,14 @@ impl Outputs {
     }
 
     /// Open (creating, not truncating) every report file before the scan,
-    /// as nmap does. This catches unwritable paths up front, and on Unix
-    /// compares the files themselves, so a link whose target doesn't exist
-    /// yet, or a hard link, can't make two reports share one file.
+    /// as nmap does. This catches unwritable paths up front, and then
+    /// compares the files themselves, so that aliases a path can't show
+    /// (a link whose target doesn't exist yet, a hard link, or another
+    /// spelling on a case-insensitive file system) can't make two reports
+    /// share one file. On Unix the file's device and inode decide; on other
+    /// systems the canonical path of the now existing file, which on Windows
+    /// comes back in the case stored on disk.
     fn open_files(&self) -> Result<()> {
-        #[cfg(unix)]
         let mut seen = std::collections::HashSet::new();
         for path in self.files() {
             let file = std::fs::OpenOptions::new()
@@ -442,15 +445,19 @@ impl Outputs {
                 .open(path)
                 .with_context(|| format!("opening {path}"))?;
             #[cfg(unix)]
-            {
+            let id = {
                 use std::os::unix::fs::MetadataExt;
                 let m = file.metadata().with_context(|| format!("reading {path}"))?;
-                if !seen.insert((m.dev(), m.ino())) {
-                    bail!("two reports would be written to {path}; give each its own file");
-                }
-            }
+                (m.dev(), m.ino())
+            };
             #[cfg(not(unix))]
-            drop(file);
+            let id = {
+                drop(file);
+                std::fs::canonicalize(path).with_context(|| format!("resolving {path}"))?
+            };
+            if !seen.insert(id) {
+                bail!("two reports would be written to {path}; give each its own file");
+            }
         }
         Ok(())
     }
@@ -1178,6 +1185,16 @@ mod tests {
                     .is_err()
             );
             assert!(out(&dir.join("a"), &dir.join("b")).open_files().is_ok());
+        }
+        // Windows file systems ignore case: report and REPORT are one file.
+        #[cfg(windows)]
+        {
+            let o = Outputs {
+                normal: vec![dir.join("report").display().to_string()],
+                xml: vec![dir.join("REPORT").display().to_string()],
+                ..Default::default()
+            };
+            assert!(o.open_files().is_err());
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
