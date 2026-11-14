@@ -296,6 +296,13 @@ Ports run on without a space (`-PS22,443`, `-PU53`); with a space,
 repeated. A probe type the process can't send is skipped, so the others
 decide.
 
+As root on Linux, hosts on a directly connected Ethernet network are asked
+with ARP (IPv4) or neighbour discovery (IPv6) first, like nmap does, and the
+answer settles them: the `-P` probes then go only to the other hosts. To
+send the `-P` probes to local hosts too, add `--disable-arp-ping` (or its
+nmap name `--send-ip`). Your own address is probed over the loopback
+interface, so a capture on the Ethernet interface won't show those packets.
+
 Hosts that are up get a reverse DNS lookup, shown as `Scan report for name
 (address)`, as `type="PTR"` hostnames in XML, and in grepable and JSON output.
 `-n` turns the lookups off, `-R` looks up every target, up or not, and

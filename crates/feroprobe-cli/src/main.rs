@@ -326,9 +326,10 @@ struct Args {
     randomize_hosts: bool,
 
     /// Don't use ARP (IPv4) or neighbour discovery (IPv6) for targets on a
-    /// local Ethernet network; ping them with ICMP and TCP probes like
-    /// remote hosts
-    #[arg(long)]
+    /// local Ethernet network; ping them with the -P probes like remote
+    /// hosts. Without it, ARP decides for local hosts and -P probes go only
+    /// to the rest. --send-ip does the same, like nmap's
+    #[arg(long, visible_alias = "send-ip")]
     disable_arp_ping: bool,
 
     /// IEEE OUI list for MAC vendor names (oui.txt, oui.csv, Wireshark manuf).
@@ -1131,6 +1132,8 @@ mod tests {
             a.oui_file.as_deref(),
             Some(std::path::Path::new("/tmp/oui.txt"))
         );
+        let a = Args::try_parse_from(["feroprobe", "--send-ip", "10.0.0.1"]).unwrap();
+        assert!(a.disable_arp_ping);
     }
 
     #[test]
