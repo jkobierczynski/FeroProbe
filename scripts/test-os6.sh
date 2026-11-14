@@ -76,8 +76,21 @@ fi
 free_port() {
     python3 -c 'import socket; s=socket.socket(socket.AF_INET6); s.bind(("::1",0)); print(s.getsockname()[1]); s.close()'
 }
-[ "$OPEN" -eq 0 ]   && OPEN="$(free_port)"
-[ "$CLOSED" -eq 0 ] && CLOSED="$(free_port)"
+[ "$OPEN" -eq 0 ] && OPEN="$(free_port)"
+if [ "$CLOSED" -eq 0 ]; then
+    CLOSED="$(free_port)"
+    # free_port releases its socket, so two calls can hand back the same
+    # number; keep the closed port different or its scan would hit the
+    # listener still up on the open port and wrongly report a guess.
+    tries=0
+    while [ "$CLOSED" -eq "$OPEN" ] && [ "$tries" -lt 10 ]; do
+        CLOSED="$(free_port)"; tries=$((tries + 1))
+    done
+fi
+if [ "$OPEN" -eq "$CLOSED" ]; then
+    echo "open and closed ports must differ (both $OPEN)." >&2
+    exit 2
+fi
 
 echo "FeroProbe:  $BIN"
 echo "Target:     ::1   (open=$OPEN closed=$CLOSED)"
@@ -131,13 +144,13 @@ PY
 }
 
 run_os_scan() {   # args: port out-file
-    local rc=0
-    "$BIN" -O -p "$2" -oJ "$3" ::1 >/dev/null 2>&1 || rc=$?
+    local port="$1" out="$2" rc=0
+    "$BIN" -O -p "$port" -oJ "$out" ::1 >/dev/null 2>&1 || rc=$?
     if [ "$rc" -ne 0 ]; then
-        printf '  FAIL  %-26s scan exited %s\n' "port $2 scan" "$rc"
+        printf '  FAIL  %-26s scan exited %s\n' "port $port scan" "$rc"
         fails=$((fails + 1))
     fi
-    if [ "$VERBOSE" = 1 ]; then echo "--- -O -p $2 JSON ---"; cat "$3"; echo; fi
+    if [ "$VERBOSE" = 1 ]; then echo "--- -O -p $port JSON ---"; cat "$out"; echo; fi
 }
 
 fails=0
