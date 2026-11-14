@@ -490,6 +490,9 @@ mod imp {
             }
             while waiting > 0 && Instant::now() < deadline {
                 match recv_sock.read(&mut buf) {
+                    // A read can block past the host deadline: a reply
+                    // that arrives after it does not count.
+                    Ok(_) if cfg.expired() => break,
                     Ok(n) => {
                         if take(&buf[..n], &mut found) {
                             waiting -= 1;
