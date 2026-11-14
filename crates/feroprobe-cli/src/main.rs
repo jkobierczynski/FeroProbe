@@ -303,8 +303,8 @@ struct Args {
     #[arg(long = "output-all", value_name = "BASE")]
     out_all: Option<String>,
 
-    /// -v: report progress on standard error (each phase, and open ports as
-    /// they are found); -vv for more
+    /// -v: report progress on standard error (each phase with its time,
+    /// and the open ports each scan found when it finishes); -vv for more
     #[arg(short = 'v', action = clap::ArgAction::Count)]
     verbose: u8,
 }
@@ -391,6 +391,17 @@ impl Outputs {
             .count();
         if to_stdout > 1 {
             bail!("only one report can go to standard output (-)");
+        }
+        // Two reports in one file would leave only the last one written.
+        let mut seen = std::collections::HashSet::new();
+        for path in [&o.normal, &o.xml, &o.grep, &o.json]
+            .iter()
+            .flat_map(|v| v.iter())
+            .filter(|p| *p != "-")
+        {
+            if !seen.insert(std::path::absolute(path).unwrap_or_else(|_| path.into())) {
+                bail!("two reports would be written to {path}; give each its own file");
+            }
         }
         Ok(o)
     }
@@ -573,6 +584,9 @@ async fn main() -> Result<()> {
     } else {
         IpVersion::PreferV4
     };
+    if args.input_file.as_deref() == Some("-") && args.excludefile.as_deref() == Some("-") {
+        bail!("-iL - and --excludefile - cannot both read standard input; put one list in a file");
+    }
     let mut specs = args.targets.clone();
     if let Some(path) = &args.input_file {
         specs.extend(read_host_list(path)?);
@@ -1043,6 +1057,24 @@ mod tests {
             Outputs::from_args(&parse(&["feroprobe", "-oX", "-", "-oG", "-", "10.0.0.1"])).is_err()
         );
         assert!(Outputs::from_args(&parse(&["feroprobe", "-oA", "-", "10.0.0.1"])).is_err());
+        // Two reports in one file.
+        assert!(
+            Outputs::from_args(&parse(&["feroprobe", "-oN", "r", "-oX", "r", "10.0.0.1"])).is_err()
+        );
+        assert!(
+            Outputs::from_args(&parse(&[
+                "feroprobe",
+                "-oA",
+                "scan",
+                "-oX",
+                "scan.nmap",
+                "10.0.0.1"
+            ]))
+            .is_err()
+        );
+        assert!(
+            Outputs::from_args(&parse(&["feroprobe", "-oN", "a", "-oX", "b", "10.0.0.1"])).is_ok()
+        );
     }
 
     #[test]

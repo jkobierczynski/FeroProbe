@@ -254,9 +254,10 @@ These work like nmap's:
 | `-oG FILE` | Also write the grepable report to FILE: one line per host, like nmap's |
 | `-oJ FILE` | Also write the JSON report to FILE (FeroProbe's own) |
 | `-oA BASE` | Write `BASE.nmap`, `BASE.xml` and `BASE.gnmap` at once |
-| `-v`, `-vv` | Report progress on standard error: each phase with its time, and each open port as a scan finds it |
+| `-v`, `-vv` | Report progress on standard error: each phase with its time, and the open ports each scan found when it finishes |
 
-A report file of `-` means standard output, which then carries that report
+Two reports cannot share a file, and `-iL -` cannot be combined with
+`--excludefile -`. A report file of `-` means standard output, which then carries that report
 instead of the table. `-o table|json|xml|grepable` still picks the format of
 standard output.
 
