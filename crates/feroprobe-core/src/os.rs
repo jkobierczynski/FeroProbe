@@ -169,6 +169,48 @@ const SIGNATURES: &[Signature] = &[
         initial_ttl: 64,
         options: Some("M,N,N,S,N,W"),
     },
+    // Linux writes its options in a fixed order (MSS, SACK with timestamps,
+    // window scale) and pads with NOPs when one is turned off by sysctl.
+    Signature {
+        name: "Linux (TCP SACK disabled)",
+        vendor: "Linux",
+        family: "Linux",
+        device_type: GP,
+        initial_ttl: 64,
+        options: Some("M,N,N,T,N,W"),
+    },
+    Signature {
+        name: "Linux (TCP window scaling disabled)",
+        vendor: "Linux",
+        family: "Linux",
+        device_type: GP,
+        initial_ttl: 64,
+        options: Some("M,S,T"),
+    },
+    Signature {
+        name: "Linux (TCP timestamps and window scaling disabled)",
+        vendor: "Linux",
+        family: "Linux",
+        device_type: GP,
+        initial_ttl: 64,
+        options: Some("M,N,N,S"),
+    },
+    Signature {
+        name: "Linux (TCP SACK and timestamps disabled)",
+        vendor: "Linux",
+        family: "Linux",
+        device_type: GP,
+        initial_ttl: 64,
+        options: Some("M,N,W"),
+    },
+    Signature {
+        name: "Linux (TCP SACK and window scaling disabled)",
+        vendor: "Linux",
+        family: "Linux",
+        device_type: GP,
+        initial_ttl: 64,
+        options: Some("M,N,N,T"),
+    },
     Signature {
         name: "Apple macOS or iOS",
         vendor: "Apple",
@@ -208,6 +250,14 @@ const SIGNATURES: &[Signature] = &[
         device_type: GP,
         initial_ttl: 128,
         options: Some("M,N,W,S,T"),
+    },
+    Signature {
+        name: "Microsoft Windows XP or Server 2003, or newer with window scaling off",
+        vendor: "Microsoft",
+        family: "Windows",
+        device_type: GP,
+        initial_ttl: 128,
+        options: Some("M,N,N,S"),
     },
     Signature {
         name: "Cisco IOS or similar network device",
@@ -504,6 +554,24 @@ mod tests {
         let cisco = TcpTraits::from_reply(250, false, &syn_ack(4128, &[2, 4, 2, 0x18])).unwrap();
         let m = classify(cisco, 23, false).unwrap();
         assert_eq!((m.device_type, m.accuracy), ("network device", 90));
+
+        // Linux with sysctls turned off pads with NOPs in its own order.
+        let no_sack = [
+            2, 4, 5, 0xb4, 1, 1, 8, 10, 0, 0, 0, 1, 0, 0, 0, 0, 1, 3, 3, 7,
+        ];
+        let t = TcpTraits::from_reply(64, true, &syn_ack(65160, &no_sack)).unwrap();
+        assert_eq!(t.options, "M,N,N,T,N,W");
+        let m = classify(t, 22, false).unwrap();
+        assert_eq!(
+            (m.family, m.name.as_str()),
+            ("Linux", "Linux (TCP SACK disabled)")
+        );
+        let sack_only = [2, 4, 5, 0xb4, 1, 1, 4, 2];
+        let t = TcpTraits::from_reply(64, true, &syn_ack(64240, &sack_only)).unwrap();
+        assert_eq!(classify(t, 22, false).unwrap().family, "Linux");
+        // The same layout from TTL 128 is Windows.
+        let t = TcpTraits::from_reply(128, true, &syn_ack(64240, &sack_only)).unwrap();
+        assert_eq!(classify(t, 445, false).unwrap().family, "Windows");
 
         // Unknown layout: TTL-only guess, and no DF lowers it further.
         let odd = TcpTraits::from_reply(64, false, &syn_ack(512, &[2, 4, 5, 0xb4])).unwrap();

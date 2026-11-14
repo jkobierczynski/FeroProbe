@@ -13,6 +13,7 @@
 //! Open UDP ports get a protocol-specific query where we know one (DNS
 //! `version.bind`, NTP, SNMP sysDescr, SSDP).
 
+mod parsers;
 mod rules;
 mod tls;
 mod udp_info;
