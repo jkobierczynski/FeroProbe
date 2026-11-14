@@ -69,6 +69,15 @@ pub fn parse_target(spec: &str) -> Result<TargetSpec, Error> {
         return Ok(TargetSpec::Addrs(vec![ip]));
     }
 
+    // The resolver would read "2222" as the address 0.0.8.174. A bare
+    // number is almost always a port that came loose from its option, as
+    // in `-PS 2222`.
+    if spec.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(Error::InvalidTarget(format!(
+            "'{spec}' is a number, not a host; if it is a port, attach it to its option (-PS{spec}, not -PS {spec})"
+        )));
+    }
+
     if let Some((addr, zone)) = spec.split_once('%') {
         let ip: Ipv6Addr = addr
             .parse()
@@ -437,9 +446,14 @@ mod tests {
             "10.0.0.1-300",
             "-bad-",
             "a b",
+            "2222",
+            "0",
         ] {
             assert!(parse_target(bad).is_err(), "{bad} should fail");
         }
+        // A bare number is most likely a port split from -PS and friends.
+        let err = parse_target("2222").unwrap_err().to_string();
+        assert!(err.contains("-PS2222"), "{err}");
     }
 
     #[test]
