@@ -1015,7 +1015,7 @@ impl ScanJob<'_> {
         limit: Duration,
         progress: Progress,
     ) -> Result<()> {
-        let group = live.len().clamp(1, HOST_GROUP);
+        let group = host_group(live.len(), cfg);
         let mut shared = cfg.clone();
         shared.concurrency = (cfg.concurrency / group).max(1);
         shared.max_rate = (cfg.max_rate / group as u32).max(1);
@@ -1070,6 +1070,18 @@ impl ScanJob<'_> {
         done(&progress);
         Ok(())
     }
+}
+
+/// How many hosts `--host-timeout` scans at once: at most [`HOST_GROUP`],
+/// and fewer when the budgets are small, so that every host gets at least
+/// one probe in flight and one packet per second while the totals stay
+/// within `--concurrency` and `--max-rate`.
+fn host_group(hosts: usize, cfg: &ScanConfig) -> usize {
+    hosts
+        .min(HOST_GROUP)
+        .min(cfg.concurrency)
+        .min(cfg.max_rate as usize)
+        .max(1)
 }
 
 /// Whether a scan error is the `--host-timeout` deadline passing.
@@ -1840,6 +1852,27 @@ mod tests {
             "Stats: 0:00:01 elapsed; host discovery"
         );
         assert!(args(&["--stats-every", "10s"]).stats_every == Some(Duration::from_secs(10)));
+    }
+
+    #[test]
+    fn host_groups_keep_the_budgets() {
+        let cfg = |concurrency, max_rate| ScanConfig {
+            concurrency,
+            max_rate,
+            ..ScanConfig::default()
+        };
+        assert_eq!(host_group(100, &cfg(500, 5000)), HOST_GROUP);
+        assert_eq!(host_group(5, &cfg(500, 5000)), 5);
+        assert_eq!(host_group(100, &cfg(1, 5000)), 1);
+        assert_eq!(host_group(100, &cfg(500, 1)), 1);
+        assert_eq!(host_group(100, &cfg(10, 4)), 4);
+        assert_eq!(host_group(0, &cfg(10, 4)), 1);
+        // Each host's share times the group stays within the totals.
+        for (c, r) in [(1, 1), (10, 4), (33, 100), (500, 5000)] {
+            let g = host_group(100, &cfg(c, r));
+            assert!((c / g).max(1) * g <= c, "{c} {r}");
+            assert!((r as usize / g).max(1) * g <= r as usize, "{c} {r}");
+        }
     }
 
     #[tokio::test]

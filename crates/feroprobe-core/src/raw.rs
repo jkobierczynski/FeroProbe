@@ -118,7 +118,7 @@ pub(crate) fn receive_loop<T>(
 
 /// Spaces out packets so that no more than `rate` are sent per second, and
 /// none closer than the scan delay to any other probe of this process (see
-/// [`crate::timing::pace_blocking_or_cancel`]).
+/// [`crate::timing::pace_blocking_unless`]).
 pub(crate) struct Pacer {
     start: Instant,
     sent: u32,
@@ -151,9 +151,24 @@ impl Pacer {
     /// set. Returns whether the packet may be sent; `false` means cancelled.
     pub(crate) fn wait_or_cancel(&mut self, cancel: &std::sync::atomic::AtomicBool) -> bool {
         use std::sync::atomic::Ordering;
+        self.wait_unless(&|| cancel.load(Ordering::Relaxed))
+    }
+
+    /// Like [`wait`](Self::wait), but gives up once `deadline` (if any)
+    /// has passed, also while waiting. Returns whether the packet may be
+    /// sent; `false` means the deadline passed.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn wait_until(&mut self, deadline: Option<Instant>) -> bool {
+        self.wait_unless(&|| deadline.is_some_and(|d| Instant::now() >= d))
+    }
+
+    /// Wait for the packet's turn unless `stop` returns true first (checked
+    /// at least every [`crate::timing::CANCEL_POLL`], and once more after
+    /// the wait). Returns whether the packet may be sent.
+    fn wait_unless(&mut self, stop: &dyn Fn() -> bool) -> bool {
         let due = self.start + self.interval.saturating_mul(self.sent);
         loop {
-            if cancel.load(Ordering::Relaxed) {
+            if stop() {
                 return false;
             }
             let now = Instant::now();
@@ -163,7 +178,7 @@ impl Pacer {
             std::thread::sleep((due - now).min(crate::timing::CANCEL_POLL));
         }
         self.sent = self.sent.saturating_add(1);
-        crate::timing::pace_blocking_or_cancel(self.delay, cancel)
+        crate::timing::pace_blocking_unless(self.delay, stop) && !stop()
     }
 }
 
@@ -327,6 +342,23 @@ fn is_no_buffer_space(e: &io::Error) -> bool {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn deadline_cuts_a_wait_short() {
+        let mut pacer = Pacer::new(1, Duration::ZERO);
+        assert!(pacer.wait_until(None));
+        // The next packet is due in a second; the deadline comes first.
+        let t = Instant::now();
+        assert!(!pacer.wait_until(Some(t + Duration::from_millis(150))));
+        let waited = t.elapsed();
+        assert!(
+            waited >= Duration::from_millis(150) && waited < Duration::from_millis(600),
+            "{waited:?}"
+        );
+        // A deadline that has passed refuses even a packet that is due.
+        let mut pacer = Pacer::new(1000, Duration::ZERO);
+        assert!(!pacer.wait_until(Some(Instant::now())));
+    }
 
     #[test]
     fn cancel_cuts_a_wait_short() {

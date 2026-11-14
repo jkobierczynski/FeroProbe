@@ -7,7 +7,6 @@
 
 use std::fmt;
 use std::str::FromStr;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use crate::model::ScanConfig;
@@ -167,11 +166,11 @@ pub(crate) async fn pace(delay: Duration) {
 }
 
 /// Wait until the next probe may be sent, from a blocking thread, giving up
-/// as soon as `cancel` is set (checked at least every [`CANCEL_POLL`]).
+/// as soon as `stop` returns true (checked at least every [`CANCEL_POLL`]).
 /// Returns whether the probe may be sent; send right after it returns true.
-pub(crate) fn pace_blocking_or_cancel(delay: Duration, cancel: &AtomicBool) -> bool {
+pub(crate) fn pace_blocking_unless(delay: Duration, stop: &dyn Fn() -> bool) -> bool {
     loop {
-        if cancel.load(Ordering::Relaxed) {
+        if stop() {
             return false;
         }
         if delay.is_zero() {
@@ -250,11 +249,9 @@ mod tests {
         // Async and blocking callers interleave on the same schedule.
         pace(delay).await;
         pace(delay).await;
-        tokio::task::spawn_blocking(move || {
-            pace_blocking_or_cancel(delay, &AtomicBool::new(false))
-        })
-        .await
-        .unwrap();
+        tokio::task::spawn_blocking(move || pace_blocking_unless(delay, &|| false))
+            .await
+            .unwrap();
         pace(delay).await;
         // Three gaps after the first probe, which went at once.
         assert!(
@@ -291,11 +288,9 @@ mod tests {
                 starts.lock().unwrap().push(std::time::Instant::now());
             }));
         }
-        tokio::task::spawn_blocking(move || {
-            pace_blocking_or_cancel(delay, &AtomicBool::new(false))
-        })
-        .await
-        .unwrap();
+        tokio::task::spawn_blocking(move || pace_blocking_unless(delay, &|| false))
+            .await
+            .unwrap();
         for t in tasks {
             t.await.unwrap();
         }

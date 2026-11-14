@@ -453,7 +453,10 @@ mod imp {
                         ));
                         continue;
                     };
-                    pacer.wait();
+                    // The wait gives up at the host deadline.
+                    if !pacer.wait_until(cfg.deadline) {
+                        return Err(ScanConfig::timed_out());
+                    }
                     // A slow template can wait long enough for an answer to
                     // the previous round's probe to arrive: record it against
                     // the old send time and do not send again.
