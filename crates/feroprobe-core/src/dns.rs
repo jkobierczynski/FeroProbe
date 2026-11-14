@@ -104,6 +104,11 @@ pub fn parse_ptr_response(buf: &[u8], id: u16) -> PtrAnswer {
     if buf.len() < 12 || u16::from_be_bytes([buf[0], buf[1]]) != id || buf[2] & 0x80 == 0 {
         return PtrAnswer::Retry;
     }
+    // Truncated (TC): the answer may be missing records, so it settles
+    // nothing. Another server, or a retry, may fit it in a datagram.
+    if buf[2] & 0x02 != 0 {
+        return PtrAnswer::Retry;
+    }
     match buf[3] & 0x0f {
         0 => {}
         3 => return PtrAnswer::NoName,
@@ -135,6 +140,8 @@ fn first_ptr(buf: &[u8]) -> Option<PtrAnswer> {
                 PtrAnswer::Name(name)
             });
         }
+        // A record whose data is cut short makes the message malformed.
+        buf.get(data..data + len)?;
         pos = data + len;
     }
     Some(PtrAnswer::NoName)
@@ -294,6 +301,16 @@ mod tests {
         assert_eq!(rcode(0), PtrAnswer::NoName);
         assert_eq!(rcode(2), PtrAnswer::Retry);
         assert_eq!(rcode(5), PtrAnswer::Retry);
+        // Truncated responses and records cut short settle nothing.
+        let mut tc = response(&q, 0, &[]);
+        tc[2] |= 0x02;
+        assert_eq!(parse_ptr_response(&tc, 0xbeef), PtrAnswer::Retry);
+        let cut = response(&q, 0, &[(1, vec![192, 0, 2, 1])]);
+        assert_eq!(parse_ptr_response(&cut, 0xbeef), PtrAnswer::NoName);
+        assert_eq!(
+            parse_ptr_response(&cut[..cut.len() - 4], 0xbeef),
+            PtrAnswer::Retry
+        );
     }
 
     #[test]
@@ -360,6 +377,24 @@ mod tests {
         assert_eq!(names.get(&ip).map(String::as_str), Some("ok"));
         t1.await.unwrap();
         t2.await.unwrap();
+
+        // A truncated answer hands over too.
+        let truncating = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let tc_addr = truncating.local_addr().unwrap();
+        let t5 = tokio::spawn(async move {
+            let mut buf = [0u8; 512];
+            let (n, from) = truncating.recv_from(&mut buf).await.unwrap();
+            let mut r = response(&buf[..n], 0, &[]);
+            r[2] |= 0x02;
+            truncating.send_to(&r, from).await.unwrap();
+        });
+        let (good, t6) = server(1, 0, Some(b"\x02ok\x00")).await;
+        let names = reverse_lookup(&[ip], &[tc_addr, good], &cfg(300, 0))
+            .await
+            .unwrap();
+        assert_eq!(names.get(&ip).map(String::as_str), Some("ok"));
+        t5.await.unwrap();
+        t6.await.unwrap();
 
         // NXDOMAIN is final: the second server is never asked.
         let (nx, t3) = server(1, 3, None).await;
