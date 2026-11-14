@@ -60,7 +60,9 @@ impl SctpScanKind {
     }
 }
 
-/// Run an SCTP scan of every port on every target.
+/// Run an SCTP scan of every port on every target. Target addresses must
+/// be distinct (the CLI resolver guarantees this); a repeated address
+/// would leave every copy but one reporting no response.
 pub async fn sctp_scan(
     targets: &[Target],
     ports: &[u16],

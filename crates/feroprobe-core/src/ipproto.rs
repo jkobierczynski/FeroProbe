@@ -22,7 +22,9 @@ use crate::model::{HostResult, ScanConfig};
 use crate::target::Target;
 
 /// Run an IP protocol scan of every protocol number in `protocols` (each
-/// at most 255) on every target.
+/// at most 255) on every target. Target addresses must be distinct (the
+/// CLI resolver guarantees this); a repeated address would leave every
+/// copy but one reporting no response.
 pub async fn ip_protocol_scan(
     targets: &[Target],
     protocols: &[u8],
