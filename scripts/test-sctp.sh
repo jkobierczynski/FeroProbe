@@ -183,8 +183,12 @@ PY
     PIDS+=($!)
     TMPFILES+=("$f")
     # CLOSED needs no listener: the kernel ABORTs an unbound SCTP port.
-    # FILTERED: drop the probe so the kernel never answers -> no response.
-    local rule="-p sctp -m sctp --dport $FILTERED -d 127.0.0.1 -j DROP"
+    # FILTERED: drop the kernel's *reply* from that port (match --sport), so
+    # the probe still goes out and simply gets no answer -- a genuine silent
+    # filter. Dropping the outgoing *probe* instead would fail the local
+    # send (EPERM), which the scanner reports as filtered for every scan and
+    # so hides the COOKIE ECHO open|filtered result.
+    local rule="-p sctp -m sctp --sport $FILTERED -d 127.0.0.1 -j DROP"
     if iptables -A OUTPUT $rule 2>/dev/null; then
         IPTABLES_RULE="$rule"
     else
