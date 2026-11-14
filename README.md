@@ -414,6 +414,16 @@ can report some as open|filtered. Lower `--concurrency` for more accuracy.
 With a lower `--timeout`, closed ports show as filtered on Windows. The SYN scan
 (Linux only for now) does not have this limitation.
 
+## Responsible use
+
+Scan only networks you own or are allowed to test. FeroProbe follows nmap
+closely, with a few deliberate exceptions that keep it from helping
+attackers hide: evasion options such as decoys and spoofed addresses only
+work against private address ranges, its probes carry a documented
+signature, and the repository ships Suricata and Snort rules for
+defenders. See [docs/responsible-use.md](docs/responsible-use.md) for the
+reasons and the current state.
+
 ## License
 
 GPL-3.0-or-later. See [LICENSE](LICENSE).
