@@ -378,23 +378,30 @@ mod tests {
         t1.await.unwrap();
         t2.await.unwrap();
 
-        // A truncated answer hands over too.
-        let truncating = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let tc_addr = truncating.local_addr().unwrap();
-        let t5 = tokio::spawn(async move {
+        // A truncated answer, or one whose record is cut short, hands over
+        // too.
+        let truncated = |r: &mut Vec<u8>| r[2] |= 0x02;
+        let cut_short = |r: &mut Vec<u8>| r.truncate(r.len() - 4);
+        for (spoil, records) in [
+            (&truncated as &(dyn Fn(&mut Vec<u8>) + Sync), vec![]),
+            (&cut_short, vec![(1u16, vec![192, 0, 2, 1])]),
+        ] {
+            let broken = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let broken_addr = broken.local_addr().unwrap();
             let mut buf = [0u8; 512];
-            let (n, from) = truncating.recv_from(&mut buf).await.unwrap();
-            let mut r = response(&buf[..n], 0, &[]);
-            r[2] |= 0x02;
-            truncating.send_to(&r, from).await.unwrap();
-        });
-        let (good, t6) = server(1, 0, Some(b"\x02ok\x00")).await;
-        let names = reverse_lookup(&[ip], &[tc_addr, good], &cfg(300, 0))
-            .await
-            .unwrap();
-        assert_eq!(names.get(&ip).map(String::as_str), Some("ok"));
-        t5.await.unwrap();
-        t6.await.unwrap();
+            let (good, t6) = server(1, 0, Some(b"\x02ok\x00")).await;
+            let (ips, servers, quick) = ([ip], [broken_addr, good], cfg(300, 0));
+            let lookup = reverse_lookup(&ips, &servers, &quick);
+            let reply = async {
+                let (n, from) = broken.recv_from(&mut buf).await.unwrap();
+                let mut r = response(&buf[..n], 0, &records);
+                spoil(&mut r);
+                broken.send_to(&r, from).await.unwrap();
+            };
+            let (names, ()) = tokio::join!(lookup, reply);
+            assert_eq!(names.unwrap().get(&ip).map(String::as_str), Some("ok"));
+            t6.await.unwrap();
+        }
 
         // NXDOMAIN is final: the second server is never asked.
         let (nx, t3) = server(1, 3, None).await;
