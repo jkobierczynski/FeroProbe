@@ -480,9 +480,9 @@ mod tests {
         ];
         let hosts = discover(&targets, &cfg).await.unwrap();
         assert!(hosts.iter().all(HostResult::is_up), "{hosts:?}");
-        // With raw sockets the ICMPv6 echo is sure to run, and its answer
-        // wins over a TCP reset.
-        if crate::raw::raw_ipv6_available() {
+        // On Linux with raw sockets the ICMPv6 echo is sure to run, and its
+        // answer wins over a TCP reset. Elsewhere only the TCP probes may run.
+        if cfg!(target_os = "linux") && crate::raw::raw_ipv6_available() {
             assert_eq!(hosts[0].up_reason, Some(reason::ECHO_REPLY), "{hosts:?}");
         }
     }
