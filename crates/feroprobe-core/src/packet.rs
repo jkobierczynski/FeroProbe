@@ -637,7 +637,17 @@ pub fn parse_ipv6(buf: &[u8]) -> Option<Ipv6<'_>> {
     loop {
         let skip = match next {
             0 | 43 | 60 => usize::from(*buf.get(at + 1)?) * 8 + 8,
-            44 => 8,
+            44 => {
+                // A fragment header is a fixed 8 bytes. Only the first
+                // fragment (offset 0) holds the start of the transport
+                // header; a later fragment's payload is not one, so refuse
+                // to hand it on as such rather than misparse it.
+                let frag = u16::from_be_bytes([*buf.get(at + 2)?, *buf.get(at + 3)?]);
+                if frag & 0xfff8 != 0 {
+                    return None;
+                }
+                8
+            }
             _ => break,
         };
         next = *buf.get(at)?;
@@ -666,6 +676,10 @@ pub struct IcmpError<'a> {
     pub code: u8,
     pub protocol: u8,
     pub dst: IpAddr,
+    /// The quoted IPv4 packet's identification field, by which a probe with
+    /// a fixed IP id can be told from other traffic to the same host;
+    /// `None` for IPv6, which has no such field in its base header.
+    pub id: Option<u16>,
     /// The quoted packet's payload: at least its first 8 bytes when the
     /// sender followed RFC 792; may be empty.
     pub quoted: &'a [u8],
@@ -688,14 +702,14 @@ pub fn parse_icmp_error(msg: &[u8], v6: bool) -> Option<IcmpError<'_>> {
         return None;
     }
     let b = icmp.body;
-    let (protocol, dst, quoted): (u8, IpAddr, &[u8]) = if v6 {
+    let (protocol, dst, id, quoted): (u8, IpAddr, Option<u16>, &[u8]) = if v6 {
         // The quote may be cut short anywhere, so do not insist on a
         // complete packet: only the fixed header.
         if b.len() < 40 || b[0] >> 4 != 6 {
             return None;
         }
         let dst: [u8; 16] = b[24..40].try_into().ok()?;
-        (b[6], Ipv6Addr::from(dst).into(), &b[40..])
+        (b[6], Ipv6Addr::from(dst).into(), None, &b[40..])
     } else {
         if b.len() < 20 || b[0] >> 4 != 4 {
             return None;
@@ -704,6 +718,7 @@ pub fn parse_icmp_error(msg: &[u8], v6: bool) -> Option<IcmpError<'_>> {
         (
             b[9],
             Ipv4Addr::new(b[16], b[17], b[18], b[19]).into(),
+            Some(u16::from_be_bytes([b[4], b[5]])),
             b.get(ihl..).unwrap_or(&[]),
         )
     };
@@ -712,6 +727,7 @@ pub fn parse_icmp_error(msg: &[u8], v6: bool) -> Option<IcmpError<'_>> {
         code: icmp.code,
         protocol,
         dst,
+        id,
         quoted,
     })
 }
@@ -937,15 +953,25 @@ mod tests {
 
     #[test]
     fn ipv6_extension_headers_are_skipped() {
-        let mut pkt = vec![0x60, 0, 0, 0, 0, 16, 0, 64];
-        pkt.extend_from_slice(&Ipv6Addr::LOCALHOST.octets());
-        pkt.extend_from_slice(&Ipv6Addr::LOCALHOST.octets());
-        // A fragment header, then 8 bytes of UDP.
-        pkt.extend_from_slice(&[IPPROTO_UDP, 0, 0, 1, 0, 0, 0, 7]);
-        pkt.extend_from_slice(&[0, 53, 0x9c, 0x40, 0, 8, 0, 0]);
-        let ip = parse_ipv6(&pkt).unwrap();
+        // Fixed header Next Header = 44 (fragment); `frag_hi` is the top
+        // byte of the fragment header's offset/flags word.
+        let pkt = |frag_hi: u8| {
+            let mut pkt = vec![0x60, 0, 0, 0, 0, 16, 44, 64];
+            pkt.extend_from_slice(&Ipv6Addr::LOCALHOST.octets());
+            pkt.extend_from_slice(&Ipv6Addr::LOCALHOST.octets());
+            // Fragment header (next = UDP, M flag set), then 8 bytes of UDP.
+            pkt.extend_from_slice(&[IPPROTO_UDP, 0, frag_hi, 1, 0, 0, 0, 7]);
+            pkt.extend_from_slice(&[0, 53, 0x9c, 0x40, 0, 8, 0, 0]);
+            pkt
+        };
+        // The first fragment (offset 0) carries the transport header.
+        let first = pkt(0);
+        let ip = parse_ipv6(&first).unwrap();
         assert_eq!(ip.protocol, IPPROTO_UDP);
         assert_eq!(ip.payload.len(), 8);
+        // A later fragment (nonzero offset) does not, so it is refused
+        // rather than read as a transport header.
+        assert!(parse_ipv6(&pkt(0x08)).is_none());
     }
 
     #[test]

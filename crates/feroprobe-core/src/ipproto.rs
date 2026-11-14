@@ -188,18 +188,28 @@ mod imp {
     pub(super) fn answers(pkt: &Packet<'_>, index: &Index, probe: &Probe) -> Vec<Answer> {
         let mut out = Vec::new();
         let v6 = pkt.src.is_ipv6();
-        // Our own probe, seen coming back in on the loopback interface.
-        let ours = pkt.src == pkt.dst
-            && match pkt.ipid {
-                Some(id) => id == probe.ipid,
-                None => pkt.payload == probe.body(pkt.protocol, pkt.src, pkt.dst).as_slice(),
-            };
+        // One of our own probes, seen coming back in: on the loopback
+        // interface a probe is delivered to us as well as sent, even when
+        // its source and destination differ (127.0.0.1 -> 127.0.0.2). Our
+        // IPv4 probes carry a fixed IP id that a target's reply never
+        // echoes, so that alone identifies them; IPv6 has no such field, so
+        // there we can only catch the same-address loopback echo.
+        let ours = match pkt.ipid {
+            Some(id) => id == probe.ipid,
+            None => {
+                pkt.src == pkt.dst
+                    && pkt.payload == probe.body(pkt.protocol, pkt.src, pkt.dst).as_slice()
+            }
+        };
         if ours {
             return out;
         }
         let icmp = if v6 { IPPROTO_ICMPV6 } else { IPPROTO_ICMP };
         if pkt.protocol == icmp
             && let Some(e) = packet::parse_icmp_error(pkt.payload, v6)
+            // Only an error quoting our own probe (same fixed IP id) counts;
+            // another application's traffic to the same host must not.
+            && e.id.is_none_or(|id| id == probe.ipid)
             && let Some(&host) = index.get(&e.dst)
             && let Some((state, why)) = error_state(v6, e.kind, e.code, pkt.src == e.dst)
         {

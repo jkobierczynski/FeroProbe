@@ -13,7 +13,7 @@ use std::mem;
 use std::net::IpAddr;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::{SyncSender, TrySendError};
 use std::time::Instant;
 
 use crate::packet;
@@ -114,7 +114,7 @@ pub(crate) fn open() -> io::Result<OwnedFd> {
 pub(crate) fn receive_loop<T>(
     fd: OwnedFd,
     stop: &AtomicBool,
-    tx: &Sender<T>,
+    tx: &SyncSender<T>,
     parse: impl Fn(&Packet<'_>, Instant) -> Option<T>,
 ) {
     let mut buf = vec![0u8; 65536];
@@ -163,7 +163,9 @@ pub(crate) fn receive_loop<T>(
             );
             format!("{line} ttl={}", pkt.ttl)
         });
-        if tx.send(answer).is_err() {
+        // Drop the answer if the queue is full (an overloaded or hostile
+        // responder); stop only once the receiver has gone.
+        if let Err(TrySendError::Disconnected(_)) = tx.try_send(answer) {
             return;
         }
     }

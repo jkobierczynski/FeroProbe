@@ -362,9 +362,13 @@ pub struct PortLists {
 /// Parse a port specification that may name its protocol, like nmap's
 /// `-p 22,T:80,U:53,S:2905,161`: `T:` (TCP), `U:` (UDP), `S:` (SCTP) and
 /// `P:` (IP protocols, for `-sO`) apply to the ports after them until the
-/// next prefix, and ports before any prefix go in every list. Each list
-/// is sorted and de-duplicated.
-pub fn parse_port_lists(spec: &str) -> Result<PortLists, Error> {
+/// next prefix. Values before any prefix apply to every *active* scan
+/// family: `port_scan` says a port scan (TCP, UDP or SCTP) is selected, so
+/// they are ports (1-65535); `ip_proto` says `-sO` is selected, so they
+/// are also IP protocol numbers (0-255). A value valid for one but not the
+/// other (`300` as a port, `0` as a protocol) is rejected only for the
+/// family it is out of range for. Each list is sorted and de-duplicated.
+pub fn parse_port_lists(spec: &str, ip_proto: bool, port_scan: bool) -> Result<PortLists, Error> {
     #[derive(Clone, Copy, PartialEq)]
     enum Proto {
         All,
@@ -397,26 +401,36 @@ pub fn parse_port_lists(spec: &str) -> Result<PortLists, Error> {
         }
     }
     let mut lists = PortLists::default();
+    let note = |e| match e {
+        Error::InvalidPorts(why) => Error::InvalidPorts(format!("{why} (in '{spec}')")),
+        other => other,
+    };
     for (proto, parts) in groups {
         let joined = parts.join(",");
-        // Protocol 0 is valid, and "-" means all of them, 0-255.
-        let ports = if proto == Proto::Ip {
-            parse_protocols(&joined)
-        } else {
-            parse_ports(&joined)
-        }
-        .map_err(|e| match e {
-            Error::InvalidPorts(why) => Error::InvalidPorts(format!("{why} (in '{spec}')")),
-            other => other,
-        })?;
-        for (p, list) in [
-            (Proto::Tcp, &mut lists.tcp),
-            (Proto::Udp, &mut lists.udp),
-            (Proto::Sctp, &mut lists.sctp),
-            (Proto::Ip, &mut lists.protocols),
-        ] {
-            if proto == p || proto == Proto::All {
-                list.extend(&ports);
+        match proto {
+            Proto::Tcp => lists.tcp.extend(parse_ports(&joined).map_err(&note)?),
+            Proto::Udp => lists.udp.extend(parse_ports(&joined).map_err(&note)?),
+            Proto::Sctp => lists.sctp.extend(parse_ports(&joined).map_err(&note)?),
+            // `P:` is always IP protocol numbers: 0 is valid, "-" is 0-255.
+            Proto::Ip => lists
+                .protocols
+                .extend(parse_protocols(&joined).map_err(&note)?),
+            Proto::All => {
+                // Unprefixed values go to each active scan family in its own
+                // range. Parse as ports for TCP/UDP/SCTP (and when no scan
+                // family is known, to preserve the old port semantics)...
+                if port_scan || !ip_proto {
+                    let ports = parse_ports(&joined).map_err(&note)?;
+                    lists.tcp.extend(&ports);
+                    lists.udp.extend(&ports);
+                    lists.sctp.extend(&ports);
+                }
+                // ...and as IP protocol numbers for -sO.
+                if ip_proto {
+                    lists
+                        .protocols
+                        .extend(parse_protocols(&joined).map_err(&note)?);
+                }
             }
         }
     }
@@ -529,28 +543,46 @@ mod tests {
 
     #[test]
     fn protocol_prefixes() {
-        let l = parse_port_lists("22,T:80,443,U:53,161").unwrap();
+        let l = parse_port_lists("22,T:80,443,U:53,161", true, true).unwrap();
         assert_eq!(l.tcp, vec![22, 80, 443]);
         assert_eq!(l.udp, vec![22, 53, 161]);
-        let l = parse_port_lists("U:53,t:1-3").unwrap();
+        let l = parse_port_lists("U:53,t:1-3", true, true).unwrap();
         assert_eq!(l.tcp, vec![1, 2, 3]);
         assert_eq!(l.udp, vec![53]);
-        let l = parse_port_lists("U:-").unwrap();
+        let l = parse_port_lists("U:-", true, true).unwrap();
         assert!(l.tcp.is_empty());
         assert_eq!(l.udp.len(), 65535);
-        let l = parse_port_lists("80,80,T:80").unwrap();
+        let l = parse_port_lists("80,80,T:80", true, true).unwrap();
         assert_eq!((l.tcp, l.udp), (vec![80], vec![80]));
         for bad in ["", "T:", "S:0", "U:0", "T:22,,80", "X:22", "P:256"] {
-            assert!(parse_port_lists(bad).is_err(), "{bad} should fail");
+            assert!(
+                parse_port_lists(bad, true, true).is_err(),
+                "{bad} should fail"
+            );
         }
     }
 
     #[test]
     fn sctp_and_protocol_prefixes() {
-        let l = parse_port_lists("22,S:2905,P:1,6,17,0").unwrap();
+        // With -sO active (ip_proto), the unprefixed 22 is also a protocol.
+        let l = parse_port_lists("22,S:2905,P:1,6,17,0", true, true).unwrap();
         assert_eq!(l.tcp, vec![22]);
         assert_eq!(l.sctp, vec![22, 2905]);
         assert_eq!(l.protocols, vec![0, 1, 6, 17, 22]);
+        // Without -sO, unprefixed values stay out of the protocols list.
+        let l = parse_port_lists("22,P:1,6", false, true).unwrap();
+        assert_eq!(l.protocols, vec![1, 6]);
+        // -sO alone reads unprefixed values as IP protocols: 0 and "-" are
+        // valid there, but a number above 255 is not.
+        assert_eq!(
+            parse_port_lists("0", true, false).unwrap().protocols,
+            vec![0]
+        );
+        assert_eq!(
+            parse_port_lists("-", true, false).unwrap().protocols.len(),
+            256
+        );
+        assert!(parse_port_lists("300", true, false).is_err());
         assert_eq!(parse_protocols("-").unwrap().len(), 256);
         assert_eq!(
             parse_protocols("250-").unwrap(),

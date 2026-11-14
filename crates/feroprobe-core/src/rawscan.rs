@@ -33,6 +33,12 @@ pub(crate) struct Answer {
 /// Where each target is in the list, to match answers to probes.
 pub(crate) type Index = HashMap<IpAddr, usize>;
 
+/// How many unprocessed answers the capture thread may hold. A target can
+/// send a packet for every protocol, repeatedly; with a long `--scan-delay`
+/// the sender drains the queue only slowly, so it is bounded and overflow
+/// is dropped rather than letting a flood exhaust memory.
+const QUEUE_CAP: usize = 8192;
+
 /// Scan every key on every target. `send` sends one probe, given the
 /// host's index, the key, and our source and the target's address.
 /// `classify` reads each captured packet, on its own thread, and returns
@@ -79,7 +85,7 @@ pub(crate) fn run(
 
     let fd = capture::open()?;
     let stop = Arc::new(AtomicBool::new(false));
-    let (tx, rx) = mpsc::channel::<(Answer, Instant)>();
+    let (tx, rx) = mpsc::sync_channel::<(Answer, Instant)>(QUEUE_CAP);
     let receiver = {
         let (stop, index) = (Arc::clone(&stop), Arc::clone(&index));
         std::thread::spawn(move || {
@@ -88,7 +94,9 @@ pub(crate) fn run(
                 // One packet, several answers: send all but the last here.
                 let (last, rest) = answers.split_last()?;
                 for a in rest {
-                    if tx.send((*a, at)).is_err() {
+                    // Drop on a full queue; stop only once the main thread,
+                    // and so the receiver, is gone.
+                    if let Err(mpsc::TrySendError::Disconnected(_)) = tx.try_send((*a, at)) {
                         return None;
                     }
                 }
@@ -123,8 +131,10 @@ pub(crate) fn run(
     crate::progress::tick((addrs.len() * keys.len() - pending.len()) as u64);
 
     let outcome = (|| -> io::Result<()> {
+        // One pacer for the whole scan, so retries keep to the rate budget
+        // rather than each round starting a fresh allowance.
+        let mut pacer = Pacer::for_config(cfg);
         for round in 0..=cfg.retries {
-            let mut pacer = Pacer::for_config(cfg);
             for &(h, k) in &pending {
                 if round == 0 {
                     crate::progress::tick(1);
@@ -205,8 +215,11 @@ pub(crate) fn run(
             host.ports = keys
                 .iter()
                 .map(|&k| {
+                    // Clone rather than remove: a key may appear more than
+                    // once, and each entry needs the same answer.
                     results
-                        .remove(&(h, k))
+                        .get(&(h, k))
+                        .cloned()
                         .unwrap_or_else(|| result(k, no_answer, reason::NO_RESPONSE, None))
                 })
                 .collect();

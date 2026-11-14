@@ -853,9 +853,9 @@ fn apply_min_rate(
 
 /// The TCP and UDP ports to scan, sorted: from -p, -F or --top-ports, less
 /// --exclude-ports.
-fn port_lists(args: &Args) -> Result<PortLists> {
+fn port_lists(args: &Args, ip_proto: bool, port_scan: bool) -> Result<PortLists> {
     let mut lists = match &args.ports {
-        Some(spec) => parse_port_lists(spec)?,
+        Some(spec) => parse_port_lists(spec, ip_proto, port_scan)?,
         None => {
             let n = if args.fast { Some(100) } else { args.top_ports };
             PortLists {
@@ -868,7 +868,7 @@ fn port_lists(args: &Args) -> Result<PortLists> {
         }
     };
     if let Some(spec) = &args.exclude_ports {
-        let ex = parse_port_lists(spec).context("reading --exclude-ports")?;
+        let ex = parse_port_lists(spec, ip_proto, port_scan).context("reading --exclude-ports")?;
         lists.tcp.retain(|p| ex.tcp.binary_search(p).is_err());
         lists.udp.retain(|p| ex.udp.binary_search(p).is_err());
         lists.sctp.retain(|p| ex.sctp.binary_search(p).is_err());
@@ -1171,7 +1171,13 @@ impl ScanJob<'_> {
         // The hosts share one --max-rate schedule (set in scan_config), so
         // each may use the whole rate.
         let probes = self.plan.tcp.map_or(0, |_| self.tcp.len())
-            + if self.plan.udp { self.udp.len() } else { 0 };
+            + if self.plan.udp { self.udp.len() } else { 0 }
+            + self.plan.sctp.map_or(0, |_| self.sctp.len())
+            + if self.plan.ip_proto {
+                self.protocols.len()
+            } else {
+                0
+            };
         let done = progress.phase_of(
             "port scan (each host on its own clock)",
             live.len(),
@@ -1310,7 +1316,8 @@ async fn main() -> Result<()> {
     let syn_ok = raw_sockets_available() && (!any_ipv6 || raw_ipv6_available());
     let mut probes = ping_probes(&args.ping)?.unwrap_or_default();
     if let Some(spec) = &args.exclude_ports {
-        let ex = parse_port_lists(spec).context("reading --exclude-ports")?;
+        // Discovery probes are TCP/UDP ports, so read the exclusions as ports.
+        let ex = parse_port_lists(spec, false, true).context("reading --exclude-ports")?;
         for w in exclude_ping_ports(&mut probes, &ex) {
             eprintln!("Warning: {w}");
         }
@@ -1327,13 +1334,14 @@ async fn main() -> Result<()> {
         }
     }
 
+    let port_scan = plan.tcp.is_some() || plan.udp || plan.sctp.is_some();
     let PortLists {
         tcp: tcp_ports,
         udp: udp_ports,
         sctp: sctp_ports,
         protocols,
-    } = port_lists(&args)?;
-    // -sO's "ports" are IP protocol numbers, 0-255.
+    } = port_lists(&args, plan.ip_proto, port_scan)?;
+    // -sO's "ports" are IP protocol numbers, 0-255 (validated on parse).
     let protocols: Vec<u8> = protocols.iter().map(|&p| p as u8).collect();
     if plan.ping_only && !plan.discovery && !trace {
         bail!("-sn with -Pn would do nothing (add --traceroute to only trace the route)");
@@ -2052,7 +2060,7 @@ mod tests {
 
     #[test]
     fn port_selection() {
-        let lists = |argv: &[&str]| port_lists(&args(argv)).unwrap();
+        let lists = |argv: &[&str]| port_lists(&args(argv), false, true).unwrap();
         let fast = lists(&["-F"]);
         assert_eq!((fast.tcp.len(), fast.udp.len()), (100, 100));
         assert_eq!(lists(&[]).udp.len(), 20);
@@ -2068,9 +2076,15 @@ mod tests {
         assert_eq!(l.tcp, vec![22]);
         assert_eq!(l.sctp, vec![2905]);
         assert_eq!(l.protocols, vec![1, 6]);
-        assert!(port_lists(&args(&["-p", "P:300"])).is_err());
+        assert!(port_lists(&args(&["-p", "P:300"]), false, true).is_err());
+        // -sO reads unprefixed -p as IP protocol numbers (0-255): 0 and "-"
+        // are valid, 300 is not, and a cast must never wrap it into range.
+        let proto = |p: &str| port_lists(&args(&["-sO", "-p", p]), true, false);
+        assert_eq!(proto("0").unwrap().protocols, vec![0]);
+        assert_eq!(proto("-").unwrap().protocols.len(), 256);
+        assert!(proto("300").is_err());
         // --exclude-ports also thins the discovery probes, like nmap.
-        let ex = parse_port_lists("80,U:53").unwrap();
+        let ex = parse_port_lists("80,U:53", false, true).unwrap();
         let mut probes = PingProbes::default();
         assert!(exclude_ping_ports(&mut probes, &ex).is_empty());
         assert_eq!(probes.syn, vec![443]);

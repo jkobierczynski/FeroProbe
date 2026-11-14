@@ -366,6 +366,15 @@ mod imp {
             if !privileged() {
                 return;
             }
+            // With the kernel SCTP module loaded, the kernel answers our
+            // probe to the unbound port itself (an ABORT) and can beat the
+            // fake stack's INIT-ACK; a raw socket does not displace that
+            // handler, so the open-port assertion would be flaky. Skip it
+            // there rather than racing the kernel.
+            if std::path::Path::new("/proc/net/sctp").exists() {
+                eprintln!("note: kernel SCTP active, fake-stack test not run");
+                return;
+            }
             let stop = Arc::new(AtomicBool::new(false));
             let stack = fake_stack(2905, Arc::clone(&stop));
             let cfg = ScanConfig {
