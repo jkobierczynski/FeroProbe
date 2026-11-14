@@ -90,6 +90,7 @@ pub(crate) fn receive_loop<T>(
     use std::mem::MaybeUninit;
     use std::sync::atomic::Ordering;
     let mut buf = vec![MaybeUninit::<u8>::uninit(); 65536];
+    let proto = socket_protocol(&sock);
     while !stop.load(Ordering::Relaxed) {
         let (n, from) = match sock.recv_from(&mut buf) {
             Ok(r) => r,
@@ -108,9 +109,15 @@ pub(crate) fn receive_loop<T>(
         let at = Instant::now();
         // SAFETY: recv_from initialised the first `n` bytes.
         let data = unsafe { std::slice::from_raw_parts(buf.as_ptr().cast::<u8>(), n) };
-        if let Some(answer) = parse(data, &from, at)
-            && tx.send(answer).is_err()
-        {
+        let Some(answer) = parse(data, &from, at) else {
+            continue;
+        };
+        if let Some(ip) = from.as_socket().map(|a| a.ip()) {
+            crate::packet_trace::log("RCVD", || {
+                crate::packet_trace::describe_received(proto, data, ip)
+            });
+        }
+        if tx.send(answer).is_err() {
             return;
         }
     }
@@ -334,6 +341,10 @@ pub(crate) fn send_with_backoff_until(
     to: SocketAddr,
     deadline: Option<Instant>,
 ) -> io::Result<()> {
+    // Logged before sending, so the answer's line cannot come first.
+    if crate::packet_trace::enabled() {
+        crate::packet_trace::sent(socket_protocol(sock), pkt, to);
+    }
     let addr = to.into();
     let mut attempts = 0;
     loop {
@@ -352,6 +363,22 @@ pub(crate) fn send_with_backoff_until(
             }
             Err(e) => return Err(e),
         }
+    }
+}
+
+/// The IP protocol a raw socket was opened for, for `--packet-trace`.
+pub(crate) fn socket_protocol(sock: &Socket) -> u8 {
+    #[cfg(target_os = "linux")]
+    {
+        sock.protocol()
+            .ok()
+            .flatten()
+            .map_or(0, |p| i32::from(p) as u8)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = sock;
+        0
     }
 }
 

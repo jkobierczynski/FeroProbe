@@ -55,6 +55,7 @@ OUTPUT:
   -o, --output <table|json|xml|grepable>: Format on standard output
   -v: More progress output (-vv for even more)
   --reason: Show why each port got its state
+  --packet-trace: Show every packet sent and received
   --open: Show only open (or possibly open) ports
   --stats-every <time>: Print a progress line every <time>
   --nmap-label: Write scanner=\"nmap\" in XML, for tools that need it

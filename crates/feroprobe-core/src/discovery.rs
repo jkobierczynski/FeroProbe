@@ -546,6 +546,10 @@ mod icmp {
                     if msg.kind != query.reply(v6) || (!id_rewritten && msg.id != id) {
                         continue;
                     }
+                    crate::packet_trace::log("RCVD", || {
+                        let proto = if v6 { 58 } else { packet::IPPROTO_ICMP };
+                        crate::packet_trace::describe_received(proto, data, sender)
+                    });
                     let _ = tx.send((sender, msg.seq, at));
                 }
             })

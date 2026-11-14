@@ -59,6 +59,18 @@ pub async fn probe_port(addr: SocketAddr, cfg: &ScanConfig) -> io::Result<PortRe
         let start = Instant::now();
         let outcome = tokio::time::timeout(cfg.timeout, TcpStream::connect(addr)).await;
         let rtt = Some(elapsed_ms(start));
+        crate::packet_trace::conn(
+            addr,
+            &match &outcome {
+                Ok(Ok(_)) => "Connected".to_string(),
+                // "Connection refused", without " (os error 111)".
+                Ok(Err(e)) => {
+                    let text = e.to_string();
+                    text.split(" (os error").next().unwrap_or(&text).to_string()
+                }
+                Err(_) => "No answer within the timeout".to_string(),
+            },
+        );
         match outcome {
             Ok(Ok(_stream)) => return Ok(result(PortState::Open, reason::SYN_ACK, rtt)),
             Ok(Err(e)) if e.kind() == ErrorKind::ConnectionRefused => {

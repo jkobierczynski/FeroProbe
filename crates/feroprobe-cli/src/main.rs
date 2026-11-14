@@ -408,6 +408,11 @@ struct Args {
     #[arg(long)]
     open: bool,
 
+    /// Print every probe sent and every answer received (SENT/RCVD/CONN
+    /// lines on standard output), like nmap's --packet-trace
+    #[arg(long)]
+    packet_trace: bool,
+
     /// Show why each port got its state (syn-ack, reset, port-unreach, ...)
     #[arg(long)]
     reason: bool,
@@ -1165,6 +1170,9 @@ fn is_host_timeout(e: &anyhow::Error) -> bool {
 async fn main() -> Result<()> {
     let args = Args::parse_from(nmap_style_args(std::env::args()));
     let outputs = Outputs::from_args(&args)?;
+    if args.packet_trace {
+        feroprobe_core::packet_trace::enable();
+    }
     outputs.open_files()?;
     let progress = Progress {
         level: args.verbose,

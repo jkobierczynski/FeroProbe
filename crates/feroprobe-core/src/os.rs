@@ -477,6 +477,7 @@ mod imp {
                         Ok(_) if cfg.expired() => break,
                         Ok(n) => {
                             if take(&buf[..n], &mut found) {
+                                trace_reply(&buf[..n]);
                                 waiting -= 1;
                             }
                         }
@@ -497,6 +498,7 @@ mod imp {
                     Ok(_) if cfg.expired() => break,
                     Ok(n) => {
                         if take(&buf[..n], &mut found) {
+                            trace_reply(&buf[..n]);
                             waiting -= 1;
                         }
                     }
@@ -510,6 +512,18 @@ mod imp {
             }
         }
         Ok(found)
+    }
+
+    /// `--packet-trace` line for an answer OS detection kept.
+    fn trace_reply(data: &[u8]) {
+        crate::packet_trace::log("RCVD", || match packet::parse_ipv4(data) {
+            Some(ip) => crate::packet_trace::describe_received(
+                packet::IPPROTO_TCP,
+                data,
+                IpAddr::V4(ip.src),
+            ),
+            None => format!("{} bytes", data.len()),
+        });
     }
 }
 

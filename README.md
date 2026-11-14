@@ -21,7 +21,7 @@ no external binaries.
 | Timing templates `-T0`…`-T5`, `--scan-delay`, `--min-rate`, `--host-timeout`, `--stats-every` | ✅ |
 | Targets: IPv4 and IPv6 addresses, CIDR, `a.b.c.X-Y` ranges, `fe80::1%eth0`, hostnames (`-6` for their IPv6 address) | ✅ |
 | nmap-style `-p` port specs with `T:`/`U:`, top ports, `-F`, `--exclude-ports`, shuffled port order (`-r` keeps it) | ✅ |
-| Table, JSON, nmap-style XML and grepable output, `--reason`, `--open` | ✅ |
+| Table, JSON, nmap-style XML and grepable output, `--reason`, `--open`, `--packet-trace` | ✅ |
 | Report files `-oN`, `-oX`, `-oG`, `-oJ`, `-oA`; target lists `-iL`; `--exclude`, `--excludefile`; progress with `-v` | ✅ |
 | Service and version detection, `-sV`, with our own probes and rules | ✅ |
 | OS detection, `-O`, from SYN-ACK traits with our own signatures (Linux, root; IPv4 only) | ✅ |
@@ -78,7 +78,19 @@ sudo ./target/release/feroprobe -sn 2001:db8::/120 fe80::1%eth0
 # that only accept scanner="nmap"; a comment still names FeroProbe.
 ```
 
-Run `feroprobe --help` for all options (timeout, concurrency, packet rate, retries).
+Run `feroprobe --help` (or `feroprobe` alone) for all options, on one page
+laid out like nmap's.
+
+To see what FeroProbe actually sends, add `--packet-trace`. Like nmap's, it
+prints one line per probe and per answer on standard output:
+
+```
+SENT (0.0005s) ICMP [10.0.0.2 > 10.0.0.5 Echo request (type=8/code=0) id=7996 seq=0]
+RCVD (0.0007s) ICMP [10.0.0.5 > 10.0.0.2 Echo reply (type=0/code=0) id=7996 seq=0] ttl=64
+CONN (0.0006s) TCP localhost > 10.0.0.5:443 => Connection refused
+SENT (0.0543s) TCP 10.0.0.2:48100 > 10.0.0.5:22 S seq=2448842408 win=1024
+RCVD (0.0545s) TCP 10.0.0.5:22 > 10.0.0.2:48100 SA seq=1290442 win=64240 ttl=64
+```
 
 Example output:
 

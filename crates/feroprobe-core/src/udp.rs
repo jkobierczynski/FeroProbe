@@ -164,8 +164,12 @@ pub async fn probe_udp(addr: SocketAddr, cfg: &ScanConfig) -> io::Result<PortRes
         if let Err(e) = sock.send(payload).await {
             return classify(e, None);
         }
+        crate::packet_trace::log("SENT", || {
+            format!("UDP localhost > {addr} len={}", payload.len())
+        });
         match tokio::time::timeout(cfg.timeout, sock.recv(&mut buf)).await {
-            Ok(Ok(_)) => {
+            Ok(Ok(n)) => {
+                crate::packet_trace::log("RCVD", || format!("UDP {addr} > localhost len={n}"));
                 return Ok(result(
                     PortState::Open,
                     reason::UDP_RESPONSE,
@@ -179,7 +183,15 @@ pub async fn probe_udp(addr: SocketAddr, cfg: &ScanConfig) -> io::Result<PortRes
                     Some(elapsed_ms(start)),
                 ));
             }
-            Ok(Err(e)) => return classify(e, Some(elapsed_ms(start))),
+            Ok(Err(e)) => {
+                // The kernel reports an ICMP error for the datagram this way.
+                crate::packet_trace::log("RCVD", || {
+                    let text = e.to_string();
+                    let text = text.split(" (os error").next().unwrap_or(&text);
+                    format!("UDP {addr} => {text}")
+                });
+                return classify(e, Some(elapsed_ms(start)));
+            }
             Err(_) => continue,
         }
     }

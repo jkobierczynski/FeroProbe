@@ -24,6 +24,7 @@ pub mod netif;
 pub mod os;
 pub mod oui;
 pub mod packet;
+pub mod packet_trace;
 pub mod ports;
 pub mod progress;
 pub mod raw;
