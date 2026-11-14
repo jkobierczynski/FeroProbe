@@ -86,16 +86,35 @@ fn read_name(buf: &[u8], mut pos: usize) -> Option<(String, usize)> {
     None
 }
 
-/// The first PTR name in a DNS response to the query with `id`, if the
-/// server found one.
-pub fn parse_ptr_response(buf: &[u8], id: u16) -> Option<String> {
-    if buf.len() < 12 || u16::from_be_bytes([buf[0], buf[1]]) != id {
-        return None;
+/// What a DNS server said about a PTR query.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PtrAnswer {
+    /// The address's name.
+    Name(String),
+    /// A final answer without a name: no such name (NXDOMAIN), or no PTR
+    /// record for it.
+    NoName,
+    /// No usable answer (a server failure, a refusal, a malformed or
+    /// mismatched message): another server may do better.
+    Retry,
+}
+
+/// Read a DNS response to the PTR query with `id`.
+pub fn parse_ptr_response(buf: &[u8], id: u16) -> PtrAnswer {
+    if buf.len() < 12 || u16::from_be_bytes([buf[0], buf[1]]) != id || buf[2] & 0x80 == 0 {
+        return PtrAnswer::Retry;
     }
-    // A response (QR set) without an error (RCODE 0).
-    if buf[2] & 0x80 == 0 || buf[3] & 0x0f != 0 {
-        return None;
+    match buf[3] & 0x0f {
+        0 => {}
+        3 => return PtrAnswer::NoName,
+        // SERVFAIL, NOTIMP, REFUSED and the rest say nothing about the name.
+        _ => return PtrAnswer::Retry,
     }
+    first_ptr(buf).unwrap_or(PtrAnswer::Retry)
+}
+
+/// The first PTR record of a successful response; `None` if malformed.
+fn first_ptr(buf: &[u8]) -> Option<PtrAnswer> {
     let questions = u16::from_be_bytes([buf[4], buf[5]]);
     let answers = u16::from_be_bytes([buf[6], buf[7]]);
     let mut pos = 12;
@@ -110,40 +129,57 @@ pub fn parse_ptr_response(buf: &[u8], id: u16) -> Option<String> {
         let data = pos + 10;
         if kind == 12 {
             let (name, _) = read_name(buf, data)?;
-            return (!name.is_empty()).then_some(name);
+            return Some(if name.is_empty() {
+                PtrAnswer::NoName
+            } else {
+                PtrAnswer::Name(name)
+            });
         }
         pos = data + len;
     }
-    None
+    Some(PtrAnswer::NoName)
 }
 
-/// Ask `servers` in turn for `ip`'s PTR record, retrying per `cfg`.
+/// Ask one server for the PTR record `name`, waiting up to `cfg.timeout`.
+async fn ask(server: SocketAddr, name: &str, id: u16, cfg: &ScanConfig) -> PtrAnswer {
+    let bind: SocketAddr = if server.is_ipv4() {
+        (std::net::Ipv4Addr::UNSPECIFIED, 0).into()
+    } else {
+        (std::net::Ipv6Addr::UNSPECIFIED, 0).into()
+    };
+    let Ok(sock) = UdpSocket::bind(bind).await else {
+        return PtrAnswer::Retry;
+    };
+    if sock.connect(server).await.is_err() || sock.send(&ptr_query(id, name)).await.is_err() {
+        return PtrAnswer::Retry;
+    }
+    let mut buf = [0u8; 1500];
+    let deadline = tokio::time::Instant::now() + cfg.timeout;
+    // Skip stray datagrams until the matching answer or the timeout.
+    while let Ok(Ok(n)) = tokio::time::timeout_at(deadline, sock.recv(&mut buf)).await {
+        if n >= 2 && u16::from_be_bytes([buf[0], buf[1]]) == id {
+            return parse_ptr_response(&buf[..n], id);
+        }
+    }
+    PtrAnswer::Retry
+}
+
+/// Ask `servers` for `ip`'s PTR record: every server in turn, for
+/// `cfg.retries + 1` rounds, until one gives a final answer.
 async fn query_servers(ip: IpAddr, servers: &[SocketAddr], cfg: &ScanConfig) -> Option<String> {
     let name = ptr_name(ip);
     let seed = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.subsec_nanos());
-    for attempt in 0..=cfg.retries as usize {
-        let server = servers[attempt % servers.len()];
-        let id = (seed as u16) ^ (attempt as u16).wrapping_mul(0x9e37);
-        let bind: SocketAddr = if server.is_ipv4() {
-            "0.0.0.0:0".parse().unwrap()
-        } else {
-            "[::]:0".parse().unwrap()
-        };
-        let Ok(sock) = UdpSocket::bind(bind).await else {
-            continue;
-        };
-        if sock.connect(server).await.is_err() || sock.send(&ptr_query(id, &name)).await.is_err() {
-            continue;
-        }
-        let mut buf = [0u8; 1500];
-        let deadline = tokio::time::Instant::now() + cfg.timeout;
-        // Skip stray datagrams until the matching answer or the timeout.
-        while let Ok(Ok(n)) = tokio::time::timeout_at(deadline, sock.recv(&mut buf)).await {
-            if n >= 2 && u16::from_be_bytes([buf[0], buf[1]]) == id {
-                // An answer without a PTR record is final: the name doesn't exist.
-                return parse_ptr_response(&buf[..n], id);
+        .map_or(0, |d| d.subsec_nanos()) as u16;
+    let mut attempt: u16 = 0;
+    for _ in 0..=cfg.retries {
+        for &server in servers {
+            let id = seed ^ attempt.wrapping_mul(0x9e37);
+            attempt = attempt.wrapping_add(1);
+            match ask(server, &name, id, cfg).await {
+                PtrAnswer::Name(n) => return Some(n),
+                PtrAnswer::NoName => return None,
+                PtrAnswer::Retry => {}
             }
         }
     }
@@ -233,23 +269,31 @@ mod tests {
         let web = b"\x03web\x07example\x00".to_vec();
         let r = response(&q, 0, &[(5, b"\x01x\x00".to_vec()), (12, web)]);
         assert_eq!(
-            parse_ptr_response(&r, 0xbeef).as_deref(),
-            Some("web.example")
+            parse_ptr_response(&r, 0xbeef),
+            PtrAnswer::Name("web.example".into())
         );
         // A label plus a compression pointer back to the question name.
         let r = response(&q, 0, &[(12, vec![4, b'm', b'a', b'i', b'l', 0xc0, 12])]);
         assert_eq!(
-            parse_ptr_response(&r, 0xbeef).as_deref(),
-            Some("mail.10.2.0.192.in-addr.arpa")
+            parse_ptr_response(&r, 0xbeef),
+            PtrAnswer::Name("mail.10.2.0.192.in-addr.arpa".into())
         );
 
         // Wrong id, NXDOMAIN, no PTR record, truncated: no name.
         let r = response(&q, 0, &[(12, b"\x01a\x00".to_vec())]);
-        assert_eq!(parse_ptr_response(&r, 0xbeef).as_deref(), Some("a"));
-        assert_eq!(parse_ptr_response(&r, 0x1234), None);
-        assert_eq!(parse_ptr_response(&response(&q, 3, &[]), 0xbeef), None);
-        assert_eq!(parse_ptr_response(&response(&q, 0, &[]), 0xbeef), None);
-        assert_eq!(parse_ptr_response(&r[..r.len() - 2], 0xbeef), None);
+        assert_eq!(parse_ptr_response(&r, 0xbeef), PtrAnswer::Name("a".into()));
+        assert_eq!(parse_ptr_response(&r, 0x1234), PtrAnswer::Retry);
+        assert_eq!(
+            parse_ptr_response(&r[..r.len() - 2], 0xbeef),
+            PtrAnswer::Retry
+        );
+        // NXDOMAIN and an answer without a PTR record are final; a server
+        // failure or a refusal is not.
+        let rcode = |code| parse_ptr_response(&response(&q, code, &[]), 0xbeef);
+        assert_eq!(rcode(3), PtrAnswer::NoName);
+        assert_eq!(rcode(0), PtrAnswer::NoName);
+        assert_eq!(rcode(2), PtrAnswer::Retry);
+        assert_eq!(rcode(5), PtrAnswer::Retry);
     }
 
     #[test]
@@ -259,27 +303,72 @@ mod tests {
         // Point the answer's data at itself.
         let at = r.len() - 2;
         r[at + 1] = at as u8;
-        assert_eq!(parse_ptr_response(&r, 1), None);
+        assert_eq!(parse_ptr_response(&r, 1), PtrAnswer::Retry);
+    }
+
+    /// A DNS server on localhost that answers its first `count` queries
+    /// with `rcode` and `answer` (a PTR name, if any).
+    async fn server(
+        count: usize,
+        rcode: u8,
+        answer: Option<&'static [u8]>,
+    ) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+        let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr = sock.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            let mut buf = [0u8; 512];
+            for _ in 0..count {
+                let (n, from) = sock.recv_from(&mut buf).await.unwrap();
+                let records: Vec<(u16, Vec<u8>)> =
+                    answer.iter().map(|a| (12, a.to_vec())).collect();
+                let r = response(&buf[..n], rcode, &records);
+                sock.send_to(&r, from).await.unwrap();
+            }
+        });
+        (addr, task)
+    }
+
+    fn cfg(timeout_ms: u64, retries: u32) -> ScanConfig {
+        ScanConfig {
+            timeout: std::time::Duration::from_millis(timeout_ms),
+            retries,
+            ..Default::default()
+        }
     }
 
     #[tokio::test]
     async fn servers_answer_ptr_queries() {
-        // A one-shot DNS server on localhost that names every address.
-        let server = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let addr = server.local_addr().unwrap();
-        let task = tokio::spawn(async move {
-            let mut buf = [0u8; 512];
-            let (n, from) = server.recv_from(&mut buf).await.unwrap();
-            let r = response(&buf[..n], 0, &[(12, b"\x04host\x04test\x00".to_vec())]);
-            server.send_to(&r, from).await.unwrap();
-        });
-        let cfg = ScanConfig {
-            timeout: std::time::Duration::from_secs(5),
-            ..Default::default()
-        };
+        let (addr, task) = server(1, 0, Some(b"\x04host\x04test\x00")).await;
         let ip: IpAddr = "192.0.2.7".parse().unwrap();
-        let names = reverse_lookup(&[ip, ip], &[addr], &cfg).await.unwrap();
+        let names = reverse_lookup(&[ip, ip], &[addr], &cfg(5000, 0))
+            .await
+            .unwrap();
         assert_eq!(names.get(&ip).map(String::as_str), Some("host.test"));
         task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn failing_and_silent_servers_hand_over_to_the_next() {
+        let ip: IpAddr = "192.0.2.8".parse().unwrap();
+        // One server fails, one never answers, the last knows the name: a
+        // single round (no retries) still reaches it.
+        let (failing, t1) = server(1, 2, None).await;
+        let silent = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let (good, t2) = server(1, 0, Some(b"\x02ok\x00")).await;
+        let servers = [failing, silent.local_addr().unwrap(), good];
+        let names = reverse_lookup(&[ip], &servers, &cfg(300, 0)).await.unwrap();
+        assert_eq!(names.get(&ip).map(String::as_str), Some("ok"));
+        t1.await.unwrap();
+        t2.await.unwrap();
+
+        // NXDOMAIN is final: the second server is never asked.
+        let (nx, t3) = server(1, 3, None).await;
+        let (unasked, t4) = server(1, 0, Some(b"\x02no\x00")).await;
+        let names = reverse_lookup(&[ip], &[nx, unasked], &cfg(300, 0))
+            .await
+            .unwrap();
+        assert!(names.is_empty(), "{names:?}");
+        t3.await.unwrap();
+        t4.abort();
     }
 }
