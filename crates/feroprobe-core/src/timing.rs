@@ -142,8 +142,10 @@ static LAST_START: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mut
 /// can never end up going together with the next one, and a pause cannot be
 /// made up with a burst.
 fn try_start(delay: Duration) -> Option<Duration> {
-    let now = std::time::Instant::now();
     let mut last = LAST_START.lock().unwrap_or_else(|e| e.into_inner());
+    // Read the clock under the lock, so the recorded start is the moment
+    // this probe was admitted.
+    let now = std::time::Instant::now();
     match *last {
         Some(prev) if now < prev + delay => Some(prev + delay - now),
         _ => {
