@@ -25,7 +25,7 @@ no external binaries.
 ## Install
 
 Download a binary for Linux (x86_64, static musl, or arm64), macOS (Apple
-silicon) or Windows from the
+silicon or Intel) or Windows (x86_64) from the
 [releases page](https://github.com/jkobierczynski/FeroProbe/releases), or build
 it:
 
@@ -221,7 +221,8 @@ connect scan takes about 18 ms (about 55,000 ports per second).
 ## Releases
 
 Pushing a tag such as `v0.2.0` runs `.github/workflows/release.yml`, which
-builds the binaries above, smoke-tests each one, and publishes them with
+builds the binaries above, smoke-tests each one (the Intel macOS build, which
+is cross-compiled, gets an architecture check instead), and publishes them with
 SHA-256 checksums as a GitHub release.
 
 ## Layout

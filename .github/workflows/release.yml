@@ -32,6 +32,10 @@ jobs:
             os: ubuntu-24.04-arm
           - target: aarch64-apple-darwin
             os: macos-latest
+          # Intel Macs: cross-built on the Apple silicon runner.
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            cross: true
           - target: x86_64-pc-windows-msvc
             os: windows-latest
     steps:
@@ -68,11 +72,21 @@ jobs:
           echo "ARCHIVE=$archive" >> "$GITHUB_ENV"
       # The binary must at least start on its own platform.
       - name: Smoke test
+        if: ${{ !matrix.cross }}
         shell: bash
         run: |
           bin="target/${{ matrix.target }}/release/feroprobe"
           "$bin" --version
           "$bin" -Pn -sT -p 1 127.0.0.1
+      # A cross-built binary can't run here: check it is built for the
+      # right CPU instead.
+      - name: Check architecture
+        if: ${{ matrix.cross }}
+        shell: bash
+        run: |
+          bin="target/${{ matrix.target }}/release/feroprobe"
+          file "$bin"
+          lipo -archs "$bin" | grep -qx x86_64
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.target }}
