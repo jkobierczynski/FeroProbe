@@ -197,6 +197,8 @@ impl ScanConfig {
     }
 
     /// An error for a scan cut short by the deadline.
+    // Only the raw-socket scans, which are Linux only, stop at the deadline.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) fn timed_out() -> std::io::Error {
         std::io::Error::new(std::io::ErrorKind::TimedOut, "host timeout")
     }
