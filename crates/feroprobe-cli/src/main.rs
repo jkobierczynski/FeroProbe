@@ -479,7 +479,7 @@ async fn main() -> Result<()> {
     }
     if trace {
         scan_types.push("traceroute");
-        traceroute(&mut hosts, &cfg)
+        traceroute(&mut hosts, &cfg, !plan.discovery)
             .await
             .context("traceroute failed")?;
     }

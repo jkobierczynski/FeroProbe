@@ -103,11 +103,17 @@ fn build_trace(port: u16, answers: &[HopAnswer]) -> Trace {
 }
 
 /// Trace the route to every host that is up, and store it in `trace`.
-pub async fn traceroute(hosts: &mut [HostResult], cfg: &ScanConfig) -> io::Result<()> {
+/// With `assume_up` (`-Pn`), every host is traced, even one that never
+/// answered the scan: routers on the way may still answer.
+pub async fn traceroute(
+    hosts: &mut [HostResult],
+    cfg: &ScanConfig,
+    assume_up: bool,
+) -> io::Result<()> {
     let jobs: Vec<(usize, IpAddr, u16)> = hosts
         .iter()
         .enumerate()
-        .filter(|(_, h)| h.is_up())
+        .filter(|(_, h)| assume_up || h.is_up())
         .map(|(i, h)| (i, h.addr, trace_port(h)))
         .collect();
     if jobs.is_empty() {
@@ -157,8 +163,44 @@ mod imp {
     use crate::raw::{Pacer, Rng, raw_socket_in, receive_loop, send_with_backoff, source_addr_for};
     use crate::target::socket_addr;
 
-    /// Job index, TTL, who answered, whether it was the host, when.
-    type Raw = (usize, u8, IpAddr, bool, Instant);
+    /// Job index, TTL, round, who answered, whether it was the host, when.
+    type Raw = (usize, u8, u32, IpAddr, bool, Instant);
+
+    /// The sequence number of round `r`'s probes, so a late answer to an
+    /// earlier round is timed against that round's send.
+    fn round_seq(cookie: u32, r: u32) -> u32 {
+        cookie.wrapping_add(r << 24)
+    }
+
+    /// Which round a quoted or acknowledged sequence number belongs to.
+    fn round_of(cookie: u32, seq: u32, rounds: u32) -> Option<u32> {
+        let d = seq.wrapping_sub(cookie);
+        (d & 0x00ff_ffff == 0 && d >> 24 < rounds).then_some(d >> 24)
+    }
+
+    /// Sockets for one address family: send, TCP receive, ICMP receive.
+    type FamilySockets = (Socket, Socket, Socket);
+
+    fn open_family(v6: bool) -> io::Result<Option<FamilySockets>> {
+        let domain = if v6 { Domain::IPV6 } else { Domain::IPV4 };
+        let send = match raw_socket_in(domain, SockProto::TCP) {
+            Ok(s) => s,
+            // No IPv6 here: those hosts get an empty trace.
+            Err(e) if v6 && e.raw_os_error() == Some(libc::EAFNOSUPPORT) => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        let tcp = raw_socket_in(domain, SockProto::TCP)?;
+        let icmp_proto = if v6 {
+            SockProto::ICMPV6
+        } else {
+            SockProto::ICMPV4
+        };
+        let icmp = raw_socket_in(domain, icmp_proto)?;
+        for sock in [&tcp, &icmp] {
+            sock.set_read_timeout(Some(Duration::from_millis(50)))?;
+        }
+        Ok(Some((send, tcp, icmp)))
+    }
 
     pub(super) fn trace_blocking(
         jobs: &[(usize, IpAddr, u16)],
@@ -174,6 +216,7 @@ mod imp {
         // Source ports base+1 ..= base+MAX_HOPS stand for TTLs 1 ..= MAX_HOPS.
         let base = 40000 + (rng.next_u32() % 20000) as u16;
         let cookie = rng.next_u32();
+        let rounds = cfg.retries.saturating_add(1).min(256);
         let ttl_of = move |sport: u16| -> Option<u8> {
             let ttl = sport.checked_sub(base)?;
             (1..=u16::from(MAX_HOPS))
@@ -181,32 +224,33 @@ mod imp {
                 .then_some(ttl as u8)
         };
 
+        // Everything that can fail happens before any receiver starts, so
+        // an error never leaves a thread running.
+        let mut families: [Option<FamilySockets>; 2] = [None, None];
+        for (slot, v6) in [false, true].into_iter().enumerate() {
+            if jobs.iter().any(|j| j.1.is_ipv6() == v6) {
+                families[slot] = open_family(v6)?;
+            }
+        }
+        let sources: Vec<Option<IpAddr>> = jobs
+            .iter()
+            .map(|j| match source_addr_for(j.1) {
+                Ok(a) => Ok(Some(a)),
+                Err(e) if is_network_error(&e) => Ok(None),
+                Err(e) => Err(e),
+            })
+            .collect::<io::Result<_>>()?;
+
         let stop = Arc::new(AtomicBool::new(false));
         let (tx, rx) = mpsc::channel::<Raw>();
         let mut send_socks: [Option<Socket>; 2] = [None, None];
         let mut receivers = Vec::new();
-        for (slot, v6) in [false, true].into_iter().enumerate() {
-            if !jobs.iter().any(|j| j.1.is_ipv6() == v6) {
+        for (slot, fam) in families.into_iter().enumerate() {
+            let Some((send, tcp, icmp)) = fam else {
                 continue;
-            }
-            let domain = if v6 { Domain::IPV6 } else { Domain::IPV4 };
-            let send = match raw_socket_in(domain, SockProto::TCP) {
-                Ok(s) => s,
-                // No IPv6 here: those hosts get an empty trace.
-                Err(e) if v6 && e.raw_os_error() == Some(libc::EAFNOSUPPORT) => continue,
-                Err(e) => return Err(e),
             };
+            let v6 = slot == 1;
             send_socks[slot] = Some(send);
-            let tcp = raw_socket_in(domain, SockProto::TCP)?;
-            let icmp_proto = if v6 {
-                SockProto::ICMPV6
-            } else {
-                SockProto::ICMPV4
-            };
-            let icmp = raw_socket_in(domain, icmp_proto)?;
-            for sock in [&tcp, &icmp] {
-                sock.set_read_timeout(Some(Duration::from_millis(50)))?;
-            }
             // The host's own answers: SYN-ACK or reset to one of our ports.
             let (stop2, index2, tx2) = (Arc::clone(&stop), Arc::clone(&index), tx.clone());
             receivers.push(std::thread::spawn(move || {
@@ -224,10 +268,11 @@ mod imp {
                     let t = packet::parse_tcp(segment)?;
                     let answered = t.flags & (TCP_SYN | TCP_ACK) == TCP_SYN | TCP_ACK
                         || t.flags & TCP_RST != 0;
-                    if !answered || t.ack != cookie.wrapping_add(1) {
+                    if !answered {
                         return None;
                     }
-                    Some((*index2.get(&src)?, ttl_of(t.dport)?, src, true, at))
+                    let r = round_of(cookie, t.ack.wrapping_sub(1), rounds)?;
+                    Some((*index2.get(&src)?, ttl_of(t.dport)?, r, src, true, at))
                 });
             }));
             // Routers' (and the host's) ICMP errors quoting a probe.
@@ -235,27 +280,16 @@ mod imp {
             receivers.push(std::thread::spawn(move || {
                 receive_loop(icmp, &stop2, &tx2, |data, from, at| {
                     let e = packet::parse_icmp_tcp_error(data, v6)?;
-                    if e.seq != cookie {
-                        return None;
-                    }
+                    let r = round_of(cookie, e.seq, rounds)?;
                     let &j = index2.get(&e.dst)?;
                     let src = e.src.or_else(|| from.as_socket().map(|sa| sa.ip()))?;
-                    Some((j, ttl_of(e.sport)?, src, src == e.dst, at))
+                    Some((j, ttl_of(e.sport)?, r, src, src == e.dst, at))
                 });
             }));
         }
         drop(tx);
 
-        let sources: Vec<Option<IpAddr>> = jobs
-            .iter()
-            .map(|j| match source_addr_for(j.1) {
-                Ok(a) => Ok(Some(a)),
-                Err(e) if is_network_error(&e) => Ok(None),
-                Err(e) => Err(e),
-            })
-            .collect::<io::Result<_>>()?;
-
-        let mut sent_at: HashMap<(usize, u8), Instant> = HashMap::new();
+        let mut sent_at: HashMap<(usize, u8, u32), Instant> = HashMap::new();
         let mut first: HashMap<(usize, u8), Raw> = HashMap::new();
         let record = |first: &mut HashMap<(usize, u8), Raw>, a: Raw| {
             first.entry((a.0, a.1)).or_insert(a);
@@ -264,14 +298,15 @@ mod imp {
         let limit = |first: &HashMap<(usize, u8), Raw>, j: usize| -> u8 {
             first
                 .values()
-                .filter(|a| a.0 == j && a.3)
+                .filter(|a| a.0 == j && a.4)
                 .map(|a| a.1)
                 .min()
                 .unwrap_or(MAX_HOPS)
         };
 
         let outcome = (|| -> io::Result<()> {
-            for _round in 0..=cfg.retries {
+            for round in 0..rounds {
+                let seq = round_seq(cookie, round);
                 let mut pacer = Pacer::for_config(cfg);
                 let mut sent_any = false;
                 for (j, &(_, addr, port)) in jobs.iter().enumerate() {
@@ -295,8 +330,8 @@ mod imp {
                             sock.set_ttl_v4(u32::from(ttl))?;
                         }
                         let sport = base + u16::from(ttl);
-                        let pkt = packet::tcp_syn(src, addr, sport, port, cookie);
-                        sent_at.entry((j, ttl)).or_insert_with(Instant::now);
+                        let pkt = packet::tcp_syn(src, addr, sport, port, seq);
+                        sent_at.insert((j, ttl, round), Instant::now());
                         sent_any = true;
                         match send_with_backoff(sock, &pkt, socket_addr(addr, 0)) {
                             Ok(()) => {}
@@ -330,12 +365,12 @@ mod imp {
 
         Ok(first
             .into_values()
-            .map(|(j, ttl, from, reached, at)| HopAnswer {
+            .map(|(j, ttl, round, from, reached, at)| HopAnswer {
                 host: j,
                 ttl,
                 from,
                 reached,
-                rtt_ms: sent_at.get(&(j, ttl)).map(|s| {
+                rtt_ms: sent_at.get(&(j, ttl, round)).map(|s| {
                     (at.saturating_duration_since(*s).as_secs_f64() * 1_000_000.0).round() / 1000.0
                 }),
             })
@@ -346,6 +381,16 @@ mod imp {
     mod tests {
         use super::*;
         use crate::raw::raw_sockets_available;
+
+        #[test]
+        fn rounds_have_their_own_sequence_numbers() {
+            let cookie = 0xffff_fff0;
+            for r in 0..3 {
+                assert_eq!(round_of(cookie, round_seq(cookie, r), 3), Some(r));
+            }
+            assert_eq!(round_of(cookie, round_seq(cookie, 3), 3), None);
+            assert_eq!(round_of(cookie, cookie.wrapping_add(1), 3), None);
+        }
 
         #[test]
         fn trace_localhost_is_one_hop() {

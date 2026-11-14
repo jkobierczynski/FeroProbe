@@ -162,7 +162,8 @@ HOP RTT        ADDRESS
 
 A hop that never answers shows `...`. The route is in the JSON output under
 `trace`, and in the XML as nmap's `<trace>` element. It needs raw sockets:
-Linux, root or `CAP_NET_RAW`. It also works with `-sn`, probing port 80.
+Linux, root or `CAP_NET_RAW`. It also works with `-sn`, probing port 80. With
+`-Pn` every target is traced, even one that never answered the scan.
 
 `-A` turns on `-sV`, `-O` and `--traceroute` together. Without raw-socket
 privileges it runs only `-sV` and prints a warning.
