@@ -41,7 +41,7 @@ fn unix_secs(t: SystemTime) -> u64 {
 }
 
 /// `Fri Nov 13 17:45:14 2026 UTC`, like nmap's `startstr` but in UTC.
-fn time_str(t: SystemTime) -> String {
+pub(crate) fn time_str(t: SystemTime) -> String {
     let secs = unix_secs(t);
     let days = (secs / 86_400) as i64;
     let rem = secs % 86_400;
@@ -285,7 +285,11 @@ pub fn render(hosts: &[HostResult], info: &RunInfo) -> String {
         );
     }
     // nmap's DTD wants these two after scaninfo, before the hosts.
-    x.push_str("<verbose level=\"0\"/>\n<debugging level=\"0\"/>\n");
+    let _ = writeln!(
+        x,
+        "<verbose level=\"{}\"/>\n<debugging level=\"0\"/>",
+        info.verbosity
+    );
     let mut up = 0;
     for host in hosts.iter().filter(|h| reported(h, info)) {
         up += 1;
@@ -310,25 +314,7 @@ mod tests {
     use feroprobe_core::ServiceInfo;
     use std::time::Duration;
 
-    fn info() -> RunInfo {
-        RunInfo {
-            args: "feroprobe -sV <x> & \"y\"".into(),
-            start: UNIX_EPOCH + Duration::from_secs(1_794_591_914),
-            scan_types: vec!["tcp-connect", "version"],
-            tcp_ports: vec![22, 80, 81, 82, 443],
-            udp_ports: vec![],
-            ports_per_host: 5,
-            elapsed: Duration::from_millis(1500),
-            only_open: false,
-            show_reason: false,
-            show_version: true,
-            show_os: false,
-            show_trace: false,
-            assume_up: false,
-            ping_only: false,
-            nmap_label: false,
-        }
-    }
+    use crate::output::tests::info;
 
     fn port(port: u16, state: PortState, service: Option<ServiceInfo>) -> PortResult {
         PortResult {

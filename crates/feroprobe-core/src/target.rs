@@ -174,6 +174,69 @@ pub async fn resolve_targets_with<S: AsRef<str>>(
     Ok(out)
 }
 
+/// Hosts to leave out of a scan, like nmap's `--exclude`: addresses, CIDR
+/// blocks (of any size), `a.b.c.X-Y` ranges and hostnames.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Exclusions {
+    nets: Vec<IpNet>,
+    /// Hostnames as given, lowercased, to also match targets given by name.
+    names: Vec<String>,
+}
+
+impl Exclusions {
+    /// Parse exclusion specs, resolving hostnames to their addresses (all
+    /// of them, so a name excludes the host whichever address a target used).
+    pub async fn parse<S: AsRef<str>>(specs: &[S]) -> Result<Self, Error> {
+        let mut ex = Self::default();
+        for spec in specs {
+            let spec = spec.as_ref().trim();
+            if spec.is_empty() {
+                continue;
+            }
+            let host = |ip: IpAddr| IpNet::from(ip);
+            if let Ok(ip) = spec.parse::<IpAddr>() {
+                ex.nets.push(host(ip));
+            } else if let Some((addr, _)) = spec.split_once('%') {
+                let ip: Ipv6Addr = addr.parse().map_err(|_| {
+                    Error::InvalidTarget(format!("'{addr}' is not an IPv6 address"))
+                })?;
+                ex.nets.push(host(IpAddr::V6(ip)));
+            } else if spec.contains('/') {
+                let net: IpNet = spec.parse().map_err(|_| {
+                    Error::InvalidTarget(format!("'{spec}' is not a valid CIDR block"))
+                })?;
+                ex.nets.push(net.trunc());
+            } else if let Some(addrs) = parse_octet_range(spec)? {
+                ex.nets.extend(addrs.into_iter().map(host));
+            } else if is_valid_hostname(spec) {
+                let found = tokio::net::lookup_host((spec, 0))
+                    .await
+                    .map_err(|e| Error::Resolve(spec.to_string(), e.to_string()))?;
+                ex.nets.extend(found.map(|sa| host(sa.ip())));
+                ex.names.push(spec.to_ascii_lowercase());
+            } else {
+                return Err(Error::InvalidTarget(format!(
+                    "exclude '{spec}' is not an address, CIDR, range or hostname"
+                )));
+            }
+        }
+        Ok(ex)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.nets.is_empty() && self.names.is_empty()
+    }
+
+    /// Whether `target` is excluded, by address or by the name it was given as.
+    pub fn excludes(&self, target: &Target) -> bool {
+        self.nets.iter().any(|n| n.contains(&target.addr))
+            || target
+                .hostname
+                .as_ref()
+                .is_some_and(|h| self.names.contains(&h.to_ascii_lowercase()))
+    }
+}
+
 /// Resolve a hostname to a single address: IPv4 first like nmap, or only
 /// IPv6 with [`IpVersion::V6`]. A link-local answer comes with the
 /// interface it was found on.
@@ -427,5 +490,34 @@ mod tests {
             t.iter().map(|t| t.addr.to_string()).collect::<Vec<_>>(),
             ["127.0.0.1", "127.0.0.0"]
         );
+    }
+
+    #[tokio::test]
+    async fn exclusions_by_address_block_range_and_name() {
+        let ex = Exclusions::parse(&[
+            "10.0.0.5",
+            "10.1.0.0/16",
+            "10.2.0.1-3",
+            "192.168.0.0/8",
+            "localhost",
+        ])
+        .await
+        .unwrap();
+        let t = |a: &str| Target::new(a.parse().unwrap());
+        assert!(ex.excludes(&t("10.0.0.5")));
+        assert!(!ex.excludes(&t("10.0.0.6")));
+        assert!(ex.excludes(&t("10.1.255.255")));
+        assert!(ex.excludes(&t("10.2.0.3")));
+        assert!(!ex.excludes(&t("10.2.0.4")));
+        // A /8 written with host bits set still covers the whole block.
+        assert!(ex.excludes(&t("192.1.2.3")));
+        assert!(ex.excludes(&t("127.0.0.1")));
+        let named = Target {
+            addr: "203.0.113.9".parse().unwrap(),
+            hostname: Some("LocalHost".into()),
+        };
+        assert!(ex.excludes(&named));
+        assert!(Exclusions::parse(&["not a host!"]).await.is_err());
+        assert!(Exclusions::parse(&[" "]).await.unwrap().is_empty());
     }
 }

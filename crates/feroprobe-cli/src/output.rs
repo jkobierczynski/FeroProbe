@@ -1,6 +1,14 @@
 //! Rendering scan results.
 
+use std::fmt::Write;
 use std::time::{Duration, SystemTime};
+
+/// `writeln!` into a String, which cannot fail.
+macro_rules! w {
+    ($($t:tt)*) => {{
+        let _ = writeln!($($t)*);
+    }};
+}
 
 use anyhow::Result;
 use feroprobe_core::{HostResult, PortResult, PortState, service_name};
@@ -34,6 +42,8 @@ pub struct RunInfo {
     pub ping_only: bool,
     /// `--nmap-label`: the XML report says `scanner="nmap"`.
     pub nmap_label: bool,
+    /// How many `-v` were given.
+    pub verbosity: u8,
 }
 
 pub(crate) fn is_openish(state: PortState) -> bool {
@@ -84,34 +94,37 @@ pub(crate) fn port_rows<'a>(
     (hidden, rows)
 }
 
-pub fn print_table(hosts: &[HostResult], info: &RunInfo) {
-    println!("Starting FeroProbe {}", env!("CARGO_PKG_VERSION"));
+/// The report in nmap's "normal" layout (stdout, `-oN`).
+pub fn render_table(hosts: &[HostResult], info: &RunInfo) -> String {
+    let mut s = String::new();
+    let out = &mut s;
+    w!(out, "Starting FeroProbe {}", env!("CARGO_PKG_VERSION"));
     let mut up = 0;
     for host in hosts.iter().filter(|h| reported(h, info)) {
         up += 1;
         match &host.hostname {
-            Some(name) => println!("\nScan report for {name} ({})", host.addr),
-            None => println!("\nScan report for {}", host.addr),
+            Some(name) => w!(out, "\nScan report for {name} ({})", host.addr),
+            None => w!(out, "\nScan report for {}", host.addr),
         }
         match (host.latency_ms, host.up_reason) {
-            (Some(ms), Some(why)) => println!("Host is up, {why} ({ms:.2} ms latency)."),
-            (None, Some(why)) => println!("Host is up, {why}."),
+            (Some(ms), Some(why)) => w!(out, "Host is up, {why} ({ms:.2} ms latency)."),
+            (None, Some(why)) => w!(out, "Host is up, {why}."),
             _ => {}
         }
         if let Some(mac) = &host.mac {
             match mac.vendor {
-                Some(v) => println!("MAC Address: {} ({v})", mac.addr),
-                None => println!("MAC Address: {} (Unknown)", mac.addr),
+                Some(v) => w!(out, "MAC Address: {} ({v})", mac.addr),
+                None => w!(out, "MAC Address: {} (Unknown)", mac.addr),
             }
         }
         if !info.ping_only {
-            print_ports(host, info);
+            print_ports(out, host, info);
         }
         if info.show_os {
-            print_os(host);
+            print_os(out, host);
         }
         if info.show_trace {
-            print_trace(host);
+            print_trace(out, host);
         }
     }
     let what = if info.ping_only {
@@ -119,27 +132,29 @@ pub fn print_table(hosts: &[HostResult], info: &RunInfo) {
     } else {
         format!(", {} port(s) each", info.ports_per_host)
     };
-    println!(
+    w!(
+        out,
         "\nFeroProbe done: {} host(s), {} up{what}, in {:.2}s",
         hosts.len(),
         up,
         info.elapsed.as_secs_f64()
     );
+    s
 }
 
 /// The port table for one host.
-fn print_ports(host: &HostResult, info: &RunInfo) {
+fn print_ports(out: &mut String, host: &HostResult, info: &RunInfo) {
     let (hidden, rows) = port_rows(host, info);
     if rows.is_empty() {
         match hidden {
-            _ if info.only_open => println!("No open ports found"),
-            Some((n, state)) => println!("All {n} scanned ports are {state}"),
+            _ if info.only_open => w!(out, "No open ports found"),
+            Some((n, state)) => w!(out, "All {n} scanned ports are {state}"),
             None => {}
         }
         return;
     }
     if let (false, Some((n, state))) = (info.only_open, hidden) {
-        println!("Not shown: {n} {state} ports");
+        w!(out, "Not shown: {n} {state} ports");
     }
     let mut header = vec![format!("{:<10} {:<14} {:<14}", "PORT", "STATE", "SERVICE")];
     if info.show_reason {
@@ -148,7 +163,7 @@ fn print_ports(host: &HostResult, info: &RunInfo) {
     if info.show_version {
         header.push("VERSION".into());
     }
-    println!("{}", header.join(" ").trim_end());
+    w!(out, "{}", header.join(" ").trim_end());
     let mut unrecognized = Vec::new();
     for p in &rows {
         let port = format!("{}/{}", p.port, p.protocol);
@@ -166,50 +181,56 @@ fn print_ports(host: &HostResult, info: &RunInfo) {
                 unrecognized.push(format!("{port}: \"{fp}\""));
             }
         }
-        println!("{}", line.join(" ").trim_end());
+        w!(out, "{}", line.join(" ").trim_end());
     }
     if !unrecognized.is_empty() {
-        println!("Unrecognized service replies:");
+        w!(out, "Unrecognized service replies:");
         for u in unrecognized {
-            println!("  {u}");
+            w!(out, "  {u}");
         }
     }
 }
 
 /// The OS guess for one host, after `-O`.
-fn print_os(host: &HostResult) {
+fn print_os(out: &mut String, host: &HostResult) {
     match &host.os {
         Some(os) => {
-            println!(
+            w!(
+                out,
                 "OS guess: {} ({}%), from {}/tcp",
-                os.name, os.accuracy, os.port
+                os.name,
+                os.accuracy,
+                os.port
             );
-            println!("OS fingerprint: {}", os.traits.fingerprint());
+            w!(out, "OS fingerprint: {}", os.traits.fingerprint());
             let hops = if os.distance == 1 { "hop" } else { "hops" };
-            println!("Network distance: {} {hops}", os.distance);
+            w!(out, "Network distance: {} {hops}", os.distance);
         }
-        None => println!("OS guess: none (needs an open TCP port that answers a SYN)"),
+        None => w!(
+            out,
+            "OS guess: none (needs an open TCP port that answers a SYN)"
+        ),
     }
 }
 
 /// The route to one host, after `--traceroute`, in nmap's layout.
-fn print_trace(host: &HostResult) {
+fn print_trace(out: &mut String, host: &HostResult) {
     let Some(t) = &host.trace else { return };
     if t.hops.is_empty() {
-        println!("TRACEROUTE: no hops answered");
+        w!(out, "TRACEROUTE: no hops answered");
         return;
     }
-    println!("TRACEROUTE (using port {}/{})", t.port, t.protocol);
-    println!("HOP RTT        ADDRESS");
+    w!(out, "TRACEROUTE (using port {}/{})", t.port, t.protocol);
+    w!(out, "HOP RTT        ADDRESS");
     for hop in &t.hops {
         let rtt = hop
             .rtt_ms
             .map_or_else(|| "...".to_string(), |ms| format!("{ms:.2} ms"));
         let addr = hop.addr.map_or_else(String::new, |a| a.to_string());
-        println!("{:<3} {rtt:<10} {addr}", hop.ttl);
+        w!(out, "{:<3} {rtt:<10} {addr}", hop.ttl);
     }
     if !t.reached {
-        println!("(the host itself did not answer)");
+        w!(out, "(the host itself did not answer)");
     }
 }
 
@@ -290,7 +311,8 @@ impl<'a> JsonPort<'a> {
     }
 }
 
-pub fn print_json(hosts: &[HostResult], info: &RunInfo) -> Result<()> {
+/// The report as JSON (`-o json`, `-oJ`).
+pub fn render_json(hosts: &[HostResult], info: &RunInfo) -> Result<String> {
     let report = JsonReport {
         scanner: "feroprobe",
         version: env!("CARGO_PKG_VERSION"),
@@ -313,6 +335,33 @@ pub fn print_json(hosts: &[HostResult], info: &RunInfo) -> Result<()> {
             })
             .collect(),
     };
-    println!("{}", serde_json::to_string_pretty(&report)?);
-    Ok(())
+    Ok(serde_json::to_string_pretty(&report)? + "\n")
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+    use std::time::UNIX_EPOCH;
+
+    /// A run description for renderer tests.
+    pub(crate) fn info() -> RunInfo {
+        RunInfo {
+            args: "feroprobe -sV <x> & \"y\"".into(),
+            start: UNIX_EPOCH + Duration::from_secs(1_794_591_914),
+            scan_types: vec!["tcp-connect", "version"],
+            tcp_ports: vec![22, 80, 81, 82, 443],
+            udp_ports: vec![],
+            ports_per_host: 5,
+            elapsed: Duration::from_millis(1500),
+            only_open: false,
+            show_reason: false,
+            show_version: true,
+            show_os: false,
+            show_trace: false,
+            assume_up: false,
+            ping_only: false,
+            nmap_label: false,
+            verbosity: 0,
+        }
+    }
 }
