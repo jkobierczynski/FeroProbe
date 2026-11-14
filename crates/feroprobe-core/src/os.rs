@@ -382,7 +382,7 @@ mod imp {
 
     use socket2::Protocol as SockProto;
 
-    use crate::raw::{Pacer, Rng, raw_socket, send_with_backoff, source_addr_for};
+    use crate::raw::{Pacer, Rng, raw_socket, send_with_backoff_until, source_addr_for};
 
     /// Send one option-rich SYN to each job's port and collect the SYN-ACKs,
     /// in job order. Unanswered probes are retried `cfg.retries` times.
@@ -467,7 +467,7 @@ mod imp {
                 if !pacer.wait_until(cfg.deadline) {
                     return Err(ScanConfig::timed_out());
                 }
-                send_with_backoff(&send_sock, &pkt, (addr, 0).into())?;
+                send_with_backoff_until(&send_sock, &pkt, (addr, 0).into(), cfg.deadline)?;
                 // Bounded, so constant inbound traffic can't stall sending.
                 // Whatever is left is read by the next drain or the wait.
                 let drain_until = Instant::now() + Duration::from_millis(10);
@@ -498,6 +498,10 @@ mod imp {
                     Err(e) if quiet(&e) => {}
                     Err(e) => return Err(e),
                 }
+            }
+            // The wait ended at the host deadline with probes unanswered.
+            if waiting > 0 && cfg.expired() {
+                return Err(ScanConfig::timed_out());
             }
         }
         Ok(found)

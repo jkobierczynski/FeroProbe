@@ -284,7 +284,9 @@ mod imp {
 
     use crate::connect::is_network_error;
     use crate::model::{PortResult, Protocol};
-    use crate::raw::{Pacer, Rng, raw_socket_in, receive_loop, send_with_backoff, source_addr_for};
+    use crate::raw::{
+        Pacer, Rng, raw_socket_in, receive_loop, send_with_backoff_until, source_addr_for,
+    };
     use crate::target::socket_addr;
 
     /// An answer seen by a receiver thread: host index, port, state,
@@ -472,14 +474,16 @@ mod imp {
                     // probe look like an ordinary connection attempt.
                     let sent = if scan.flags == TCP_SYN {
                         let pkt = packet::tcp_syn(src, addrs[h], sport, p, cookie);
-                        send_with_backoff(send_sock, &pkt, to)
+                        send_with_backoff_until(send_sock, &pkt, to, cfg.deadline)
                     } else {
                         let pkt =
                             packet::tcp_probe(src, addrs[h], sport, p, cookie, ack, scan.flags);
-                        send_with_backoff(send_sock, &pkt, to)
+                        send_with_backoff_until(send_sock, &pkt, to, cfg.deadline)
                     };
                     match sent {
                         Ok(()) => {}
+                        // The send gave up at the host deadline.
+                        Err(_) if cfg.expired() => return Err(ScanConfig::timed_out()),
                         Err(e) if is_network_error(&e) => {
                             results.entry((h, p)).or_insert(result(
                                 p,

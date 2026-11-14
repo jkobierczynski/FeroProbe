@@ -314,14 +314,33 @@ pub(crate) fn is_idle_read(e: &io::Error) -> bool {
 /// address with port 0, from [`crate::target::socket_addr`] so that a
 /// link-local IPv6 target keeps its interface.
 pub(crate) fn send_with_backoff(sock: &Socket, pkt: &[u8], to: SocketAddr) -> io::Result<()> {
+    send_with_backoff_until(sock, pkt, to, None)
+}
+
+/// [`send_with_backoff`] that stops retrying at `deadline` (the host
+/// deadline from `--host-timeout`) with a `TimedOut` error, so a full send
+/// buffer cannot carry a probe past it.
+pub(crate) fn send_with_backoff_until(
+    sock: &Socket,
+    pkt: &[u8],
+    to: SocketAddr,
+    deadline: Option<Instant>,
+) -> io::Result<()> {
     let addr = to.into();
     let mut attempts = 0;
     loop {
+        if deadline.is_some_and(|d| Instant::now() >= d) {
+            return Err(crate::model::ScanConfig::timed_out());
+        }
         match sock.send_to(pkt, &addr) {
             Ok(_) => return Ok(()),
             Err(e) if is_no_buffer_space(&e) && attempts < 50 => {
                 attempts += 1;
-                std::thread::sleep(Duration::from_millis(10));
+                let mut pause = Duration::from_millis(10);
+                if let Some(d) = deadline {
+                    pause = pause.min(d.saturating_duration_since(Instant::now()));
+                }
+                std::thread::sleep(pause);
             }
             Err(e) => return Err(e),
         }
@@ -342,6 +361,16 @@ fn is_no_buffer_space(e: &io::Error) -> bool {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn no_send_after_the_deadline() {
+        let sock = Socket::new(Domain::IPV4, Type::DGRAM, None).unwrap();
+        let to: SocketAddr = "127.0.0.1:9".parse().unwrap();
+        let past = Some(Instant::now() - Duration::from_millis(1));
+        let err = send_with_backoff_until(&sock, b"x", to, past).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+        assert!(send_with_backoff_until(&sock, b"x", to, None).is_ok());
+    }
 
     #[test]
     fn deadline_cuts_a_wait_short() {
