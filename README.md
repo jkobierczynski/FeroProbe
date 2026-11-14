@@ -159,8 +159,10 @@ scan type can run at a time (it can be combined with `-sU`).
 An ICMP unreachable error marks the port filtered in all of them, with the
 error as the reason (`host-unreach`, `admin-prohibited`, ...). FIN, NULL and
 Xmas rely on RFC 793 behaviour: Windows and some network devices reset every
-port, so every port looks closed. Most systems reset Maimon probes too, and
-only some report a window for `-sW`; Linux does neither. `-sA` is for mapping
+port, so every port looks closed. Most systems, Linux included, reset Maimon
+probes to open ports too, so `-sM` shows them closed. Only some systems put a
+non-zero window in the reset for `-sW`; Linux always sends zero, so `-sW`
+shows every port on Linux as closed. `-sA` is for mapping
 firewalls: "unfiltered" says a probe got through, not whether the port is open.
 
 `--scanflags` sends any flag combination instead, given as names run together
