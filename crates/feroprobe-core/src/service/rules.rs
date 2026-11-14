@@ -138,7 +138,7 @@ pub(super) const PROBES: &[Probe] = &[
             To: <sip:feroprobe.invalid>\r\n\
             Call-ID: feroprobe@feroprobe.invalid\r\nCSeq: 1 OPTIONS\r\n\
             Max-Forwards: 70\r\nContent-Length: 0\r\n\r\n",
-        ports: &[5060],
+        ports: &[5060, 5061],
     },
 ];
 
