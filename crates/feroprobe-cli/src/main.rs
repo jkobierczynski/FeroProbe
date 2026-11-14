@@ -848,6 +848,30 @@ fn port_lists(args: &Args) -> Result<PortLists> {
     Ok(lists)
 }
 
+/// Take the `--exclude-ports` ports out of the discovery probes, as nmap
+/// does, with nmap's warning for a probe type left without ports.
+fn exclude_ping_ports(probes: &mut PingProbes, ex: &PortLists) -> Vec<String> {
+    let had_tcp = !probes.syn.is_empty() || !probes.ack.is_empty();
+    let had_udp = !probes.udp.is_empty();
+    probes.syn.retain(|p| ex.tcp.binary_search(p).is_err());
+    probes.ack.retain(|p| ex.tcp.binary_search(p).is_err());
+    probes.udp.retain(|p| ex.udp.binary_search(p).is_err());
+    let mut warnings = Vec::new();
+    if had_tcp && probes.syn.is_empty() && probes.ack.is_empty() {
+        warnings.push(
+            "a TCP ping was asked for, but --exclude-ports removed all its ports; skipping it"
+                .to_string(),
+        );
+    }
+    if had_udp && probes.udp.is_empty() {
+        warnings.push(
+            "a UDP ping was asked for, but --exclude-ports removed all its ports; skipping it"
+                .to_string(),
+        );
+    }
+    warnings
+}
+
 /// Warnings for `-p` ports marked for a protocol this scan does not use,
 /// like nmap's: `-sS -p U:53` scans no UDP port.
 fn protocol_warnings(spec: &str, tcp_scan: bool, udp_scan: bool) -> Vec<String> {
@@ -1161,10 +1185,16 @@ async fn main() -> Result<()> {
     }
     let any_ipv6 = targets.iter().any(|t| t.addr.is_ipv6());
     let syn_ok = raw_sockets_available() && (!any_ipv6 || raw_ipv6_available());
-    let probes = ping_probes(&args.ping)?;
+    let mut probes = ping_probes(&args.ping)?.unwrap_or_default();
+    if let Some(spec) = &args.exclude_ports {
+        let ex = parse_port_lists(spec).context("reading --exclude-ports")?;
+        for w in exclude_ping_ports(&mut probes, &ex) {
+            eprintln!("Warning: {w}");
+        }
+    }
     let skip_discovery = args.ping.contains(&PingArg::Skip);
     let mut plan = plan(&args.scan, skip_discovery, syn_ok, args.scanflags.is_some())?;
-    let (os, trace) = aggressive(&mut plan, &args, raw_sockets_available())?;
+    let (mut os, trace) = aggressive(&mut plan, &args, raw_sockets_available())?;
     if os {
         if plan.ping_only {
             bail!("-O needs a port scan, so it cannot be combined with -sn");
@@ -1184,22 +1214,34 @@ async fn main() -> Result<()> {
     if trace && !raw_sockets_available() {
         bail!("--traceroute sends raw packets: run as root or grant CAP_NET_RAW");
     }
-    if !plan.ping_only {
-        if plan.tcp.is_some() && tcp_ports.is_empty() {
-            if udp_ports.is_empty() {
-                bail!("no ports to scan");
-            }
-            bail!("no TCP ports to scan (U: ports are only scanned with -sU)");
-        }
-        if plan.udp && udp_ports.is_empty() {
-            bail!("no UDP ports to scan (mark them with U:, as in -p U:53)");
-        }
-    }
     if !plan.ping_only
         && let Some(spec) = &args.ports
     {
         for w in protocol_warnings(spec, plan.tcp.is_some(), plan.udp) {
             eprintln!("Warning: {w}");
+        }
+    }
+    if !plan.ping_only {
+        // Like nmap: a scan type left without ports is skipped, not an error.
+        if plan.tcp.is_some() && tcp_ports.is_empty() {
+            eprintln!(
+                "Warning: a TCP scan was asked for, but no TCP ports were given; skipping it"
+            );
+            plan.tcp = None;
+        }
+        if plan.udp && udp_ports.is_empty() {
+            eprintln!(
+                "Warning: a UDP scan was asked for, but no UDP ports were given; skipping it"
+            );
+            plan.udp = false;
+        }
+        if plan.tcp.is_none() && !plan.udp {
+            plan.ping_only = true;
+            plan.version = false;
+            if os {
+                eprintln!("Warning: skipping OS detection, which needs a port scan");
+                os = false;
+            }
         }
     }
     // The order probes go out in; reports keep the sorted lists.
@@ -1235,7 +1277,6 @@ async fn main() -> Result<()> {
     });
     let mut hosts: Vec<HostResult> = if plan.discovery {
         let done = progress.phase("host discovery", targets.len());
-        let probes = probes.unwrap_or_default();
         let hosts = discover(&targets, &cfg, &probes)
             .await
             .context("host discovery failed")?;
@@ -1820,6 +1861,20 @@ mod tests {
         let l = lists(&["--top-ports", "10", "--exclude-ports", "T:80"]);
         assert!(!l.tcp.contains(&80) && l.tcp.len() == 9, "{:?}", l.tcp);
         assert!(port_lists(&args(&["--exclude-ports", "S:1"])).is_err());
+        // --exclude-ports also thins the discovery probes, like nmap.
+        let ex = parse_port_lists("80,U:53").unwrap();
+        let mut probes = PingProbes::default();
+        assert!(exclude_ping_ports(&mut probes, &ex).is_empty());
+        assert_eq!(probes.syn, vec![443]);
+        assert!(probes.echo);
+        let mut probes = PingProbes {
+            ack: vec![80],
+            udp: vec![53],
+            ..PingProbes::none()
+        };
+        let w = exclude_ping_ports(&mut probes, &ex);
+        assert_eq!(w.len(), 2);
+        assert!(w[0].contains("TCP") && w[1].contains("UDP"));
         assert_eq!(protocol_warnings("77,U:44,T:33", true, false).len(), 1);
         assert!(protocol_warnings("77,u:44", true, false)[0].contains("-sU"));
         assert!(protocol_warnings("77,U:44,T:33", true, true).is_empty());

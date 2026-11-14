@@ -281,13 +281,13 @@ feroprobe -v -oG - 192.168.1.0/24 | grep '/open/'
 | `-p 22,U:53,161,T:80` | `T:` and `U:` apply to the ports after them; ports before any prefix are both TCP and UDP. Here TCP gets 22 and 80, UDP gets 22, 53 and 161 |
 | `--top-ports N` | The N most common ports (by default 100 for TCP and 20 for UDP) |
 | `-F` | Fast: the 100 most common TCP and UDP ports |
-| `--exclude-ports SPEC` | Leave these out, written like `-p` |
+| `--exclude-ports SPEC` | Leave these out, written like `-p`. As in nmap, this also removes them from the discovery probes (`-PS`, `-PA`, `-PU` and the default TCP ping to 443 and 80) |
 | `-r` | Probe ports in order; by default the order is shuffled, like nmap's (reports are always sorted) |
 
-A scan whose protocol ends up with no ports is an error: `-sU -p T:80`
-scans no UDP port, and `-p U:53` needs `-sU`. When only some ports are
-left out, FeroProbe warns like nmap does: `-sS -p 77,U:44` scans TCP 77
-and prints a warning that `U:44` needs `-sU`.
+FeroProbe warns like nmap does when ports and scan types don't match:
+`-sS -p 77,U:44` scans TCP 77 and warns that `U:44` needs `-sU`. A scan
+type left without any ports is skipped with a warning, as in
+`-sS -sU -p U:53`, which only scans UDP.
 
 ### Host discovery and names
 
