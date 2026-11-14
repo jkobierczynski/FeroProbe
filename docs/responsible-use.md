@@ -32,7 +32,8 @@ development phase; this page says what is in place and what is planned.
 
 nmap has options whose main use is getting past intrusion detection or
 hiding who is scanning: packet fragmentation (`-f`, `--mtu`), decoys
-(`-D`), spoofed source addresses (`-S`) and similar. These are useful when
+(`-D`), spoofed source addresses (`-S`), the idle scan (`-sI`), which
+bounces probes off a third "zombie" host, and similar. These are useful when
 you test your own firewall or IDS, and that is the only use FeroProbe
 supports. When they are added, FeroProbe will only allow them against
 private address ranges (RFC 1918, carrier-grade NAT, loopback, link-local
