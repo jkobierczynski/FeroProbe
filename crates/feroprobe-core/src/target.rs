@@ -217,6 +217,10 @@ impl Exclusions {
                 ex.nets.push(net.trunc());
             } else if let Some(addrs) = parse_octet_range(spec)? {
                 ex.nets.extend(addrs.into_iter().map(host));
+            } else if spec.bytes().all(|b| b.is_ascii_digit()) {
+                return Err(Error::InvalidTarget(format!(
+                    "exclude '{spec}' is a number, not a host"
+                )));
             } else if is_valid_hostname(spec) {
                 let found = tokio::net::lookup_host((spec, 0))
                     .await
@@ -532,6 +536,7 @@ mod tests {
         };
         assert!(ex.excludes(&named));
         assert!(Exclusions::parse(&["not a host!"]).await.is_err());
+        assert!(Exclusions::parse(&["2222"]).await.is_err());
         assert!(Exclusions::parse(&[" "]).await.unwrap().is_empty());
     }
 }
