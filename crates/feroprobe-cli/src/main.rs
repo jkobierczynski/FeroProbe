@@ -1315,13 +1315,6 @@ async fn main() -> Result<()> {
     let any_ipv6 = targets.iter().any(|t| t.addr.is_ipv6());
     let syn_ok = raw_sockets_available() && (!any_ipv6 || raw_ipv6_available());
     let mut probes = ping_probes(&args.ping)?.unwrap_or_default();
-    if let Some(spec) = &args.exclude_ports {
-        // Discovery probes are TCP/UDP ports, so read the exclusions as ports.
-        let ex = parse_port_lists(spec, false, true).context("reading --exclude-ports")?;
-        for w in exclude_ping_ports(&mut probes, &ex) {
-            eprintln!("Warning: {w}");
-        }
-    }
     let skip_discovery = args.ping.contains(&PingArg::Skip);
     let mut plan = plan(&args.scan, skip_discovery, syn_ok, args.scanflags.is_some())?;
     let (mut os, trace) = aggressive(&mut plan, &args, raw_sockets_available())?;
@@ -1343,6 +1336,16 @@ async fn main() -> Result<()> {
     } = port_lists(&args, plan.ip_proto, port_scan)?;
     // -sO's "ports" are IP protocol numbers, 0-255 (validated on parse).
     let protocols: Vec<u8> = protocols.iter().map(|&p| p as u8).collect();
+    // Thin the discovery probes by --exclude-ports, read the same way the
+    // scan reads -p, so -sO's protocol exclusions (0 among them) parse
+    // rather than being rejected as ports. Only TCP/UDP ping ports match.
+    if let Some(spec) = &args.exclude_ports {
+        let ex =
+            parse_port_lists(spec, plan.ip_proto, port_scan).context("reading --exclude-ports")?;
+        for w in exclude_ping_ports(&mut probes, &ex) {
+            eprintln!("Warning: {w}");
+        }
+    }
     if plan.ping_only && !plan.discovery && !trace {
         bail!("-sn with -Pn would do nothing (add --traceroute to only trace the route)");
     }
@@ -2083,6 +2086,15 @@ mod tests {
         assert_eq!(proto("0").unwrap().protocols, vec![0]);
         assert_eq!(proto("-").unwrap().protocols.len(), 256);
         assert!(proto("300").is_err());
+        // --exclude-ports reads protocol numbers (0 included) under -sO,
+        // rather than rejecting 0 as an unscannable port.
+        let l = port_lists(
+            &args(&["-sO", "-p", "1,6", "--exclude-ports", "0,6"]),
+            true,
+            false,
+        )
+        .unwrap();
+        assert_eq!(l.protocols, vec![1]);
         // --exclude-ports also thins the discovery probes, like nmap.
         let ex = parse_port_lists("80,U:53", false, true).unwrap();
         let mut probes = PingProbes::default();
