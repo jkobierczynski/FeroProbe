@@ -54,6 +54,18 @@ own rules.
 ## Limits of these safeguards
 
 FeroProbe is open source under the GPLv3, so anyone can change the code and
-remove these checks. The safeguards do not stop a determined attacker.
-They make sure the official FeroProbe does not make abuse easier, and they
-make its traffic easy to recognize.
+remove these checks. With an AI assistant, stripping them out of a fork
+takes minutes, so they are a minor nuisance at most for someone set on
+abuse. They are not meant as a barrier.
+
+Their value lies elsewhere:
+
+- **No ready-made evasion kit.** The official FeroProbe does not hand out
+  tools for hiding a scan from the network's owner.
+- **Easy to spot by default.** Its traffic is easy for defenders to
+  recognize, which matters most for the many people who run it unchanged.
+- **Help for defenders.** The detection rules help blue teams spot scans
+  whoever wrote the scanner.
+
+Taken together, they are a statement of intent: FeroProbe is built for the
+people who defend networks.
