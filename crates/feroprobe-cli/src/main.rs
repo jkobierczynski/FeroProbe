@@ -412,16 +412,47 @@ impl Outputs {
         }
         // Two reports in one file would leave only the last one written.
         let mut seen = std::collections::HashSet::new();
-        for path in [&o.normal, &o.xml, &o.grep, &o.json]
-            .iter()
-            .flat_map(|v| v.iter())
-            .filter(|p| *p != "-")
-        {
+        for path in o.files() {
             if !seen.insert(report_key(path)) {
                 bail!("two reports would be written to {path}; give each its own file");
             }
         }
         Ok(o)
+    }
+
+    fn files(&self) -> impl Iterator<Item = &String> {
+        [&self.normal, &self.xml, &self.grep, &self.json]
+            .into_iter()
+            .flat_map(|v| v.iter())
+            .filter(|p| *p != "-")
+    }
+
+    /// Open (creating, not truncating) every report file before the scan,
+    /// as nmap does. This catches unwritable paths up front, and on Unix
+    /// compares the files themselves, so a link whose target doesn't exist
+    /// yet, or a hard link, can't make two reports share one file.
+    fn open_files(&self) -> Result<()> {
+        #[cfg(unix)]
+        let mut seen = std::collections::HashSet::new();
+        for path in self.files() {
+            let file = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(path)
+                .with_context(|| format!("opening {path}"))?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                let m = file.metadata().with_context(|| format!("reading {path}"))?;
+                if !seen.insert((m.dev(), m.ino())) {
+                    bail!("two reports would be written to {path}; give each its own file");
+                }
+            }
+            #[cfg(not(unix))]
+            drop(file);
+        }
+        Ok(())
     }
 
     /// Whether some -o option took over standard output.
@@ -596,6 +627,7 @@ fn merge(hosts: &mut [HostResult], scanned: &[usize], results: Vec<HostResult>) 
 async fn main() -> Result<()> {
     let args = Args::parse_from(nmap_style_args(std::env::args()));
     let outputs = Outputs::from_args(&args)?;
+    outputs.open_files()?;
     let progress = Progress(args.verbose);
     let version = if args.ipv6 {
         IpVersion::V6
@@ -1126,6 +1158,26 @@ mod tests {
             let _ = std::fs::remove_file(&link);
             std::os::unix::fs::symlink(&plain, &link).unwrap();
             assert_eq!(report_key(&plain), report_key(&link.display().to_string()));
+
+            // Aliases only the files themselves reveal: a link to a report
+            // that doesn't exist yet, and a hard link.
+            let out = |normal: &std::path::Path, xml: &std::path::Path| Outputs {
+                normal: vec![normal.display().to_string()],
+                xml: vec![xml.display().to_string()],
+                ..Default::default()
+            };
+            let dangling = dir.join("dangling");
+            std::os::unix::fs::symlink(dir.join("later"), &dangling).unwrap();
+            let o = out(&dangling, &dir.join("later"));
+            assert!(o.open_files().is_err());
+            let hard = dir.join("hard");
+            std::fs::hard_link(&plain, &hard).unwrap();
+            assert!(
+                out(&hard, std::path::Path::new(&plain))
+                    .open_files()
+                    .is_err()
+            );
+            assert!(out(&dir.join("a"), &dir.join("b")).open_files().is_ok());
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
