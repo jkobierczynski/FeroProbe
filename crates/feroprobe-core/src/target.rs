@@ -69,15 +69,6 @@ pub fn parse_target(spec: &str) -> Result<TargetSpec, Error> {
         return Ok(TargetSpec::Addrs(vec![ip]));
     }
 
-    // The resolver would read "2222" as the address 0.0.8.174. A bare
-    // number is almost always a port that came loose from its option, as
-    // in `-PS 2222`.
-    if spec.bytes().all(|b| b.is_ascii_digit()) {
-        return Err(Error::InvalidTarget(format!(
-            "'{spec}' is a number, not a host; if it is a port, attach it to its option (-PS{spec}, not -PS {spec})"
-        )));
-    }
-
     if let Some((addr, zone)) = spec.split_once('%') {
         let ip: Ipv6Addr = addr
             .parse()
@@ -104,6 +95,7 @@ pub fn parse_target(spec: &str) -> Result<TargetSpec, Error> {
     }
 
     if is_valid_hostname(spec) {
+        refuse_numeric_name(spec)?;
         return Ok(TargetSpec::Hostname(spec.to_string()));
     }
 
@@ -217,11 +209,8 @@ impl Exclusions {
                 ex.nets.push(net.trunc());
             } else if let Some(addrs) = parse_octet_range(spec)? {
                 ex.nets.extend(addrs.into_iter().map(host));
-            } else if spec.bytes().all(|b| b.is_ascii_digit()) {
-                return Err(Error::InvalidTarget(format!(
-                    "exclude '{spec}' is a number, not a host"
-                )));
             } else if is_valid_hostname(spec) {
+                refuse_numeric_name(spec)?;
                 let found = tokio::net::lookup_host((spec, 0))
                     .await
                     .map_err(|e| Error::Resolve(spec.to_string(), e.to_string()))?;
@@ -378,6 +367,36 @@ fn parse_octet_range(spec: &str) -> Result<Option<Vec<IpAddr>>, Error> {
     ))
 }
 
+/// Refuse a "hostname" that the system resolver would read as an IPv4
+/// address in one of the old inet_aton forms: a bare number ("2222" is
+/// 0.0.8.174), fewer than four parts ("10.1.2" is 10.1.0.2), octal
+/// ("010.0.0.1" is 8.0.0.1) or hex ("0x7f000001"). A real name never ends
+/// in a numeric label, so these are mistakes, most often a port that came
+/// loose from its option, as in `-PS 2222`.
+fn refuse_numeric_name(spec: &str) -> Result<(), Error> {
+    let numeric = |label: &str| {
+        let hex = label
+            .strip_prefix("0x")
+            .or_else(|| label.strip_prefix("0X"))
+            .is_some_and(|h| h.bytes().all(|b| b.is_ascii_hexdigit()));
+        hex || label.bytes().all(|b| b.is_ascii_digit())
+    };
+    let last = spec.rsplit('.').next().unwrap_or(spec);
+    if !numeric(last) {
+        return Ok(());
+    }
+    let why = if spec.bytes().all(|b| b.is_ascii_digit()) {
+        format!(
+            "'{spec}' is a number, not a host; if it is a port, attach it to its option (-PS{spec}, not -PS {spec})"
+        )
+    } else {
+        format!(
+            "'{spec}' is not a hostname; write an IPv4 address as four decimal parts, like 10.0.0.1"
+        )
+    };
+    Err(Error::InvalidTarget(why))
+}
+
 fn is_valid_hostname(s: &str) -> bool {
     s.len() <= 253
         && s.split('.').all(|label| {
@@ -452,12 +471,21 @@ mod tests {
             "a b",
             "2222",
             "0",
+            "127.1",
+            "10.1.2",
+            "010.0.0.1",
+            "0x7f000001",
+            "host.0X1f",
         ] {
             assert!(parse_target(bad).is_err(), "{bad} should fail");
         }
         // A bare number is most likely a port split from -PS and friends.
         let err = parse_target("2222").unwrap_err().to_string();
         assert!(err.contains("-PS2222"), "{err}");
+        // Names may still start with digits or contain hex-looking labels.
+        for name in ["3com.example", "1e2", "0x.example", "a.b1", "deadbeef"] {
+            assert!(parse_target(name).is_ok(), "{name} should parse");
+        }
     }
 
     #[test]
@@ -536,7 +564,9 @@ mod tests {
         };
         assert!(ex.excludes(&named));
         assert!(Exclusions::parse(&["not a host!"]).await.is_err());
-        assert!(Exclusions::parse(&["2222"]).await.is_err());
+        for numeric in ["2222", "127.1", "0177.0.0.1", "0x7f000001"] {
+            assert!(Exclusions::parse(&[numeric]).await.is_err(), "{numeric}");
+        }
         assert!(Exclusions::parse(&[" "]).await.unwrap().is_empty());
     }
 }

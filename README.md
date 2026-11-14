@@ -258,6 +258,11 @@ These work like nmap's:
 | `-oA BASE` | Write `BASE.nmap`, `BASE.xml` and `BASE.gnmap` at once |
 | `-v`, `-vv` | Report progress on standard error: each phase with its time, and the open ports each scan found when it finishes |
 
+A target that the system resolver would read as an old-style IPv4 number
+is refused rather than scanned: a bare number (`2222` would be 0.0.8.174),
+fewer than four parts (`10.1.2`), octal (`010.0.0.1` would be 8.0.0.1) or
+hex (`0x7f000001`). Write addresses as four decimal parts.
+
 Two reports cannot share a file, and `-iL -` cannot be combined with
 `--excludefile -`. A report file of `-` means standard output, which then carries that report
 instead of the table. `-o table|json|xml|grepable` still picks the format of
@@ -286,7 +291,8 @@ any of them, only those run:
 | `-PM` | ICMP address mask request (IPv4, raw sockets) | an address mask reply (rare today) |
 | `-Pn` | none: every target counts as up | |
 
-Ports run on without a space (`-PS22,443`, `-PU53`), and the options can be
+Ports run on without a space (`-PS22,443`, `-PU53`); with a space,
+`-PS 22` is an error because `22` is not a host. The options can be
 repeated. A probe type the process can't send is skipped, so the others
 decide.
 
