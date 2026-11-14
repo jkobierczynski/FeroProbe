@@ -341,15 +341,18 @@ pub(crate) fn send_with_backoff_until(
     to: SocketAddr,
     deadline: Option<Instant>,
 ) -> io::Result<()> {
-    // Logged before sending, so the answer's line cannot come first.
-    if crate::packet_trace::enabled() {
-        crate::packet_trace::sent(socket_protocol(sock), pkt, to);
-    }
     let addr = to.into();
     let mut attempts = 0;
+    let mut logged = false;
     loop {
         if deadline.is_some_and(|d| Instant::now() >= d) {
             return Err(crate::model::ScanConfig::timed_out());
+        }
+        // Logged just before the first real send, so the answer's line
+        // cannot come first and probes never sent are not shown.
+        if !logged && crate::packet_trace::enabled() {
+            crate::packet_trace::sent(sent_protocol(sock, to), pkt, to);
+            logged = true;
         }
         match sock.send_to(pkt, &addr) {
             Ok(_) => return Ok(()),
@@ -366,7 +369,19 @@ pub(crate) fn send_with_backoff_until(
     }
 }
 
-/// The IP protocol a raw socket was opened for, for `--packet-trace`.
+/// The IP protocol of a packet sent on `sock` to `to`, for
+/// `--packet-trace`. Outside Linux the socket cannot be asked, but the only
+/// raw sockets there are the ICMP ones of host discovery.
+fn sent_protocol(sock: &Socket, to: SocketAddr) -> u8 {
+    match socket_protocol(sock) {
+        0 if to.is_ipv6() => 58,
+        0 => crate::packet::IPPROTO_ICMP,
+        p => p,
+    }
+}
+
+/// The IP protocol a raw socket was opened for, for `--packet-trace`
+/// (0 where the system cannot say).
 pub(crate) fn socket_protocol(sock: &Socket) -> u8 {
     #[cfg(target_os = "linux")]
     {

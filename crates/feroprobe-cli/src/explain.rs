@@ -323,7 +323,10 @@ pub(crate) fn explain(args: &Args, f: &Facts) -> Vec<String> {
     if let Some(min) = args.min_rate {
         say(
             &mut out,
-            format!("--min-rate {min}: limits raised so at least {min} probes go out per second"),
+            format!(
+                "--min-rate {min}: aim for at least {min} probes per second, \
+                 a target, not a promise: -c and the open-file limit still cap it"
+            ),
         );
     }
     if let Some(limit) = args.host_timeout.filter(|d| !d.is_zero()) {

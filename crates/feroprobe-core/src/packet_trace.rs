@@ -60,8 +60,9 @@ fn host_port(ip: Option<IpAddr>, port: u16) -> String {
 }
 
 /// Describe a transport segment or ICMP message (no IP header) of IP
-/// protocol `proto` between `src` (if known) and `dst`.
-pub(crate) fn describe(proto: u8, data: &[u8], src: Option<IpAddr>, dst: IpAddr) -> String {
+/// protocol `proto` between `src` and `dst`; an unknown end shows as `*`.
+pub(crate) fn describe(proto: u8, data: &[u8], src: Option<IpAddr>, dst: Option<IpAddr>) -> String {
+    let to = dst.map_or_else(|| "*".to_string(), |d| d.to_string());
     const IPPROTO_UDP: u8 = 17;
     const IPPROTO_ICMPV6: u8 = 58;
     match proto {
@@ -69,17 +70,17 @@ pub(crate) fn describe(proto: u8, data: &[u8], src: Option<IpAddr>, dst: IpAddr)
             Some(t) => format!(
                 "TCP {} > {} {} seq={} win={}",
                 host_port(src, t.sport),
-                host_port(Some(dst), t.dport),
+                host_port(dst, t.dport),
                 tcp_flags(t.flags),
                 t.seq,
                 t.window
             ),
-            None => format!("TCP {} bytes to {dst}", data.len()),
+            None => format!("TCP {} bytes to {to}", data.len()),
         },
         IPPROTO_UDP if data.len() >= 8 => format!(
             "UDP {} > {} len={}",
             host_port(src, u16::from_be_bytes([data[0], data[1]])),
-            host_port(Some(dst), u16::from_be_bytes([data[2], data[3]])),
+            host_port(dst, u16::from_be_bytes([data[2], data[3]])),
             data.len() - 8
         ),
         packet::IPPROTO_ICMP | IPPROTO_ICMPV6 => {
@@ -91,17 +92,17 @@ pub(crate) fn describe(proto: u8, data: &[u8], src: Option<IpAddr>, dst: IpAddr)
             let from = src.map_or_else(|| "*".to_string(), |s| s.to_string());
             match packet::parse_icmp(data) {
                 Some(m) => format!(
-                    "{v} [{from} > {dst} {} (type={}/code={}) id={} seq={}]",
+                    "{v} [{from} > {to} {} (type={}/code={}) id={} seq={}]",
                     icmp_name(proto == IPPROTO_ICMPV6, m.kind),
                     m.kind,
                     m.code,
                     m.id,
                     m.seq
                 ),
-                None => format!("{v} {} bytes {from} > {dst}", data.len()),
+                None => format!("{v} {} bytes {from} > {to}", data.len()),
             }
         }
-        other => format!("proto {other}, {} bytes to {dst}", data.len()),
+        other => format!("proto {other}, {} bytes to {to}", data.len()),
     }
 }
 
@@ -115,12 +116,13 @@ pub(crate) fn describe_received(proto: u8, data: &[u8], from: IpAddr) -> String 
                 ip.protocol,
                 ip.payload,
                 Some(IpAddr::V4(ip.src)),
-                IpAddr::V4(ip.dst)
+                Some(IpAddr::V4(ip.dst))
             ),
             ip.ttl
         ),
-        // No header: the local address is not in the packet.
-        _ => describe(proto, data, Some(from), local_for(from).unwrap_or(from)),
+        // No header: the local address is not in the packet, and shows
+        // as `*` when the routing table cannot tell it either.
+        _ => describe(proto, data, Some(from), local_for(from)),
     }
 }
 
@@ -139,7 +141,9 @@ fn local_for(dst: IpAddr) -> Option<IpAddr> {
 
 /// A sent raw packet: `to` is where it went.
 pub(crate) fn sent(proto: u8, pkt: &[u8], to: SocketAddr) {
-    log("SENT", || describe(proto, pkt, local_for(to.ip()), to.ip()));
+    log("SENT", || {
+        describe(proto, pkt, local_for(to.ip()), Some(to.ip()))
+    });
 }
 
 /// A connect() attempt and how it ended, like nmap's CONN lines.
@@ -186,7 +190,7 @@ mod tests {
             packet::IPPROTO_TCP,
             &syn,
             Some("192.0.2.1".parse().unwrap()),
-            "192.0.2.9".parse().unwrap(),
+            Some("192.0.2.9".parse().unwrap()),
         );
         assert_eq!(line, "TCP 192.0.2.1:40000 > 192.0.2.9:80 S seq=7 win=1024");
         let echo = packet::icmp_echo(5, 1, &[]);
@@ -194,7 +198,7 @@ mod tests {
             packet::IPPROTO_ICMP,
             &echo,
             None,
-            "192.0.2.9".parse().unwrap(),
+            Some("192.0.2.9".parse().unwrap()),
         );
         assert_eq!(
             line,

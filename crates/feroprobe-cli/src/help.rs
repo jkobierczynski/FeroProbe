@@ -68,7 +68,7 @@ MISC:
   -h, --help: Print this help page
 EXAMPLES:
   feroprobe -v -A scanme.example.org
-  feroprobe -v -sn 192.168.0.0/16 10.0.0.0/8
+  feroprobe -v -sn 192.168.0.0/16 10.0.0.0/16
   feroprobe -Pn -p 80 -oX scan.xml 10.0.0.1-50
 SEE THE README (https://github.com/jkobierczynski/FeroProbe) FOR MORE OPTIONS AND EXAMPLES
 "
