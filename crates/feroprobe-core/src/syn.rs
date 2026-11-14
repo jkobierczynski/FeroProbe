@@ -401,10 +401,13 @@ mod imp {
             let v4 = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             let open6 = v6.local_addr().unwrap().port();
             let open4 = v4.local_addr().unwrap().port();
-            let closed = {
+            // A port free on IPv4 may be the IPv6 listener's, so skip both.
+            let closed = std::iter::repeat_with(|| {
                 let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
                 l.local_addr().unwrap().port()
-            };
+            })
+            .find(|p| *p != open4 && *p != open6)
+            .unwrap();
             let cfg = ScanConfig {
                 timeout: Duration::from_millis(500),
                 ..Default::default()
