@@ -78,7 +78,7 @@ Run `feroprobe --help` for all options (timeout, concurrency, packet rate, retri
 Example output:
 
 ```
-Starting FeroProbe 0.1.0
+Starting FeroProbe 0.2.0
 
 Scan report for 127.0.0.1
 Host is up, echo-reply (0.06 ms latency).
