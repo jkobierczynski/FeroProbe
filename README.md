@@ -19,7 +19,8 @@ no external binaries.
 | Timing templates `-T0`…`-T5` and `--scan-delay` | ✅ |
 | Targets: IPv4 and IPv6 addresses, CIDR, `a.b.c.X-Y` ranges, `fe80::1%eth0`, hostnames (`-6` for their IPv6 address) | ✅ |
 | nmap-style `-p` port specs and top ports | ✅ |
-| Table, JSON and nmap-style XML output, `--reason`, `--open` | ✅ |
+| Table, JSON, nmap-style XML and grepable output, `--reason`, `--open` | ✅ |
+| Report files `-oN`, `-oX`, `-oG`, `-oJ`, `-oA`; target lists `-iL`; `--exclude`, `--excludefile`; progress with `-v` | ✅ |
 | Service and version detection, `-sV`, with our own probes and rules | ✅ |
 | OS detection, `-O`, from SYN-ACK traits with our own signatures (Linux, root; IPv4 only) | ✅ |
 | Traceroute, `--traceroute`, IPv4 and IPv6 (Linux, root), and `-A` (`-sV -O --traceroute`) | ✅ |
@@ -238,6 +239,32 @@ IPv6 address instead.
   a link-local address is used.
 - A CIDR block may hold at most 2^20 addresses (a `/108`), so a whole `/64`
   cannot be swept; give the part you want, e.g. `2001:db8::/120`.
+
+### Target lists, exclusions and report files
+
+These work like nmap's:
+
+| Option | What it does |
+| --- | --- |
+| `-iL FILE` | Read targets from FILE: any target form, separated by spaces or newlines, `#` starts a comment. `-` reads standard input. Combines with targets on the command line |
+| `--exclude A,B,...` | Leave out these hosts: addresses, CIDR blocks of any size, ranges or hostnames |
+| `--excludefile FILE` | Leave out the hosts in FILE (same format as `-iL`) |
+| `-oN FILE` | Also write the normal report (the table) to FILE |
+| `-oX FILE` | Also write the XML report to FILE |
+| `-oG FILE` | Also write the grepable report to FILE: one line per host, like nmap's |
+| `-oJ FILE` | Also write the JSON report to FILE (FeroProbe's own) |
+| `-oA BASE` | Write `BASE.nmap`, `BASE.xml` and `BASE.gnmap` at once |
+| `-v`, `-vv` | Report progress on standard error: each phase with its time, and the open ports each scan found when it finishes |
+
+Two reports cannot share a file, and `-iL -` cannot be combined with
+`--excludefile -`. A report file of `-` means standard output, which then carries that report
+instead of the table. `-o table|json|xml|grepable` still picks the format of
+standard output.
+
+```sh
+feroprobe -iL hosts.txt --exclude 10.0.0.1,10.0.9.0/24 -oA weekly
+feroprobe -v -oG - 192.168.1.0/24 | grep '/open/'
+```
 
 ### Timing templates
 

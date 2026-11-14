@@ -42,7 +42,8 @@ pub use raw::{raw_ipv6_available, raw_sockets_available};
 pub use service::{ServiceInfo, detect_services};
 pub use syn::{RawTcpScan, TcpScanKind, parse_scanflags, raw_tcp_scan, syn_scan};
 pub use target::{
-    IpVersion, Target, TargetSpec, parse_target, resolve_targets, resolve_targets_with, socket_addr,
+    Exclusions, IpVersion, Target, TargetSpec, parse_target, resolve_targets, resolve_targets_with,
+    socket_addr,
 };
 pub use timing::Timing;
 pub use trace::{Hop, Trace, traceroute};

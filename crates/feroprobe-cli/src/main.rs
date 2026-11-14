@@ -1,5 +1,6 @@
 //! `feroprobe`: an nmap-style network scanner, written natively in Rust.
 
+mod grep;
 mod output;
 mod xml;
 
@@ -8,10 +9,10 @@ use std::time::{Duration, Instant, SystemTime};
 use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
 use feroprobe_core::{
-    HostResult, IpVersion, RawTcpScan, ScanConfig, Target, TcpScanKind, Timing, connect_scan,
-    detect_services, discover, os_detect, parse_ports, parse_scanflags, raw_ipv6_available,
-    raw_sockets_available, raw_tcp_scan, resolve_targets_with, top_ports, top_udp_ports,
-    traceroute, udp_scan,
+    Exclusions, HostResult, IpVersion, RawTcpScan, ScanConfig, Target, TcpScanKind, Timing,
+    connect_scan, detect_services, discover, os_detect, parse_ports, parse_scanflags,
+    raw_ipv6_available, raw_sockets_available, raw_tcp_scan, resolve_targets_with, top_ports,
+    top_udp_ports, traceroute, udp_scan,
 };
 
 use output::RunInfo;
@@ -112,6 +113,17 @@ enum Format {
     Json,
     /// XML in nmap's layout, for tools that read nmap's -oX output
     Xml,
+    /// One line per host, like nmap's -oG output
+    Grepable,
+}
+
+fn render(format: Format, hosts: &[HostResult], info: &RunInfo) -> Result<String> {
+    Ok(match format {
+        Format::Table => output::render_table(hosts, info),
+        Format::Json => output::render_json(hosts, info)?,
+        Format::Xml => xml::render(hosts, info),
+        Format::Grepable => grep::render(hosts, info),
+    })
 }
 
 /// Fast, native network scanner with an nmap-style command line.
@@ -124,6 +136,8 @@ enum Format {
 ///   sudo feroprobe -sn 192.168.1.0/24   (ARP on a local network, shows MAC vendors)
 ///   feroprobe -sV -p 22,80,443 10.0.0.5
 ///   sudo feroprobe -O 10.0.0.5
+///   feroprobe -iL hosts.txt --exclude 10.0.0.1 -oA scan   (scan.nmap, scan.xml, scan.gnmap)
+///   feroprobe -v -oG - 10.0.0.0/24                     (grepable on stdout, progress on stderr)
 ///   sudo feroprobe -A 10.0.0.5              (-sV -O --traceroute)
 ///   sudo feroprobe --traceroute -p 443 example.org
 ///   feroprobe -Pn --top-ports 1000 --open -o json 10.0.0.1-50
@@ -140,8 +154,22 @@ struct Args {
     /// Targets: IPv4 or IPv6 addresses, CIDR blocks (10.0.0.0/24, 2001:db8::/120),
     /// ranges (10.0.0.1-20), link-local addresses with their interface
     /// (fe80::1%eth0) or hostnames
-    #[arg(required = true)]
+    #[arg(required_unless_present = "input_file")]
     targets: Vec<String>,
+
+    /// -iL FILE: read more targets from FILE (one or more per line, # starts
+    /// a comment; "-" reads standard input)
+    #[arg(long = "input-file", value_name = "FILE")]
+    input_file: Option<String>,
+
+    /// Leave these hosts out: comma-separated addresses, CIDR blocks,
+    /// ranges or hostnames
+    #[arg(long, value_name = "HOSTS", value_delimiter = ',')]
+    exclude: Vec<String>,
+
+    /// Leave out the hosts listed in FILE (same format as -iL)
+    #[arg(long, value_name = "FILE")]
+    excludefile: Option<String>,
 
     /// -6: use the IPv6 address of each hostname target (IPv4 is preferred
     /// otherwise). Address targets are scanned as given, IPv4 or IPv6
@@ -250,9 +278,243 @@ struct Args {
     #[arg(long)]
     nmap_label: bool,
 
-    /// Output format
+    /// Output format on standard output
     #[arg(short = 'o', long, value_enum, default_value_t = Format::Table)]
     output: Format,
+
+    /// -oN FILE: also write the normal (table) report to FILE ("-" for stdout)
+    #[arg(long = "output-normal", value_name = "FILE")]
+    out_normal: Option<String>,
+
+    /// -oX FILE: also write the XML report to FILE ("-" for stdout)
+    #[arg(long = "output-xml", value_name = "FILE")]
+    out_xml: Option<String>,
+
+    /// -oG FILE: also write the grepable report to FILE ("-" for stdout)
+    #[arg(long = "output-grepable", value_name = "FILE")]
+    out_grep: Option<String>,
+
+    /// -oJ FILE: also write the JSON report to FILE ("-" for stdout)
+    #[arg(long = "output-json", value_name = "FILE")]
+    out_json: Option<String>,
+
+    /// -oA BASE: write BASE.nmap, BASE.xml and BASE.gnmap (normal, XML and
+    /// grepable) at once
+    #[arg(long = "output-all", value_name = "BASE")]
+    out_all: Option<String>,
+
+    /// -v: report progress on standard error (each phase with its time,
+    /// and the open ports each scan found when it finishes); -vv for more
+    #[arg(short = 'v', action = clap::ArgAction::Count)]
+    verbose: u8,
+}
+
+/// nmap's two-letter options (`-iL`, `-oN`, `-oX`, `-oG`, `-oA`) clash with
+/// clap's short flags, so they are renamed to their long forms before
+/// parsing. Only whole arguments before `--` are touched.
+fn nmap_style_args(argv: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = false;
+    for a in argv {
+        if rest {
+            out.push(a);
+            continue;
+        }
+        let long = match a.as_str() {
+            "--" => {
+                rest = true;
+                None
+            }
+            "-iL" => Some("--input-file"),
+            "-oN" => Some("--output-normal"),
+            "-oX" => Some("--output-xml"),
+            "-oG" => Some("--output-grepable"),
+            "-oJ" => Some("--output-json"),
+            "-oA" => Some("--output-all"),
+            _ => None,
+        };
+        out.push(long.map_or(a, str::to_string));
+    }
+    out
+}
+
+/// Host specs from a target list file: whitespace-separated, with `#`
+/// comments. `-` reads standard input.
+fn read_host_list(path: &str) -> Result<Vec<String>> {
+    let text = if path == "-" {
+        std::io::read_to_string(std::io::stdin()).context("reading targets from stdin")?
+    } else {
+        std::fs::read_to_string(path).with_context(|| format!("reading {path}"))?
+    };
+    Ok(parse_host_list(&text))
+}
+
+fn parse_host_list(text: &str) -> Vec<String> {
+    text.lines()
+        .flat_map(|line| {
+            let line = line.split('#').next().unwrap_or("");
+            line.split_whitespace().map(str::to_string)
+        })
+        .collect()
+}
+
+/// Where each report goes, from -oN/-oX/-oG/-oJ/-oA. A path of `-` means
+/// standard output, which then carries that report instead of the usual one.
+#[derive(Debug, Default, PartialEq)]
+struct Outputs {
+    normal: Vec<String>,
+    xml: Vec<String>,
+    grep: Vec<String>,
+    json: Vec<String>,
+}
+
+/// The real location a report path names, so that `r`, `./r`, `sub/../r`
+/// and symbolic links to the same file all compare equal. A report file
+/// usually doesn't exist yet, so its directory is resolved instead.
+fn report_key(path: &str) -> std::path::PathBuf {
+    let p = std::path::Path::new(path);
+    if let Ok(real) = p.canonicalize() {
+        return real;
+    }
+    let dir = match p.parent() {
+        Some(d) if !d.as_os_str().is_empty() => d,
+        _ => std::path::Path::new("."),
+    };
+    match (dir.canonicalize(), p.file_name()) {
+        (Ok(real), Some(name)) => real.join(name),
+        _ => std::path::absolute(p).unwrap_or_else(|_| p.into()),
+    }
+}
+
+impl Outputs {
+    fn from_args(args: &Args) -> Result<Self> {
+        let mut o = Outputs::default();
+        let push = |v: &mut Vec<String>, p: &Option<String>| v.extend(p.iter().cloned());
+        push(&mut o.normal, &args.out_normal);
+        push(&mut o.xml, &args.out_xml);
+        push(&mut o.grep, &args.out_grep);
+        push(&mut o.json, &args.out_json);
+        if let Some(base) = &args.out_all {
+            if base == "-" {
+                bail!("-oA needs a file name base, not -");
+            }
+            o.normal.push(format!("{base}.nmap"));
+            o.xml.push(format!("{base}.xml"));
+            o.grep.push(format!("{base}.gnmap"));
+        }
+        let to_stdout = [&o.normal, &o.xml, &o.grep, &o.json]
+            .iter()
+            .flat_map(|v| v.iter())
+            .filter(|p| *p == "-")
+            .count();
+        if to_stdout > 1 {
+            bail!("only one report can go to standard output (-)");
+        }
+        // Two reports in one file would leave only the last one written.
+        let mut seen = std::collections::HashSet::new();
+        for path in o.files() {
+            if !seen.insert(report_key(path)) {
+                bail!("two reports would be written to {path}; give each its own file");
+            }
+        }
+        Ok(o)
+    }
+
+    fn files(&self) -> impl Iterator<Item = &String> {
+        [&self.normal, &self.xml, &self.grep, &self.json]
+            .into_iter()
+            .flat_map(|v| v.iter())
+            .filter(|p| *p != "-")
+    }
+
+    /// Open (creating, not truncating) every report file before the scan,
+    /// as nmap does. This catches unwritable paths up front, and then
+    /// compares the files themselves, so that aliases a path can't show
+    /// (a link whose target doesn't exist yet, a hard link, or another
+    /// spelling on a case-insensitive file system) can't make two reports
+    /// share one file. On Unix the file's device and inode decide; on other
+    /// systems the canonical path of the now existing file, which on Windows
+    /// comes back in the case stored on disk.
+    fn open_files(&self) -> Result<()> {
+        let mut seen = std::collections::HashSet::new();
+        for path in self.files() {
+            let file = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(path)
+                .with_context(|| format!("opening {path}"))?;
+            #[cfg(unix)]
+            let id = {
+                use std::os::unix::fs::MetadataExt;
+                let m = file.metadata().with_context(|| format!("reading {path}"))?;
+                (m.dev(), m.ino())
+            };
+            #[cfg(not(unix))]
+            let id = {
+                drop(file);
+                std::fs::canonicalize(path).with_context(|| format!("resolving {path}"))?
+            };
+            if !seen.insert(id) {
+                bail!("two reports would be written to {path}; give each its own file");
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether some -o option took over standard output.
+    fn stdout_taken(&self) -> bool {
+        [&self.normal, &self.xml, &self.grep, &self.json]
+            .iter()
+            .any(|v| v.iter().any(|p| p == "-"))
+    }
+}
+
+/// Progress on standard error for -v.
+struct Progress(u8);
+
+impl Progress {
+    fn say(&self, level: u8, msg: impl FnOnce() -> String) {
+        if self.0 >= level {
+            eprintln!("{}", msg());
+        }
+    }
+
+    /// Start a phase; the returned closure reports it done.
+    fn phase(&self, what: &str, hosts: usize) -> impl FnOnce(&Progress) + use<> {
+        let what = what.to_string();
+        let start = Instant::now();
+        self.say(1, || {
+            format!("Initiating {what} of {hosts} host{}", plural(hosts))
+        });
+        move |p: &Progress| {
+            p.say(1, || {
+                format!("Completed {what} in {:.2}s", start.elapsed().as_secs_f64())
+            })
+        }
+    }
+
+    /// Announce the open ports a scan found, like nmap's -v.
+    fn found(&self, results: &[HostResult]) {
+        for h in results {
+            for p in h
+                .ports
+                .iter()
+                .filter(|p| p.state == feroprobe_core::PortState::Open)
+            {
+                self.say(1, || {
+                    format!(
+                        "Discovered open port {}/{} on {}",
+                        p.port, p.protocol, h.addr
+                    )
+                });
+            }
+        }
+    }
+}
+
+fn plural(n: usize) -> &'static str {
+    if n == 1 { "" } else { "s" }
 }
 
 /// What to run, after applying nmap's defaults to the flags.
@@ -370,15 +632,43 @@ fn merge(hosts: &mut [HostResult], scanned: &[usize], results: Vec<HostResult>) 
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let args = Args::parse();
+    let args = Args::parse_from(nmap_style_args(std::env::args()));
+    let outputs = Outputs::from_args(&args)?;
+    outputs.open_files()?;
+    let progress = Progress(args.verbose);
     let version = if args.ipv6 {
         IpVersion::V6
     } else {
         IpVersion::PreferV4
     };
-    let targets = resolve_targets_with(&args.targets, version)
+    if args.input_file.as_deref() == Some("-") && args.excludefile.as_deref() == Some("-") {
+        bail!("-iL - and --excludefile - cannot both read standard input; put one list in a file");
+    }
+    let mut specs = args.targets.clone();
+    if let Some(path) = &args.input_file {
+        specs.extend(read_host_list(path)?);
+    }
+    if specs.is_empty() {
+        bail!("no targets given");
+    }
+    let mut excluded = args.exclude.clone();
+    if let Some(path) = &args.excludefile {
+        excluded.extend(read_host_list(path)?);
+    }
+    let exclusions = Exclusions::parse(&excluded)
+        .await
+        .context("reading --exclude")?;
+    let mut targets = resolve_targets_with(&specs, version)
         .await
         .context("resolving targets")?;
+    if !exclusions.is_empty() {
+        let before = targets.len();
+        targets.retain(|t| !exclusions.excludes(t));
+        progress.say(1, || format!("Excluded {} host(s)", before - targets.len()));
+        if targets.is_empty() {
+            bail!("every target is excluded");
+        }
+    }
     let any_ipv6 = targets.iter().any(|t| t.addr.is_ipv6());
     let syn_ok = raw_sockets_available() && (!any_ipv6 || raw_ipv6_available());
     let mut plan = plan(&args.scan, args.ping, syn_ok, args.scanflags.is_some())?;
@@ -420,9 +710,16 @@ async fn main() -> Result<()> {
     let started = Instant::now();
     let start_time = SystemTime::now();
     let mut hosts: Vec<HostResult> = if plan.discovery {
-        discover(&targets, &cfg)
+        let done = progress.phase("host discovery", targets.len());
+        let hosts = discover(&targets, &cfg)
             .await
-            .context("host discovery failed")?
+            .context("host discovery failed")?;
+        done(&progress);
+        let up = hosts.iter().filter(|h| h.is_up()).count();
+        progress.say(1, || {
+            format!("{up} of {} host{} up", hosts.len(), plural(hosts.len()))
+        });
+        hosts
     } else {
         targets
             .iter()
@@ -446,33 +743,49 @@ async fn main() -> Result<()> {
                 if let Some(flags) = args.scanflags {
                     scan.flags = flags;
                 }
+                let done = progress.phase(
+                    &format!("TCP {} scan", kind.name().to_uppercase()),
+                    live.len(),
+                );
                 let r = raw_tcp_scan(&live, &tcp_ports, &cfg, scan)
                     .await
                     .with_context(|| format!("TCP {} scan ({}) failed", kind.name(), t.flag()))?;
+                progress.found(&r);
+                done(&progress);
                 merge(&mut hosts, &scanned, r);
             }
             Some((_, None)) => {
                 scan_types.push("tcp-connect");
+                let done = progress.phase("TCP connect scan", live.len());
                 let r = connect_scan(&live, &tcp_ports, &cfg).await.context(hint)?;
+                progress.found(&r);
+                done(&progress);
                 merge(&mut hosts, &scanned, r);
             }
             None => {}
         }
         if plan.udp {
             scan_types.push("udp");
+            let done = progress.phase("UDP scan", live.len());
             let r = udp_scan(&live, &udp_ports, &cfg).await.context(hint)?;
+            progress.found(&r);
+            done(&progress);
             merge(&mut hosts, &scanned, r);
         }
         if plan.version {
             scan_types.push("version");
             let wait = Duration::from_millis(args.version_timeout);
+            let done = progress.phase("service detection", live.len());
             detect_services(&mut hosts, &cfg, wait).await;
+            done(&progress);
         }
         if os {
             scan_types.push("os");
+            let done = progress.phase("OS detection", live.len());
             os_detect(&mut hosts, &cfg)
                 .await
                 .context("OS detection failed")?;
+            done(&progress);
         }
     } else {
         scan_types.push("ping");
@@ -485,9 +798,11 @@ async fn main() -> Result<()> {
         } else {
             80
         };
+        let done = progress.phase("traceroute", hosts.len());
         traceroute(&mut hosts, &cfg, !plan.discovery, fallback)
             .await
             .context("traceroute failed")?;
+        done(&progress);
     }
 
     let ports_per_host =
@@ -512,11 +827,28 @@ async fn main() -> Result<()> {
         assume_up: !plan.discovery,
         ping_only: plan.ping_only,
         nmap_label: args.nmap_label,
+        verbosity: args.verbose,
     };
-    match args.output {
-        Format::Table => output::print_table(&hosts, &info),
-        Format::Json => output::print_json(&hosts, &info)?,
-        Format::Xml => print!("{}", xml::render(&hosts, &info)),
+    if !outputs.stdout_taken() {
+        print!("{}", render(args.output, &hosts, &info)?);
+    }
+    for (format, paths) in [
+        (Format::Table, &outputs.normal),
+        (Format::Xml, &outputs.xml),
+        (Format::Grepable, &outputs.grep),
+        (Format::Json, &outputs.json),
+    ] {
+        if paths.is_empty() {
+            continue;
+        }
+        let text = render(format, &hosts, &info)?;
+        for path in paths {
+            if path == "-" {
+                print!("{text}");
+            } else {
+                std::fs::write(path, &text).with_context(|| format!("writing {path}"))?;
+            }
+        }
     }
     Ok(())
 }
@@ -717,5 +1049,161 @@ mod tests {
         let a = args(&["feroprobe", "-A", "-sn", "10.0.0.1"]);
         let mut pl = p(&a.scan, a.ping, true).unwrap();
         assert!(aggressive(&mut pl, &a, true).is_err());
+    }
+
+    #[test]
+    fn nmap_two_letter_options() {
+        let argv = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            nmap_style_args(argv(&[
+                "feroprobe",
+                "-iL",
+                "t.txt",
+                "-oA",
+                "out",
+                "-oX",
+                "-",
+                "--",
+                "-oN"
+            ])),
+            argv(&[
+                "feroprobe",
+                "--input-file",
+                "t.txt",
+                "--output-all",
+                "out",
+                "--output-xml",
+                "-",
+                "--",
+                "-oN"
+            ])
+        );
+        let a = Args::parse_from(nmap_style_args(argv(&[
+            "feroprobe",
+            "-iL",
+            "t.txt",
+            "-oG",
+            "-",
+            "-vv",
+            "--exclude",
+            "10.0.0.1,10.0.0.2",
+            "-o",
+            "json",
+        ])));
+        assert!(a.targets.is_empty());
+        assert_eq!(a.input_file.as_deref(), Some("t.txt"));
+        assert_eq!(a.exclude, ["10.0.0.1", "10.0.0.2"]);
+        assert_eq!(a.verbose, 2);
+        assert!(matches!(a.output, Format::Json));
+        let o = Outputs::from_args(&a).unwrap();
+        assert_eq!(o.grep, ["-"]);
+        assert!(o.stdout_taken());
+        // Targets are required unless -iL gives them.
+        assert!(Args::try_parse_from(["feroprobe", "-p", "22"]).is_err());
+    }
+
+    #[test]
+    fn output_all_and_stdout_conflicts() {
+        let parse = |v: &[&str]| Args::parse_from(nmap_style_args(v.iter().map(|s| s.to_string())));
+        let o = Outputs::from_args(&parse(&["feroprobe", "-oA", "scan", "10.0.0.1"])).unwrap();
+        assert_eq!(o.normal, ["scan.nmap"]);
+        assert_eq!(o.xml, ["scan.xml"]);
+        assert_eq!(o.grep, ["scan.gnmap"]);
+        assert!(!o.stdout_taken());
+        assert!(
+            Outputs::from_args(&parse(&["feroprobe", "-oX", "-", "-oG", "-", "10.0.0.1"])).is_err()
+        );
+        assert!(Outputs::from_args(&parse(&["feroprobe", "-oA", "-", "10.0.0.1"])).is_err());
+        // Two reports in one file.
+        assert!(
+            Outputs::from_args(&parse(&["feroprobe", "-oN", "r", "-oX", "r", "10.0.0.1"])).is_err()
+        );
+        assert!(
+            Outputs::from_args(&parse(&[
+                "feroprobe",
+                "-oA",
+                "scan",
+                "-oX",
+                "scan.nmap",
+                "10.0.0.1"
+            ]))
+            .is_err()
+        );
+        assert!(
+            Outputs::from_args(&parse(&["feroprobe", "-oN", "a", "-oX", "b", "10.0.0.1"])).is_ok()
+        );
+    }
+
+    #[test]
+    fn report_paths_compare_by_real_location() {
+        // A fresh name, created exclusively and private to this user, so the
+        // test never writes through a directory or link someone else made.
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("feroprobe-out-{}-{nanos}", std::process::id()));
+        #[cfg(unix)]
+        std::os::unix::fs::DirBuilderExt::mode(&mut std::fs::DirBuilder::new(), 0o700)
+            .create(&dir)
+            .unwrap();
+        #[cfg(not(unix))]
+        std::fs::DirBuilder::new().create(&dir).unwrap();
+        std::fs::create_dir(dir.join("sub")).unwrap();
+        let plain = dir.join("r").display().to_string();
+        let dotted = dir.join("sub").join("..").join("r").display().to_string();
+        assert_eq!(report_key(&plain), report_key(&dotted));
+        assert_ne!(
+            report_key(&plain),
+            report_key(&dir.join("s").display().to_string())
+        );
+        #[cfg(unix)]
+        {
+            std::fs::write(&plain, "").unwrap();
+            let link = dir.join("link");
+            let _ = std::fs::remove_file(&link);
+            std::os::unix::fs::symlink(&plain, &link).unwrap();
+            assert_eq!(report_key(&plain), report_key(&link.display().to_string()));
+
+            // Aliases only the files themselves reveal: a link to a report
+            // that doesn't exist yet, and a hard link.
+            let out = |normal: &std::path::Path, xml: &std::path::Path| Outputs {
+                normal: vec![normal.display().to_string()],
+                xml: vec![xml.display().to_string()],
+                ..Default::default()
+            };
+            let dangling = dir.join("dangling");
+            std::os::unix::fs::symlink(dir.join("later"), &dangling).unwrap();
+            let o = out(&dangling, &dir.join("later"));
+            assert!(o.open_files().is_err());
+            let hard = dir.join("hard");
+            std::fs::hard_link(&plain, &hard).unwrap();
+            assert!(
+                out(&hard, std::path::Path::new(&plain))
+                    .open_files()
+                    .is_err()
+            );
+            assert!(out(&dir.join("a"), &dir.join("b")).open_files().is_ok());
+        }
+        // Windows file systems ignore case: report and REPORT are one file.
+        #[cfg(windows)]
+        {
+            let o = Outputs {
+                normal: vec![dir.join("report").display().to_string()],
+                xml: vec![dir.join("REPORT").display().to_string()],
+                ..Default::default()
+            };
+            assert!(o.open_files().is_err());
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn host_list_files() {
+        assert_eq!(
+            parse_host_list("10.0.0.1 10.0.0.2\n# comment\n\nexample.org # web\n  10.1.0.0/24\n"),
+            ["10.0.0.1", "10.0.0.2", "example.org", "10.1.0.0/24"]
+        );
     }
 }
