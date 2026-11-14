@@ -103,7 +103,7 @@ pub async fn connect_scan(
 
     let mut results = stream::iter(jobs)
         .map(|(host_idx, port)| {
-            let addr = SocketAddr::new(targets[host_idx].addr, port);
+            let addr = crate::target::socket_addr(targets[host_idx].addr, port);
             async move { (host_idx, probe_port(addr, cfg).await) }
         })
         .buffer_unordered(cfg.concurrency.max(1));

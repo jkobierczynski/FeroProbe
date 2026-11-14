@@ -351,7 +351,10 @@ mod imp {
         let mut found: Vec<Option<TcpTraits>> = vec![None; jobs.len()];
         let sources: Vec<Option<Ipv4Addr>> = jobs
             .iter()
-            .map(|&(_, addr, _)| source_addr_for(addr).ok())
+            .map(|&(_, addr, _)| match source_addr_for(addr.into()) {
+                Ok(std::net::IpAddr::V4(src)) => Some(src),
+                _ => None,
+            })
             .collect();
         let mut pacer = Pacer::for_config(cfg);
         let mut buf = vec![0u8; 65536];
@@ -408,7 +411,7 @@ mod imp {
                 };
                 let pkt = packet::tcp_syn_with_options(src, addr, sport, port, seq, tsval);
                 pacer.wait();
-                send_with_backoff(&send_sock, &pkt, addr)?;
+                send_with_backoff(&send_sock, &pkt, (addr, 0).into())?;
                 // Bounded, so constant inbound traffic can't stall sending.
                 // Whatever is left is read by the next drain or the wait.
                 let drain_until = Instant::now() + Duration::from_millis(10);

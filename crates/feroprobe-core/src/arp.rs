@@ -239,7 +239,7 @@ pub fn sweep(
 
 #[cfg(target_os = "linux")]
 mod linux {
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashMap;
     use std::ffi::CStr;
     use std::io;
     use std::mem;
@@ -247,11 +247,11 @@ mod linux {
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
-    use super::{ARP_FRAME_LEN, ETH_P_ARP, LocalNet, MacAddr, arp_request, parse_arp_reply};
+    use super::{ETH_P_ARP, LocalNet, MacAddr, arp_request, parse_arp_reply};
     use crate::model::ScanConfig;
-    use crate::raw::Pacer;
+    use crate::raw::{is_idle_read, request_sweep};
 
     /// Every IPv4 network on an up, ARP-capable Ethernet interface.
     pub fn local_networks() -> io::Result<Vec<LocalNet>> {
@@ -427,106 +427,23 @@ mod linux {
             return Ok(());
         }
         let fd = Arc::new(open(net.ifindex)?);
-        let stop = Arc::new(AtomicBool::new(false));
-        let (tx, rx) = std::sync::mpsc::channel::<(Ipv4Addr, MacAddr, Instant)>();
-        let receiver = {
-            let (fd, stop) = (Arc::clone(&fd), Arc::clone(&stop));
-            std::thread::spawn(move || {
-                let mut buf = [0u8; 2048];
-                while !stop.load(Ordering::Relaxed) {
-                    // SAFETY: reads into a buffer we own, of the given size.
-                    let n = unsafe {
-                        libc::recv(fd.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len(), 0)
-                    };
-                    if n < 0 {
-                        let e = io::Error::last_os_error();
-                        if matches!(
-                            e.kind(),
-                            io::ErrorKind::WouldBlock
-                                | io::ErrorKind::TimedOut
-                                | io::ErrorKind::Interrupted
-                        ) {
-                            continue;
-                        }
-                        // E.g. ENETDOWN: the sweep must not pass for complete.
-                        return Err(e);
-                    }
-                    let at = Instant::now();
-                    if let Some((ip, mac)) = parse_arp_reply(&buf[..n as usize])
-                        && tx.send((ip, mac, at)).is_err()
-                    {
-                        return Ok(());
-                    }
+        let receive = {
+            let fd = Arc::clone(&fd);
+            let mut buf = [0u8; 2048];
+            move || -> io::Result<Option<(Ipv4Addr, MacAddr)>> {
+                // SAFETY: reads into a buffer we own, of the given size.
+                let n =
+                    unsafe { libc::recv(fd.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len(), 0) };
+                if n < 0 {
+                    let e = io::Error::last_os_error();
+                    // E.g. ENETDOWN ends the sweep: it must not pass for complete.
+                    return if is_idle_read(&e) { Ok(None) } else { Err(e) };
                 }
-                Ok(())
-            })
-        };
-
-        let wanted: HashSet<Ipv4Addr> = targets.iter().copied().collect();
-        let mut sent_at: HashMap<Ipv4Addr, Instant> = HashMap::new();
-        let mut answered: HashSet<Ipv4Addr> = HashSet::new();
-        let mut record = |(ip, mac, at): (Ipv4Addr, MacAddr, Instant),
-                          sent_at: &HashMap<Ipv4Addr, Instant>,
-                          answered: &mut HashSet<Ipv4Addr>| {
-            // Only hosts we asked about, and only their first answer.
-            let Some(&sent) = sent_at.get(&ip) else {
-                return;
-            };
-            if wanted.contains(&ip) && answered.insert(ip) {
-                let rtt = (at.saturating_duration_since(sent).as_secs_f64() * 1e6).round() / 1000.0;
-                on_reply(ip, mac, rtt);
+                Ok(parse_arp_reply(&buf[..n as usize]))
             }
         };
-
-        let mut pending: Vec<Ipv4Addr> = targets.to_vec();
-        let outcome = (|| -> io::Result<()> {
-            for _ in 0..=cfg.retries {
-                let mut pacer = Pacer::for_config(cfg);
-                for &ip in &pending {
-                    let frame: [u8; ARP_FRAME_LEN] = arp_request(net.mac, net.addr, ip);
-                    if !pacer.wait_or_cancel(cancel) {
-                        return Ok(());
-                    }
-                    sent_at.insert(ip, Instant::now());
-                    send(&fd, net.ifindex, &frame)?;
-                    while let Ok(r) = rx.try_recv() {
-                        record(r, &sent_at, &mut answered);
-                    }
-                }
-                let deadline = Instant::now() + cfg.timeout;
-                while answered.len() < wanted.len()
-                    && !cancel.load(Ordering::Relaxed)
-                    && let Some(left) = deadline.checked_duration_since(Instant::now())
-                {
-                    match rx.recv_timeout(left.min(Duration::from_millis(100))) {
-                        Ok(r) => record(r, &sent_at, &mut answered),
-                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
-                    }
-                }
-                if cancel.load(Ordering::Relaxed) {
-                    return Ok(());
-                }
-                pending.retain(|ip| !answered.contains(ip));
-                if pending.is_empty() {
-                    break;
-                }
-            }
-            Ok(())
-        })();
-
-        stop.store(true, Ordering::Relaxed);
-        // If receiving failed, silence proves nothing: report the error so
-        // the caller keeps the unanswered hosts for its other probes. Replies
-        // that arrived before the failure have already been passed on.
-        let received = receiver
-            .join()
-            .unwrap_or_else(|_| Err(io::Error::other("ARP receiver panicked")));
-        // Replies still queued (e.g. when a send failed mid-round) count too.
-        while let Ok(r) = rx.try_recv() {
-            record(r, &sent_at, &mut answered);
-        }
-        outcome.and(received)
+        let send_one = |ip: Ipv4Addr| send(&fd, net.ifindex, &arp_request(net.mac, net.addr, ip));
+        request_sweep(targets, cfg, cancel, send_one, receive, on_reply)
     }
 }
 
