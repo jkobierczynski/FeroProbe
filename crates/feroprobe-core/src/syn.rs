@@ -8,8 +8,9 @@
 //! - **filtered**: no reply after all retries
 //!
 //! It never completes a handshake, so it is faster and quieter than a connect
-//! scan, but it needs root (or `CAP_NET_RAW`). Currently Linux and IPv4 only:
-//! other systems do not deliver TCP replies to raw sockets.
+//! scan, but it needs root (or `CAP_NET_RAW`). IPv4 and IPv6 targets can be
+//! mixed. Linux only: other systems do not deliver TCP replies to raw
+//! sockets.
 
 use std::io;
 
@@ -49,19 +50,20 @@ mod imp {
     use super::*;
 
     use std::collections::HashMap;
-    use std::io::Read;
-    use std::net::{IpAddr, Ipv4Addr};
+    use std::mem::MaybeUninit;
+    use std::net::IpAddr;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
-    use socket2::Protocol as SockProto;
+    use socket2::{Domain, Protocol as SockProto, Socket};
 
     use crate::connect::is_network_error;
     use crate::model::{PortResult, PortState, Protocol, reason};
     use crate::packet::{self, TCP_ACK, TCP_RST, TCP_SYN};
-    use crate::raw::{Pacer, Rng, raw_socket, send_with_backoff, source_addr_for};
+    use crate::raw::{Pacer, Rng, raw_socket_in, send_with_backoff, source_addr_for};
+    use crate::target::socket_addr;
 
     /// An answer seen by the receiver thread: host index, port, state, time.
     type Answer = (usize, u16, PortState, Instant);
@@ -71,23 +73,34 @@ mod imp {
         ports: &[u16],
         cfg: &ScanConfig,
     ) -> io::Result<Vec<HostResult>> {
-        let addrs: Vec<Ipv4Addr> = targets
-            .iter()
-            .map(|t| match t.addr {
-                IpAddr::V4(a) => Ok(a),
-                IpAddr::V6(a) => Err(io::Error::new(
-                    io::ErrorKind::Unsupported,
-                    format!("SYN scan supports IPv4 only for now; use -sT for {a}"),
-                )),
-            })
-            .collect::<io::Result<_>>()?;
-        let index: HashMap<Ipv4Addr, usize> =
-            addrs.iter().enumerate().map(|(i, a)| (*a, i)).collect();
+        let addrs: Vec<IpAddr> = targets.iter().map(|t| t.addr).collect();
+        let index: Arc<HashMap<IpAddr, usize>> =
+            Arc::new(addrs.iter().enumerate().map(|(i, a)| (*a, i)).collect());
 
-        let send_sock = raw_socket(SockProto::TCP)?;
-        let recv_sock = raw_socket(SockProto::TCP)?;
-        recv_sock.set_read_timeout(Some(Duration::from_millis(50)))?;
-        let _ = recv_sock.set_recv_buffer_size(8 << 20);
+        // A send and a receive socket for each address family in use.
+        let open = |domain: Domain| -> io::Result<(Socket, Socket)> {
+            let send = raw_socket_in(domain, SockProto::TCP)?;
+            let recv = raw_socket_in(domain, SockProto::TCP)?;
+            recv.set_read_timeout(Some(Duration::from_millis(50)))?;
+            let _ = recv.set_recv_buffer_size(8 << 20);
+            Ok((send, recv))
+        };
+        let v4 = if addrs.iter().any(IpAddr::is_ipv4) {
+            Some(open(Domain::IPV4)?)
+        } else {
+            None
+        };
+        let v6 = if addrs.iter().any(IpAddr::is_ipv6) {
+            match open(Domain::IPV6) {
+                Ok(pair) => Some(pair),
+                // No IPv6 on this system: its targets are unreachable, and
+                // are marked so below when no source address is found.
+                Err(e) if e.raw_os_error() == Some(libc::EAFNOSUPPORT) => None,
+                Err(e) => return Err(e),
+            }
+        } else {
+            None
+        };
 
         let mut rng = Rng::new();
         let sport = 40000 + (rng.next_u32() % 20000) as u16;
@@ -104,7 +117,7 @@ mod imp {
         };
 
         // Hosts we cannot route to get every port marked filtered up front.
-        let mut sources: Vec<Option<Ipv4Addr>> = Vec::with_capacity(addrs.len());
+        let mut sources: Vec<Option<IpAddr>> = Vec::with_capacity(addrs.len());
         for (h, addr) in addrs.iter().enumerate() {
             match source_addr_for(*addr) {
                 Ok(src) => sources.push(Some(src)),
@@ -123,12 +136,17 @@ mod imp {
 
         let stop = Arc::new(AtomicBool::new(false));
         let (tx, rx) = mpsc::channel::<Answer>();
-        let receiver = {
-            let stop = Arc::clone(&stop);
-            std::thread::spawn(move || {
-                receive_loop(recv_sock, &index, sport, cookie, &stop, &tx);
-            })
-        };
+        let mut send_socks: [Option<Socket>; 2] = [None, None];
+        let mut receivers = Vec::new();
+        for (slot, pair) in [v4, v6].into_iter().enumerate() {
+            let Some((send, recv)) = pair else { continue };
+            send_socks[slot] = Some(send);
+            let (stop, index, tx) = (Arc::clone(&stop), Arc::clone(&index), tx.clone());
+            receivers.push(std::thread::spawn(move || {
+                receive_loop(recv, &index, sport, cookie, &stop, &tx);
+            }));
+        }
+        drop(tx);
 
         let mut sent_at: HashMap<(usize, u16), Instant> = HashMap::new();
 
@@ -149,6 +167,17 @@ mod imp {
                         continue;
                     }
                     let pkt = packet::tcp_syn(src, addrs[h], sport, p, cookie);
+                    let Some(send_sock) = send_socks[usize::from(addrs[h].is_ipv6())].as_ref()
+                    else {
+                        // No socket for this family (no IPv6 here).
+                        results.entry((h, p)).or_insert(result(
+                            p,
+                            PortState::Filtered,
+                            reason::UNREACHABLE,
+                            None,
+                        ));
+                        continue;
+                    };
                     pacer.wait();
                     // A slow template can wait long enough for an answer to
                     // the previous round's probe to arrive: record it against
@@ -160,7 +189,7 @@ mod imp {
                         continue;
                     }
                     sent_at.insert((h, p), Instant::now());
-                    match send_with_backoff(&send_sock, &pkt, addrs[h]) {
+                    match send_with_backoff(send_sock, &pkt, socket_addr(addrs[h], 0)) {
                         Ok(()) => {}
                         Err(e) if is_network_error(&e) => {
                             results.entry((h, p)).or_insert(result(
@@ -200,7 +229,9 @@ mod imp {
         })();
 
         stop.store(true, Ordering::Relaxed);
-        let _ = receiver.join();
+        for r in receivers {
+            let _ = r.join();
+        }
         outcome?;
 
         Ok(targets
@@ -256,20 +287,20 @@ mod imp {
 
     /// Read TCP segments off the raw socket and report the ones that answer
     /// our probes: addressed to our source port, from a target, and
-    /// acknowledging our sequence cookie.
+    /// acknowledging our sequence cookie. IPv4 raw sockets return the IP
+    /// header, IPv6 ones only the segment, with the sender's address.
     fn receive_loop(
-        sock: socket2::Socket,
-        index: &HashMap<Ipv4Addr, usize>,
+        sock: Socket,
+        index: &HashMap<IpAddr, usize>,
         sport: u16,
         cookie: u32,
         stop: &AtomicBool,
         tx: &mpsc::Sender<Answer>,
     ) {
-        let mut sock = sock;
-        let mut buf = vec![0u8; 65536];
+        let mut buf = vec![MaybeUninit::<u8>::uninit(); 65536];
         while !stop.load(Ordering::Relaxed) {
-            let n = match sock.read(&mut buf) {
-                Ok(n) => n,
+            let (n, from) = match sock.recv_from(&mut buf) {
+                Ok(r) => r,
                 Err(e)
                     if matches!(
                         e.kind(),
@@ -283,19 +314,24 @@ mod imp {
                 Err(_) => return,
             };
             let at = Instant::now();
-            let Some(ip) = packet::parse_ipv4(&buf[..n]) else {
-                continue;
+            // SAFETY: recv_from initialised the first `n` bytes.
+            let data = unsafe { std::slice::from_raw_parts(buf.as_ptr().cast::<u8>(), n) };
+            let (src, segment) = match from.as_socket() {
+                Some(sa) if sa.is_ipv6() => (sa.ip(), data),
+                _ => match packet::parse_ipv4(data) {
+                    Some(ip) if ip.protocol == packet::IPPROTO_TCP => {
+                        (IpAddr::V4(ip.src), ip.payload)
+                    }
+                    _ => continue,
+                },
             };
-            if ip.protocol != packet::IPPROTO_TCP {
-                continue;
-            }
-            let Some(tcp) = packet::parse_tcp(ip.payload) else {
+            let Some(tcp) = packet::parse_tcp(segment) else {
                 continue;
             };
             if tcp.dport != sport || tcp.ack != cookie.wrapping_add(1) {
                 continue;
             }
-            let Some(&h) = index.get(&ip.src) else {
+            let Some(&h) = index.get(&src) else {
                 continue;
             };
             let state = if tcp.flags & (TCP_SYN | TCP_ACK) == TCP_SYN | TCP_ACK {
@@ -355,10 +391,31 @@ mod imp {
         }
 
         #[test]
-        fn rejects_ipv6() {
-            let target = Target::new("::1".parse().unwrap());
-            let err = syn_scan_blocking(&[target], &[80], &ScanConfig::default()).unwrap_err();
-            assert_eq!(err.kind(), io::ErrorKind::Unsupported);
+        fn syn_scan_ipv6_and_ipv4_together() {
+            if !privileged() || !crate::testutil::ipv6_loopback() {
+                return;
+            }
+            let listener = std::net::TcpListener::bind("[::]:0").unwrap();
+            let open = listener.local_addr().unwrap().port();
+            let closed = {
+                let l = std::net::TcpListener::bind("[::]:0").unwrap();
+                l.local_addr().unwrap().port()
+            };
+            let cfg = ScanConfig {
+                timeout: Duration::from_millis(500),
+                ..Default::default()
+            };
+            // A dual-stack listener answers on both families.
+            let targets = [
+                Target::new("::1".parse().unwrap()),
+                Target::new("127.0.0.1".parse().unwrap()),
+            ];
+            let hosts = syn_scan_blocking(&targets, &[open, closed], &cfg).unwrap();
+            for host in &hosts {
+                let state_of = |p| host.ports.iter().find(|r| r.port == p).unwrap().state;
+                assert_eq!(state_of(open), PortState::Open, "{}", host.addr);
+                assert_eq!(state_of(closed), PortState::Closed, "{}", host.addr);
+            }
         }
     }
 }

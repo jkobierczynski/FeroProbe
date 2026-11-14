@@ -201,7 +201,7 @@ pub async fn udp_scan(
         .flat_map(|&port| (0..targets.len()).map(move |h| (h, port)));
     let mut results = stream::iter(jobs)
         .map(|(h, port)| {
-            let addr = SocketAddr::new(targets[h].addr, port);
+            let addr = crate::target::socket_addr(targets[h].addr, port);
             async move { (h, probe_udp(addr, cfg).await) }
         })
         .buffer_unordered(cfg.concurrency.max(1));

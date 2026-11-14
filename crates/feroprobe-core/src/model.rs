@@ -65,6 +65,8 @@ pub mod reason {
     pub const UDP_RESPONSE: &str = "udp-response";
     pub const ECHO_REPLY: &str = "echo-reply";
     pub const ARP_RESPONSE: &str = "arp-response";
+    /// The host answered an IPv6 neighbour solicitation.
+    pub const ND_RESPONSE: &str = "nd-response";
     pub const USER_SET: &str = "user-set";
 }
 

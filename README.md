@@ -10,17 +10,17 @@ no external binaries.
 | Feature | State |
 | --- | --- |
 | TCP connect scan, `-sT` (no root needed) | ✅ |
-| TCP SYN scan, `-sS` (raw sockets, Linux, root or `CAP_NET_RAW`) | ✅ |
+| TCP SYN scan, `-sS`, IPv4 and IPv6 (raw sockets, Linux, root or `CAP_NET_RAW`) | ✅ |
 | UDP scan, `-sU`, with DNS, NTP, SNMP and SSDP payloads | ✅ |
-| Host discovery: ICMP echo + TCP 443/80 probes, `-sn`, `-Pn` | ✅ |
-| ARP discovery on the local network, with MAC address and vendor (Linux, root; `--disable-arp-ping` to turn off) | ✅ |
+| Host discovery: ICMP/ICMPv6 echo + TCP 443/80 probes, `-sn`, `-Pn` | ✅ |
+| ARP (IPv4) and neighbour discovery (IPv6) on the local network, with MAC address and vendor (Linux, root; `--disable-arp-ping` to turn off) | ✅ |
 | MAC vendor names from the full IEEE OUI list (system `oui.txt` or `--oui-file`) | ✅ |
 | Timing templates `-T0`…`-T5` and `--scan-delay` | ✅ |
-| Targets: IPs, CIDR, `a.b.c.X-Y` ranges, hostnames, IPv6 (connect and UDP) | ✅ |
+| Targets: IPv4 and IPv6 addresses, CIDR, `a.b.c.X-Y` ranges, `fe80::1%eth0`, hostnames (`-6` for their IPv6 address) | ✅ |
 | nmap-style `-p` port specs and top ports | ✅ |
 | Table, JSON and nmap-style XML output, `--reason`, `--open` | ✅ |
 | Service and version detection, `-sV`, with our own probes and rules | ✅ |
-| OS detection, `-O`, from SYN-ACK traits with our own signatures (Linux, root) | ✅ |
+| OS detection, `-O`, from SYN-ACK traits with our own signatures (Linux, root; IPv4 only) | ✅ |
 
 ## Install
 
@@ -57,6 +57,12 @@ sudo ./target/release/feroprobe -sS -p - --reason 10.0.0.5
 
 # Guess the operating system (raw sockets, so root)
 sudo ./target/release/feroprobe -O 10.0.0.5
+
+# IPv6: a prefix on the local link (found with neighbour discovery as root,
+# with MAC addresses), a link-local host on a given interface, and the IPv6
+# address of a hostname
+sudo ./target/release/feroprobe -sn 2001:db8::/120 fe80::1%eth0
+./target/release/feroprobe -6 -p 22,443 scanme.example.org
 
 # Only open ports, as JSON
 ./target/release/feroprobe --top-ports 1000 --open -o json 10.0.0.1-50
@@ -129,6 +135,7 @@ nmap's database, so the guess is per family (Linux, Windows, macOS, FreeBSD,
 OpenBSD, network devices) rather than an exact version. The fingerprint line
 shows the raw traits, which is what a new signature is written from. It needs
 raw sockets, so Linux with root or `CAP_NET_RAW`, and at least one open TCP port.
+IPv6 hosts are skipped for now: the signatures rely on IPv4 header fields.
 
 ### Privileges
 
@@ -142,8 +149,23 @@ sudo setcap cap_net_raw+ep ./target/release/feroprobe
 Without it, a scan with no `-s` option uses a connect scan instead, and
 discovery uses TCP probes (plus unprivileged ping sockets where the OS allows
 them). An explicit `-sS` still needs the privileges; use `-sT` to ask for an
-unprivileged TCP scan. The default is also a connect scan when any target is
-IPv6, since the SYN scan is IPv4 only for now.
+unprivileged TCP scan. With IPv6 targets on a system without IPv6, the default
+is also a connect scan.
+
+### IPv6
+
+Every scan type takes IPv6 targets, and IPv4 and IPv6 targets can be mixed in
+one scan. Hostnames resolve to their IPv4 address, like nmap; `-6` picks the
+IPv6 address instead.
+
+- Discovery pings with ICMPv6 echo. As root on Linux, targets on a directly
+  connected link are asked with neighbour discovery (NDP) instead, which, like
+  ARP for IPv4, also gives their MAC address and vendor.
+- A link-local address (`fe80::/10`) needs the interface it is on:
+  `fe80::1%eth0` (or `%2`, by index). Without one, the only interface that has
+  a link-local address is used.
+- A CIDR block may hold at most 2^20 addresses (a `/108`), so a whole `/64`
+  cannot be swept; give the part you want, e.g. `2001:db8::/120`.
 
 ### Timing templates
 
@@ -201,7 +223,7 @@ SHA-256 checksums as a GitHub release.
 
 - `crates/feroprobe-core`: the scanning engine as a library: target and port
   parsing, connect/SYN/UDP scans, host discovery, and a small packet module
-  (TCP, IPv4, ICMP) with no external packet crate.
+  (TCP, IPv4, ICMP, ICMPv6 and NDP) with no external packet crate.
 - `crates/feroprobe-cli`: the `feroprobe` command-line tool.
 
 ## Port states

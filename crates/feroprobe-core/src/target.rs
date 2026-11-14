@@ -2,11 +2,19 @@
 //!
 //! Supported forms, mirroring nmap:
 //! - single IPv4/IPv6 address: `192.168.1.10`, `::1`
+//! - IPv6 link-local address with its interface: `fe80::1%eth0`, `fe80::1%2`
 //! - CIDR block: `10.0.0.0/24`, `fe80::/120`
 //! - last-octet range: `192.168.1.1-20`
 //! - hostname: `scanme.example.org` (resolved via the system resolver)
+//!
+//! A link-local IPv6 address (`fe80::/10`) only means something together with
+//! the interface it is on. Give it as `fe80::1%eth0`; without one, the only
+//! interface that has a link-local address is used. Build socket addresses
+//! with [`socket_addr`] so that this scope is applied.
 
-use std::net::{IpAddr, Ipv4Addr};
+use std::collections::HashMap;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6};
+use std::sync::{OnceLock, RwLock};
 
 use ipnet::IpNet;
 
@@ -36,6 +44,18 @@ impl Target {
 pub enum TargetSpec {
     Addrs(Vec<IpAddr>),
     Hostname(String),
+    /// A link-local IPv6 address and the interface (index) it is on.
+    Scoped(Ipv6Addr, u32),
+}
+
+/// Which address to use when a hostname has both IPv4 and IPv6 ones.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum IpVersion {
+    /// Prefer IPv4, like nmap; fall back to IPv6 if the name has no IPv4.
+    #[default]
+    PreferV4,
+    /// Use IPv6 only (nmap's `-6`).
+    V6,
 }
 
 /// Parse one target specification without doing any DNS lookups.
@@ -47,6 +67,20 @@ pub fn parse_target(spec: &str) -> Result<TargetSpec, Error> {
 
     if let Ok(ip) = spec.parse::<IpAddr>() {
         return Ok(TargetSpec::Addrs(vec![ip]));
+    }
+
+    if let Some((addr, zone)) = spec.split_once('%') {
+        let ip: Ipv6Addr = addr
+            .parse()
+            .map_err(|_| Error::InvalidTarget(format!("'{addr}' is not an IPv6 address")))?;
+        if !is_link_local(ip) {
+            return Err(Error::InvalidTarget(format!(
+                "'{spec}': only link-local (fe80::/10) addresses take an interface"
+            )));
+        }
+        let index = interface_index(zone)
+            .ok_or_else(|| Error::InvalidTarget(format!("no network interface '{zone}'")))?;
+        return Ok(TargetSpec::Scoped(ip, index));
     }
 
     if spec.contains('/') {
@@ -72,6 +106,14 @@ pub fn parse_target(spec: &str) -> Result<TargetSpec, Error> {
 /// Parse and resolve a list of target specifications into concrete hosts.
 /// Duplicate addresses are removed while preserving first-seen order.
 pub async fn resolve_targets<S: AsRef<str>>(specs: &[S]) -> Result<Vec<Target>, Error> {
+    resolve_targets_with(specs, IpVersion::PreferV4).await
+}
+
+/// Like [`resolve_targets`], choosing hostname addresses by `version`.
+pub async fn resolve_targets_with<S: AsRef<str>>(
+    specs: &[S],
+    version: IpVersion,
+) -> Result<Vec<Target>, Error> {
     let mut out: Vec<Target> = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for spec in specs {
@@ -83,8 +125,14 @@ pub async fn resolve_targets<S: AsRef<str>>(specs: &[S]) -> Result<Vec<Target>, 
                     }
                 }
             }
+            TargetSpec::Scoped(ip, index) => {
+                set_scope(ip, index);
+                if seen.insert(IpAddr::V6(ip)) {
+                    out.push(Target::new(IpAddr::V6(ip)));
+                }
+            }
             TargetSpec::Hostname(name) => {
-                let addr = resolve_hostname(&name).await?;
+                let addr = resolve_hostname(&name, version).await?;
                 if seen.insert(addr) {
                     out.push(Target {
                         addr,
@@ -102,19 +150,89 @@ pub async fn resolve_targets<S: AsRef<str>>(specs: &[S]) -> Result<Vec<Target>, 
     Ok(out)
 }
 
-/// Resolve a hostname to a single address, preferring IPv4 like nmap does.
-async fn resolve_hostname(name: &str) -> Result<IpAddr, Error> {
-    let addrs: Vec<IpAddr> = tokio::net::lookup_host((name, 0))
+/// Resolve a hostname to a single address: IPv4 first like nmap, or only
+/// IPv6 with [`IpVersion::V6`].
+async fn resolve_hostname(name: &str, version: IpVersion) -> Result<IpAddr, Error> {
+    let found: Vec<SocketAddr> = tokio::net::lookup_host((name, 0))
         .await
         .map_err(|e| Error::Resolve(name.to_string(), e.to_string()))?
-        .map(|sa| sa.ip())
         .collect();
-    addrs
-        .iter()
-        .find(|a| a.is_ipv4())
-        .or_else(|| addrs.first())
-        .copied()
-        .ok_or_else(|| Error::Resolve(name.to_string(), "no addresses returned".into()))
+    let pick = match version {
+        IpVersion::PreferV4 => found.iter().find(|a| a.is_ipv4()).or_else(|| found.first()),
+        IpVersion::V6 => found.iter().find(|a| a.is_ipv6()),
+    };
+    let Some(sa) = pick else {
+        let why = match version {
+            IpVersion::V6 if !found.is_empty() => "no IPv6 address",
+            _ => "no addresses returned",
+        };
+        return Err(Error::Resolve(name.to_string(), why.into()));
+    };
+    // A link-local answer comes with the interface it was found on.
+    if let SocketAddr::V6(v6) = sa
+        && is_link_local(*v6.ip())
+        && v6.scope_id() != 0
+    {
+        set_scope(*v6.ip(), v6.scope_id());
+    }
+    Ok(sa.ip())
+}
+
+/// Whether `ip` is a link-local unicast address (`fe80::/10`).
+pub fn is_link_local(ip: Ipv6Addr) -> bool {
+    ip.segments()[0] & 0xffc0 == 0xfe80
+}
+
+/// Interfaces chosen for link-local targets, by address.
+static SCOPES: RwLock<Option<HashMap<Ipv6Addr, u32>>> = RwLock::new(None);
+
+fn set_scope(ip: Ipv6Addr, index: u32) {
+    let mut scopes = SCOPES.write().unwrap_or_else(|e| e.into_inner());
+    scopes.get_or_insert_with(HashMap::new).insert(ip, index);
+}
+
+/// The interface index a link-local address is used on: the one given
+/// with the target, or else the only interface with a link-local address.
+/// `None` for other addresses, or when it is ambiguous.
+pub fn scope_of(ip: Ipv6Addr) -> Option<u32> {
+    if !is_link_local(ip) {
+        return None;
+    }
+    let scopes = SCOPES.read().unwrap_or_else(|e| e.into_inner());
+    if let Some(&index) = scopes.as_ref().and_then(|s| s.get(&ip)) {
+        return Some(index);
+    }
+    default_scope()
+}
+
+/// The only up, non-loopback interface with a link-local IPv6 address.
+fn default_scope() -> Option<u32> {
+    static DEFAULT: OnceLock<Option<u32>> = OnceLock::new();
+    *DEFAULT.get_or_init(|| {
+        let mut found = crate::netif::ipv6_addrs()
+            .into_iter()
+            .filter(|a| is_link_local(a.addr))
+            .map(|a| a.index);
+        let first = found.next()?;
+        found.all(|i| i == first).then_some(first)
+    })
+}
+
+/// The socket address for `ip` and `port`, with the interface applied to
+/// a link-local IPv6 address. Use this instead of `SocketAddr::new`.
+pub fn socket_addr(ip: IpAddr, port: u16) -> SocketAddr {
+    match ip {
+        IpAddr::V6(v6) => SocketAddr::V6(SocketAddrV6::new(v6, port, 0, scope_of(v6).unwrap_or(0))),
+        IpAddr::V4(_) => SocketAddr::new(ip, port),
+    }
+}
+
+/// An interface's index from its name or number (`eth0`, `2`).
+fn interface_index(zone: &str) -> Option<u32> {
+    if let Ok(n) = zone.parse::<u32>() {
+        return (n != 0).then_some(n);
+    }
+    crate::netif::index_of(zone)
 }
 
 fn expand_cidr(net: IpNet) -> Result<Vec<IpAddr>, Error> {
@@ -236,6 +354,36 @@ mod tests {
             "a b",
         ] {
             assert!(parse_target(bad).is_err(), "{bad} should fail");
+        }
+    }
+
+    #[test]
+    fn scoped_link_local() {
+        assert_eq!(
+            parse_target("fe80::1%7").unwrap(),
+            TargetSpec::Scoped("fe80::1".parse().unwrap(), 7)
+        );
+        assert!(parse_target("fe80::1%no-such-if0").is_err());
+        assert!(parse_target("2001:db8::1%7").is_err());
+        assert!(parse_target("fe80::1%0").is_err());
+        assert!(is_link_local("fe80::1".parse().unwrap()));
+        assert!(is_link_local("febf::1".parse().unwrap()));
+        assert!(!is_link_local("fec0::1".parse().unwrap()));
+    }
+
+    #[tokio::test]
+    async fn scope_reaches_socket_addresses() {
+        // fe80::99 is only used by this test, since scopes are process-wide.
+        let t = resolve_targets(&["fe80::99%9"]).await.unwrap();
+        assert_eq!(t[0].addr.to_string(), "fe80::99");
+        match socket_addr(t[0].addr, 80) {
+            SocketAddr::V6(a) => assert_eq!((a.port(), a.scope_id()), (80, 9)),
+            other => panic!("{other}"),
+        }
+        let global: IpAddr = "2001:db8::1".parse().unwrap();
+        match socket_addr(global, 80) {
+            SocketAddr::V6(a) => assert_eq!(a.scope_id(), 0),
+            other => panic!("{other}"),
         }
     }
 

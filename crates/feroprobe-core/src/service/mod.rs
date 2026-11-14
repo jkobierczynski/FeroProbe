@@ -292,7 +292,7 @@ pub async fn detect_services(hosts: &mut [HostResult], cfg: &ScanConfig, wait: D
                 .enumerate()
                 .filter(|(_, p)| p.state == PortState::Open)
                 .map(move |(i, p)| {
-                    let addr = SocketAddr::new(host.addr, p.port);
+                    let addr = crate::target::socket_addr(host.addr, p.port);
                     (h, i, addr, host.hostname.clone(), p.protocol)
                 })
         })

@@ -8,9 +8,9 @@ use std::time::{Duration, Instant, SystemTime};
 use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
 use feroprobe_core::{
-    HostResult, ScanConfig, Target, Timing, connect_scan, detect_services, discover, os_detect,
-    parse_ports, raw_sockets_available, resolve_targets, syn_scan, top_ports, top_udp_ports,
-    udp_scan,
+    HostResult, IpVersion, ScanConfig, Target, Timing, connect_scan, detect_services, discover,
+    os_detect, parse_ports, raw_ipv6_available, raw_sockets_available, resolve_targets_with,
+    syn_scan, top_ports, top_udp_ports, udp_scan,
 };
 
 use output::RunInfo;
@@ -64,16 +64,25 @@ enum Format {
 ///   feroprobe -Pn --top-ports 1000 --open -o json 10.0.0.1-50
 ///   feroprobe -T4 -p- 10.0.0.5             (aggressive timing)
 ///   feroprobe -T2 --scan-delay 1s 10.0.0.5
+///   sudo feroprobe -6 -sn fe80::1%eth0 2001:db8::/120   (IPv6, NDP on the local link)
+///   feroprobe -6 -p 22,443 scanme.example.org          (use the name's IPv6 address)
 #[derive(Debug, Parser)]
 #[command(version, verbatim_doc_comment)]
 struct Args {
-    /// Targets: IP addresses, CIDR blocks (10.0.0.0/24), ranges (10.0.0.1-20) or hostnames
+    /// Targets: IPv4 or IPv6 addresses, CIDR blocks (10.0.0.0/24, 2001:db8::/120),
+    /// ranges (10.0.0.1-20), link-local addresses with their interface
+    /// (fe80::1%eth0) or hostnames
     #[arg(required = true)]
     targets: Vec<String>,
 
+    /// -6: use the IPv6 address of each hostname target (IPv4 is preferred
+    /// otherwise). Address targets are scanned as given, IPv4 or IPv6
+    #[arg(short = '6')]
+    ipv6: bool,
+
     /// Scan technique, nmap style: -sS (SYN), -sT (connect), -sU (UDP), -sn (no port scan),
     /// -sV (also detect service versions on open ports).
-    /// Can be repeated, e.g. -sS -sU -sV. Default: -sS when run as root on Linux with only IPv4 targets, else -sT
+    /// Can be repeated, e.g. -sS -sU -sV. Default: -sS when run as root on Linux, else -sT
     #[arg(
         short = 's',
         value_name = "TYPE",
@@ -86,8 +95,9 @@ struct Args {
     #[arg(short = 'P', value_name = "n", value_enum, hide_possible_values = true)]
     ping: Option<PingMode>,
 
-    /// Don't use ARP for targets on a local Ethernet network; ping them
-    /// with ICMP and TCP probes like remote hosts
+    /// Don't use ARP (IPv4) or neighbour discovery (IPv6) for targets on a
+    /// local Ethernet network; ping them with ICMP and TCP probes like
+    /// remote hosts
     #[arg(long)]
     disable_arp_ping: bool,
 
@@ -123,7 +133,7 @@ struct Args {
     #[arg(short = 'c', long, value_name = "N")]
     concurrency: Option<usize>,
 
-    /// Maximum packets per second for raw-socket probes (SYN, ICMP, ARP) [default: from -T; normally 5000]
+    /// Maximum packets per second for raw-socket probes (SYN, ICMP, ARP, NDP) [default: from -T; normally 5000]
     #[arg(long, value_name = "PPS")]
     max_rate: Option<u32>,
 
@@ -169,7 +179,7 @@ struct Plan {
 }
 
 /// `syn_ok` says whether a SYN scan can serve as the default: the process is
-/// privileged and every target is IPv4 (the SYN scan is IPv4 only for now).
+/// privileged, and the system has IPv6 if any target needs it.
 fn plan(scan: &[ScanType], ping: Option<PingMode>, syn_ok: bool) -> Result<Plan> {
     let has = |t| scan.contains(&t);
     if has(ScanType::Syn) && has(ScanType::Connect) {
@@ -233,11 +243,17 @@ fn merge(hosts: &mut [HostResult], scanned: &[usize], results: Vec<HostResult>) 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
-    let targets = resolve_targets(&args.targets)
+    let version = if args.ipv6 {
+        IpVersion::V6
+    } else {
+        IpVersion::PreferV4
+    };
+    let targets = resolve_targets_with(&args.targets, version)
         .await
         .context("resolving targets")?;
-    let all_ipv4 = targets.iter().all(|t| t.addr.is_ipv4());
-    let plan = plan(&args.scan, args.ping, all_ipv4 && raw_sockets_available())?;
+    let any_ipv6 = targets.iter().any(|t| t.addr.is_ipv6());
+    let syn_ok = raw_sockets_available() && (!any_ipv6 || raw_ipv6_available());
+    let plan = plan(&args.scan, args.ping, syn_ok)?;
     if args.os {
         if plan.ping_only {
             bail!("-O needs a port scan, so it cannot be combined with -sn");
