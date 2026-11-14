@@ -701,7 +701,11 @@ mod imp {
                     if !pacer.wait_until(cfg.deadline) {
                         return Err(ScanConfig::timed_out());
                     }
-                    send_with_backoff_until(&send_sock, &pkt, (addr, 0).into(), cfg.deadline)?;
+                    // `socket_addr` restores a link-local target's interface
+                    // scope (fe80::…%iface); a bare `(addr, 0)` would drop it
+                    // and the SYN could leave the wrong interface.
+                    let to = crate::target::socket_addr(addr.into(), 0);
+                    send_with_backoff_until(&send_sock, &pkt, to, cfg.deadline)?;
                     drain(&mut found);
                 }
                 if !unanswered(&found) {
