@@ -24,6 +24,9 @@ pub struct RunInfo {
     /// TCP and UDP ports scanned on each host (empty if that scan did not run).
     pub tcp_ports: Vec<u16>,
     pub udp_ports: Vec<u16>,
+    pub sctp_ports: Vec<u16>,
+    /// IP protocol numbers for `-sO`.
+    pub protocols: Vec<u16>,
     pub ports_per_host: usize,
     pub elapsed: Duration,
     /// Only show open (and open|filtered, unfiltered) ports, like nmap's `--open`.
@@ -83,6 +86,7 @@ pub(crate) fn port_rows<'a>(
         PortState::Filtered,
         PortState::OpenFiltered,
         PortState::Unfiltered,
+        PortState::ClosedFiltered,
     ]
     .into_iter()
     .map(|s| (host.count(s), s))
@@ -382,6 +386,8 @@ pub(crate) mod tests {
             scan_types: vec!["tcp-connect", "version"],
             tcp_ports: vec![22, 80, 81, 82, 443],
             udp_ports: vec![],
+            sctp_ports: vec![],
+            protocols: vec![],
             ports_per_host: 5,
             elapsed: Duration::from_millis(1500),
             only_open: false,

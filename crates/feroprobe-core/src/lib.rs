@@ -15,9 +15,12 @@
 //! finds the routers on the way to it.
 
 pub mod arp;
+#[cfg(target_os = "linux")]
+mod capture;
 pub mod connect;
 pub mod discovery;
 pub mod dns;
+pub mod ipproto;
 pub mod model;
 pub mod ndp;
 pub mod netif;
@@ -28,6 +31,9 @@ pub mod packet_trace;
 pub mod ports;
 pub mod progress;
 pub mod raw;
+#[cfg(target_os = "linux")]
+mod rawscan;
+pub mod sctp;
 pub mod service;
 pub mod syn;
 pub mod target;
@@ -39,10 +45,15 @@ pub use arp::{MacAddr, MacInfo};
 pub use connect::connect_scan;
 pub use discovery::{PingProbes, discover, icmp_available};
 pub use dns::reverse_lookup;
+pub use ipproto::ip_protocol_scan;
 pub use model::{HostResult, PortResult, PortState, Protocol, ScanConfig};
 pub use os::{OsMatch, TcpTraits, os_detect};
-pub use ports::{PortLists, parse_port_lists, parse_ports, service_name, top_ports, top_udp_ports};
+pub use ports::{
+    PortLists, ip_protocol_name, parse_port_lists, parse_ports, parse_protocols, service_name,
+    top_ports, top_sctp_ports, top_udp_ports,
+};
 pub use raw::{raw_ipv6_available, raw_sockets_available};
+pub use sctp::{SctpScanKind, sctp_scan};
 pub use service::{ServiceInfo, detect_services};
 pub use syn::{RawTcpScan, TcpScanKind, parse_scanflags, raw_tcp_scan, syn_scan};
 pub use target::{

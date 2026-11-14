@@ -10,12 +10,15 @@ use crate::os::OsMatch;
 use crate::service::ServiceInfo;
 use crate::trace::Trace;
 
-/// Transport protocol of a scanned port.
+/// Transport protocol of a scanned port. [`Protocol::Ip`] is the IP
+/// protocol scan (`-sO`), whose "ports" are IP protocol numbers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Protocol {
     Tcp,
     Udp,
+    Sctp,
+    Ip,
 }
 
 impl std::fmt::Display for Protocol {
@@ -23,6 +26,8 @@ impl std::fmt::Display for Protocol {
         f.pad(match self {
             Protocol::Tcp => "tcp",
             Protocol::Udp => "udp",
+            Protocol::Sctp => "sctp",
+            Protocol::Ip => "ip",
         })
     }
 }
@@ -47,6 +52,10 @@ pub enum PortState {
     /// but whether it is open is unknown.
     #[serde(rename = "unfiltered")]
     Unfiltered,
+    /// Idle scan: the zombie's IP ID did not move, so the port is closed
+    /// or a filter dropped the probe.
+    #[serde(rename = "closed|filtered")]
+    ClosedFiltered,
 }
 
 impl std::fmt::Display for PortState {
@@ -57,6 +66,7 @@ impl std::fmt::Display for PortState {
             PortState::Filtered => "filtered",
             PortState::OpenFiltered => "open|filtered",
             PortState::Unfiltered => "unfiltered",
+            PortState::ClosedFiltered => "closed|filtered",
         })
     }
 }
@@ -82,6 +92,19 @@ pub mod reason {
     /// The host answered an IPv6 neighbour solicitation.
     pub const ND_RESPONSE: &str = "nd-response";
     pub const USER_SET: &str = "user-set";
+    /// ICMP time exceeded: the probe died on the way.
+    pub const TIME_EXCEEDED: &str = "time-exceeded";
+    /// SCTP: the port answered an INIT with an INIT-ACK.
+    pub const INIT_ACK: &str = "init-ack";
+    /// SCTP: the port answered with an ABORT.
+    pub const ABORT: &str = "abort";
+    /// IP protocol scan: the host answered in the protocol probed.
+    pub const PROTO_RESPONSE: &str = "proto-response";
+    /// ICMPv6 parameter problem, which -sO reads like an unreachable.
+    pub const PARAM_PROBLEM: &str = "param-problem";
+    /// Idle scan: the zombie's IP ID moved, or did not.
+    pub const IPID_CHANGE: &str = "ipid-change";
+    pub const NO_IPID_CHANGE: &str = "no-ipid-change";
 }
 
 /// Result for one port on one host.

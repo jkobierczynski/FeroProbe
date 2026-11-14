@@ -63,8 +63,6 @@ fn host_port(ip: Option<IpAddr>, port: u16) -> String {
 /// protocol `proto` between `src` and `dst`; an unknown end shows as `*`.
 pub(crate) fn describe(proto: u8, data: &[u8], src: Option<IpAddr>, dst: Option<IpAddr>) -> String {
     let to = dst.map_or_else(|| "*".to_string(), |d| d.to_string());
-    const IPPROTO_UDP: u8 = 17;
-    const IPPROTO_ICMPV6: u8 = 58;
     match proto {
         packet::IPPROTO_TCP => match packet::parse_tcp(data) {
             Some(t) => format!(
@@ -77,14 +75,14 @@ pub(crate) fn describe(proto: u8, data: &[u8], src: Option<IpAddr>, dst: Option<
             ),
             None => format!("TCP {} bytes to {to}", data.len()),
         },
-        IPPROTO_UDP if data.len() >= 8 => format!(
+        packet::IPPROTO_UDP if data.len() >= 8 => format!(
             "UDP {} > {} len={}",
             host_port(src, u16::from_be_bytes([data[0], data[1]])),
             host_port(dst, u16::from_be_bytes([data[2], data[3]])),
             data.len() - 8
         ),
-        packet::IPPROTO_ICMP | IPPROTO_ICMPV6 => {
-            let v = if proto == IPPROTO_ICMPV6 {
+        packet::IPPROTO_ICMP | packet::IPPROTO_ICMPV6 => {
+            let v = if proto == packet::IPPROTO_ICMPV6 {
                 "ICMPv6"
             } else {
                 "ICMP"
@@ -93,7 +91,7 @@ pub(crate) fn describe(proto: u8, data: &[u8], src: Option<IpAddr>, dst: Option<
             match packet::parse_icmp(data) {
                 Some(m) => format!(
                     "{v} [{from} > {to} {} (type={}/code={}) id={} seq={}]",
-                    icmp_name(proto == IPPROTO_ICMPV6, m.kind),
+                    icmp_name(proto == packet::IPPROTO_ICMPV6, m.kind),
                     m.kind,
                     m.code,
                     m.id,
@@ -102,7 +100,22 @@ pub(crate) fn describe(proto: u8, data: &[u8], src: Option<IpAddr>, dst: Option<
                 None => format!("{v} {} bytes {from} > {to}", data.len()),
             }
         }
-        other => format!("proto {other}, {} bytes to {to}", data.len()),
+        packet::IPPROTO_SCTP => match packet::parse_sctp(data) {
+            Some(c) => format!(
+                "SCTP {} > {} {} vtag={}",
+                host_port(src, c.sport),
+                host_port(dst, c.dport),
+                sctp_chunk_name(c.chunk),
+                c.vtag
+            ),
+            None => format!("SCTP {} bytes to {to}", data.len()),
+        },
+        other => format!(
+            "{} {} > {to} ({} bytes)",
+            crate::ports::ip_protocol_name(other).to_uppercase(),
+            src.map_or_else(|| "*".to_string(), |s| s.to_string()),
+            data.len()
+        ),
     }
 }
 
@@ -156,6 +169,16 @@ pub(crate) fn conn(to: SocketAddr, outcome: &str) {
     });
 }
 
+fn sctp_chunk_name(chunk: u8) -> &'static str {
+    match chunk {
+        packet::SCTP_INIT => "INIT",
+        packet::SCTP_INIT_ACK => "INIT-ACK",
+        packet::SCTP_ABORT => "ABORT",
+        packet::SCTP_COOKIE_ECHO => "COOKIE-ECHO",
+        _ => "chunk",
+    }
+}
+
 fn icmp_name(v6: bool, kind: u8) -> &'static str {
     match (v6, kind) {
         (false, 0) | (true, 129) => "Echo reply",
@@ -204,5 +227,12 @@ mod tests {
             line,
             "ICMP [* > 192.0.2.9 Echo request (type=8/code=0) id=5 seq=1]"
         );
+        let init = packet::sctp_init(40000, 2905, 7, 1);
+        let dst = Some("192.0.2.9".parse().unwrap());
+        assert_eq!(
+            describe(packet::IPPROTO_SCTP, &init, None, dst),
+            "SCTP *:40000 > 192.0.2.9:2905 INIT vtag=0"
+        );
+        assert_eq!(describe(47, &[], None, dst), "GRE * > 192.0.2.9 (0 bytes)");
     }
 }

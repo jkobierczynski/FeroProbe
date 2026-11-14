@@ -341,18 +341,33 @@ pub(crate) fn send_with_backoff_until(
     to: SocketAddr,
     deadline: Option<Instant>,
 ) -> io::Result<()> {
+    send_logged_until(sock, pkt, to, deadline, || {
+        crate::packet_trace::sent(sent_protocol(sock, to), pkt, to);
+    })
+}
+
+/// [`send_with_backoff_until`] with the caller's own `--packet-trace`
+/// line: `log` runs (when tracing is on) just before the first real send,
+/// so the answer's line cannot come first and probes never sent are not
+/// shown.
+pub(crate) fn send_logged_until(
+    sock: &Socket,
+    pkt: &[u8],
+    to: SocketAddr,
+    deadline: Option<Instant>,
+    log: impl FnOnce(),
+) -> io::Result<()> {
     let addr = to.into();
     let mut attempts = 0;
-    let mut logged = false;
+    let mut log = Some(log);
     loop {
         if deadline.is_some_and(|d| Instant::now() >= d) {
             return Err(crate::model::ScanConfig::timed_out());
         }
-        // Logged just before the first real send, so the answer's line
-        // cannot come first and probes never sent are not shown.
-        if !logged && crate::packet_trace::enabled() {
-            crate::packet_trace::sent(sent_protocol(sock, to), pkt, to);
-            logged = true;
+        if crate::packet_trace::enabled()
+            && let Some(log) = log.take()
+        {
+            log();
         }
         match sock.send_to(pkt, &addr) {
             Ok(_) => return Ok(()),

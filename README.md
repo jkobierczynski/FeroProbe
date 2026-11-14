@@ -13,6 +13,8 @@ no external binaries.
 | TCP SYN scan, `-sS`, IPv4 and IPv6 (raw sockets, Linux, root or `CAP_NET_RAW`) | ✅ |
 | FIN, NULL, Xmas, ACK, Window and Maimon scans (`-sF`, `-sN`, `-sX`, `-sA`, `-sW`, `-sM`) and custom flags with `--scanflags`, IPv4 and IPv6 (raw sockets, Linux, root) | ✅ |
 | UDP scan, `-sU`, with DNS, NTP, SNMP and SSDP payloads | ✅ |
+| SCTP scans `-sY` (INIT) and `-sZ` (COOKIE ECHO), IPv4 and IPv6 (raw sockets, Linux, root) | ✅ |
+| IP protocol scan `-sO` (which protocols a host runs), IPv4 and IPv6 (raw sockets, Linux, root) | ✅ |
 | Host discovery: ICMP/ICMPv6 echo + TCP 443/80 probes, `-sn`, `-Pn` | ✅ |
 | Ping types `-PS`, `-PA`, `-PU`, `-PE`, `-PP`, `-PM` | ✅ |
 | Reverse DNS names, `-n`, `-R`, `--dns-servers`; `--randomize-hosts` | ✅ |
@@ -20,7 +22,7 @@ no external binaries.
 | MAC vendor names from the full IEEE OUI list (system `oui.txt` or `--oui-file`) | ✅ |
 | Timing templates `-T0`…`-T5`, `--scan-delay`, `--min-rate`, `--host-timeout`, `--stats-every` | ✅ |
 | Targets: IPv4 and IPv6 addresses, CIDR, `a.b.c.X-Y` ranges, `fe80::1%eth0`, hostnames (`-6` for their IPv6 address) | ✅ |
-| nmap-style `-p` port specs with `T:`/`U:`, top ports, `-F`, `--exclude-ports`, shuffled port order (`-r` keeps it) | ✅ |
+| nmap-style `-p` port specs with `T:`/`U:`/`S:` and `P:` (IP protocols for `-sO`), top ports, `-F`, `--exclude-ports`, shuffled port order (`-r` keeps it) | ✅ |
 | Table, JSON, nmap-style XML and grepable output, `--reason`, `--open`, `--packet-trace` | ✅ |
 | Report files `-oN`, `-oX`, `-oG`, `-oJ`, `-oA`; target lists `-iL`; `--exclude`, `--excludefile`; progress with `-v` | ✅ |
 | Service and version detection, `-sV`, with our own probes and rules | ✅ |
@@ -230,6 +232,45 @@ sudo feroprobe --scanflags SYNFIN -p 80,443 10.0.0.5
 sudo feroprobe -sA --scanflags ACKPSH -p 1-1024 10.0.0.5
 ```
 
+### SCTP scans
+
+`-sY` and `-sZ` scan SCTP, the transport behind telephone- and mobile-network
+signalling (Diameter, S1/NG, SIGTRAN). They need the same raw-socket
+privileges as `-sS`.
+
+- `-sY` sends an INIT, the first chunk of SCTP's handshake, and never finishes
+  it: an **INIT-ACK** means the port is open, an **ABORT** means closed, and
+  silence (or an ICMP unreachable) means filtered.
+- `-sZ` sends a COOKIE ECHO out of the blue: an open port drops it silently
+  (**open|filtered**) and a closed one answers with an **ABORT**. It slips past
+  some firewalls that block INIT chunks.
+
+Name SCTP ports in `-p` with `S:`, e.g. `-sY -p S:2905,3868,S:9900`. With no
+`-p`, a built-in list of common SCTP ports is used.
+
+```sh
+sudo feroprobe -sY -p S:2905,3868 10.0.0.5
+```
+
+### IP protocol scan
+
+`-sO` finds which IP protocols (ICMP, IGMP, TCP, UDP, GRE, ESP, SCTP, ...) a
+host supports, rather than which ports. Its "ports" are protocol numbers, 0 to
+255, named with `P:` in `-p` (`-sO -p P:1,6,17,47`); with no `-p` it tries all
+256. FeroProbe gives the protocols nmap gives a real probe (ICMP echo, IGMP
+query, a TCP ACK, a UDP datagram, an SCTP INIT) one, and sends the rest as a
+bare IP header.
+
+- **open**: the host answered in that protocol, or sent an ICMP *port*
+  unreachable (so the protocol is there, the port was not)
+- **closed**: an ICMP *protocol* unreachable
+- **filtered**: another ICMP unreachable, from the host or a router
+- **open|filtered**: no answer at all
+
+```sh
+sudo feroprobe -sO -p P:1,6,17,47,50,132 10.0.0.5
+```
+
 ### Privileges
 
 The SYN scan and the other raw TCP scans send hand-built packets over raw
@@ -427,6 +468,7 @@ SHA-256 checksums as a GitHub release.
 | filtered | No reply (TCP) or an ICMP unreachable error from a filter |
 | open\|filtered | No reply where an open port stays silent too (UDP, FIN, NULL, Xmas, Maimon): a silent service or a firewall |
 | unfiltered | ACK scan: the host reset the probe, so no filter dropped it; open or closed is unknown |
+| closed\|filtered | Idle scan (`-sI`, planned): the zombie's IP ID did not move; closed or filtered is unknown |
 
 UDP note: hosts rate-limit ICMP errors, so scanning many closed UDP ports fast
 can report some as open|filtered. Lower `--concurrency` for more accuracy.

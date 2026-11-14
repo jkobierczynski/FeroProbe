@@ -26,10 +26,12 @@ SCAN TECHNIQUES:
   -sS/sT/sA/sW/sM: TCP SYN/connect/ACK/Window/Maimon scans
   -sU: UDP scan
   -sN/sF/sX: TCP NULL, FIN and Xmas scans
+  -sY/sZ: SCTP INIT and COOKIE ECHO scans
+  -sO: IP protocol scan - which protocols (TCP, UDP, ICMP, ...) a host runs
   --scanflags <flags>: Send these TCP flags (e.g. SYNFIN) instead
 PORT SPECIFICATION AND SCAN ORDER:
   -p, --ports <port ranges>: Scan only these ports
-    Ex: -p 443; -p 1-1024; -p 22,80,T:8080,U:53,123
+    Ex: -p 443; -p 1-1024; -p 22,80,T:8080,U:53,S:2905; -sO -p P:1,6,17
   --exclude-ports <port ranges>: Leave these ports out (from -P probes too)
   -F: Fast mode - the 100 most common ports
   -r: Scan ports in order instead of shuffled

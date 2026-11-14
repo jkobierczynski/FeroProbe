@@ -291,7 +291,11 @@ pub async fn detect_services(hosts: &mut [HostResult], cfg: &ScanConfig, wait: D
             host.ports
                 .iter()
                 .enumerate()
-                .filter(|(_, p)| p.state == PortState::Open)
+                // No SCTP probes yet, and -sO "ports" are protocols.
+                .filter(|(_, p)| {
+                    p.state == PortState::Open
+                        && matches!(p.protocol, Protocol::Tcp | Protocol::Udp)
+                })
                 .map(move |(i, p)| {
                     let addr = crate::target::socket_addr(host.addr, p.port);
                     (h, i, addr, host.hostname.clone(), p.protocol)
@@ -303,6 +307,7 @@ pub async fn detect_services(hosts: &mut [HostResult], cfg: &ScanConfig, wait: D
             let info = match protocol {
                 Protocol::Tcp => detect_tcp(addr, hostname.as_deref(), cfg, wait).await,
                 Protocol::Udp => detect_udp(addr, cfg, wait).await,
+                Protocol::Sctp | Protocol::Ip => None,
             };
             (h, i, info)
         })
