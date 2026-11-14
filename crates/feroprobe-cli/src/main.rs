@@ -14,10 +14,11 @@ use clap::{Parser, ValueEnum};
 use feroprobe_core::discovery::{DEFAULT_TCP_PING_PORT, DEFAULT_UDP_PING_PORT};
 use feroprobe_core::timing::parse_duration;
 use feroprobe_core::{
-    Exclusions, HostResult, IpVersion, PingProbes, PortLists, RawTcpScan, ScanConfig, Target,
-    TcpScanKind, Timing, connect_scan, detect_services, discover, os_detect, parse_port_lists,
-    parse_ports, parse_scanflags, raw_ipv6_available, raw_sockets_available, raw_tcp_scan,
-    resolve_targets_lenient, reverse_lookup, top_ports, top_udp_ports, traceroute, udp_scan,
+    Exclusions, HostResult, IpVersion, PingProbes, PortLists, RawTcpScan, ScanConfig, SctpScanKind,
+    Target, TcpScanKind, Timing, connect_scan, detect_services, discover, ip_protocol_scan,
+    os_detect, parse_port_lists, parse_ports, parse_scanflags, raw_ipv6_available,
+    raw_sockets_available, raw_tcp_scan, resolve_targets_lenient, reverse_lookup, sctp_scan,
+    top_ports, top_sctp_ports, top_udp_ports, traceroute, udp_scan,
 };
 use futures::StreamExt;
 
@@ -49,6 +50,15 @@ enum ScanType {
     /// -sM: TCP Maimon scan, FIN and ACK (raw sockets)
     #[value(name = "M")]
     Maimon,
+    /// -sY: SCTP INIT scan (raw sockets)
+    #[value(name = "Y")]
+    SctpInit,
+    /// -sZ: SCTP COOKIE ECHO scan (raw sockets)
+    #[value(name = "Z")]
+    SctpCookie,
+    /// -sO: IP protocol scan (raw sockets)
+    #[value(name = "O")]
+    IpProto,
     /// -sU: UDP scan
     #[value(name = "U")]
     Udp,
@@ -97,6 +107,9 @@ impl ScanType {
             ScanType::Ack => "-sA",
             ScanType::Window => "-sW",
             ScanType::Maimon => "-sM",
+            ScanType::SctpInit => "-sY",
+            ScanType::SctpCookie => "-sZ",
+            ScanType::IpProto => "-sO",
             ScanType::Udp => "-sU",
             ScanType::PingOnly => "-sn",
             ScanType::Version => "-sV",
@@ -697,6 +710,10 @@ fn plural(n: usize) -> &'static str {
 struct Plan {
     tcp: Option<ScanType>,
     udp: bool,
+    /// The SCTP scan to run (`-sY` or `-sZ`), if any.
+    sctp: Option<SctpScanKind>,
+    /// The IP protocol scan (`-sO`).
+    ip_proto: bool,
     version: bool,
     ping_only: bool,
     discovery: bool,
@@ -723,12 +740,22 @@ fn plan(scan: &[ScanType], skip_discovery: bool, syn_ok: bool, scanflags: bool) 
             bail!("--scanflags sends raw packets, so it cannot be combined with -sT");
         }
     }
+    let sctp = match (has(ScanType::SctpInit), has(ScanType::SctpCookie)) {
+        (true, true) => bail!("choose one SCTP scan type, not -sY and -sZ"),
+        (true, false) => Some(SctpScanKind::Init),
+        (false, true) => Some(SctpScanKind::CookieEcho),
+        (false, false) => None,
+    };
+    let ip_proto = has(ScanType::IpProto);
+    // Only pull in the default TCP scan when no scan type was asked for at
+    // all; an explicit -sU, -sY, -sZ or -sO stands on its own, like nmap.
+    let any_explicit = !tcp_types.is_empty() || has(ScanType::Udp) || sctp.is_some() || ip_proto;
     let tcp = if let Some(&t) = tcp_types.first() {
         Some(t)
     } else if scanflags {
         // nmap reads custom flags as a SYN scan unless told otherwise.
         Some(ScanType::Syn)
-    } else if !has(ScanType::Udp) && !ping_only {
+    } else if !any_explicit && !ping_only {
         // nmap's default: SYN scan when privileged, connect scan otherwise.
         Some(if syn_ok && cfg!(target_os = "linux") {
             ScanType::Syn
@@ -741,6 +768,8 @@ fn plan(scan: &[ScanType], skip_discovery: bool, syn_ok: bool, scanflags: bool) 
     Ok(Plan {
         tcp,
         udp: has(ScanType::Udp),
+        sctp,
+        ip_proto,
         version: has(ScanType::Version),
         ping_only,
         discovery: !skip_discovery,
@@ -824,21 +853,28 @@ fn apply_min_rate(
 
 /// The TCP and UDP ports to scan, sorted: from -p, -F or --top-ports, less
 /// --exclude-ports.
-fn port_lists(args: &Args) -> Result<PortLists> {
+fn port_lists(args: &Args, ip_proto: bool, port_scan: bool) -> Result<PortLists> {
     let mut lists = match &args.ports {
-        Some(spec) => parse_port_lists(spec)?,
+        Some(spec) => parse_port_lists(spec, ip_proto, port_scan)?,
         None => {
             let n = if args.fast { Some(100) } else { args.top_ports };
             PortLists {
                 tcp: top_ports(n.unwrap_or(100)),
                 udp: top_udp_ports(n.unwrap_or(20)),
+                sctp: top_sctp_ports(n.unwrap_or(50)),
+                // -sO with no -p scans every IP protocol.
+                protocols: (0..=255).collect(),
             }
         }
     };
     if let Some(spec) = &args.exclude_ports {
-        let ex = parse_port_lists(spec).context("reading --exclude-ports")?;
+        let ex = parse_port_lists(spec, ip_proto, port_scan).context("reading --exclude-ports")?;
         lists.tcp.retain(|p| ex.tcp.binary_search(p).is_err());
         lists.udp.retain(|p| ex.udp.binary_search(p).is_err());
+        lists.sctp.retain(|p| ex.sctp.binary_search(p).is_err());
+        lists
+            .protocols
+            .retain(|p| ex.protocols.binary_search(p).is_err());
     }
     Ok(lists)
 }
@@ -994,6 +1030,9 @@ struct ScanJob<'a> {
     /// The ports, in the order to probe them.
     tcp: &'a [u16],
     udp: &'a [u16],
+    sctp: &'a [u16],
+    /// IP protocol numbers for `-sO`.
+    protocols: &'a [u8],
     scanflags: Option<u8>,
     version_wait: Duration,
     os: bool,
@@ -1013,6 +1052,14 @@ impl ScanJob<'_> {
         }
         if self.plan.udp {
             types.push("udp");
+        }
+        match self.plan.sctp {
+            Some(SctpScanKind::Init) => types.push("sctp-init"),
+            Some(SctpScanKind::CookieEcho) => types.push("sctp-cookie"),
+            None => {}
+        }
+        if self.plan.ip_proto {
+            types.push("ipproto");
         }
         if self.plan.version {
             types.push("version");
@@ -1067,6 +1114,32 @@ impl ScanJob<'_> {
             done(&progress);
             merge(hosts, r);
         }
+        if let Some(kind) = self.plan.sctp {
+            let name = match kind {
+                SctpScanKind::Init => "SCTP INIT scan",
+                SctpScanKind::CookieEcho => "SCTP COOKIE ECHO scan",
+            };
+            let done = progress.phase_of(name, live.len(), live.len() * self.sctp.len());
+            let r = sctp_scan(live, self.sctp, cfg, kind)
+                .await
+                .with_context(|| format!("{name} failed"))?;
+            progress.found(&r);
+            done(&progress);
+            merge(hosts, r);
+        }
+        if self.plan.ip_proto {
+            let done = progress.phase_of(
+                "IP protocol scan",
+                live.len(),
+                live.len() * self.protocols.len(),
+            );
+            let r = ip_protocol_scan(live, self.protocols, cfg)
+                .await
+                .context("IP protocol scan failed")?;
+            progress.found(&r);
+            done(&progress);
+            merge(hosts, r);
+        }
         if self.plan.version {
             let done = progress.phase("service detection", live.len());
             detect_services(hosts, cfg, self.version_wait).await;
@@ -1098,7 +1171,13 @@ impl ScanJob<'_> {
         // The hosts share one --max-rate schedule (set in scan_config), so
         // each may use the whole rate.
         let probes = self.plan.tcp.map_or(0, |_| self.tcp.len())
-            + if self.plan.udp { self.udp.len() } else { 0 };
+            + if self.plan.udp { self.udp.len() } else { 0 }
+            + self.plan.sctp.map_or(0, |_| self.sctp.len())
+            + if self.plan.ip_proto {
+                self.protocols.len()
+            } else {
+                0
+            };
         let done = progress.phase_of(
             "port scan (each host on its own clock)",
             live.len(),
@@ -1236,12 +1315,6 @@ async fn main() -> Result<()> {
     let any_ipv6 = targets.iter().any(|t| t.addr.is_ipv6());
     let syn_ok = raw_sockets_available() && (!any_ipv6 || raw_ipv6_available());
     let mut probes = ping_probes(&args.ping)?.unwrap_or_default();
-    if let Some(spec) = &args.exclude_ports {
-        let ex = parse_port_lists(spec).context("reading --exclude-ports")?;
-        for w in exclude_ping_ports(&mut probes, &ex) {
-            eprintln!("Warning: {w}");
-        }
-    }
     let skip_discovery = args.ping.contains(&PingArg::Skip);
     let mut plan = plan(&args.scan, skip_discovery, syn_ok, args.scanflags.is_some())?;
     let (mut os, trace) = aggressive(&mut plan, &args, raw_sockets_available())?;
@@ -1254,10 +1327,25 @@ async fn main() -> Result<()> {
         }
     }
 
+    let port_scan = plan.tcp.is_some() || plan.udp || plan.sctp.is_some();
     let PortLists {
         tcp: tcp_ports,
         udp: udp_ports,
-    } = port_lists(&args)?;
+        sctp: sctp_ports,
+        protocols,
+    } = port_lists(&args, plan.ip_proto, port_scan)?;
+    // -sO's "ports" are IP protocol numbers, 0-255 (validated on parse).
+    let protocols: Vec<u8> = protocols.iter().map(|&p| p as u8).collect();
+    // Thin the discovery probes by --exclude-ports, read the same way the
+    // scan reads -p, so -sO's protocol exclusions (0 among them) parse
+    // rather than being rejected as ports. Only TCP/UDP ping ports match.
+    if let Some(spec) = &args.exclude_ports {
+        let ex =
+            parse_port_lists(spec, plan.ip_proto, port_scan).context("reading --exclude-ports")?;
+        for w in exclude_ping_ports(&mut probes, &ex) {
+            eprintln!("Warning: {w}");
+        }
+    }
     if plan.ping_only && !plan.discovery && !trace {
         bail!("-sn with -Pn would do nothing (add --traceroute to only trace the route)");
     }
@@ -1285,7 +1373,19 @@ async fn main() -> Result<()> {
             );
             plan.udp = false;
         }
-        if plan.tcp.is_none() && !plan.udp {
+        if plan.sctp.is_some() && sctp_ports.is_empty() {
+            eprintln!(
+                "Warning: an SCTP scan was asked for, but no SCTP ports were given; skipping it"
+            );
+            plan.sctp = None;
+        }
+        if plan.ip_proto && protocols.is_empty() {
+            eprintln!(
+                "Warning: an IP protocol scan was asked for, but no protocols were given; skipping it"
+            );
+            plan.ip_proto = false;
+        }
+        if plan.tcp.is_none() && !plan.udp && plan.sctp.is_none() && !plan.ip_proto {
             plan.ping_only = true;
             plan.version = false;
             if os {
@@ -1296,9 +1396,11 @@ async fn main() -> Result<()> {
     }
     // The order probes go out in; reports keep the sorted lists.
     let (mut tcp_order, mut udp_order) = (tcp_ports.clone(), udp_ports.clone());
+    let mut sctp_order = sctp_ports.clone();
     if !args.ordered_ports {
         shuffle(&mut tcp_order);
         shuffle(&mut udp_order);
+        shuffle(&mut sctp_order);
     }
 
     let mut cfg = scan_config(&args);
@@ -1325,6 +1427,12 @@ async fn main() -> Result<()> {
             },
             tcp_ports: if plan.tcp.is_some() { &tcp_ports } else { &[] },
             udp_ports: if plan.udp { &udp_ports } else { &[] },
+            sctp_ports: if plan.sctp.is_some() {
+                &sctp_ports
+            } else {
+                &[]
+            },
+            protocols: if plan.ip_proto { &protocols } else { &[] },
             cfg: &cfg,
             os,
             trace,
@@ -1394,6 +1502,8 @@ async fn main() -> Result<()> {
             plan: &plan,
             tcp: &tcp_order,
             udp: &udp_order,
+            sctp: &sctp_order,
+            protocols: &protocols,
             scanflags: args.scanflags,
             version_wait: Duration::from_millis(args.version_timeout),
             os,
@@ -1443,8 +1553,10 @@ async fn main() -> Result<()> {
     if let Some(task) = stats {
         task.abort();
     }
-    let ports_per_host =
-        plan.tcp.map_or(0, |_| tcp_ports.len()) + if plan.udp { udp_ports.len() } else { 0 };
+    let ports_per_host = plan.tcp.map_or(0, |_| tcp_ports.len())
+        + if plan.udp { udp_ports.len() } else { 0 }
+        + plan.sctp.map_or(0, |_| sctp_ports.len())
+        + if plan.ip_proto { protocols.len() } else { 0 };
     let info = RunInfo {
         args: std::env::args().collect::<Vec<_>>().join(" "),
         start: start_time,
@@ -1455,6 +1567,16 @@ async fn main() -> Result<()> {
             Vec::new()
         },
         udp_ports: if plan.udp { udp_ports } else { Vec::new() },
+        sctp_ports: if plan.sctp.is_some() {
+            sctp_ports
+        } else {
+            Vec::new()
+        },
+        protocols: if plan.ip_proto {
+            protocols.iter().map(|&p| u16::from(p)).collect()
+        } else {
+            Vec::new()
+        },
         ports_per_host,
         elapsed: started.elapsed(),
         only_open: args.open,
@@ -1534,6 +1656,20 @@ mod tests {
     }
 
     #[test]
+    fn sctp_and_ip_protocol_scans() {
+        let y = p(&[ScanType::SctpInit], false, true).unwrap();
+        assert_eq!(y.sctp, Some(SctpScanKind::Init));
+        // An explicit -sY does not pull in a default TCP scan.
+        assert_eq!((y.tcp, y.udp, y.ip_proto), (None, false, false));
+        let o = p(&[ScanType::IpProto], false, true).unwrap();
+        assert!(o.ip_proto && o.tcp.is_none());
+        // -sS and -sO run side by side.
+        let both = p(&[ScanType::Syn, ScanType::IpProto], false, true).unwrap();
+        assert_eq!((both.tcp, both.ip_proto), (Some(ScanType::Syn), true));
+        assert!(p(&[ScanType::SctpInit, ScanType::SctpCookie], false, true).is_err());
+    }
+
+    #[test]
     fn rejects_conflicts() {
         assert!(p(&[ScanType::Syn, ScanType::Connect], false, true).is_err());
         assert!(p(&[ScanType::PingOnly, ScanType::Udp], false, true).is_err());
@@ -1604,7 +1740,10 @@ mod tests {
         assert_eq!(a.ping, vec![PingArg::Skip]);
         let a = Args::try_parse_from(["feroprobe", "-sn", "10.0.0.0/24"]).unwrap();
         assert_eq!(a.scan, vec![ScanType::PingOnly]);
-        assert!(Args::try_parse_from(["feroprobe", "-sZ", "10.0.0.1"]).is_err());
+        let a = Args::try_parse_from(["feroprobe", "-sZ", "10.0.0.1"]).unwrap();
+        assert_eq!(a.scan, vec![ScanType::SctpCookie]);
+        let a = Args::try_parse_from(["feroprobe", "-sO", "10.0.0.1"]).unwrap();
+        assert_eq!(a.scan, vec![ScanType::IpProto]);
         let a = Args::try_parse_from([
             "feroprobe",
             "--disable-arp-ping",
@@ -1924,7 +2063,7 @@ mod tests {
 
     #[test]
     fn port_selection() {
-        let lists = |argv: &[&str]| port_lists(&args(argv)).unwrap();
+        let lists = |argv: &[&str]| port_lists(&args(argv), false, true).unwrap();
         let fast = lists(&["-F"]);
         assert_eq!((fast.tcp.len(), fast.udp.len()), (100, 100));
         assert_eq!(lists(&[]).udp.len(), 20);
@@ -1935,9 +2074,29 @@ mod tests {
         assert_eq!(l.udp, vec![20, 24, 25, 50, 51, 52, 54, 55]);
         let l = lists(&["--top-ports", "10", "--exclude-ports", "T:80"]);
         assert!(!l.tcp.contains(&80) && l.tcp.len() == 9, "{:?}", l.tcp);
-        assert!(port_lists(&args(&["--exclude-ports", "S:1"])).is_err());
+        // S: (SCTP) and P: (IP protocols) are valid now.
+        let l = lists(&["-p", "T:22,S:2905,P:1,6"]);
+        assert_eq!(l.tcp, vec![22]);
+        assert_eq!(l.sctp, vec![2905]);
+        assert_eq!(l.protocols, vec![1, 6]);
+        assert!(port_lists(&args(&["-p", "P:300"]), false, true).is_err());
+        // -sO reads unprefixed -p as IP protocol numbers (0-255): 0 and "-"
+        // are valid, 300 is not, and a cast must never wrap it into range.
+        let proto = |p: &str| port_lists(&args(&["-sO", "-p", p]), true, false);
+        assert_eq!(proto("0").unwrap().protocols, vec![0]);
+        assert_eq!(proto("-").unwrap().protocols.len(), 256);
+        assert!(proto("300").is_err());
+        // --exclude-ports reads protocol numbers (0 included) under -sO,
+        // rather than rejecting 0 as an unscannable port.
+        let l = port_lists(
+            &args(&["-sO", "-p", "1,6", "--exclude-ports", "0,6"]),
+            true,
+            false,
+        )
+        .unwrap();
+        assert_eq!(l.protocols, vec![1]);
         // --exclude-ports also thins the discovery probes, like nmap.
-        let ex = parse_port_lists("80,U:53").unwrap();
+        let ex = parse_port_lists("80,U:53", false, true).unwrap();
         let mut probes = PingProbes::default();
         assert!(exclude_ping_ports(&mut probes, &ex).is_empty());
         assert_eq!(probes.syn, vec![443]);
@@ -2046,6 +2205,8 @@ mod tests {
         let plan = Plan {
             tcp: Some(ScanType::Connect),
             udp: false,
+            sctp: None,
+            ip_proto: false,
             version: false,
             ping_only: false,
             discovery: false,
@@ -2054,6 +2215,8 @@ mod tests {
             plan: &plan,
             tcp: &[open],
             udp: &[],
+            sctp: &[],
+            protocols: &[],
             scanflags: None,
             version_wait: Duration::from_secs(1),
             os: false,

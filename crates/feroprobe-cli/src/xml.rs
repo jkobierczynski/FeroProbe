@@ -101,6 +101,7 @@ fn state_str(s: PortState) -> &'static str {
         PortState::Filtered => "filtered",
         PortState::OpenFiltered => "open|filtered",
         PortState::Unfiltered => "unfiltered",
+        PortState::ClosedFiltered => "closed|filtered",
     }
 }
 
@@ -108,6 +109,8 @@ fn write_port(x: &mut String, p: &PortResult) {
     let proto = match p.protocol {
         Protocol::Tcp => "tcp",
         Protocol::Udp => "udp",
+        Protocol::Sctp => "sctp",
+        Protocol::Ip => "ip",
     };
     let _ = write!(
         x,
@@ -278,6 +281,9 @@ pub fn render(hosts: &[HostResult], info: &RunInfo) -> String {
     for scan in &info.scan_types {
         let (kind, protocol, ports) = match *scan {
             "udp" => ("udp", "udp", &info.udp_ports),
+            "sctp-init" => ("sctpinit", "sctp", &info.sctp_ports),
+            "sctp-cookie" => ("sctpcookieecho", "sctp", &info.sctp_ports),
+            "ipproto" => ("ipproto", "ip", &info.protocols),
             // tcp-syn, tcp-connect, tcp-fin, tcp-ack, ...: nmap's own names.
             s if s.starts_with("tcp-") => (&s[4..], "tcp", &info.tcp_ports),
             _ => continue,

@@ -23,6 +23,8 @@ pub(crate) struct Facts<'a> {
     pub local: BTreeMap<String, usize>,
     pub tcp_ports: &'a [u16],
     pub udp_ports: &'a [u16],
+    pub sctp_ports: &'a [u16],
+    pub protocols: &'a [u8],
     pub cfg: &'a ScanConfig,
     pub os: bool,
     pub trace: bool,
@@ -271,6 +273,31 @@ pub(crate) fn explain(args: &Args, f: &Facts) -> Vec<String> {
                 ),
             );
         }
+        if let Some(kind) = p.sctp {
+            let (flag, name) = match kind {
+                feroprobe_core::SctpScanKind::Init => ("-sY", "SCTP INIT scan"),
+                feroprobe_core::SctpScanKind::CookieEcho => ("-sZ", "SCTP COOKIE ECHO scan"),
+            };
+            say(
+                &mut out,
+                format!(
+                    "{name} ({flag}), {} SCTP ports: {}",
+                    f.sctp_ports.len(),
+                    ports(f.sctp_ports)
+                ),
+            );
+        }
+        if p.ip_proto {
+            let protos: Vec<u16> = f.protocols.iter().map(|&n| u16::from(n)).collect();
+            say(
+                &mut out,
+                format!(
+                    "IP protocol scan (-sO), {} protocols: {}",
+                    protos.len(),
+                    ports(&protos)
+                ),
+            );
+        }
         let source = if let Some(spec) = &args.ports {
             format!("-p {spec}")
         } else if args.fast {
@@ -412,6 +439,8 @@ mod tests {
             local: BTreeMap::new(),
             tcp_ports: &[22, 443],
             udp_ports: &[],
+            sctp_ports: &[],
+            protocols: &[],
             cfg: &cfg,
             os: false,
             trace: false,

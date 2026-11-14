@@ -34,6 +34,11 @@ pub const TOP_UDP_PORTS: &[u16] = &[
 /// detection did not run or learned nothing. Purely a label from the port
 /// number.
 pub fn service_name(protocol: Protocol, port: u16) -> &'static str {
+    match protocol {
+        Protocol::Ip => return u8::try_from(port).map_or("unknown", ip_protocol_name),
+        Protocol::Sctp => return sctp_service_name(port),
+        Protocol::Tcp | Protocol::Udp => {}
+    }
     match (protocol, port) {
         (Protocol::Tcp, 21) => "ftp",
         (Protocol::Tcp, 22) => "ssh",
@@ -86,6 +91,225 @@ pub fn service_name(protocol: Protocol, port: u16) -> &'static str {
     }
 }
 
+/// SCTP services by port (IANA's registry), falling back to the TCP name,
+/// since many services use the same port over both.
+fn sctp_service_name(port: u16) -> &'static str {
+    match port {
+        9 => "discard",
+        179 => "bgp",
+        1167 => "cisco-ipsla",
+        2225 => "rcip-itu",
+        2904 => "m2ua",
+        2905 => "m3ua",
+        2944 => "megaco-h248",
+        2945 => "h248-binary",
+        3097 => "itu-bicc-stc",
+        3565 => "m2pa",
+        3863 => "asap-sctp",
+        3864 => "asap-sctp-tls",
+        3868 => "diameter",
+        5060 => "sip",
+        5061 => "sip-tls",
+        5090 => "car",
+        5091 => "cxtp",
+        6704 => "frc-hp",
+        6705 => "frc-mp",
+        6706 => "frc-lp",
+        7626 => "simco",
+        9900 => "iua",
+        9901 => "enrp-sctp",
+        9902 => "enrp-sctp-tls",
+        14001 => "sua",
+        29118 => "sgsap",
+        29168 => "sbcap",
+        29169 => "iuhsctpassoc",
+        36412 => "s1-control",
+        36422 => "x2-control",
+        36443 => "m2ap",
+        36444 => "m3ap",
+        38412 => "ng-control",
+        38422 => "xw-control",
+        38472 => "f1-control",
+        other => service_name(Protocol::Tcp, other),
+    }
+}
+
+/// The keyword IANA's protocol numbers registry gives IP protocol
+/// `proto`, in lower case as `-sO` shows it, or "unknown".
+pub fn ip_protocol_name(proto: u8) -> &'static str {
+    const NAMES: [&str; 146] = [
+        "hopopt",
+        "icmp",
+        "igmp",
+        "ggp",
+        "ipv4",
+        "st",
+        "tcp",
+        "cbt",
+        "egp",
+        "igp",
+        "bbn-rcc-mon",
+        "nvp-ii",
+        "pup",
+        "argus",
+        "emcon",
+        "xnet",
+        "chaos",
+        "udp",
+        "mux",
+        "dcn-meas",
+        "hmp",
+        "prm",
+        "xns-idp",
+        "trunk-1",
+        "trunk-2",
+        "leaf-1",
+        "leaf-2",
+        "rdp",
+        "irtp",
+        "iso-tp4",
+        "netblt",
+        "mfe-nsp",
+        "merit-inp",
+        "dccp",
+        "3pc",
+        "idpr",
+        "xtp",
+        "ddp",
+        "idpr-cmtp",
+        "tp++",
+        "il",
+        "ipv6",
+        "sdrp",
+        "ipv6-route",
+        "ipv6-frag",
+        "idrp",
+        "rsvp",
+        "gre",
+        "dsr",
+        "bna",
+        "esp",
+        "ah",
+        "i-nlsp",
+        "swipe",
+        "narp",
+        "mobile",
+        "tlsp",
+        "skip",
+        "ipv6-icmp",
+        "ipv6-nonxt",
+        "ipv6-opts",
+        "unknown",
+        "cftp",
+        "unknown",
+        "sat-expak",
+        "kryptolan",
+        "rvd",
+        "ippc",
+        "unknown",
+        "sat-mon",
+        "visa",
+        "ipcv",
+        "cpnx",
+        "cphb",
+        "wsn",
+        "pvp",
+        "br-sat-mon",
+        "sun-nd",
+        "wb-mon",
+        "wb-expak",
+        "iso-ip",
+        "vmtp",
+        "secure-vmtp",
+        "vines",
+        "ttp",
+        "nsfnet-igp",
+        "dgp",
+        "tcf",
+        "eigrp",
+        "ospfigp",
+        "sprite-rpc",
+        "larp",
+        "mtp",
+        "ax.25",
+        "ipip",
+        "micp",
+        "scc-sp",
+        "etherip",
+        "encap",
+        "unknown",
+        "gmtp",
+        "ifmp",
+        "pnni",
+        "pim",
+        "aris",
+        "scps",
+        "qnx",
+        "a/n",
+        "ipcomp",
+        "snp",
+        "compaq-peer",
+        "ipx-in-ip",
+        "vrrp",
+        "pgm",
+        "unknown",
+        "l2tp",
+        "ddx",
+        "iatp",
+        "stp",
+        "srp",
+        "uti",
+        "smp",
+        "sm",
+        "ptp",
+        "isis",
+        "fire",
+        "crtp",
+        "crudp",
+        "sscopmce",
+        "iplt",
+        "sps",
+        "pipe",
+        "sctp",
+        "fc",
+        "rsvp-e2e-ignore",
+        "mobility-hdr",
+        "udplite",
+        "mpls-in-ip",
+        "manet",
+        "hip",
+        "shim6",
+        "wesp",
+        "rohc",
+        "ethernet",
+        "aggfrag",
+        "nsh",
+    ];
+    NAMES
+        .get(usize::from(proto))
+        .copied()
+        .unwrap_or(match proto {
+            253 | 254 => "experimental",
+            255 => "reserved",
+            _ => "unknown",
+        })
+}
+
+/// Common SCTP ports, most used first: signalling for telephone and
+/// mobile networks (SIGTRAN, Diameter, S1/NG), and services that also
+/// run over SCTP. From IANA's registry and published deployments.
+pub const TOP_SCTP_PORTS: &[u16] = &[
+    80, 3868, 2905, 36412, 38412, 2904, 5060, 5061, 179, 443, 9, 22, 21, 2944, 2945, 3565, 3863,
+    3864, 14001, 29118, 29168, 29169, 36422, 36443, 36444, 38422, 38472, 1167, 2225, 3097, 5090,
+    5091, 6704, 6705, 6706, 7626, 9900, 9901, 9902, 1720, 1812, 1813, 4739, 5672, 8282, 20049,
+    7701, 8471, 9082, 9084, 25471, 30100,
+];
+
+/// Like [`top_ports`], for SCTP, starting from [`TOP_SCTP_PORTS`].
+pub fn top_sctp_ports(n: usize) -> Vec<u16> {
+    top_from(TOP_SCTP_PORTS, n)
+}
+
 /// Parse an nmap-style port specification.
 ///
 /// Accepts a comma-separated list of single ports (`22`), ranges (`1-1024`),
@@ -123,43 +347,53 @@ pub fn parse_ports(spec: &str) -> Result<Vec<u16>, Error> {
     Ok(ports)
 }
 
-/// TCP and UDP ports from one nmap-style specification.
+/// TCP, UDP and SCTP ports, and IP protocol numbers, from one nmap-style
+/// specification.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PortLists {
     pub tcp: Vec<u16>,
     pub udp: Vec<u16>,
+    pub sctp: Vec<u16>,
+    /// IP protocol numbers for `-sO`. They may be out of range (over
+    /// 255): the caller decides, as only `-sO` reads them.
+    pub protocols: Vec<u16>,
 }
 
 /// Parse a port specification that may name its protocol, like nmap's
-/// `-p 22,T:80,U:53,161`: `T:` and `U:` apply to the ports after them until
-/// the next prefix, and ports before any prefix are both TCP and UDP. Each
-/// list is sorted and de-duplicated.
-pub fn parse_port_lists(spec: &str) -> Result<PortLists, Error> {
+/// `-p 22,T:80,U:53,S:2905,161`: `T:` (TCP), `U:` (UDP), `S:` (SCTP) and
+/// `P:` (IP protocols, for `-sO`) apply to the ports after them until the
+/// next prefix. Values before any prefix apply to every *active* scan
+/// family: `port_scan` says a port scan (TCP, UDP or SCTP) is selected, so
+/// they are ports (1-65535); `ip_proto` says `-sO` is selected, so they
+/// are also IP protocol numbers (0-255). A value valid for one but not the
+/// other (`300` as a port, `0` as a protocol) is rejected only for the
+/// family it is out of range for. Each list is sorted and de-duplicated.
+pub fn parse_port_lists(spec: &str, ip_proto: bool, port_scan: bool) -> Result<PortLists, Error> {
     #[derive(Clone, Copy, PartialEq)]
     enum Proto {
-        Both,
+        All,
         Tcp,
         Udp,
+        Sctp,
+        Ip,
     }
     let mut groups: Vec<(Proto, Vec<&str>)> = Vec::new();
-    let mut current = Proto::Both;
+    let mut current = Proto::All;
     for part in spec.split(',').map(str::trim) {
-        let lower = part.get(..2).map(str::to_ascii_uppercase);
-        let rest = match lower.as_deref() {
-            Some("T:") => {
-                current = Proto::Tcp;
+        let prefix = part.get(..2).map(str::to_ascii_uppercase);
+        let named = match prefix.as_deref() {
+            Some("T:") => Some(Proto::Tcp),
+            Some("U:") => Some(Proto::Udp),
+            Some("S:") => Some(Proto::Sctp),
+            Some("P:") => Some(Proto::Ip),
+            _ => None,
+        };
+        let rest = match named {
+            Some(p) => {
+                current = p;
                 &part[2..]
             }
-            Some("U:") => {
-                current = Proto::Udp;
-                &part[2..]
-            }
-            Some("S:" | "P:") => {
-                return Err(Error::InvalidPorts(format!(
-                    "'{part}': only T: (TCP) and U: (UDP) ports are supported"
-                )));
-            }
-            _ => part,
+            None => part,
         };
         match groups.last_mut() {
             Some((proto, parts)) if *proto == current => parts.push(rest),
@@ -167,23 +401,87 @@ pub fn parse_port_lists(spec: &str) -> Result<PortLists, Error> {
         }
     }
     let mut lists = PortLists::default();
+    let note = |e| match e {
+        Error::InvalidPorts(why) => Error::InvalidPorts(format!("{why} (in '{spec}')")),
+        other => other,
+    };
     for (proto, parts) in groups {
-        let ports = parse_ports(&parts.join(",")).map_err(|e| match e {
-            Error::InvalidPorts(why) => Error::InvalidPorts(format!("{why} (in '{spec}')")),
-            other => other,
-        })?;
-        if proto != Proto::Udp {
-            lists.tcp.extend(&ports);
-        }
-        if proto != Proto::Tcp {
-            lists.udp.extend(&ports);
+        let joined = parts.join(",");
+        match proto {
+            Proto::Tcp => lists.tcp.extend(parse_ports(&joined).map_err(&note)?),
+            Proto::Udp => lists.udp.extend(parse_ports(&joined).map_err(&note)?),
+            Proto::Sctp => lists.sctp.extend(parse_ports(&joined).map_err(&note)?),
+            // `P:` is always IP protocol numbers: 0 is valid, "-" is 0-255.
+            Proto::Ip => lists
+                .protocols
+                .extend(parse_protocols(&joined).map_err(&note)?),
+            Proto::All => {
+                // Unprefixed values go to each active scan family in its own
+                // range. Parse as ports for TCP/UDP/SCTP (and when no scan
+                // family is known, to preserve the old port semantics)...
+                if port_scan || !ip_proto {
+                    let ports = parse_ports(&joined).map_err(&note)?;
+                    lists.tcp.extend(&ports);
+                    lists.udp.extend(&ports);
+                    lists.sctp.extend(&ports);
+                }
+                // ...and as IP protocol numbers for -sO.
+                if ip_proto {
+                    lists
+                        .protocols
+                        .extend(parse_protocols(&joined).map_err(&note)?);
+                }
+            }
         }
     }
-    for list in [&mut lists.tcp, &mut lists.udp] {
+    for list in [
+        &mut lists.tcp,
+        &mut lists.udp,
+        &mut lists.sctp,
+        &mut lists.protocols,
+    ] {
         list.sort_unstable();
         list.dedup();
     }
     Ok(lists)
+}
+
+/// Parse IP protocol numbers for `-sO`, like [`parse_ports`] but from 0,
+/// with "-" or an open range ending at 255.
+pub fn parse_protocols(spec: &str) -> Result<Vec<u16>, Error> {
+    let mut protos = Vec::new();
+    for part in spec.split(',').map(str::trim) {
+        let num = |s: &str, default: u16| -> Result<u16, Error> {
+            if s.is_empty() {
+                return Ok(default);
+            }
+            match s.parse::<u16>() {
+                Ok(n) if n <= 255 => Ok(n),
+                _ => Err(Error::InvalidPorts(format!(
+                    "'{s}' is not an IP protocol number (0-255)"
+                ))),
+            }
+        };
+        if part.is_empty() {
+            return Err(Error::InvalidPorts(format!("empty entry in '{spec}'")));
+        }
+        let (start, end) = match part.split_once('-') {
+            Some((a, b)) => (num(a, 0)?, num(b, 255)?),
+            None => {
+                let n = num(part, 0)?;
+                (n, n)
+            }
+        };
+        if start > end {
+            return Err(Error::InvalidPorts(format!(
+                "range start is greater than end in '{part}'"
+            )));
+        }
+        protos.extend(start..=end);
+    }
+    protos.sort_unstable();
+    protos.dedup();
+    Ok(protos)
 }
 
 /// The `n` most common ports, sorted ascending.
@@ -245,20 +543,69 @@ mod tests {
 
     #[test]
     fn protocol_prefixes() {
-        let l = parse_port_lists("22,T:80,443,U:53,161").unwrap();
+        let l = parse_port_lists("22,T:80,443,U:53,161", true, true).unwrap();
         assert_eq!(l.tcp, vec![22, 80, 443]);
         assert_eq!(l.udp, vec![22, 53, 161]);
-        let l = parse_port_lists("U:53,t:1-3").unwrap();
+        let l = parse_port_lists("U:53,t:1-3", true, true).unwrap();
         assert_eq!(l.tcp, vec![1, 2, 3]);
         assert_eq!(l.udp, vec![53]);
-        let l = parse_port_lists("U:-").unwrap();
+        let l = parse_port_lists("U:-", true, true).unwrap();
         assert!(l.tcp.is_empty());
         assert_eq!(l.udp.len(), 65535);
-        let l = parse_port_lists("80,80,T:80").unwrap();
+        let l = parse_port_lists("80,80,T:80", true, true).unwrap();
         assert_eq!((l.tcp, l.udp), (vec![80], vec![80]));
-        for bad in ["", "T:", "S:80", "U:0", "T:22,,80", "X:22"] {
-            assert!(parse_port_lists(bad).is_err(), "{bad} should fail");
+        for bad in ["", "T:", "S:0", "U:0", "T:22,,80", "X:22", "P:256"] {
+            assert!(
+                parse_port_lists(bad, true, true).is_err(),
+                "{bad} should fail"
+            );
         }
+    }
+
+    #[test]
+    fn sctp_and_protocol_prefixes() {
+        // With -sO active (ip_proto), the unprefixed 22 is also a protocol.
+        let l = parse_port_lists("22,S:2905,P:1,6,17,0", true, true).unwrap();
+        assert_eq!(l.tcp, vec![22]);
+        assert_eq!(l.sctp, vec![22, 2905]);
+        assert_eq!(l.protocols, vec![0, 1, 6, 17, 22]);
+        // Without -sO, unprefixed values stay out of the protocols list.
+        let l = parse_port_lists("22,P:1,6", false, true).unwrap();
+        assert_eq!(l.protocols, vec![1, 6]);
+        // -sO alone reads unprefixed values as IP protocols: 0 and "-" are
+        // valid there, but a number above 255 is not.
+        assert_eq!(
+            parse_port_lists("0", true, false).unwrap().protocols,
+            vec![0]
+        );
+        assert_eq!(
+            parse_port_lists("-", true, false).unwrap().protocols.len(),
+            256
+        );
+        assert!(parse_port_lists("300", true, false).is_err());
+        assert_eq!(parse_protocols("-").unwrap().len(), 256);
+        assert_eq!(
+            parse_protocols("250-").unwrap(),
+            vec![250, 251, 252, 253, 254, 255]
+        );
+        assert!(parse_protocols("300").is_err());
+    }
+
+    #[test]
+    fn names_for_ip_protocols_and_sctp_ports() {
+        assert_eq!(service_name(Protocol::Ip, 1), "icmp");
+        assert_eq!(service_name(Protocol::Ip, 47), "gre");
+        assert_eq!(service_name(Protocol::Ip, 50), "esp");
+        assert_eq!(service_name(Protocol::Ip, 89), "ospfigp");
+        assert_eq!(service_name(Protocol::Ip, 112), "vrrp");
+        assert_eq!(service_name(Protocol::Ip, 132), "sctp");
+        assert_eq!(service_name(Protocol::Ip, 145), "nsh");
+        assert_eq!(service_name(Protocol::Ip, 200), "unknown");
+        assert_eq!(service_name(Protocol::Ip, 255), "reserved");
+        assert_eq!(service_name(Protocol::Sctp, 3868), "diameter");
+        assert_eq!(service_name(Protocol::Sctp, 80), "http");
+        let top = top_sctp_ports(TOP_SCTP_PORTS.len());
+        assert_eq!(top.len(), TOP_SCTP_PORTS.len(), "no duplicates");
     }
 
     #[test]
