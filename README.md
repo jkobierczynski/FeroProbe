@@ -231,7 +231,10 @@ is also a connect scan.
 
 Every scan type takes IPv6 targets, and IPv4 and IPv6 targets can be mixed in
 one scan. Hostnames resolve to their IPv4 address, like nmap; `-6` picks the
-IPv6 address instead.
+IPv6 address instead. As in nmap, a name without an address of that version
+is skipped with a hint to try (or drop) `-6`, and a name that does not
+resolve at all is skipped with a warning while the other targets are
+scanned.
 
 - Discovery pings with ICMPv6 echo. As root on Linux, targets on a directly
   connected link are asked with neighbour discovery (NDP) instead, which, like

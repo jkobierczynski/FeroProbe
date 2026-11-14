@@ -16,7 +16,7 @@ use feroprobe_core::{
     Exclusions, HostResult, IpVersion, PingProbes, PortLists, RawTcpScan, ScanConfig, Target,
     TcpScanKind, Timing, connect_scan, detect_services, discover, os_detect, parse_port_lists,
     parse_ports, parse_scanflags, raw_ipv6_available, raw_sockets_available, raw_tcp_scan,
-    resolve_targets_with, reverse_lookup, top_ports, top_udp_ports, traceroute, udp_scan,
+    resolve_targets_lenient, reverse_lookup, top_ports, top_udp_ports, traceroute, udp_scan,
 };
 use futures::StreamExt;
 
@@ -251,8 +251,8 @@ struct Args {
     #[arg(long, value_name = "FILE")]
     excludefile: Option<String>,
 
-    /// -6: use the IPv6 address of each hostname target (IPv4 is preferred
-    /// otherwise). Address targets are scanned as given, IPv4 or IPv6
+    /// -6: use the IPv6 address of each hostname target (otherwise its IPv4
+    /// address, like nmap). Address targets are scanned as given
     #[arg(short = '6')]
     ipv6: bool,
 
@@ -832,6 +832,43 @@ fn port_lists(args: &Args) -> Result<PortLists> {
     Ok(lists)
 }
 
+/// A resolver message as nmap prints it: "Failed to resolve" lines stand
+/// alone, the rest are warnings.
+fn nmap_warning(w: &str) -> String {
+    if w.starts_with("Failed to resolve") {
+        w.to_string()
+    } else {
+        format!("Warning: {w}")
+    }
+}
+
+/// nmap's warnings about option values that will likely hurt the scan.
+fn option_warnings(args: &Args, open_files: Option<u64>) -> Vec<String> {
+    let mut warnings = Vec::new();
+    if let Some(ms) = args.timeout
+        && ms < 20
+    {
+        warnings.push(format!(
+            "a probe timeout of {ms} ms is extraordinarily small; accuracy may suffer"
+        ));
+    }
+    if let Some(c) = args.concurrency {
+        if c > 900 {
+            warnings.push(format!(
+                "a --concurrency of {c} is extraordinarily high, which can hurt reliability"
+            ));
+        }
+        if let Some(limit) = open_files
+            && (c as u64) > limit
+        {
+            warnings.push(format!(
+                "--concurrency is {c}, but this system may only allow {limit} open sockets; trying anyway"
+            ));
+        }
+    }
+    warnings
+}
+
 /// Take the `--exclude-ports` ports out of the discovery probes, as nmap
 /// does, with nmap's warning for a probe type left without ports.
 fn exclude_ping_ports(probes: &mut PingProbes, ex: &PortLists) -> Vec<String> {
@@ -1155,16 +1192,27 @@ async fn main() -> Result<()> {
     let exclusions = Exclusions::parse(&excluded)
         .await
         .context("reading --exclude")?;
-    let mut targets = resolve_targets_with(&specs, version)
+    // Like nmap, a name that does not resolve is skipped with a warning.
+    let resolved = resolve_targets_lenient(&specs, version)
         .await
         .context("resolving targets")?;
+    for w in &resolved.warnings {
+        eprintln!("{}", nmap_warning(w));
+    }
+    for note in &resolved.notes {
+        progress.say(2, || format!("Warning: {note}"));
+    }
+    let mut targets = resolved.targets;
     if !exclusions.is_empty() {
         let before = targets.len();
         targets.retain(|t| !exclusions.excludes(t));
         progress.say(1, || format!("Excluded {} host(s)", before - targets.len()));
-        if targets.is_empty() {
-            bail!("every target is excluded");
-        }
+    }
+    if targets.is_empty() {
+        eprintln!("Warning: no targets were left to scan, so 0 hosts scanned.");
+    }
+    for w in option_warnings(&args, feroprobe_core::connect::open_file_limit()) {
+        eprintln!("Warning: {w}");
     }
     if args.randomize_hosts {
         shuffle(&mut targets);
