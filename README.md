@@ -11,6 +11,7 @@ no external binaries.
 | --- | --- |
 | TCP connect scan, `-sT` (no root needed) | ✅ |
 | TCP SYN scan, `-sS`, IPv4 and IPv6 (raw sockets, Linux, root or `CAP_NET_RAW`) | ✅ |
+| FIN, NULL, Xmas, ACK, Window and Maimon scans (`-sF`, `-sN`, `-sX`, `-sA`, `-sW`, `-sM`) and custom flags with `--scanflags`, IPv4 and IPv6 (raw sockets, Linux, root) | ✅ |
 | UDP scan, `-sU`, with DNS, NTP, SNMP and SSDP payloads | ✅ |
 | Host discovery: ICMP/ICMPv6 echo + TCP 443/80 probes, `-sn`, `-Pn` | ✅ |
 | ARP (IPv4) and neighbour discovery (IPv6) on the local network, with MAC address and vendor (Linux, root; `--disable-arp-ping` to turn off) | ✅ |
@@ -142,9 +143,41 @@ shows the raw traits, which is what a new signature is written from. It needs
 raw sockets, so Linux with root or `CAP_NET_RAW`, and at least one open TCP port.
 IPv6 hosts are skipped for now: the signatures rely on IPv4 header fields.
 
+### FIN, NULL, Xmas, ACK, Window and Maimon scans
+
+These send TCP segments with other flags than SYN and read the answers the
+way nmap does. They need the same raw-socket privileges as `-sS`, and one TCP
+scan type can run at a time (it can be combined with `-sU`).
+
+| Scan | Flags sent | Reset | No answer |
+| --- | --- | --- | --- |
+| `-sF` FIN, `-sN` NULL, `-sX` Xmas | FIN / none / FIN+PSH+URG | closed | open\|filtered |
+| `-sM` Maimon | FIN+ACK | closed | open\|filtered |
+| `-sA` ACK | ACK | unfiltered | filtered |
+| `-sW` Window | ACK | open if the reset has a non-zero window, else closed | filtered |
+
+An ICMP unreachable error marks the port filtered in all of them, with the
+error as the reason (`host-unreach`, `admin-prohibited`, ...). FIN, NULL and
+Xmas rely on RFC 793 behaviour: Windows and some network devices reset every
+port, so every port looks closed. Most systems, Linux included, reset Maimon
+probes to open ports too, so `-sM` shows them closed. Only some systems put a
+non-zero window in the reset for `-sW`; Linux always sends zero, so `-sW`
+shows every port on Linux as closed. `-sA` is for mapping
+firewalls: "unfiltered" says a probe got through, not whether the port is open.
+
+`--scanflags` sends any flag combination instead, given as names run together
+(`SYNFIN`, `URGPSHFIN`; also `ECE`, `CWR`, `RST`) or a number. The answers are
+read like those of the scan type given with it, or a SYN scan's without one:
+
+```sh
+sudo feroprobe --scanflags SYNFIN -p 80,443 10.0.0.5
+sudo feroprobe -sA --scanflags ACKPSH -p 1-1024 10.0.0.5
+```
+
 ### Privileges
 
-The SYN scan sends hand-built packets over raw sockets, which needs root. On
+The SYN scan and the other raw TCP scans send hand-built packets over raw
+sockets, which needs root. On
 Linux you can instead grant the binary just that capability:
 
 ```sh
@@ -239,7 +272,8 @@ SHA-256 checksums as a GitHub release.
 | open | TCP: SYN-ACK or completed handshake. UDP: the service replied |
 | closed | TCP: the host replied with a reset. UDP: ICMP port unreachable |
 | filtered | No reply (TCP) or an ICMP unreachable error from a filter |
-| open\|filtered | UDP only: no reply, which can mean a silent service or a firewall |
+| open\|filtered | No reply where an open port stays silent too (UDP, FIN, NULL, Xmas, Maimon): a silent service or a firewall |
+| unfiltered | ACK scan: the host reset the probe, so no filter dropped it; open or closed is unknown |
 
 UDP note: hosts rate-limit ICMP errors, so scanning many closed UDP ports fast
 can report some as open|filtered. Lower `--concurrency` for more accuracy.

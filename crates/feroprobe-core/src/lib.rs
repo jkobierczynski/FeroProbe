@@ -6,6 +6,7 @@
 //! Scan techniques:
 //! - [`connect_scan`]: TCP connect, no privileges needed
 //! - [`syn_scan`]: TCP SYN over raw sockets (Linux, root or `CAP_NET_RAW`)
+//! - [`raw_tcp_scan`]: FIN, NULL, Xmas, ACK, Window, Maimon or custom-flag scans, also raw
 //! - [`udp_scan`]: UDP with service-specific payloads, no privileges needed
 //! - [`discover`]: host discovery with ARP (local networks), ICMP echo and TCP probes
 //!
@@ -37,7 +38,7 @@ pub use os::{OsMatch, TcpTraits, os_detect};
 pub use ports::{parse_ports, service_name, top_ports, top_udp_ports};
 pub use raw::{raw_ipv6_available, raw_sockets_available};
 pub use service::{ServiceInfo, detect_services};
-pub use syn::syn_scan;
+pub use syn::{RawTcpScan, TcpScanKind, parse_scanflags, raw_tcp_scan, syn_scan};
 pub use target::{
     IpVersion, Target, TargetSpec, parse_target, resolve_targets, resolve_targets_with, socket_addr,
 };

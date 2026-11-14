@@ -38,9 +38,14 @@ pub enum PortState {
     /// No answer, or an ICMP error that says a filter dropped the probe.
     #[serde(rename = "filtered")]
     Filtered,
-    /// UDP only: no answer, which can mean open (silent service) or filtered.
+    /// No answer where an open port would stay silent too: UDP, and the
+    /// FIN, NULL, Xmas and Maimon scans.
     #[serde(rename = "open|filtered")]
     OpenFiltered,
+    /// ACK scan: the port answered with a reset, so no filter blocks it,
+    /// but whether it is open is unknown.
+    #[serde(rename = "unfiltered")]
+    Unfiltered,
 }
 
 impl std::fmt::Display for PortState {
@@ -50,6 +55,7 @@ impl std::fmt::Display for PortState {
             PortState::Closed => "closed",
             PortState::Filtered => "filtered",
             PortState::OpenFiltered => "open|filtered",
+            PortState::Unfiltered => "unfiltered",
         })
     }
 }
@@ -62,6 +68,11 @@ pub mod reason {
     pub const NO_RESPONSE: &str = "no-response";
     pub const UNREACHABLE: &str = "unreachable";
     pub const PORT_UNREACH: &str = "port-unreach";
+    /// ICMP errors from a router or the host for raw TCP probes.
+    pub const NET_UNREACH: &str = "net-unreach";
+    pub const HOST_UNREACH: &str = "host-unreach";
+    pub const PROTO_UNREACH: &str = "proto-unreach";
+    pub const ADMIN_PROHIBITED: &str = "admin-prohibited";
     pub const UDP_RESPONSE: &str = "udp-response";
     pub const ECHO_REPLY: &str = "echo-reply";
     pub const ARP_RESPONSE: &str = "arp-response";
@@ -123,10 +134,12 @@ impl HostResult {
     /// gave a definite answer.
     pub fn is_up(&self) -> bool {
         self.up_reason.is_some()
-            || self
-                .ports
-                .iter()
-                .any(|p| matches!(p.state, PortState::Open | PortState::Closed))
+            || self.ports.iter().any(|p| {
+                matches!(
+                    p.state,
+                    PortState::Open | PortState::Closed | PortState::Unfiltered
+                )
+            })
     }
 
     pub fn count(&self, state: PortState) -> usize {

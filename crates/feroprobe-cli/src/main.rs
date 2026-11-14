@@ -8,9 +8,9 @@ use std::time::{Duration, Instant, SystemTime};
 use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
 use feroprobe_core::{
-    HostResult, IpVersion, ScanConfig, Target, Timing, connect_scan, detect_services, discover,
-    os_detect, parse_ports, raw_ipv6_available, raw_sockets_available, resolve_targets_with,
-    syn_scan, top_ports, top_udp_ports, udp_scan,
+    HostResult, IpVersion, RawTcpScan, ScanConfig, Target, TcpScanKind, Timing, connect_scan,
+    detect_services, discover, os_detect, parse_ports, parse_scanflags, raw_ipv6_available,
+    raw_sockets_available, raw_tcp_scan, resolve_targets_with, top_ports, top_udp_ports, udp_scan,
 };
 
 use output::RunInfo;
@@ -23,6 +23,24 @@ enum ScanType {
     /// -sT: TCP connect scan (no privileges needed)
     #[value(name = "T")]
     Connect,
+    /// -sF: TCP FIN scan (raw sockets)
+    #[value(name = "F")]
+    Fin,
+    /// -sN: TCP NULL scan, no flags set (raw sockets)
+    #[value(name = "N")]
+    Null,
+    /// -sX: TCP Xmas scan, FIN, PSH and URG (raw sockets)
+    #[value(name = "X")]
+    Xmas,
+    /// -sA: TCP ACK scan, maps firewall rules (raw sockets)
+    #[value(name = "A")]
+    Ack,
+    /// -sW: TCP Window scan (raw sockets)
+    #[value(name = "W")]
+    Window,
+    /// -sM: TCP Maimon scan, FIN and ACK (raw sockets)
+    #[value(name = "M")]
+    Maimon,
     /// -sU: UDP scan
     #[value(name = "U")]
     Udp,
@@ -32,6 +50,50 @@ enum ScanType {
     /// -sV: detect service and version on open ports
     #[value(name = "V")]
     Version,
+}
+
+impl ScanType {
+    /// The TCP scans; one of them can run at a time.
+    const TCP: [ScanType; 8] = [
+        ScanType::Syn,
+        ScanType::Connect,
+        ScanType::Fin,
+        ScanType::Null,
+        ScanType::Xmas,
+        ScanType::Ack,
+        ScanType::Window,
+        ScanType::Maimon,
+    ];
+
+    /// The raw-socket scan this is, if it is one.
+    fn raw_kind(self) -> Option<TcpScanKind> {
+        Some(match self {
+            ScanType::Syn => TcpScanKind::Syn,
+            ScanType::Fin => TcpScanKind::Fin,
+            ScanType::Null => TcpScanKind::Null,
+            ScanType::Xmas => TcpScanKind::Xmas,
+            ScanType::Ack => TcpScanKind::Ack,
+            ScanType::Window => TcpScanKind::Window,
+            ScanType::Maimon => TcpScanKind::Maimon,
+            _ => return None,
+        })
+    }
+
+    fn flag(self) -> &'static str {
+        match self {
+            ScanType::Syn => "-sS",
+            ScanType::Connect => "-sT",
+            ScanType::Fin => "-sF",
+            ScanType::Null => "-sN",
+            ScanType::Xmas => "-sX",
+            ScanType::Ack => "-sA",
+            ScanType::Window => "-sW",
+            ScanType::Maimon => "-sM",
+            ScanType::Udp => "-sU",
+            ScanType::PingOnly => "-sn",
+            ScanType::Version => "-sV",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -63,6 +125,9 @@ enum Format {
 ///   sudo feroprobe -O 10.0.0.5
 ///   feroprobe -Pn --top-ports 1000 --open -o json 10.0.0.1-50
 ///   feroprobe -T4 -p- 10.0.0.5             (aggressive timing)
+///   sudo feroprobe -sA -p 1-1024 10.0.0.5   (which ports does a firewall let through?)
+///   sudo feroprobe -sF -p 22,80 10.0.0.5    (FIN scan; also -sN, -sX, -sW, -sM)
+///   sudo feroprobe --scanflags SYNFIN -p 80 10.0.0.5
 ///   feroprobe -T2 --scan-delay 1s 10.0.0.5
 ///   sudo feroprobe -6 -sn fe80::1%eth0 2001:db8::/120   (IPv6, NDP on the local link)
 ///   feroprobe -6 -p 22,443 scanme.example.org          (use the name's IPv6 address)
@@ -81,8 +146,10 @@ struct Args {
     ipv6: bool,
 
     /// Scan technique, nmap style: -sS (SYN), -sT (connect), -sU (UDP), -sn (no port scan),
-    /// -sV (also detect service versions on open ports).
-    /// Can be repeated, e.g. -sS -sU -sV. Default: -sS when run as root on Linux, else -sT
+    /// -sV (also detect service versions on open ports), and the raw TCP scans
+    /// -sF (FIN), -sN (NULL), -sX (Xmas), -sA (ACK), -sW (Window), -sM (Maimon).
+    /// Can be repeated, e.g. -sS -sU -sV, with one TCP scan at most.
+    /// Default: -sS when run as root on Linux, else -sT
     #[arg(
         short = 's',
         value_name = "TYPE",
@@ -90,6 +157,13 @@ struct Args {
         hide_possible_values = true
     )]
     scan: Vec<ScanType>,
+
+    /// TCP flags to send instead of the scan's own: names run together, e.g.
+    /// SYNFIN or URGPSHFIN (URG, ACK, PSH, RST, SYN, FIN, ECE, CWR), or a
+    /// number. Answers are read as the chosen raw scan reads them, as a SYN
+    /// scan's when none is chosen
+    #[arg(long, value_name = "FLAGS", value_parser = parse_scanflags)]
+    scanflags: Option<u8>,
 
     /// -Pn: skip host discovery and scan every target as if it were up
     #[arg(short = 'P', value_name = "n", value_enum, hide_possible_values = true)]
@@ -150,7 +224,7 @@ struct Args {
     #[arg(long, value_name = "N")]
     retries: Option<u32>,
 
-    /// Only show open (and open|filtered) ports
+    /// Only show open (and open|filtered, unfiltered) ports
     #[arg(long)]
     open: bool,
 
@@ -180,10 +254,12 @@ struct Plan {
 
 /// `syn_ok` says whether a SYN scan can serve as the default: the process is
 /// privileged, and the system has IPv6 if any target needs it.
-fn plan(scan: &[ScanType], ping: Option<PingMode>, syn_ok: bool) -> Result<Plan> {
+fn plan(scan: &[ScanType], ping: Option<PingMode>, syn_ok: bool, scanflags: bool) -> Result<Plan> {
     let has = |t| scan.contains(&t);
-    if has(ScanType::Syn) && has(ScanType::Connect) {
-        bail!("choose one TCP scan type: -sS or -sT");
+    let tcp_types: Vec<ScanType> = ScanType::TCP.into_iter().filter(|&t| has(t)).collect();
+    if tcp_types.len() > 1 {
+        let flags: Vec<&str> = tcp_types.iter().map(|t| t.flag()).collect();
+        bail!("choose one TCP scan type, not {}", flags.join(" and "));
     }
     let ping_only = has(ScanType::PingOnly);
     if ping_only && scan.len() > 1 {
@@ -192,10 +268,19 @@ fn plan(scan: &[ScanType], ping: Option<PingMode>, syn_ok: bool) -> Result<Plan>
     if ping_only && ping.is_some() {
         bail!("-sn with -Pn would do nothing");
     }
-    let tcp = if has(ScanType::Syn) {
+    if scanflags {
+        if ping_only {
+            bail!("--scanflags needs a port scan, so it cannot be combined with -sn");
+        }
+        if has(ScanType::Connect) {
+            bail!("--scanflags sends raw packets, so it cannot be combined with -sT");
+        }
+    }
+    let tcp = if let Some(&t) = tcp_types.first() {
+        Some(t)
+    } else if scanflags {
+        // nmap reads custom flags as a SYN scan unless told otherwise.
         Some(ScanType::Syn)
-    } else if has(ScanType::Connect) {
-        Some(ScanType::Connect)
     } else if !has(ScanType::Udp) && !ping_only {
         // nmap's default: SYN scan when privileged, connect scan otherwise.
         Some(if syn_ok && cfg!(target_os = "linux") {
@@ -232,6 +317,19 @@ fn scan_config(args: &Args) -> ScanConfig {
     }
 }
 
+/// The run's label for a raw TCP scan, as listed in `scan_types`.
+fn tcp_scan_label(kind: TcpScanKind) -> &'static str {
+    match kind {
+        TcpScanKind::Syn => "tcp-syn",
+        TcpScanKind::Fin => "tcp-fin",
+        TcpScanKind::Null => "tcp-null",
+        TcpScanKind::Xmas => "tcp-xmas",
+        TcpScanKind::Ack => "tcp-ack",
+        TcpScanKind::Window => "tcp-window",
+        TcpScanKind::Maimon => "tcp-maimon",
+    }
+}
+
 /// Add each scan's port results to the matching host in `hosts`.
 fn merge(hosts: &mut [HostResult], scanned: &[usize], results: Vec<HostResult>) {
     for (&idx, r) in scanned.iter().zip(results) {
@@ -253,7 +351,7 @@ async fn main() -> Result<()> {
         .context("resolving targets")?;
     let any_ipv6 = targets.iter().any(|t| t.addr.is_ipv6());
     let syn_ok = raw_sockets_available() && (!any_ipv6 || raw_ipv6_available());
-    let plan = plan(&args.scan, args.ping, syn_ok)?;
+    let plan = plan(&args.scan, args.ping, syn_ok, args.scanflags.is_some())?;
     if args.os {
         if plan.ping_only {
             bail!("-O needs a port scan, so it cannot be combined with -sn");
@@ -304,15 +402,19 @@ async fn main() -> Result<()> {
         let live: Vec<Target> = scanned.iter().map(|&i| targets[i].clone()).collect();
         let hint = "scan aborted (try a lower --concurrency)";
 
-        match plan.tcp {
-            Some(ScanType::Syn) => {
-                scan_types.push("tcp-syn");
-                let r = syn_scan(&live, &tcp_ports, &cfg)
+        match plan.tcp.map(|t| (t, t.raw_kind())) {
+            Some((t, Some(kind))) => {
+                scan_types.push(tcp_scan_label(kind));
+                let mut scan = RawTcpScan::new(kind);
+                if let Some(flags) = args.scanflags {
+                    scan.flags = flags;
+                }
+                let r = raw_tcp_scan(&live, &tcp_ports, &cfg, scan)
                     .await
-                    .context("SYN scan failed")?;
+                    .with_context(|| format!("TCP {} scan ({}) failed", kind.name(), t.flag()))?;
                 merge(&mut hosts, &scanned, r);
             }
-            Some(_) => {
+            Some((_, None)) => {
                 scan_types.push("tcp-connect");
                 let r = connect_scan(&live, &tcp_ports, &cfg).await.context(hint)?;
                 merge(&mut hosts, &scanned, r);
@@ -374,7 +476,7 @@ mod tests {
     use super::*;
 
     fn p(scan: &[ScanType], ping: Option<PingMode>, syn_ok: bool) -> Result<Plan> {
-        plan(scan, ping, syn_ok)
+        plan(scan, ping, syn_ok, false)
     }
 
     #[test]
@@ -488,7 +590,7 @@ mod tests {
         assert_eq!(a.ping, Some(PingMode::Skip));
         let a = Args::try_parse_from(["feroprobe", "-sn", "10.0.0.0/24"]).unwrap();
         assert_eq!(a.scan, vec![ScanType::PingOnly]);
-        assert!(Args::try_parse_from(["feroprobe", "-sX", "10.0.0.1"]).is_err());
+        assert!(Args::try_parse_from(["feroprobe", "-sZ", "10.0.0.1"]).is_err());
         let a = Args::try_parse_from([
             "feroprobe",
             "--disable-arp-ping",
@@ -502,5 +604,47 @@ mod tests {
             a.oui_file.as_deref(),
             Some(std::path::Path::new("/tmp/oui.txt"))
         );
+    }
+
+    #[test]
+    fn raw_tcp_scan_types() {
+        // -sN is the NULL scan, -sn is ping only: case matters.
+        let a = Args::try_parse_from([
+            "feroprobe",
+            "-sF",
+            "-sN",
+            "-sX",
+            "-sA",
+            "-sW",
+            "-sM",
+            "-sn",
+            "10.0.0.1",
+        ])
+        .unwrap();
+        use ScanType::*;
+        assert_eq!(a.scan, vec![Fin, Null, Xmas, Ack, Window, Maimon, PingOnly]);
+        for t in [Fin, Null, Xmas, Ack, Window, Maimon] {
+            let plan = p(&[t, Udp], None, false).unwrap();
+            assert_eq!((plan.tcp, plan.udp), (Some(t), true));
+        }
+        let err = p(&[Fin, Ack], None, true).unwrap_err().to_string();
+        assert!(err.contains("-sF and -sA"), "{err}");
+        assert!(p(&[Xmas, Connect], None, true).is_err());
+        assert_eq!(Ack.raw_kind(), Some(TcpScanKind::Ack));
+        assert_eq!(Connect.raw_kind(), None);
+    }
+
+    #[test]
+    fn scanflags_choose_a_raw_scan() {
+        let a = Args::try_parse_from(["feroprobe", "--scanflags", "SYNFIN", "10.0.0.1"]).unwrap();
+        assert_eq!(a.scanflags, Some(0x03));
+        assert!(Args::try_parse_from(["feroprobe", "--scanflags", "BOGUS", "10.0.0.1"]).is_err());
+        // Read as a SYN scan by default, even when unprivileged, and as the
+        // chosen scan otherwise.
+        use ScanType::*;
+        assert_eq!(plan(&[], None, false, true).unwrap().tcp, Some(Syn));
+        assert_eq!(plan(&[Ack], None, false, true).unwrap().tcp, Some(Ack));
+        assert!(plan(&[Connect], None, true, true).is_err());
+        assert!(plan(&[PingOnly], None, true, true).is_err());
     }
 }
