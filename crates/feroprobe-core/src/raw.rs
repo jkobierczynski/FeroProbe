@@ -77,6 +77,45 @@ impl Rng {
     }
 }
 
+/// Read packets off a raw socket until `stop` is set, and send on the
+/// ones `parse` recognises, given the packet, its sender and when it
+/// arrived. Ends early if the socket fails or the receiver hangs up.
+#[cfg(target_os = "linux")]
+pub(crate) fn receive_loop<T>(
+    sock: Socket,
+    stop: &std::sync::atomic::AtomicBool,
+    tx: &std::sync::mpsc::Sender<T>,
+    parse: impl Fn(&[u8], &socket2::SockAddr, Instant) -> Option<T>,
+) {
+    use std::mem::MaybeUninit;
+    use std::sync::atomic::Ordering;
+    let mut buf = vec![MaybeUninit::<u8>::uninit(); 65536];
+    while !stop.load(Ordering::Relaxed) {
+        let (n, from) = match sock.recv_from(&mut buf) {
+            Ok(r) => r,
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::WouldBlock
+                        | io::ErrorKind::TimedOut
+                        | io::ErrorKind::Interrupted
+                ) =>
+            {
+                continue;
+            }
+            Err(_) => return,
+        };
+        let at = Instant::now();
+        // SAFETY: recv_from initialised the first `n` bytes.
+        let data = unsafe { std::slice::from_raw_parts(buf.as_ptr().cast::<u8>(), n) };
+        if let Some(answer) = parse(data, &from, at)
+            && tx.send(answer).is_err()
+        {
+            return;
+        }
+    }
+}
+
 /// Spaces out packets so that no more than `rate` are sent per second, and
 /// none closer than the scan delay to any other probe of this process (see
 /// [`crate::timing::pace_blocking_or_cancel`]).

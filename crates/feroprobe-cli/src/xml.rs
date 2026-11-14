@@ -218,6 +218,23 @@ fn write_host(x: &mut String, host: &HostResult, info: &RunInfo, start: u64, end
         );
         let _ = writeln!(x, "<distance value=\"{}\"/>", os.distance);
     }
+    if let Some(t) = &host.trace
+        && !t.hops.is_empty()
+    {
+        let _ = writeln!(x, "<trace port=\"{}\" proto=\"{}\">", t.port, t.protocol);
+        // nmap leaves silent hops out of the XML.
+        for hop in t.hops.iter().filter(|h| h.addr.is_some()) {
+            let _ = write!(x, "<hop ttl=\"{}\"", hop.ttl);
+            if let Some(a) = hop.addr {
+                let _ = write!(x, " ipaddr=\"{a}\"");
+            }
+            if let Some(ms) = hop.rtt_ms {
+                let _ = write!(x, " rtt=\"{ms:.2}\"");
+            }
+            x.push_str("/>\n");
+        }
+        x.push_str("</trace>\n");
+    }
     if let Some(ms) = host.latency_ms {
         // nmap reports times in microseconds.
         let us = (ms * 1000.0).round() as u64;
@@ -306,6 +323,7 @@ mod tests {
             show_reason: false,
             show_version: true,
             show_os: false,
+            show_trace: false,
             assume_up: false,
             ping_only: false,
             nmap_label: false,
@@ -446,5 +464,34 @@ mod tests {
                 xml.matches(&format!("<{tag}>")).count() + xml.matches(&format!("<{tag} ")).count();
             assert_eq!(opened, xml.matches(&format!("</{tag}>")).count(), "{tag}");
         }
+    }
+
+    #[test]
+    fn trace_lists_answering_hops() {
+        use feroprobe_core::{Hop, Trace};
+        let mut host = HostResult::new("203.0.113.5".parse().unwrap(), None);
+        host.ports = vec![port(443, PortState::Open, None)];
+        let hop = |ttl, addr: Option<&str>, rtt| Hop {
+            ttl,
+            addr: addr.map(|a| a.parse().unwrap()),
+            rtt_ms: rtt,
+        };
+        host.trace = Some(Trace {
+            port: 443,
+            protocol: Protocol::Tcp,
+            hops: vec![
+                hop(1, Some("192.0.2.1"), Some(0.5)),
+                hop(2, None, None),
+                hop(3, Some("203.0.113.5"), Some(12.345)),
+            ],
+            reached: true,
+        });
+        let xml = render(&[host], &info());
+        assert!(
+            xml.contains(
+                "<trace port=\"443\" proto=\"tcp\">\n<hop ttl=\"1\" ipaddr=\"192.0.2.1\" rtt=\"0.50\"/>\n<hop ttl=\"3\" ipaddr=\"203.0.113.5\" rtt=\"12.35\"/>\n</trace>\n"
+            ),
+            "{xml}"
+        );
     }
 }

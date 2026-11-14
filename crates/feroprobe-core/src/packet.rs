@@ -24,8 +24,11 @@ pub const TCP_CWR: u8 = 0x80;
 
 pub const ICMP_ECHO_REPLY: u8 = 0;
 pub const ICMP_DEST_UNREACH: u8 = 3;
+pub const ICMP_TIME_EXCEEDED: u8 = 11;
 pub const ICMP_ECHO_REQUEST: u8 = 8;
 
+pub const ICMPV6_DEST_UNREACH: u8 = 1;
+pub const ICMPV6_TIME_EXCEEDED: u8 = 3;
 pub const ICMPV6_ECHO_REQUEST: u8 = 128;
 pub const ICMPV6_ECHO_REPLY: u8 = 129;
 pub const ICMPV6_NEIGHBOR_SOLICIT: u8 = 135;
@@ -326,6 +329,77 @@ pub fn parse_icmp(buf: &[u8]) -> Option<Icmp<'_>> {
         id: u16::from_be_bytes([buf[4], buf[5]]),
         seq: u16::from_be_bytes([buf[6], buf[7]]),
         body: &buf[8..],
+    })
+}
+
+/// An ICMP or ICMPv6 error about a TCP segment we sent, with the fields
+/// of that segment the error quotes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IcmpTcpError {
+    /// ICMP type and code (IPv4 or IPv6 numbering).
+    pub kind: u8,
+    pub code: u8,
+    /// Who sent the error, for IPv4 (from the outer IP header). Raw ICMPv6
+    /// sockets return the message alone: take the sender from `recv_from`.
+    pub src: Option<IpAddr>,
+    /// The quoted segment's destination, ports and sequence number.
+    pub dst: IpAddr,
+    pub sport: u16,
+    pub dport: u16,
+    pub seq: u32,
+}
+
+/// Parse an ICMP error quoting a TCP segment. `data` is what a raw ICMP
+/// socket returns: the IPv4 header and message, or for ICMPv6 the message
+/// alone. Echo replies and other non-errors give `None`.
+pub fn parse_icmp_tcp_error(data: &[u8], v6: bool) -> Option<IcmpTcpError> {
+    let (src, msg) = if v6 {
+        (None, data)
+    } else {
+        let ip = parse_ipv4(data)?;
+        if ip.protocol != IPPROTO_ICMP {
+            return None;
+        }
+        (Some(IpAddr::V4(ip.src)), ip.payload)
+    };
+    let icmp = parse_icmp(msg)?;
+    let error = if v6 {
+        matches!(icmp.kind, ICMPV6_DEST_UNREACH | ICMPV6_TIME_EXCEEDED)
+    } else {
+        matches!(icmp.kind, ICMP_DEST_UNREACH | ICMP_TIME_EXCEEDED)
+    };
+    if !error {
+        return None;
+    }
+    // The quoted packet: its IP header, then at least 8 bytes of TCP.
+    let b = icmp.body;
+    let (dst, tcp): (IpAddr, &[u8]) = if v6 {
+        if b.len() < 48 || b[0] >> 4 != 6 || b[6] != IPPROTO_TCP {
+            return None;
+        }
+        let dst: [u8; 16] = b[24..40].try_into().ok()?;
+        (Ipv6Addr::from(dst).into(), &b[40..])
+    } else {
+        if b.len() < 20 || b[0] >> 4 != 4 || b[9] != IPPROTO_TCP {
+            return None;
+        }
+        let ihl = usize::from(b[0] & 0x0f) * 4;
+        (
+            Ipv4Addr::new(b[16], b[17], b[18], b[19]).into(),
+            b.get(ihl..)?,
+        )
+    };
+    if tcp.len() < 8 {
+        return None;
+    }
+    Some(IcmpTcpError {
+        kind: icmp.kind,
+        code: icmp.code,
+        src,
+        dst,
+        sport: u16::from_be_bytes([tcp[0], tcp[1]]),
+        dport: u16::from_be_bytes([tcp[2], tcp[3]]),
+        seq: u32::from_be_bytes([tcp[4], tcp[5], tcp[6], tcp[7]]),
     })
 }
 

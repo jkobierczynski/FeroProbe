@@ -212,48 +212,17 @@ pub(crate) fn parse_tcp_unreach(
     data: &[u8],
     v6: bool,
 ) -> Option<(std::net::IpAddr, u16, u16, u32, &'static str)> {
-    let msg = if v6 {
-        data
+    let e = packet::parse_icmp_tcp_error(data, v6)?;
+    let unreach = if v6 {
+        packet::ICMPV6_DEST_UNREACH
     } else {
-        let ip = packet::parse_ipv4(data)?;
-        if ip.protocol != packet::IPPROTO_ICMP {
-            return None;
-        }
-        ip.payload
+        packet::ICMP_DEST_UNREACH
     };
-    let icmp = packet::parse_icmp(msg)?;
-    let unreach_type = if v6 { 1 } else { packet::ICMP_DEST_UNREACH };
-    if icmp.kind != unreach_type {
+    if e.kind != unreach {
         return None;
     }
-    let why = unreach_reason(v6, icmp.code)?;
-    // The quoted packet: its IP header, then at least 8 bytes of TCP.
-    let (dst, tcp): (std::net::IpAddr, &[u8]) = if v6 {
-        let b = icmp.body;
-        if b.len() < 48 || b[0] >> 4 != 6 || b[6] != packet::IPPROTO_TCP {
-            return None;
-        }
-        let dst: [u8; 16] = b[24..40].try_into().ok()?;
-        (std::net::Ipv6Addr::from(dst).into(), &b[40..])
-    } else {
-        let b = icmp.body;
-        if b.len() < 20 || b[0] >> 4 != 4 || b[9] != packet::IPPROTO_TCP {
-            return None;
-        }
-        let ihl = usize::from(b[0] & 0x0f) * 4;
-        let dst = std::net::Ipv4Addr::new(b[16], b[17], b[18], b[19]);
-        (dst.into(), b.get(ihl..)?)
-    };
-    if tcp.len() < 8 {
-        return None;
-    }
-    Some((
-        dst,
-        u16::from_be_bytes([tcp[0], tcp[1]]),
-        u16::from_be_bytes([tcp[2], tcp[3]]),
-        u32::from_be_bytes([tcp[4], tcp[5], tcp[6], tcp[7]]),
-        why,
-    ))
+    let why = unreach_reason(v6, e.code)?;
+    Some((e.dst, e.sport, e.dport, e.seq, why))
 }
 
 /// Run a SYN scan of every port on every target.
@@ -305,7 +274,6 @@ mod imp {
     use super::*;
 
     use std::collections::HashMap;
-    use std::mem::MaybeUninit;
     use std::net::IpAddr;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -316,7 +284,7 @@ mod imp {
 
     use crate::connect::is_network_error;
     use crate::model::{PortResult, Protocol};
-    use crate::raw::{Pacer, Rng, raw_socket_in, send_with_backoff, source_addr_for};
+    use crate::raw::{Pacer, Rng, raw_socket_in, receive_loop, send_with_backoff, source_addr_for};
     use crate::target::socket_addr;
 
     /// An answer seen by a receiver thread: host index, port, state,
@@ -425,8 +393,10 @@ mod imp {
             send_socks[slot] = Some(send);
             let (stop, index, tx) = (Arc::clone(&stop), Arc::clone(&index), tx.clone());
             receivers.push(std::thread::spawn(move || {
-                receive_loop(recv, &stop, &tx, |data, from| {
-                    tcp_answer(data, from, &index, &scan, sport, cookie)
+                receive_loop(recv, &stop, &tx, |data, from, at| {
+                    let (h, port, state, why) =
+                        tcp_answer(data, from, &index, &scan, sport, cookie)?;
+                    Some((h, port, state, why, at))
                 });
             }));
         }
@@ -434,12 +404,12 @@ mod imp {
             let Some(sock) = sock else { continue };
             let (stop, index, tx) = (Arc::clone(&stop), Arc::clone(&index), tx.clone());
             receivers.push(std::thread::spawn(move || {
-                receive_loop(sock, &stop, &tx, |data, _| {
+                receive_loop(sock, &stop, &tx, |data, _, at| {
                     let (dst, sp, dp, seq, why) = parse_tcp_unreach(data, v6)?;
                     if sp != sport || seq != cookie {
                         return None;
                     }
-                    Some((*index.get(&dst)?, dp, PortState::Filtered, why))
+                    Some((*index.get(&dst)?, dp, PortState::Filtered, why, at))
                 });
             }));
         }
@@ -606,42 +576,6 @@ mod imp {
         let &h = index.get(&src)?;
         let (state, why) = scan.kind.classify(&tcp)?;
         Some((h, tcp.sport, state, why))
-    }
-
-    /// Read packets off a raw socket until told to stop, and pass on the
-    /// ones `parse` recognises as answers.
-    fn receive_loop(
-        sock: Socket,
-        stop: &AtomicBool,
-        tx: &mpsc::Sender<Answer>,
-        parse: impl Fn(&[u8], &SockAddr) -> Option<(usize, u16, PortState, &'static str)>,
-    ) {
-        let mut buf = vec![MaybeUninit::<u8>::uninit(); 65536];
-        while !stop.load(Ordering::Relaxed) {
-            let (n, from) = match sock.recv_from(&mut buf) {
-                Ok(r) => r,
-                Err(e)
-                    if matches!(
-                        e.kind(),
-                        io::ErrorKind::WouldBlock
-                            | io::ErrorKind::TimedOut
-                            | io::ErrorKind::Interrupted
-                    ) =>
-                {
-                    continue;
-                }
-                Err(_) => return,
-            };
-            let at = Instant::now();
-            // SAFETY: recv_from initialised the first `n` bytes.
-            let data = unsafe { std::slice::from_raw_parts(buf.as_ptr().cast::<u8>(), n) };
-            let Some((h, port, state, why)) = parse(data, &from) else {
-                continue;
-            };
-            if tx.send((h, port, state, why, at)).is_err() {
-                return;
-            }
-        }
     }
 
     #[cfg(test)]

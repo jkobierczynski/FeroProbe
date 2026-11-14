@@ -8,6 +8,7 @@ use serde::Serialize;
 use crate::arp::MacInfo;
 use crate::os::OsMatch;
 use crate::service::ServiceInfo;
+use crate::trace::Trace;
 
 /// Transport protocol of a scanned port.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
@@ -115,6 +116,9 @@ pub struct HostResult {
     /// What OS detection (`-O`) guessed, if it ran and the host answered.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub os: Option<OsMatch>,
+    /// The route to the host, if `--traceroute` ran.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trace: Option<Trace>,
 }
 
 impl HostResult {
@@ -127,6 +131,7 @@ impl HostResult {
             mac: None,
             ports: Vec::new(),
             os: None,
+            trace: None,
         }
     }
 

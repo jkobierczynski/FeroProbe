@@ -10,7 +10,8 @@ use clap::{Parser, ValueEnum};
 use feroprobe_core::{
     HostResult, IpVersion, RawTcpScan, ScanConfig, Target, TcpScanKind, Timing, connect_scan,
     detect_services, discover, os_detect, parse_ports, parse_scanflags, raw_ipv6_available,
-    raw_sockets_available, raw_tcp_scan, resolve_targets_with, top_ports, top_udp_ports, udp_scan,
+    raw_sockets_available, raw_tcp_scan, resolve_targets_with, top_ports, top_udp_ports,
+    traceroute, udp_scan,
 };
 
 use output::RunInfo;
@@ -123,6 +124,8 @@ enum Format {
 ///   sudo feroprobe -sn 192.168.1.0/24   (ARP on a local network, shows MAC vendors)
 ///   feroprobe -sV -p 22,80,443 10.0.0.5
 ///   sudo feroprobe -O 10.0.0.5
+///   sudo feroprobe -A 10.0.0.5              (-sV -O --traceroute)
+///   sudo feroprobe --traceroute -p 443 example.org
 ///   feroprobe -Pn --top-ports 1000 --open -o json 10.0.0.1-50
 ///   feroprobe -T4 -p- 10.0.0.5             (aggressive timing)
 ///   sudo feroprobe -sA -p 1-1024 10.0.0.5   (which ports does a firewall let through?)
@@ -184,6 +187,16 @@ struct Args {
     /// -O: guess each host's operating system (raw sockets: Linux, root or CAP_NET_RAW)
     #[arg(short = 'O')]
     os: bool,
+
+    /// Trace the route to each host that is up, after the port scan
+    /// (raw sockets: Linux, root or CAP_NET_RAW)
+    #[arg(long)]
+    traceroute: bool,
+
+    /// -A: aggressive detection, the same as -sV -O --traceroute. Without
+    /// raw-socket privileges only -sV runs, with a warning
+    #[arg(short = 'A')]
+    aggressive: bool,
 
     /// Ports to scan, e.g. "22", "1-1024", "22,80,443", "-" for all
     #[arg(short = 'p', long, conflicts_with = "top_ports")]
@@ -317,6 +330,26 @@ fn scan_config(args: &Args) -> ScanConfig {
     }
 }
 
+/// Apply `-A`: version detection, plus OS detection and traceroute when
+/// raw sockets are available (with a warning when they are not). Returns
+/// whether OS detection and traceroute run.
+fn aggressive(plan: &mut Plan, args: &Args, privileged: bool) -> Result<(bool, bool)> {
+    if !args.aggressive {
+        return Ok((args.os, args.traceroute));
+    }
+    if plan.ping_only {
+        bail!("-A needs a port scan, so it cannot be combined with -sn");
+    }
+    plan.version = true;
+    if privileged {
+        return Ok((true, true));
+    }
+    eprintln!(
+        "Warning: -A without root runs only -sV; OS detection and traceroute need raw sockets"
+    );
+    Ok((args.os, args.traceroute))
+}
+
 /// The run's label for a raw TCP scan, as listed in `scan_types`.
 fn tcp_scan_label(kind: TcpScanKind) -> &'static str {
     match kind {
@@ -351,8 +384,9 @@ async fn main() -> Result<()> {
         .context("resolving targets")?;
     let any_ipv6 = targets.iter().any(|t| t.addr.is_ipv6());
     let syn_ok = raw_sockets_available() && (!any_ipv6 || raw_ipv6_available());
-    let plan = plan(&args.scan, args.ping, syn_ok, args.scanflags.is_some())?;
-    if args.os {
+    let mut plan = plan(&args.scan, args.ping, syn_ok, args.scanflags.is_some())?;
+    let (os, trace) = aggressive(&mut plan, &args, raw_sockets_available())?;
+    if os {
         if plan.ping_only {
             bail!("-O needs a port scan, so it cannot be combined with -sn");
         }
@@ -369,6 +403,9 @@ async fn main() -> Result<()> {
         (Some(_), _) => tcp_ports.clone(),
         (None, n) => top_udp_ports(n.unwrap_or(20)),
     };
+    if trace && !raw_sockets_available() {
+        bail!("--traceroute sends raw packets: run as root or grant CAP_NET_RAW");
+    }
     if !plan.ping_only && tcp_ports.is_empty() {
         bail!("no ports to scan");
     }
@@ -431,7 +468,7 @@ async fn main() -> Result<()> {
             let wait = Duration::from_millis(args.version_timeout);
             detect_services(&mut hosts, &cfg, wait).await;
         }
-        if args.os {
+        if os {
             scan_types.push("os");
             os_detect(&mut hosts, &cfg)
                 .await
@@ -439,6 +476,12 @@ async fn main() -> Result<()> {
         }
     } else {
         scan_types.push("ping");
+    }
+    if trace {
+        scan_types.push("traceroute");
+        traceroute(&mut hosts, &cfg)
+            .await
+            .context("traceroute failed")?;
     }
 
     let ports_per_host =
@@ -458,7 +501,8 @@ async fn main() -> Result<()> {
         only_open: args.open,
         show_reason: args.reason,
         show_version: plan.version,
-        show_os: args.os,
+        show_os: os,
+        show_trace: trace,
         assume_up: !plan.discovery,
         ping_only: plan.ping_only,
         nmap_label: args.nmap_label,
@@ -646,5 +690,27 @@ mod tests {
         assert_eq!(plan(&[Ack], None, false, true).unwrap().tcp, Some(Ack));
         assert!(plan(&[Connect], None, true, true).is_err());
         assert!(plan(&[PingOnly], None, true, true).is_err());
+    }
+
+    #[test]
+    fn aggressive_turns_on_detection() {
+        let args = |argv: &[&str]| Args::try_parse_from(argv).unwrap();
+        let a = args(&["feroprobe", "-A", "10.0.0.1"]);
+        let mut pl = p(&a.scan, a.ping, true).unwrap();
+        assert_eq!(aggressive(&mut pl, &a, true).unwrap(), (true, true));
+        assert!(pl.version);
+        // Unprivileged: only version detection.
+        let mut pl = p(&a.scan, a.ping, false).unwrap();
+        assert_eq!(aggressive(&mut pl, &a, false).unwrap(), (false, false));
+        assert!(pl.version);
+        // -A is not -sA.
+        let a = args(&["feroprobe", "-sA", "--traceroute", "10.0.0.1"]);
+        assert!(!a.aggressive);
+        let mut pl = p(&a.scan, a.ping, true).unwrap();
+        assert_eq!(aggressive(&mut pl, &a, true).unwrap(), (false, true));
+        assert!(!pl.version);
+        let a = args(&["feroprobe", "-A", "-sn", "10.0.0.1"]);
+        let mut pl = p(&a.scan, a.ping, true).unwrap();
+        assert!(aggressive(&mut pl, &a, true).is_err());
     }
 }
