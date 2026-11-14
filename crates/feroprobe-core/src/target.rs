@@ -110,6 +110,12 @@ pub async fn resolve_targets<S: AsRef<str>>(specs: &[S]) -> Result<Vec<Target>, 
 }
 
 /// Like [`resolve_targets`], choosing hostname addresses by `version`.
+///
+/// The interfaces of link-local targets (`fe80::1%eth0`) are kept in one
+/// process-wide table that [`socket_addr`] reads, since hosts are identified
+/// by address alone. So a process scans one set of targets at a time, as the
+/// CLI does: a later resolution that gives the same link-local address
+/// another interface also moves the earlier target to it.
 pub async fn resolve_targets_with<S: AsRef<str>>(
     specs: &[S],
     version: IpVersion,
