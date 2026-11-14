@@ -90,6 +90,7 @@ pub(crate) fn receive_loop<T>(
     use std::mem::MaybeUninit;
     use std::sync::atomic::Ordering;
     let mut buf = vec![MaybeUninit::<u8>::uninit(); 65536];
+    let proto = socket_protocol(&sock);
     while !stop.load(Ordering::Relaxed) {
         let (n, from) = match sock.recv_from(&mut buf) {
             Ok(r) => r,
@@ -108,9 +109,15 @@ pub(crate) fn receive_loop<T>(
         let at = Instant::now();
         // SAFETY: recv_from initialised the first `n` bytes.
         let data = unsafe { std::slice::from_raw_parts(buf.as_ptr().cast::<u8>(), n) };
-        if let Some(answer) = parse(data, &from, at)
-            && tx.send(answer).is_err()
-        {
+        let Some(answer) = parse(data, &from, at) else {
+            continue;
+        };
+        if let Some(ip) = from.as_socket().map(|a| a.ip()) {
+            crate::packet_trace::log("RCVD", || {
+                crate::packet_trace::describe_received(proto, data, ip)
+            });
+        }
+        if tx.send(answer).is_err() {
             return;
         }
     }
@@ -336,9 +343,16 @@ pub(crate) fn send_with_backoff_until(
 ) -> io::Result<()> {
     let addr = to.into();
     let mut attempts = 0;
+    let mut logged = false;
     loop {
         if deadline.is_some_and(|d| Instant::now() >= d) {
             return Err(crate::model::ScanConfig::timed_out());
+        }
+        // Logged just before the first real send, so the answer's line
+        // cannot come first and probes never sent are not shown.
+        if !logged && crate::packet_trace::enabled() {
+            crate::packet_trace::sent(sent_protocol(sock, to), pkt, to);
+            logged = true;
         }
         match sock.send_to(pkt, &addr) {
             Ok(_) => return Ok(()),
@@ -352,6 +366,34 @@ pub(crate) fn send_with_backoff_until(
             }
             Err(e) => return Err(e),
         }
+    }
+}
+
+/// The IP protocol of a packet sent on `sock` to `to`, for
+/// `--packet-trace`. Outside Linux the socket cannot be asked, but the only
+/// raw sockets there are the ICMP ones of host discovery.
+fn sent_protocol(sock: &Socket, to: SocketAddr) -> u8 {
+    match socket_protocol(sock) {
+        0 if to.is_ipv6() => 58,
+        0 => crate::packet::IPPROTO_ICMP,
+        p => p,
+    }
+}
+
+/// The IP protocol a raw socket was opened for, for `--packet-trace`
+/// (0 where the system cannot say).
+pub(crate) fn socket_protocol(sock: &Socket) -> u8 {
+    #[cfg(target_os = "linux")]
+    {
+        sock.protocol()
+            .ok()
+            .flatten()
+            .map_or(0, |p| i32::from(p) as u8)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = sock;
+        0
     }
 }
 

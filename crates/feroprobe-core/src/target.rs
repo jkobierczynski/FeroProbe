@@ -51,7 +51,7 @@ pub enum TargetSpec {
 /// Which address to use when a hostname has both IPv4 and IPv6 ones.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum IpVersion {
-    /// Prefer IPv4, like nmap; fall back to IPv6 if the name has no IPv4.
+    /// Use IPv4 only, like nmap without `-6`.
     #[default]
     PreferV4,
     /// Use IPv6 only (nmap's `-6`).
@@ -111,6 +111,8 @@ pub async fn resolve_targets<S: AsRef<str>>(specs: &[S]) -> Result<Vec<Target>, 
 }
 
 /// Like [`resolve_targets`], choosing hostname addresses by `version`.
+/// A hostname that does not resolve is an error; see
+/// [`resolve_targets_lenient`] for nmap's behaviour of skipping it.
 ///
 /// The interfaces of link-local targets (`fe80::1%eth0`) are kept in one
 /// process-wide table that [`socket_addr`] reads, since hosts are identified
@@ -121,7 +123,37 @@ pub async fn resolve_targets_with<S: AsRef<str>>(
     specs: &[S],
     version: IpVersion,
 ) -> Result<Vec<Target>, Error> {
-    let mut out: Vec<Target> = Vec::new();
+    resolve_all(specs, version, false).await.map(|r| r.targets)
+}
+
+/// The outcome of [`resolve_targets_lenient`].
+#[derive(Debug, Default)]
+pub struct Resolution {
+    pub targets: Vec<Target>,
+    /// nmap's warnings for hostnames that were skipped, in order.
+    pub warnings: Vec<String>,
+    /// Hostnames with several addresses, and the one used (nmap shows
+    /// these at `-vv`).
+    pub notes: Vec<String>,
+}
+
+/// Like [`resolve_targets_with`], but a hostname that does not resolve (to
+/// an address of the wanted version) is skipped with nmap's warning instead
+/// of failing the whole list. Malformed specs are still errors.
+pub async fn resolve_targets_lenient<S: AsRef<str>>(
+    specs: &[S],
+    version: IpVersion,
+) -> Result<Resolution, Error> {
+    resolve_all(specs, version, true).await
+}
+
+async fn resolve_all<S: AsRef<str>>(
+    specs: &[S],
+    version: IpVersion,
+    lenient: bool,
+) -> Result<Resolution, Error> {
+    let mut res = Resolution::default();
+    let out = &mut res.targets;
     let mut seen = std::collections::HashSet::new();
     // Interfaces given for link-local targets in this request. A host is
     // identified by its address alone, so one address cannot be scanned on
@@ -151,7 +183,43 @@ pub async fn resolve_targets_with<S: AsRef<str>>(
                 }
             }
             TargetSpec::Hostname(name) => {
-                let (addr, scope) = resolve_hostname(&name, version).await?;
+                let found = match lookup(&name).await {
+                    Ok(found) => found,
+                    Err(_) if lenient => {
+                        res.warnings.push(format!("Failed to resolve \"{name}\"."));
+                        continue;
+                    }
+                    Err(e) => return Err(e),
+                };
+                let (addr, scope, total) = match pick_address(&found, version) {
+                    Ok(picked) => picked,
+                    Err(other_version) => {
+                        let why = match (other_version, version) {
+                            (false, _) => "no addresses returned",
+                            (true, IpVersion::PreferV4) => "no IPv4 address; try -6",
+                            (true, IpVersion::V6) => "no IPv6 address; try without -6",
+                        };
+                        if !lenient {
+                            return Err(Error::Resolve(name.clone(), why.into()));
+                        }
+                        if other_version {
+                            let (has, hint) = match version {
+                                IpVersion::PreferV4 => ("IPv4", "with -6"),
+                                IpVersion::V6 => ("IPv6", "without -6"),
+                            };
+                            res.warnings.push(format!(
+                                "Hostname {name} resolves, but not to any {has} address. Try scanning {hint}"
+                            ));
+                        }
+                        res.warnings.push(format!("Failed to resolve \"{name}\"."));
+                        continue;
+                    }
+                };
+                if total > 1 {
+                    res.notes.push(format!(
+                        "Hostname {name} resolves to {total} IPs. Using {addr}."
+                    ));
+                }
                 if let (IpAddr::V6(v6), Some(index)) = (addr, scope) {
                     add_scope(v6, index)?;
                 }
@@ -172,7 +240,7 @@ pub async fn resolve_targets_with<S: AsRef<str>>(
     for (ip, index) in scopes {
         set_scope(ip, index);
     }
-    Ok(out)
+    Ok(res)
 }
 
 /// Hosts to leave out of a scan, like nmap's `--exclude`: addresses, CIDR
@@ -239,30 +307,42 @@ impl Exclusions {
     }
 }
 
-/// Resolve a hostname to a single address: IPv4 first like nmap, or only
-/// IPv6 with [`IpVersion::V6`]. A link-local answer comes with the
-/// interface it was found on.
-async fn resolve_hostname(name: &str, version: IpVersion) -> Result<(IpAddr, Option<u32>), Error> {
+/// Every address a hostname resolves to.
+async fn lookup(name: &str) -> Result<Vec<SocketAddr>, Error> {
     let found: Vec<SocketAddr> = tokio::net::lookup_host((name, 0))
         .await
         .map_err(|e| Error::Resolve(name.to_string(), e.to_string()))?
         .collect();
+    let mut unique: Vec<SocketAddr> = Vec::new();
+    for sa in found {
+        if !unique.iter().any(|u| u.ip() == sa.ip()) {
+            unique.push(sa);
+        }
+    }
+    Ok(unique)
+}
+
+/// Pick the address to scan from a name's addresses, like nmap: the first
+/// IPv4 one, or with [`IpVersion::V6`] the first IPv6 one. A link-local
+/// answer comes with the interface it was found on. Also returns how many
+/// addresses the name has. The error says whether the name has addresses,
+/// only of the other version.
+fn pick_address(
+    found: &[SocketAddr],
+    version: IpVersion,
+) -> Result<(IpAddr, Option<u32>, usize), bool> {
     let pick = match version {
-        IpVersion::PreferV4 => found.iter().find(|a| a.is_ipv4()).or_else(|| found.first()),
+        IpVersion::PreferV4 => found.iter().find(|a| a.is_ipv4()),
         IpVersion::V6 => found.iter().find(|a| a.is_ipv6()),
     };
     let Some(sa) = pick else {
-        let why = match version {
-            IpVersion::V6 if !found.is_empty() => "no IPv6 address",
-            _ => "no addresses returned",
-        };
-        return Err(Error::Resolve(name.to_string(), why.into()));
+        return Err(!found.is_empty());
     };
     let scope = match sa {
         SocketAddr::V6(v6) if is_link_local(*v6.ip()) && v6.scope_id() != 0 => Some(v6.scope_id()),
         _ => None,
     };
-    Ok((sa.ip(), scope))
+    Ok((sa.ip(), scope, found.len()))
 }
 
 /// Whether `ip` is a link-local unicast address (`fe80::/10`).
@@ -525,6 +605,39 @@ mod tests {
             SocketAddr::V6(a) => assert_eq!(a.scope_id(), 0),
             other => panic!("{other}"),
         }
+    }
+
+    #[tokio::test]
+    async fn unresolvable_names_are_skipped_like_nmap() {
+        let res = resolve_targets_lenient(&["nonexistent.invalid", "127.0.0.1"], IpVersion::V6)
+            .await
+            .unwrap();
+        assert_eq!(res.targets.len(), 1);
+        assert_eq!(
+            res.warnings,
+            vec!["Failed to resolve \"nonexistent.invalid\"."]
+        );
+        // The strict version still fails, and malformed specs fail both.
+        assert!(resolve_targets(&["nonexistent.invalid"]).await.is_err());
+        assert!(
+            resolve_targets_lenient(&["2222"], IpVersion::V6)
+                .await
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn addresses_are_picked_by_version_like_nmap() {
+        let v4: SocketAddr = "192.0.2.1:0".parse().unwrap();
+        let v6: SocketAddr = "[2001:db8::1]:0".parse().unwrap();
+        let both = [v6, v4];
+        let (ip, _, n) = pick_address(&both, IpVersion::PreferV4).unwrap();
+        assert_eq!((ip, n), (v4.ip(), 2));
+        assert_eq!(pick_address(&both, IpVersion::V6).unwrap().0, v6.ip());
+        // No fallback to the other version: nmap's "try -6" case.
+        assert_eq!(pick_address(&[v6], IpVersion::PreferV4), Err(true));
+        assert_eq!(pick_address(&[v4], IpVersion::V6), Err(true));
+        assert_eq!(pick_address(&[], IpVersion::V6), Err(false));
     }
 
     #[tokio::test]

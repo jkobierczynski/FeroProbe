@@ -163,7 +163,14 @@ mod linux {
                 };
                 // SAFETY: recv initialised the first `n` bytes.
                 let data = unsafe { std::slice::from_raw_parts(buf.as_ptr().cast::<u8>(), n) };
-                Ok(parse_neighbor_advert(data))
+                let advert = parse_neighbor_advert(data);
+                if let Some((ip, mac)) = advert {
+                    crate::packet_trace::log("RCVD", || match mac {
+                        Some(mac) => format!("ICMPv6 Neighbor advertisement {ip} is-at {mac}"),
+                        None => format!("ICMPv6 Neighbor advertisement {ip}"),
+                    });
+                }
+                Ok(advert)
             }
         };
         let send_one = |ip: Ipv6Addr| {
