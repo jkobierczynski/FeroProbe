@@ -353,7 +353,7 @@ mod imp {
             .iter()
             .map(|&(_, addr, _)| source_addr_for(addr).ok())
             .collect();
-        let mut pacer = Pacer::new(cfg.max_rate);
+        let mut pacer = Pacer::for_config(cfg);
         let mut buf = vec![0u8; 65536];
 
         let syn_ack = packet::TCP_SYN | packet::TCP_ACK;
@@ -407,8 +407,8 @@ mod imp {
                     continue;
                 };
                 let pkt = packet::tcp_syn_with_options(src, addr, sport, port, seq, tsval);
+                pacer.wait();
                 send_with_backoff(&send_sock, &pkt, addr)?;
-                pacer.tick();
                 // Bounded, so constant inbound traffic can't stall sending.
                 // Whatever is left is read by the next drain or the wait.
                 let drain_until = Instant::now() + Duration::from_millis(10);

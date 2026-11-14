@@ -24,6 +24,7 @@ pub mod raw;
 pub mod service;
 pub mod syn;
 pub mod target;
+pub mod timing;
 pub mod udp;
 
 pub use arp::{MacAddr, MacInfo};
@@ -36,6 +37,7 @@ pub use raw::raw_sockets_available;
 pub use service::{ServiceInfo, detect_services};
 pub use syn::syn_scan;
 pub use target::{Target, TargetSpec, parse_target, resolve_targets};
+pub use timing::Timing;
 pub use udp::udp_scan;
 
 /// Errors produced while preparing a scan.

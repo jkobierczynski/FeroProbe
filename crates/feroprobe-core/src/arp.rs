@@ -481,15 +481,14 @@ mod linux {
         let mut pending: Vec<Ipv4Addr> = targets.to_vec();
         let outcome = (|| -> io::Result<()> {
             for _ in 0..=cfg.retries {
-                let mut pacer = Pacer::new(cfg.max_rate);
+                let mut pacer = Pacer::for_config(cfg);
                 for &ip in &pending {
-                    if cancel.load(Ordering::Relaxed) {
+                    let frame: [u8; ARP_FRAME_LEN] = arp_request(net.mac, net.addr, ip);
+                    if !pacer.wait_or_cancel(cancel) {
                         return Ok(());
                     }
-                    let frame: [u8; ARP_FRAME_LEN] = arp_request(net.mac, net.addr, ip);
                     sent_at.insert(ip, Instant::now());
                     send(&fd, net.ifindex, &frame)?;
-                    pacer.tick();
                     while let Ok(r) = rx.try_recv() {
                         record(r, &sent_at, &mut answered);
                     }

@@ -15,6 +15,7 @@ no external binaries.
 | Host discovery: ICMP echo + TCP 443/80 probes, `-sn`, `-Pn` | ✅ |
 | ARP discovery on the local network, with MAC address and vendor (Linux, root; `--disable-arp-ping` to turn off) | ✅ |
 | MAC vendor names from the full IEEE OUI list (system `oui.txt` or `--oui-file`) | ✅ |
+| Timing templates `-T0`…`-T5` and `--scan-delay` | ✅ |
 | Targets: IPs, CIDR, `a.b.c.X-Y` ranges, hostnames, IPv6 (connect and UDP) | ✅ |
 | nmap-style `-p` port specs and top ports | ✅ |
 | Table, JSON and nmap-style XML output, `--reason`, `--open` | ✅ |
@@ -143,6 +144,25 @@ discovery uses TCP probes (plus unprivileged ping sockets where the OS allows
 them). An explicit `-sS` still needs the privileges; use `-sT` to ask for an
 unprivileged TCP scan. The default is also a connect scan when any target is
 IPv6, since the SYN scan is IPv4 only for now.
+
+### Timing templates
+
+`-T0` to `-T5` (or `-T paranoid` … `-T insane`) work like nmap's: each bundles
+a timeout, retries, parallelism, packet rate and delay between probes.
+
+| Template | Timeout | Retries | Parallel | Max rate (pps) | Scan delay |
+| --- | --- | --- | --- | --- | --- |
+| `-T0` paranoid | 5 s | 2 | 1 | 1 | 5 min |
+| `-T1` sneaky | 5 s | 2 | 1 | 1 | 15 s |
+| `-T2` polite | 3 s | 2 | 10 | 100 | 0.4 s |
+| `-T3` normal (default) | 1.5 s | 1 | 500 | 5000 | none |
+| `-T4` aggressive | 1 s | 1 | 1000 | 10000 | none |
+| `-T5` insane | 0.3 s | 0 | 2000 | 50000 | none |
+
+On Windows no template goes below a 3 s timeout, since Windows reports a
+refused connection only about 2 s after the reset. `--timeout`, `--retries`,
+`-c/--concurrency`, `--max-rate` and `--scan-delay` override the template's
+value, so `-T4 --max-rate 2000` is aggressive with a lower packet rate.
 
 ### MAC vendor names
 

@@ -141,10 +141,24 @@ mod imp {
 
         let outcome = (|| -> io::Result<()> {
             for _round in 0..=cfg.retries {
-                let mut pacer = Pacer::new(cfg.max_rate);
+                let mut pacer = Pacer::for_config(cfg);
                 for &(h, p) in &pending {
                     let Some(src) = sources[h] else { continue };
+                    // Answered by a reply that came in during this round.
+                    if results.contains_key(&(h, p)) {
+                        continue;
+                    }
                     let pkt = packet::tcp_syn(src, addrs[h], sport, p, cookie);
+                    pacer.wait();
+                    // A slow template can wait long enough for an answer to
+                    // the previous round's probe to arrive: record it against
+                    // the old send time and do not send again.
+                    while let Ok(a) = rx.try_recv() {
+                        record(&mut results, &sent_at, a);
+                    }
+                    if results.contains_key(&(h, p)) {
+                        continue;
+                    }
                     sent_at.insert((h, p), Instant::now());
                     match send_with_backoff(&send_sock, &pkt, addrs[h]) {
                         Ok(()) => {}
@@ -158,7 +172,6 @@ mod imp {
                         }
                         Err(e) => return Err(e),
                     }
-                    pacer.tick();
                     while let Ok(a) = rx.try_recv() {
                         record(&mut results, &sent_at, a);
                     }

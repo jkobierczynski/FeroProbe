@@ -349,19 +349,18 @@ mod icmp {
 
         let outcome = (|| -> io::Result<()> {
             for _ in 0..=cfg.retries {
-                let mut pacer = Pacer::new(cfg.max_rate);
+                let mut pacer = Pacer::for_config(cfg);
                 for &(seq, addr) in &pending {
-                    if cancel.load(Ordering::Relaxed) {
+                    let pkt = packet::icmp_echo(id, seq, b"feroprobe");
+                    if !pacer.wait_or_cancel(cancel) {
                         return Ok(());
                     }
-                    let pkt = packet::icmp_echo(id, seq, b"feroprobe");
                     sent_at.insert(seq, (addr, Instant::now()));
                     if let Err(e) = send_with_backoff(&sock, &pkt, addr)
                         && !crate::connect::is_network_error(&e)
                     {
                         return Err(e);
                     }
-                    pacer.tick();
                     while let Ok(r) = rx.try_recv() {
                         record(r, &sent_at, &mut replies);
                     }

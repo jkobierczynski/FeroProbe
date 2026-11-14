@@ -27,6 +27,7 @@ use tokio::net::TcpStream;
 
 use crate::model::{HostResult, PortState, Protocol, ScanConfig};
 use crate::ports::service_name;
+use crate::timing::pace;
 use rules::Probe;
 
 /// What version detection learned about a port.
@@ -149,6 +150,7 @@ async fn plain_probe(
     cfg: &ScanConfig,
     wait: Duration,
 ) -> Option<Vec<u8>> {
+    pace(cfg.scan_delay).await;
     let mut stream = tokio::time::timeout(cfg.timeout, TcpStream::connect(addr))
         .await
         .ok()?
@@ -174,10 +176,12 @@ async fn detect_tls(
             .find(|p| p.ports.contains(&port))
             .unwrap_or(&rules::HTTP)
     };
+    pace(cfg.scan_delay).await;
     let (mut stream, cn) = tls::connect(addr, host, cfg.timeout, wait).await?;
     let mut data = exchange(&mut stream, probe.payload, wait).await;
     if data.is_empty() && probe.name != rules::HTTP.name {
         // No answer: try HTTP over a fresh session.
+        pace(cfg.scan_delay).await;
         if let Some((mut stream, _)) = tls::connect(addr, host, cfg.timeout, wait).await {
             probe = &rules::HTTP;
             data = exchange(&mut stream, probe.payload, wait).await;
@@ -266,6 +270,7 @@ pub async fn detect_udp(addr: SocketAddr, cfg: &ScanConfig, wait: Duration) -> O
     let sock = crate::udp::connected_socket(addr).await.ok()?;
     let mut buf = [0u8; 4096];
     for _ in 0..=cfg.retries {
+        pace(cfg.scan_delay).await;
         sock.send(payload).await.ok()?;
         if let Ok(Ok(n)) = tokio::time::timeout(wait, sock.recv(&mut buf)).await {
             return udp_info::parse(addr.port(), &buf[..n]);

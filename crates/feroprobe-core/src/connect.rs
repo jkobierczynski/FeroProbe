@@ -17,6 +17,7 @@ use tokio::net::TcpStream;
 
 use crate::model::{HostResult, PortResult, PortState, Protocol, ScanConfig, elapsed_ms, reason};
 use crate::target::Target;
+use crate::timing::pace;
 
 /// Whether an error means the network gave no usable answer (the port is
 /// filtered), as opposed to a local problem such as running out of file
@@ -54,6 +55,7 @@ pub async fn probe_port(addr: SocketAddr, cfg: &ScanConfig) -> io::Result<PortRe
         service: None,
     };
     for _ in 0..=cfg.retries {
+        pace(cfg.scan_delay).await;
         let start = Instant::now();
         let outcome = tokio::time::timeout(cfg.timeout, TcpStream::connect(addr)).await;
         let rtt = Some(elapsed_ms(start));
