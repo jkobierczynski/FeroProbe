@@ -48,8 +48,8 @@ pub struct Trace {
     pub reached: bool,
 }
 
-/// The port to trace a host with: open, else closed, else 80.
-fn trace_port(host: &HostResult) -> u16 {
+/// The port to trace a host with: open, else closed, else `fallback`.
+fn trace_port(host: &HostResult, fallback: u16) -> u16 {
     let tcp = |state| {
         host.ports
             .iter()
@@ -58,7 +58,7 @@ fn trace_port(host: &HostResult) -> u16 {
     };
     tcp(PortState::Open)
         .or_else(|| tcp(PortState::Closed))
-        .unwrap_or(80)
+        .unwrap_or(fallback)
 }
 
 /// What came back for one probe: the host index, TTL, who answered, whether
@@ -104,17 +104,19 @@ fn build_trace(port: u16, answers: &[HopAnswer]) -> Trace {
 
 /// Trace the route to every host that is up, and store it in `trace`.
 /// With `assume_up` (`-Pn`), every host is traced, even one that never
-/// answered the scan: routers on the way may still answer.
+/// answered the scan: routers on the way may still answer. Hosts with no
+/// open or closed TCP port (as after `-sn`) are traced with `fallback_port`.
 pub async fn traceroute(
     hosts: &mut [HostResult],
     cfg: &ScanConfig,
     assume_up: bool,
+    fallback_port: u16,
 ) -> io::Result<()> {
     let jobs: Vec<(usize, IpAddr, u16)> = hosts
         .iter()
         .enumerate()
         .filter(|(_, h)| assume_up || h.is_up())
-        .map(|(i, h)| (i, h.addr, trace_port(h)))
+        .map(|(i, h)| (i, h.addr, trace_port(h, fallback_port)))
         .collect();
     if jobs.is_empty() {
         return Ok(());
@@ -471,11 +473,12 @@ mod tests {
             service: None,
         };
         let mut h = HostResult::new("10.0.0.1".parse().unwrap(), None);
-        assert_eq!(trace_port(&h), 80);
+        assert_eq!(trace_port(&h, 80), 80);
+        assert_eq!(trace_port(&h, 443), 443);
         h.ports.push(port(23, PortState::Filtered));
         h.ports.push(port(25, PortState::Closed));
-        assert_eq!(trace_port(&h), 25);
+        assert_eq!(trace_port(&h, 80), 25);
         h.ports.push(port(22, PortState::Open));
-        assert_eq!(trace_port(&h), 22);
+        assert_eq!(trace_port(&h, 80), 22);
     }
 }

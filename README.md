@@ -162,8 +162,17 @@ HOP RTT        ADDRESS
 
 A hop that never answers shows `...`. The route is in the JSON output under
 `trace`, and in the XML as nmap's `<trace>` element. It needs raw sockets:
-Linux, root or `CAP_NET_RAW`. It also works with `-sn`, probing port 80. With
-`-Pn` every target is traced, even one that never answered the scan.
+Linux, root or `CAP_NET_RAW`. With `-Pn` every target is traced, even one
+that never answered the scan.
+
+To trace only, without a port scan, add `-sn`; add `-Pn` to skip host
+discovery too. The probes then go to port 80, or the first port given with
+`-p`:
+
+```sh
+sudo feroprobe -sn --traceroute example.org             # discovery, then trace
+sudo feroprobe -sn -Pn --traceroute -p 443 example.org  # trace only, to 443
+```
 
 `-A` turns on `-sV`, `-O` and `--traceroute` together. Without raw-socket
 privileges it runs only `-sV` and prints a warning.

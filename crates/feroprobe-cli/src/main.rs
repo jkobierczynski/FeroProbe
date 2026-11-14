@@ -278,9 +278,6 @@ fn plan(scan: &[ScanType], ping: Option<PingMode>, syn_ok: bool, scanflags: bool
     if ping_only && scan.len() > 1 {
         bail!("-sn (no port scan) cannot be combined with other scan types");
     }
-    if ping_only && ping.is_some() {
-        bail!("-sn with -Pn would do nothing");
-    }
     if scanflags {
         if ping_only {
             bail!("--scanflags needs a port scan, so it cannot be combined with -sn");
@@ -403,6 +400,9 @@ async fn main() -> Result<()> {
         (Some(_), _) => tcp_ports.clone(),
         (None, n) => top_udp_ports(n.unwrap_or(20)),
     };
+    if plan.ping_only && !plan.discovery && !trace {
+        bail!("-sn with -Pn would do nothing (add --traceroute to only trace the route)");
+    }
     if trace && !raw_sockets_available() {
         bail!("--traceroute sends raw packets: run as root or grant CAP_NET_RAW");
     }
@@ -479,7 +479,13 @@ async fn main() -> Result<()> {
     }
     if trace {
         scan_types.push("traceroute");
-        traceroute(&mut hosts, &cfg, !plan.discovery)
+        // Hosts without a scanned port are traced with the first -p port.
+        let fallback = if args.ports.is_some() {
+            tcp_ports.first().copied().unwrap_or(80)
+        } else {
+            80
+        };
+        traceroute(&mut hosts, &cfg, !plan.discovery, fallback)
             .await
             .context("traceroute failed")?;
     }
@@ -566,7 +572,6 @@ mod tests {
     fn rejects_conflicts() {
         assert!(p(&[ScanType::Syn, ScanType::Connect], None, true).is_err());
         assert!(p(&[ScanType::PingOnly, ScanType::Udp], None, true).is_err());
-        assert!(p(&[ScanType::PingOnly], Some(PingMode::Skip), true).is_err());
         assert!(p(&[ScanType::PingOnly, ScanType::Version], None, true).is_err());
     }
 
