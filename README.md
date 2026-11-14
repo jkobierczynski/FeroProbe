@@ -22,6 +22,7 @@ no external binaries.
 | Table, JSON and nmap-style XML output, `--reason`, `--open` | ✅ |
 | Service and version detection, `-sV`, with our own probes and rules | ✅ |
 | OS detection, `-O`, from SYN-ACK traits with our own signatures (Linux, root; IPv4 only) | ✅ |
+| Traceroute, `--traceroute`, IPv4 and IPv6 (Linux, root), and `-A` (`-sV -O --traceroute`) | ✅ |
 
 ## Install
 
@@ -142,6 +143,39 @@ recognized when SACK, timestamps or window scaling are turned off. The fingerpri
 shows the raw traits, which is what a new signature is written from. It needs
 raw sockets, so Linux with root or `CAP_NET_RAW`, and at least one open TCP port.
 IPv6 hosts are skipped for now: the signatures rely on IPv4 header fields.
+
+### Traceroute and -A
+
+`--traceroute` finds the routers between you and each host that is up. It
+sends TCP SYN probes with TTL (IPv6: hop limit) 1 to 30 all at once, to a
+port the scan found open, else one it found closed, else 80. Routers answer
+the probes that expire with ICMP "time exceeded", and the host answers the
+first probe that reaches it, which ends the route:
+
+```text
+TRACEROUTE (using port 443/tcp)
+HOP RTT        ADDRESS
+1   0.29 ms    192.168.1.1
+2   ...
+3   9.84 ms    203.0.113.5
+```
+
+A hop that never answers shows `...`. The route is in the JSON output under
+`trace`, and in the XML as nmap's `<trace>` element. It needs raw sockets:
+Linux, root or `CAP_NET_RAW`. With `-Pn` every target is traced, even one
+that never answered the scan.
+
+To trace only, without a port scan, add `-sn`; add `-Pn` to skip host
+discovery too. The probes then go to port 80, or the first port given with
+`-p`:
+
+```sh
+sudo feroprobe -sn --traceroute example.org             # discovery, then trace
+sudo feroprobe -sn -Pn --traceroute -p 443 example.org  # trace only, to 443
+```
+
+`-A` turns on `-sV`, `-O` and `--traceroute` together. Without raw-socket
+privileges it runs only `-sV` and prints a warning.
 
 ### FIN, NULL, Xmas, ACK, Window and Maimon scans
 

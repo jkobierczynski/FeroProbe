@@ -11,7 +11,8 @@
 //! - [`discover`]: host discovery with ARP (local networks), ICMP echo and TCP probes
 //!
 //! [`detect_services`] then identifies the software on open ports, and
-//! [`os_detect`] guesses each host's operating system.
+//! [`os_detect`] guesses each host's operating system, and [`traceroute`]
+//! finds the routers on the way to it.
 
 pub mod arp;
 pub mod connect;
@@ -28,6 +29,7 @@ pub mod service;
 pub mod syn;
 pub mod target;
 pub mod timing;
+pub mod trace;
 pub mod udp;
 
 pub use arp::{MacAddr, MacInfo};
@@ -43,6 +45,7 @@ pub use target::{
     IpVersion, Target, TargetSpec, parse_target, resolve_targets, resolve_targets_with, socket_addr,
 };
 pub use timing::Timing;
+pub use trace::{Hop, Trace, traceroute};
 pub use udp::udp_scan;
 
 /// Errors produced while preparing a scan.

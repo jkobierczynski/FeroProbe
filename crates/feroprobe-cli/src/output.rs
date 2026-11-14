@@ -26,6 +26,8 @@ pub struct RunInfo {
     pub show_version: bool,
     /// `-O` ran: show each host's OS guess.
     pub show_os: bool,
+    /// `--traceroute` ran: show each host's route.
+    pub show_trace: bool,
     /// `-Pn`: discovery was skipped, so report every host.
     pub assume_up: bool,
     /// `-sn`: discovery only, no port table.
@@ -108,6 +110,9 @@ pub fn print_table(hosts: &[HostResult], info: &RunInfo) {
         if info.show_os {
             print_os(host);
         }
+        if info.show_trace {
+            print_trace(host);
+        }
     }
     let what = if info.ping_only {
         String::new()
@@ -187,6 +192,27 @@ fn print_os(host: &HostResult) {
     }
 }
 
+/// The route to one host, after `--traceroute`, in nmap's layout.
+fn print_trace(host: &HostResult) {
+    let Some(t) = &host.trace else { return };
+    if t.hops.is_empty() {
+        println!("TRACEROUTE: no hops answered");
+        return;
+    }
+    println!("TRACEROUTE (using port {}/{})", t.port, t.protocol);
+    println!("HOP RTT        ADDRESS");
+    for hop in &t.hops {
+        let rtt = hop
+            .rtt_ms
+            .map_or_else(|| "...".to_string(), |ms| format!("{ms:.2} ms"));
+        let addr = hop.addr.map_or_else(String::new, |a| a.to_string());
+        println!("{:<3} {rtt:<10} {addr}", hop.ttl);
+    }
+    if !t.reached {
+        println!("(the host itself did not answer)");
+    }
+}
+
 #[derive(Serialize)]
 struct JsonReport<'a> {
     scanner: &'static str,
@@ -204,6 +230,8 @@ struct JsonHost<'a> {
     ports: Vec<JsonPort<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     os: Option<&'a feroprobe_core::OsMatch>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    trace: Option<&'a feroprobe_core::Trace>,
 }
 
 #[derive(Serialize)]
@@ -280,6 +308,7 @@ pub fn print_json(hosts: &[HostResult], info: &RunInfo) -> Result<()> {
                 },
                 up: reported(h, info),
                 os: h.os.as_ref(),
+                trace: h.trace.as_ref(),
                 ports: visible(h, info.only_open).map(JsonPort::new).collect(),
             })
             .collect(),
