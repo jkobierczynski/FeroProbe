@@ -81,6 +81,13 @@ sudo ./target/release/feroprobe -sn 2001:db8::/120 fe80::1%eth0
 Run `feroprobe --help` (or `feroprobe` alone) for all options, on one page
 laid out like nmap's.
 
+To see why FeroProbe does what it does, add `--explain`. Before sending
+anything it prints its plan to standard error, step by step, with the reason
+for each choice: which hosts get ARP and which get ping probes (and which
+probes), whether names are looked up, which scan type was picked and why,
+where the ports came from, the timing, and what runs after the port scan.
+This is FeroProbe's own option; nmap has nothing like it.
+
 To see what FeroProbe actually sends, add `--packet-trace`. Like nmap's, it
 prints one line per probe and per answer on standard output:
 

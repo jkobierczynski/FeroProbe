@@ -1,5 +1,6 @@
 //! `feroprobe`: an nmap-style network scanner, written natively in Rust.
 
+mod explain;
 mod grep;
 mod help;
 mod output;
@@ -407,6 +408,11 @@ struct Args {
     /// Only show open (and open|filtered, unfiltered) ports
     #[arg(long)]
     open: bool,
+
+    /// Before scanning, print the plan made from the command line, step by
+    /// step, with the reason for each choice (to standard error)
+    #[arg(long)]
+    explain: bool,
 
     /// Print every probe sent and every answer received (SENT/RCVD/CONN
     /// lines on standard output), like nmap's --packet-trace
@@ -1211,9 +1217,11 @@ async fn main() -> Result<()> {
         progress.say(2, || format!("Warning: {note}"));
     }
     let mut targets = resolved.targets;
+    let mut excluded = 0;
     if !exclusions.is_empty() {
         let before = targets.len();
         targets.retain(|t| !exclusions.excludes(t));
+        excluded = before - targets.len();
         progress.say(1, || format!("Excluded {} host(s)", before - targets.len()));
     }
     if targets.is_empty() {
@@ -1299,6 +1307,31 @@ async fn main() -> Result<()> {
     let sockets = !plan.ping_only && (plan.udp || plan.tcp.is_some_and(|t| t.raw_kind().is_none()));
     for w in warnings.iter().filter(|_| sockets) {
         eprintln!("Warning: {w}");
+    }
+
+    if args.explain {
+        let privileged = raw_sockets_available();
+        let facts = explain::Facts {
+            targets: &targets,
+            excluded,
+            plan: &plan,
+            probes: &probes,
+            privileged,
+            icmp: feroprobe_core::icmp_available(),
+            local: if plan.discovery && privileged && cfg.arp_ping {
+                explain::local_targets(&targets)
+            } else {
+                Default::default()
+            },
+            tcp_ports: if plan.tcp.is_some() { &tcp_ports } else { &[] },
+            udp_ports: if plan.udp { &udp_ports } else { &[] },
+            cfg: &cfg,
+            os,
+            trace,
+        };
+        for line in explain::explain(&args, &facts) {
+            eprintln!("{line}");
+        }
     }
 
     if let Some(path) = &args.oui_file {
