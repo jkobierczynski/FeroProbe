@@ -1,6 +1,8 @@
 //! `feroprobe`: an nmap-style network scanner, written natively in Rust.
 
+mod explain;
 mod grep;
+mod help;
 mod output;
 mod xml;
 
@@ -15,7 +17,7 @@ use feroprobe_core::{
     Exclusions, HostResult, IpVersion, PingProbes, PortLists, RawTcpScan, ScanConfig, Target,
     TcpScanKind, Timing, connect_scan, detect_services, discover, os_detect, parse_port_lists,
     parse_ports, parse_scanflags, raw_ipv6_available, raw_sockets_available, raw_tcp_scan,
-    resolve_targets_with, reverse_lookup, top_ports, top_udp_ports, traceroute, udp_scan,
+    resolve_targets_lenient, reverse_lookup, top_ports, top_udp_ports, traceroute, udp_scan,
 };
 use futures::StreamExt;
 
@@ -225,30 +227,10 @@ fn render(format: Format, hosts: &[HostResult], info: &RunInfo) -> Result<String
     })
 }
 
-/// Fast, native network scanner with an nmap-style command line.
-///
-/// Examples:
-///   feroprobe 192.168.1.0/24
-///   sudo feroprobe -sS -p 1-65535 10.0.0.5
-///   feroprobe -sT -sU -p 53,123,161 scanme.example.org
-///   feroprobe -sn 192.168.1.0/24
-///   sudo feroprobe -sn 192.168.1.0/24   (ARP on a local network, shows MAC vendors)
-///   feroprobe -sV -p 22,80,443 10.0.0.5
-///   sudo feroprobe -O 10.0.0.5
-///   feroprobe -iL hosts.txt --exclude 10.0.0.1 -oA scan   (scan.nmap, scan.xml, scan.gnmap)
-///   feroprobe -v -oG - 10.0.0.0/24                     (grepable on stdout, progress on stderr)
-///   sudo feroprobe -A 10.0.0.5              (-sV -O --traceroute)
-///   sudo feroprobe --traceroute -p 443 example.org
-///   feroprobe -Pn --top-ports 1000 --open -o json 10.0.0.1-50
-///   feroprobe -T4 -p- 10.0.0.5             (aggressive timing)
-///   sudo feroprobe -sA -p 1-1024 10.0.0.5   (which ports does a firewall let through?)
-///   sudo feroprobe -sF -p 22,80 10.0.0.5    (FIN scan; also -sN, -sX, -sW, -sM)
-///   sudo feroprobe --scanflags SYNFIN -p 80 10.0.0.5
-///   feroprobe -T2 --scan-delay 1s 10.0.0.5
-///   sudo feroprobe -6 -sn fe80::1%eth0 2001:db8::/120   (IPv6, NDP on the local link)
-///   feroprobe -6 -p 22,443 scanme.example.org          (use the name's IPv6 address)
+/// Fast, native network scanner with an nmap-style command line. The help
+/// page is [`help::HELP`], laid out like nmap's.
 #[derive(Debug, Parser)]
-#[command(version, verbatim_doc_comment)]
+#[command(version, override_help = help::HELP, arg_required_else_help = true)]
 struct Args {
     /// Targets: IPv4 or IPv6 addresses, CIDR blocks (10.0.0.0/24, 2001:db8::/120),
     /// ranges (10.0.0.1-20), link-local addresses with their interface
@@ -270,8 +252,8 @@ struct Args {
     #[arg(long, value_name = "FILE")]
     excludefile: Option<String>,
 
-    /// -6: use the IPv6 address of each hostname target (IPv4 is preferred
-    /// otherwise). Address targets are scanned as given, IPv4 or IPv6
+    /// -6: use the IPv6 address of each hostname target (otherwise its IPv4
+    /// address, like nmap). Address targets are scanned as given
     #[arg(short = '6')]
     ipv6: bool,
 
@@ -426,6 +408,16 @@ struct Args {
     /// Only show open (and open|filtered, unfiltered) ports
     #[arg(long)]
     open: bool,
+
+    /// Before scanning, print the plan made from the command line, step by
+    /// step, with the reason for each choice (to standard error)
+    #[arg(long)]
+    explain: bool,
+
+    /// Print every probe sent and every answer received (SENT/RCVD/CONN
+    /// lines on standard output), like nmap's --packet-trace
+    #[arg(long)]
+    packet_trace: bool,
 
     /// Show why each port got its state (syn-ack, reset, port-unreach, ...)
     #[arg(long)]
@@ -851,6 +843,43 @@ fn port_lists(args: &Args) -> Result<PortLists> {
     Ok(lists)
 }
 
+/// A resolver message as nmap prints it: "Failed to resolve" lines stand
+/// alone, the rest are warnings.
+fn nmap_warning(w: &str) -> String {
+    if w.starts_with("Failed to resolve") {
+        w.to_string()
+    } else {
+        format!("Warning: {w}")
+    }
+}
+
+/// nmap's warnings about option values that will likely hurt the scan.
+fn option_warnings(args: &Args, open_files: Option<u64>) -> Vec<String> {
+    let mut warnings = Vec::new();
+    if let Some(ms) = args.timeout
+        && ms < 20
+    {
+        warnings.push(format!(
+            "a probe timeout of {ms} ms is extraordinarily small; accuracy may suffer"
+        ));
+    }
+    if let Some(c) = args.concurrency {
+        if c > 900 {
+            warnings.push(format!(
+                "a --concurrency of {c} is extraordinarily high, which can hurt reliability"
+            ));
+        }
+        if let Some(limit) = open_files
+            && (c as u64) > limit
+        {
+            warnings.push(format!(
+                "--concurrency is {c}, but this system may only allow {limit} open sockets; trying anyway"
+            ));
+        }
+    }
+    warnings
+}
+
 /// Take the `--exclude-ports` ports out of the discovery probes, as nmap
 /// does, with nmap's warning for a probe type left without ports.
 fn exclude_ping_ports(probes: &mut PingProbes, ex: &PortLists) -> Vec<String> {
@@ -1147,6 +1176,9 @@ fn is_host_timeout(e: &anyhow::Error) -> bool {
 async fn main() -> Result<()> {
     let args = Args::parse_from(nmap_style_args(std::env::args()));
     let outputs = Outputs::from_args(&args)?;
+    if args.packet_trace {
+        feroprobe_core::packet_trace::enable();
+    }
     outputs.open_files()?;
     let progress = Progress {
         level: args.verbose,
@@ -1174,16 +1206,29 @@ async fn main() -> Result<()> {
     let exclusions = Exclusions::parse(&excluded)
         .await
         .context("reading --exclude")?;
-    let mut targets = resolve_targets_with(&specs, version)
+    // Like nmap, a name that does not resolve is skipped with a warning.
+    let resolved = resolve_targets_lenient(&specs, version)
         .await
         .context("resolving targets")?;
+    for w in &resolved.warnings {
+        eprintln!("{}", nmap_warning(w));
+    }
+    for note in &resolved.notes {
+        progress.say(2, || format!("Warning: {note}"));
+    }
+    let mut targets = resolved.targets;
+    let mut excluded = 0;
     if !exclusions.is_empty() {
         let before = targets.len();
         targets.retain(|t| !exclusions.excludes(t));
+        excluded = before - targets.len();
         progress.say(1, || format!("Excluded {} host(s)", before - targets.len()));
-        if targets.is_empty() {
-            bail!("every target is excluded");
-        }
+    }
+    if targets.is_empty() {
+        eprintln!("Warning: no targets were left to scan, so 0 hosts scanned.");
+    }
+    for w in option_warnings(&args, feroprobe_core::connect::open_file_limit()) {
+        eprintln!("Warning: {w}");
     }
     if args.randomize_hosts {
         shuffle(&mut targets);
@@ -1262,6 +1307,31 @@ async fn main() -> Result<()> {
     let sockets = !plan.ping_only && (plan.udp || plan.tcp.is_some_and(|t| t.raw_kind().is_none()));
     for w in warnings.iter().filter(|_| sockets) {
         eprintln!("Warning: {w}");
+    }
+
+    if args.explain {
+        let privileged = raw_sockets_available();
+        let facts = explain::Facts {
+            targets: &targets,
+            excluded,
+            plan: &plan,
+            probes: &probes,
+            privileged,
+            icmp: feroprobe_core::icmp_available(),
+            local: if plan.discovery && privileged && cfg.arp_ping {
+                explain::local_targets(&targets)
+            } else {
+                Default::default()
+            },
+            tcp_ports: if plan.tcp.is_some() { &tcp_ports } else { &[] },
+            udp_ports: if plan.udp { &udp_ports } else { &[] },
+            cfg: &cfg,
+            os,
+            trace,
+        };
+        for line in explain::explain(&args, &facts) {
+            eprintln!("{line}");
+        }
     }
 
     if let Some(path) = &args.oui_file {

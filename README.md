@@ -21,7 +21,7 @@ no external binaries.
 | Timing templates `-T0`…`-T5`, `--scan-delay`, `--min-rate`, `--host-timeout`, `--stats-every` | ✅ |
 | Targets: IPv4 and IPv6 addresses, CIDR, `a.b.c.X-Y` ranges, `fe80::1%eth0`, hostnames (`-6` for their IPv6 address) | ✅ |
 | nmap-style `-p` port specs with `T:`/`U:`, top ports, `-F`, `--exclude-ports`, shuffled port order (`-r` keeps it) | ✅ |
-| Table, JSON, nmap-style XML and grepable output, `--reason`, `--open` | ✅ |
+| Table, JSON, nmap-style XML and grepable output, `--reason`, `--open`, `--packet-trace` | ✅ |
 | Report files `-oN`, `-oX`, `-oG`, `-oJ`, `-oA`; target lists `-iL`; `--exclude`, `--excludefile`; progress with `-v` | ✅ |
 | Service and version detection, `-sV`, with our own probes and rules | ✅ |
 | OS detection, `-O`, from SYN-ACK traits with our own signatures (Linux, root; IPv4 only) | ✅ |
@@ -78,7 +78,26 @@ sudo ./target/release/feroprobe -sn 2001:db8::/120 fe80::1%eth0
 # that only accept scanner="nmap"; a comment still names FeroProbe.
 ```
 
-Run `feroprobe --help` for all options (timeout, concurrency, packet rate, retries).
+Run `feroprobe --help` (or `feroprobe` alone) for all options, on one page
+laid out like nmap's.
+
+To see why FeroProbe does what it does, add `--explain`. Before sending
+anything it prints its plan to standard error, step by step, with the reason
+for each choice: which hosts get ARP and which get ping probes (and which
+probes), whether names are looked up, which scan type was picked and why,
+where the ports came from, the timing, and what runs after the port scan.
+This is FeroProbe's own option; nmap has nothing like it.
+
+To see what FeroProbe actually sends, add `--packet-trace`. Like nmap's, it
+prints one line per probe and per answer on standard output:
+
+```
+SENT (0.0005s) ICMP [10.0.0.2 > 10.0.0.5 Echo request (type=8/code=0) id=7996 seq=0]
+RCVD (0.0007s) ICMP [10.0.0.5 > 10.0.0.2 Echo reply (type=0/code=0) id=7996 seq=0] ttl=64
+CONN (0.0006s) TCP localhost > 10.0.0.5:443 => Connection refused
+SENT (0.0543s) TCP 10.0.0.2:48100 > 10.0.0.5:22 S seq=2448842408 win=1024
+RCVD (0.0545s) TCP 10.0.0.5:22 > 10.0.0.2:48100 SA seq=1290442 win=64240 ttl=64
+```
 
 Example output:
 
@@ -231,7 +250,10 @@ is also a connect scan.
 
 Every scan type takes IPv6 targets, and IPv4 and IPv6 targets can be mixed in
 one scan. Hostnames resolve to their IPv4 address, like nmap; `-6` picks the
-IPv6 address instead.
+IPv6 address instead. As in nmap, a name without an address of that version
+is skipped with a hint to try (or drop) `-6`, and a name that does not
+resolve at all is skipped with a warning while the other targets are
+scanned.
 
 - Discovery pings with ICMPv6 echo. As root on Linux, targets on a directly
   connected link are asked with neighbour discovery (NDP) instead, which, like

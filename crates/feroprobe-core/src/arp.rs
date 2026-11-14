@@ -439,10 +439,18 @@ mod linux {
                     // E.g. ENETDOWN ends the sweep: it must not pass for complete.
                     return if is_idle_read(&e) { Ok(None) } else { Err(e) };
                 }
-                Ok(parse_arp_reply(&buf[..n as usize]))
+                let reply = parse_arp_reply(&buf[..n as usize]);
+                if let Some((ip, mac)) = reply {
+                    crate::packet_trace::log("RCVD", || format!("ARP reply {ip} is-at {mac}"));
+                }
+                Ok(reply)
             }
         };
-        let send_one = |ip: Ipv4Addr| send(&fd, net.ifindex, &arp_request(net.mac, net.addr, ip));
+        let send_one = |ip: Ipv4Addr| {
+            send(&fd, net.ifindex, &arp_request(net.mac, net.addr, ip))?;
+            crate::packet_trace::log("SENT", || format!("ARP who-has {ip} tell {}", net.addr));
+            Ok(())
+        };
         request_sweep(targets, cfg, cancel, send_one, receive, on_reply)
     }
 }

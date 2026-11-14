@@ -11,7 +11,7 @@ macro_rules! w {
 }
 
 use anyhow::Result;
-use feroprobe_core::{HostResult, PortResult, PortState, service_name};
+use feroprobe_core::{HostResult, PortResult, PortState, Protocol, service_name};
 use serde::Serialize;
 
 /// Everything about the run that the renderers need besides the hosts.
@@ -135,6 +135,12 @@ pub fn render_table(hosts: &[HostResult], info: &RunInfo) -> String {
             print_trace(out, host);
         }
     }
+    if hosts.len() == 1 && up == 0 && !info.assume_up {
+        w!(
+            out,
+            "Note: the host seems down. If it is up but blocks our ping probes, try -Pn"
+        );
+    }
     let what = if info.ping_only {
         String::new()
     } else {
@@ -213,6 +219,17 @@ fn print_os(out: &mut String, host: &HostResult) {
             w!(out, "OS fingerprint: {}", os.traits.fingerprint());
             let hops = if os.distance == 1 { "hop" } else { "hops" };
             w!(out, "Network distance: {} {hops}", os.distance);
+            let tcp = |state| {
+                host.ports
+                    .iter()
+                    .any(|p| p.protocol == Protocol::Tcp && p.state == state)
+            };
+            if !(tcp(PortState::Open) && tcp(PortState::Closed)) {
+                w!(
+                    out,
+                    "Warning: the OS guess may be unreliable, because the scan did not find at least 1 open and 1 closed TCP port"
+                );
+            }
         }
         None => w!(
             out,
@@ -401,6 +418,24 @@ pub(crate) mod tests {
             "{table}"
         );
         assert!(!table.contains("rDNS record for 10.0.0.7"), "{table}");
+    }
+
+    #[test]
+    fn a_lone_down_host_gets_nmaps_hint() {
+        let down = HostResult::new("10.0.0.9".parse().unwrap(), None);
+        let table = render_table(std::slice::from_ref(&down), &info());
+        assert!(
+            table.contains("seems down") && table.contains("try -Pn"),
+            "{table}"
+        );
+        // Not with -Pn, and not when more than one host was scanned.
+        let pn = RunInfo {
+            assume_up: true,
+            ..info()
+        };
+        assert!(!render_table(std::slice::from_ref(&down), &pn).contains("seems down"));
+        let two = [down.clone(), down];
+        assert!(!render_table(&two, &info()).contains("seems down"));
     }
 
     #[test]
