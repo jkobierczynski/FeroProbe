@@ -368,6 +368,24 @@ struct Outputs {
     json: Vec<String>,
 }
 
+/// The real location a report path names, so that `r`, `./r`, `sub/../r`
+/// and symbolic links to the same file all compare equal. A report file
+/// usually doesn't exist yet, so its directory is resolved instead.
+fn report_key(path: &str) -> std::path::PathBuf {
+    let p = std::path::Path::new(path);
+    if let Ok(real) = p.canonicalize() {
+        return real;
+    }
+    let dir = match p.parent() {
+        Some(d) if !d.as_os_str().is_empty() => d,
+        _ => std::path::Path::new("."),
+    };
+    match (dir.canonicalize(), p.file_name()) {
+        (Ok(real), Some(name)) => real.join(name),
+        _ => std::path::absolute(p).unwrap_or_else(|_| p.into()),
+    }
+}
+
 impl Outputs {
     fn from_args(args: &Args) -> Result<Self> {
         let mut o = Outputs::default();
@@ -399,7 +417,7 @@ impl Outputs {
             .flat_map(|v| v.iter())
             .filter(|p| *p != "-")
         {
-            if !seen.insert(std::path::absolute(path).unwrap_or_else(|_| path.into())) {
+            if !seen.insert(report_key(path)) {
                 bail!("two reports would be written to {path}; give each its own file");
             }
         }
@@ -1075,6 +1093,28 @@ mod tests {
         assert!(
             Outputs::from_args(&parse(&["feroprobe", "-oN", "a", "-oX", "b", "10.0.0.1"])).is_ok()
         );
+    }
+
+    #[test]
+    fn report_paths_compare_by_real_location() {
+        let dir = std::env::temp_dir().join(format!("feroprobe-out-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        let plain = dir.join("r").display().to_string();
+        let dotted = dir.join("sub").join("..").join("r").display().to_string();
+        assert_eq!(report_key(&plain), report_key(&dotted));
+        assert_ne!(
+            report_key(&plain),
+            report_key(&dir.join("s").display().to_string())
+        );
+        #[cfg(unix)]
+        {
+            std::fs::write(&plain, "").unwrap();
+            let link = dir.join("link");
+            let _ = std::fs::remove_file(&link);
+            std::os::unix::fs::symlink(&plain, &link).unwrap();
+            assert_eq!(report_key(&plain), report_key(&link.display().to_string()));
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
