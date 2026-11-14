@@ -18,7 +18,7 @@ pub struct RunInfo {
     pub udp_ports: Vec<u16>,
     pub ports_per_host: usize,
     pub elapsed: Duration,
-    /// Only show open (and open|filtered) ports, like nmap's `--open`.
+    /// Only show open (and open|filtered, unfiltered) ports, like nmap's `--open`.
     pub only_open: bool,
     /// Show why each port got its state.
     pub show_reason: bool,
@@ -35,7 +35,10 @@ pub struct RunInfo {
 }
 
 pub(crate) fn is_openish(state: PortState) -> bool {
-    matches!(state, PortState::Open | PortState::OpenFiltered)
+    matches!(
+        state,
+        PortState::Open | PortState::OpenFiltered | PortState::Unfiltered
+    )
 }
 
 pub(crate) fn visible(host: &HostResult, only_open: bool) -> impl Iterator<Item = &PortResult> {
@@ -67,6 +70,7 @@ pub(crate) fn port_rows<'a>(
         PortState::Closed,
         PortState::Filtered,
         PortState::OpenFiltered,
+        PortState::Unfiltered,
     ]
     .into_iter()
     .map(|s| (host.count(s), s))

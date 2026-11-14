@@ -16,7 +16,11 @@ pub const IPPROTO_TCP: u8 = 6;
 pub const TCP_FIN: u8 = 0x01;
 pub const TCP_SYN: u8 = 0x02;
 pub const TCP_RST: u8 = 0x04;
+pub const TCP_PSH: u8 = 0x08;
 pub const TCP_ACK: u8 = 0x10;
+pub const TCP_URG: u8 = 0x20;
+pub const TCP_ECE: u8 = 0x40;
+pub const TCP_CWR: u8 = 0x80;
 
 pub const ICMP_ECHO_REPLY: u8 = 0;
 pub const ICMP_DEST_UNREACH: u8 = 3;
@@ -88,6 +92,36 @@ pub fn tcp_syn(
     p[20..24].copy_from_slice(&[2, 4, 0x05, 0xb4]); // MSS = 1460
     let sum = checksum_with(
         pseudo_header_sum(src.into(), dst.into(), IPPROTO_TCP, SYN_LEN),
+        &p,
+    );
+    p[16..18].copy_from_slice(&sum.to_be_bytes());
+    p
+}
+
+/// Length of a bare TCP probe: a 20-byte header without options.
+pub const TCP_PROBE_LEN: usize = 20;
+
+/// Build a TCP segment (no IP header) with any flags, as the FIN, NULL,
+/// Xmas, ACK, Window and Maimon scans send, with a valid checksum.
+pub fn tcp_probe(
+    src: impl Into<IpAddr>,
+    dst: impl Into<IpAddr>,
+    sport: u16,
+    dport: u16,
+    seq: u32,
+    ack: u32,
+    flags: u8,
+) -> [u8; TCP_PROBE_LEN] {
+    let mut p = [0u8; TCP_PROBE_LEN];
+    p[0..2].copy_from_slice(&sport.to_be_bytes());
+    p[2..4].copy_from_slice(&dport.to_be_bytes());
+    p[4..8].copy_from_slice(&seq.to_be_bytes());
+    p[8..12].copy_from_slice(&ack.to_be_bytes());
+    p[12] = ((TCP_PROBE_LEN / 4) as u8) << 4;
+    p[13] = flags;
+    p[14..16].copy_from_slice(&1024u16.to_be_bytes());
+    let sum = checksum_with(
+        pseudo_header_sum(src.into(), dst.into(), IPPROTO_TCP, TCP_PROBE_LEN),
         &p,
     );
     p[16..18].copy_from_slice(&sum.to_be_bytes());
@@ -329,6 +363,24 @@ mod tests {
         assert_eq!(
             checksum_with(
                 pseudo_header_sum(src.into(), dst.into(), IPPROTO_TCP, SYN_LEN),
+                &seg
+            ),
+            0
+        );
+    }
+
+    #[test]
+    fn tcp_probe_any_flags() {
+        let src: Ipv6Addr = "2001:db8::1".parse().unwrap();
+        let dst: Ipv6Addr = "2001:db8::2".parse().unwrap();
+        let flags = TCP_FIN | TCP_PSH | TCP_URG;
+        let seg = tcp_probe(src, dst, 40001, 80, 11, 22, flags);
+        let tcp = parse_tcp(&seg).unwrap();
+        assert_eq!((tcp.seq, tcp.ack, tcp.flags), (11, 22, flags));
+        assert!(tcp_options(&seg).is_empty());
+        assert_eq!(
+            checksum_with(
+                pseudo_header_sum(src.into(), dst.into(), IPPROTO_TCP, TCP_PROBE_LEN),
                 &seg
             ),
             0
