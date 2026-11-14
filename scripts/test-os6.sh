@@ -76,17 +76,22 @@ fi
 free_port() {
     python3 -c 'import socket; s=socket.socket(socket.AF_INET6); s.bind(("::1",0)); print(s.getsockname()[1]); s.close()'
 }
-[ "$OPEN" -eq 0 ] && OPEN="$(free_port)"
-if [ "$CLOSED" -eq 0 ]; then
-    CLOSED="$(free_port)"
-    # free_port releases its socket, so two calls can hand back the same
-    # number; keep the closed port different or its scan would hit the
-    # listener still up on the open port and wrongly report a guess.
-    tries=0
-    while [ "$CLOSED" -eq "$OPEN" ] && [ "$tries" -lt 10 ]; do
-        CLOSED="$(free_port)"; tries=$((tries + 1))
+# Pick each automatic port so it differs from the other (which may be an
+# explicit value or an already-chosen automatic one): free_port releases its
+# socket, so two calls can hand back the same number, and if the two ports
+# coincided the closed-port scan would hit the listener still up on the open
+# port and wrongly report a guess.
+pick_distinct() {   # args: this-value other-value  -> prints a free port != other
+    local val="$1" other="$2" tries=0
+    [ "$val" -ne 0 ] && { echo "$val"; return; }
+    val="$(free_port)"
+    while [ "$val" -eq "$other" ] && [ "$tries" -lt 10 ]; do
+        val="$(free_port)"; tries=$((tries + 1))
     done
-fi
+    echo "$val"
+}
+OPEN="$(pick_distinct "$OPEN" "$CLOSED")"
+CLOSED="$(pick_distinct "$CLOSED" "$OPEN")"
 if [ "$OPEN" -eq "$CLOSED" ]; then
     echo "open and closed ports must differ (both $OPEN)." >&2
     exit 2
