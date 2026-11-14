@@ -124,6 +124,10 @@ pub struct HostResult {
     /// The route to the host, if `--traceroute` ran.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trace: Option<Trace>,
+    /// The scan of this host was cut short by `--host-timeout`: its port
+    /// and OS results were dropped.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub timed_out: bool,
 }
 
 impl HostResult {
@@ -138,6 +142,7 @@ impl HostResult {
             ports: Vec::new(),
             os: None,
             trace: None,
+            timed_out: false,
         }
     }
 
@@ -179,6 +184,22 @@ pub struct ScanConfig {
     /// During host discovery, decide targets on a local Ethernet network by
     /// ARP (when privileged on Linux) instead of ICMP and TCP probes.
     pub arp_ping: bool,
+    /// When to give up (nmap's `--host-timeout`): the scan techniques stop
+    /// sending and return an error of kind [`std::io::ErrorKind::TimedOut`]
+    /// once it has passed. `None` means no limit.
+    pub deadline: Option<Instant>,
+}
+
+impl ScanConfig {
+    /// Whether the [`deadline`](Self::deadline) has passed.
+    pub fn expired(&self) -> bool {
+        self.deadline.is_some_and(|d| Instant::now() >= d)
+    }
+
+    /// An error for a scan cut short by the deadline.
+    pub(crate) fn timed_out() -> std::io::Error {
+        std::io::Error::new(std::io::ErrorKind::TimedOut, "host timeout")
+    }
 }
 
 impl Default for ScanConfig {
@@ -191,6 +212,7 @@ impl Default for ScanConfig {
             max_rate: 5000,
             scan_delay: Duration::ZERO,
             arp_ping: true,
+            deadline: None,
         }
     }
 }

@@ -67,6 +67,10 @@ pub fn render(hosts: &[HostResult], info: &RunInfo) -> String {
             .or(host.rdns.as_deref())
             .unwrap_or("");
         let head = format!("Host: {} ({name})", host.addr);
+        if host.timed_out {
+            let _ = writeln!(x, "{head}\tStatus: Timeout");
+            continue;
+        }
         let _ = writeln!(x, "{head}\tStatus: Up");
         if info.ping_only {
             continue;
@@ -147,5 +151,16 @@ mod tests {
             "{g}"
         );
         assert_eq!(lines.len(), 4);
+    }
+
+    #[test]
+    fn timed_out_hosts() {
+        let mut host = HostResult::new("10.0.0.9".parse().unwrap(), None);
+        host.up_reason = Some("echo-reply");
+        host.timed_out = true;
+        let g = render(&[host], &info());
+        let lines: Vec<&str> = g.lines().collect();
+        assert_eq!(lines[1], "Host: 10.0.0.9 ()\tStatus: Timeout");
+        assert_eq!(lines.len(), 3, "{g}");
     }
 }

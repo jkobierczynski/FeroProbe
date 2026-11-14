@@ -149,7 +149,15 @@ fn write_port(x: &mut String, p: &PortResult) {
 
 fn write_host(x: &mut String, host: &HostResult, info: &RunInfo, start: u64, end: u64) {
     let up = reported(host, info);
-    let _ = writeln!(x, "<host starttime=\"{start}\" endtime=\"{end}\">");
+    let timedout = if host.timed_out {
+        " timedout=\"true\""
+    } else {
+        ""
+    };
+    let _ = writeln!(
+        x,
+        "<host starttime=\"{start}\" endtime=\"{end}\"{timedout}>"
+    );
     let reason = host.up_reason.unwrap_or(if info.assume_up {
         "user-set"
     } else {
@@ -184,7 +192,7 @@ fn write_host(x: &mut String, host: &HostResult, info: &RunInfo, start: u64, end
         }
     }
     x.push_str("</hostnames>\n");
-    if !info.ping_only {
+    if !info.ping_only && !host.timed_out {
         let (hidden, rows) = port_rows(host, info);
         x.push_str("<ports>");
         if let (false, Some((n, state))) = (info.only_open, hidden) {
@@ -448,6 +456,22 @@ mod tests {
                 xml.matches(&format!("<{tag}>")).count() + xml.matches(&format!("<{tag} ")).count();
             assert_eq!(opened, xml.matches(&format!("</{tag}>")).count(), "{tag}");
         }
+    }
+
+    #[test]
+    fn timed_out_host() {
+        let mut host = HostResult::new("10.0.0.9".parse().unwrap(), None);
+        host.up_reason = Some("echo-reply");
+        host.ports = vec![port(22, PortState::Open, None)];
+        host.timed_out = true;
+        let xml = render(&[host], &info());
+        assert!(xml.contains("timedout=\"true\">"), "{xml}");
+        assert!(!xml.contains("<ports>"), "{xml}");
+        let opts = roxmltree::ParsingOptions {
+            allow_dtd: true,
+            ..Default::default()
+        };
+        roxmltree::Document::parse_with_options(&xml, opts).expect("well-formed XML");
     }
 
     #[test]

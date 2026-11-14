@@ -10,12 +10,14 @@ use std::time::{Duration, Instant, SystemTime};
 use anyhow::{Context, Result, bail};
 use clap::{Parser, ValueEnum};
 use feroprobe_core::discovery::{DEFAULT_TCP_PING_PORT, DEFAULT_UDP_PING_PORT};
+use feroprobe_core::timing::parse_duration;
 use feroprobe_core::{
-    Exclusions, HostResult, IpVersion, PingProbes, RawTcpScan, ScanConfig, Target, TcpScanKind,
-    Timing, connect_scan, detect_services, discover, os_detect, parse_ports, parse_scanflags,
-    raw_ipv6_available, raw_sockets_available, raw_tcp_scan, resolve_targets_with, reverse_lookup,
-    top_ports, top_udp_ports, traceroute, udp_scan,
+    Exclusions, HostResult, IpVersion, PingProbes, PortLists, RawTcpScan, ScanConfig, Target,
+    TcpScanKind, Timing, connect_scan, detect_services, discover, os_detect, parse_port_lists,
+    parse_ports, parse_scanflags, raw_ipv6_available, raw_sockets_available, raw_tcp_scan,
+    resolve_targets_with, reverse_lookup, top_ports, top_udp_ports, traceroute, udp_scan,
 };
+use futures::StreamExt;
 
 use output::RunInfo;
 
@@ -352,13 +354,28 @@ struct Args {
     #[arg(short = 'A')]
     aggressive: bool,
 
-    /// Ports to scan, e.g. "22", "1-1024", "22,80,443", "-" for all
+    /// Ports to scan, e.g. "22", "1-1024", "22,80,443", "-" for all.
+    /// T: and U: mark TCP and UDP ports: "22,U:53,T:80" (unmarked ports
+    /// are both)
     #[arg(short = 'p', long, conflicts_with = "top_ports")]
     ports: Option<String>,
 
     /// Scan the N most common ports (default 100 for TCP, 20 for UDP)
     #[arg(long, value_name = "N")]
     top_ports: Option<usize>,
+
+    /// -F: fast mode, the 100 most common TCP and UDP ports
+    #[arg(short = 'F', conflicts_with_all = ["ports", "top_ports"])]
+    fast: bool,
+
+    /// Leave these ports out, written like -p (T: and U: work too)
+    #[arg(long, value_name = "PORTS")]
+    exclude_ports: Option<String>,
+
+    /// -r: scan ports in order (by default their order is shuffled, like
+    /// nmap's)
+    #[arg(short = 'r')]
+    ordered_ports: bool,
 
     /// Timing template: 0-5 or paranoid, sneaky, polite, normal, aggressive,
     /// insane (-T4 = aggressive). Sets timeout, retries, concurrency, rate and
@@ -378,10 +395,25 @@ struct Args {
     #[arg(long, value_name = "PPS")]
     max_rate: Option<u32>,
 
+    /// Send at least this many probes per second: raises --max-rate and
+    /// the connect/UDP parallelism as needed, and shortens a template's
+    /// scan delay
+    #[arg(long, value_name = "PPS")]
+    min_rate: Option<u32>,
+
     /// Minimum time between probes, e.g. 500ms, 2s, 5m (a bare number is seconds)
     /// [default: from -T; normally none]
-    #[arg(long, value_name = "TIME", value_parser = feroprobe_core::timing::parse_duration)]
+    #[arg(long, value_name = "TIME", value_parser = parse_duration)]
     scan_delay: Option<Duration>,
+
+    /// Give up on a host whose port scan and detection take longer than
+    /// this, e.g. 30s or 5m; it is reported without results
+    #[arg(long, value_name = "TIME", value_parser = parse_duration)]
+    host_timeout: Option<Duration>,
+
+    /// Print a progress line to standard error at this interval, e.g. 10s
+    #[arg(long, value_name = "TIME", value_parser = parse_duration)]
+    stats_every: Option<Duration>,
 
     /// With -sV, how long to wait for each service reply, in milliseconds
     #[arg(long, value_name = "MS", default_value_t = 3000)]
@@ -597,17 +629,42 @@ impl Outputs {
 }
 
 /// Progress on standard error for -v.
-struct Progress(u8);
+/// Progress reports on standard error: `-v` messages, and the phase that
+/// `--stats-every` names.
+#[derive(Clone, Copy)]
+struct Progress {
+    level: u8,
+    /// Whether this run's phases are the ones `--stats-every` reports. Off
+    /// for the per-host scans of `--host-timeout`, which share one count.
+    track: bool,
+}
+
+/// The phase `--stats-every` reports.
+static PHASE: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+fn set_phase(what: &str, probes: usize) {
+    *PHASE.lock().unwrap_or_else(|e| e.into_inner()) = what.to_string();
+    feroprobe_core::progress::reset(probes as u64);
+}
 
 impl Progress {
     fn say(&self, level: u8, msg: impl FnOnce() -> String) {
-        if self.0 >= level {
+        if self.level >= level {
             eprintln!("{}", msg());
         }
     }
 
     /// Start a phase; the returned closure reports it done.
     fn phase(&self, what: &str, hosts: usize) -> impl FnOnce(&Progress) + use<> {
+        self.phase_of(what, hosts, 0)
+    }
+
+    /// Start a phase that sends `probes` probes (0 if unknown), counted for
+    /// `--stats-every`.
+    fn phase_of(&self, what: &str, hosts: usize, probes: usize) -> impl FnOnce(&Progress) + use<> {
+        if self.track {
+            set_phase(what, probes);
+        }
         let what = what.to_string();
         let start = Instant::now();
         self.say(1, || {
@@ -712,7 +769,105 @@ fn scan_config(args: &Args) -> ScanConfig {
         max_rate: args.max_rate.unwrap_or(base.max_rate).max(1),
         scan_delay: args.scan_delay.unwrap_or(base.scan_delay),
         arp_ping: !args.disable_arp_ping,
+        deadline: None,
     }
+}
+
+/// Apply `--min-rate` on top of the timing settings. Raw-socket scans send
+/// as fast as `max_rate` and the scan delay allow, so those must allow the
+/// minimum; connect and UDP probes need enough of them in flight to keep
+/// the rate up even when every probe waits out its timeout. Returns
+/// warnings for what cannot be guaranteed.
+fn apply_min_rate(
+    cfg: &mut ScanConfig,
+    args: &Args,
+    open_files: Option<u64>,
+) -> Result<Vec<String>> {
+    let Some(min) = args.min_rate else {
+        return Ok(Vec::new());
+    };
+    if min == 0 {
+        bail!("--min-rate must be at least 1");
+    }
+    match args.max_rate {
+        Some(max) if max < min => bail!("--min-rate {min} is above --max-rate {max}"),
+        _ => cfg.max_rate = cfg.max_rate.max(min),
+    }
+    let gap = Duration::from_secs_f64(1.0 / f64::from(min));
+    if cfg.scan_delay > gap {
+        if args.scan_delay.is_some() {
+            bail!(
+                "--scan-delay {:?} allows fewer than --min-rate {min} probes per second",
+                cfg.scan_delay
+            );
+        }
+        // A template's delay gives way, as in nmap.
+        cfg.scan_delay = gap;
+    }
+    let mut warnings = Vec::new();
+    let needed = (f64::from(min) * cfg.timeout.as_secs_f64()).ceil() as usize;
+    if needed > cfg.concurrency {
+        if let Some(c) = args.concurrency {
+            warnings.push(format!(
+                "--concurrency {c} may keep connect and UDP scans below --min-rate {min} \
+                 ({needed} probes can be waiting for an answer at once)"
+            ));
+        } else {
+            // Leave room for the process's other files.
+            let cap = open_files.map_or(usize::MAX, |n| n.saturating_sub(64).max(1) as usize);
+            if needed > cap {
+                warnings.push(format!(
+                    "the open file limit (ulimit -n) allows {cap} connect or UDP probes at once, \
+                     which may keep those scans below --min-rate {min}"
+                ));
+            }
+            cfg.concurrency = needed.min(cap).max(cfg.concurrency);
+        }
+    }
+    Ok(warnings)
+}
+
+/// The TCP and UDP ports to scan, sorted: from -p, -F or --top-ports, less
+/// --exclude-ports.
+fn port_lists(args: &Args) -> Result<PortLists> {
+    let mut lists = match &args.ports {
+        Some(spec) => parse_port_lists(spec)?,
+        None => {
+            let n = if args.fast { Some(100) } else { args.top_ports };
+            PortLists {
+                tcp: top_ports(n.unwrap_or(100)),
+                udp: top_udp_ports(n.unwrap_or(20)),
+            }
+        }
+    };
+    if let Some(spec) = &args.exclude_ports {
+        let ex = parse_port_lists(spec).context("reading --exclude-ports")?;
+        lists.tcp.retain(|p| ex.tcp.binary_search(p).is_err());
+        lists.udp.retain(|p| ex.udp.binary_search(p).is_err());
+    }
+    Ok(lists)
+}
+
+/// "1:02:03" for an elapsed time, like nmap's stats lines.
+fn clock(d: Duration) -> String {
+    let s = d.as_secs();
+    format!("{}:{:02}:{:02}", s / 3600, s / 60 % 60, s % 60)
+}
+
+/// The `--stats-every` line for the current phase.
+fn stats_line(elapsed: Duration) -> String {
+    let phase = PHASE.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let (done, total) = feroprobe_core::progress::snapshot();
+    let mut line = format!("Stats: {} elapsed", clock(elapsed));
+    if !phase.is_empty() {
+        line.push_str("; ");
+        line.push_str(&phase);
+        if total > 0 {
+            let pct = done as f64 * 100.0 / total as f64;
+            line.push_str(&format!(": {pct:.2}% done ({done} of {total} probes)"));
+        }
+    }
+    line
 }
 
 /// Apply `-A`: version detection, plus OS detection and traceroute when
@@ -749,11 +904,180 @@ fn tcp_scan_label(kind: TcpScanKind) -> &'static str {
 }
 
 /// Add each scan's port results to the matching host in `hosts`.
-fn merge(hosts: &mut [HostResult], scanned: &[usize], results: Vec<HostResult>) {
-    for (&idx, r) in scanned.iter().zip(results) {
-        hosts[idx].ports.extend(r.ports);
-        hosts[idx].sort_ports();
+fn merge(hosts: &mut [HostResult], results: Vec<HostResult>) {
+    for (host, r) in hosts.iter_mut().zip(results) {
+        host.ports.extend(r.ports);
+        host.sort_ports();
     }
+}
+
+/// The port scans and detection to run on the hosts that are up.
+struct ScanJob<'a> {
+    plan: &'a Plan,
+    /// The ports, in the order to probe them.
+    tcp: &'a [u16],
+    udp: &'a [u16],
+    scanflags: Option<u8>,
+    version_wait: Duration,
+    os: bool,
+}
+
+/// How many hosts `--host-timeout` scans at once, each on its own clock.
+const HOST_GROUP: usize = 32;
+
+impl ScanJob<'_> {
+    /// The run's scan types, as the reports list them.
+    fn scan_types(&self) -> Vec<&'static str> {
+        let mut types = Vec::new();
+        match self.plan.tcp.map(|t| t.raw_kind()) {
+            Some(Some(kind)) => types.push(tcp_scan_label(kind)),
+            Some(None) => types.push("tcp-connect"),
+            None => {}
+        }
+        if self.plan.udp {
+            types.push("udp");
+        }
+        if self.plan.version {
+            types.push("version");
+        }
+        if self.os {
+            types.push("os");
+        }
+        types
+    }
+
+    /// Scan `live` together, adding the results to `hosts` (one per target).
+    async fn run(
+        &self,
+        live: &[Target],
+        hosts: &mut [HostResult],
+        cfg: &ScanConfig,
+        progress: Progress,
+    ) -> Result<()> {
+        let hint = "scan aborted (try a lower --concurrency)";
+        match self.plan.tcp.map(|t| (t, t.raw_kind())) {
+            Some((t, Some(kind))) => {
+                let mut scan = RawTcpScan::new(kind);
+                if let Some(flags) = self.scanflags {
+                    scan.flags = flags;
+                }
+                let done = progress.phase_of(
+                    &format!("TCP {} scan", kind.name().to_uppercase()),
+                    live.len(),
+                    live.len() * self.tcp.len(),
+                );
+                let r = raw_tcp_scan(live, self.tcp, cfg, scan)
+                    .await
+                    .with_context(|| format!("TCP {} scan ({}) failed", kind.name(), t.flag()))?;
+                progress.found(&r);
+                done(&progress);
+                merge(hosts, r);
+            }
+            Some((_, None)) => {
+                let done =
+                    progress.phase_of("TCP connect scan", live.len(), live.len() * self.tcp.len());
+                let r = connect_scan(live, self.tcp, cfg).await.context(hint)?;
+                progress.found(&r);
+                done(&progress);
+                merge(hosts, r);
+            }
+            None => {}
+        }
+        if self.plan.udp {
+            let done = progress.phase_of("UDP scan", live.len(), live.len() * self.udp.len());
+            let r = udp_scan(live, self.udp, cfg).await.context(hint)?;
+            progress.found(&r);
+            done(&progress);
+            merge(hosts, r);
+        }
+        if self.plan.version {
+            let done = progress.phase("service detection", live.len());
+            detect_services(hosts, cfg, self.version_wait).await;
+            done(&progress);
+        }
+        if self.os {
+            let done = progress.phase("OS detection", live.len());
+            os_detect(hosts, cfg).await.context("OS detection failed")?;
+            done(&progress);
+        }
+        Ok(())
+    }
+
+    /// Scan each host on its own clock (`--host-timeout`): a host whose
+    /// scans take longer than `limit` is marked timed out and loses its
+    /// port and OS results. Up to [`HOST_GROUP`] hosts run at once, sharing
+    /// the parallelism and packet rate.
+    async fn run_each(
+        &self,
+        live: &[Target],
+        hosts: &mut [HostResult],
+        cfg: &ScanConfig,
+        limit: Duration,
+        progress: Progress,
+    ) -> Result<()> {
+        let group = live.len().clamp(1, HOST_GROUP);
+        let mut shared = cfg.clone();
+        shared.concurrency = (cfg.concurrency / group).max(1);
+        shared.max_rate = (cfg.max_rate / group as u32).max(1);
+        let probes = self.plan.tcp.map_or(0, |_| self.tcp.len())
+            + if self.plan.udp { self.udp.len() } else { 0 };
+        let done = progress.phase_of(
+            "port scan (each host on its own clock)",
+            live.len(),
+            live.len() * probes,
+        );
+        let quiet = Progress {
+            level: 0,
+            track: false,
+        };
+        let start: Vec<HostResult> = hosts.to_vec();
+        let jobs = live.iter().zip(start).enumerate().map(|(i, (t, host))| {
+            let shared = &shared;
+            async move {
+                let mut cfg = shared.clone();
+                cfg.deadline = Some(Instant::now() + limit);
+                let mut one = [host];
+                let outcome = tokio::time::timeout(
+                    limit,
+                    self.run(std::slice::from_ref(t), &mut one, &cfg, quiet),
+                )
+                .await;
+                let [host] = one;
+                (i, host, outcome)
+            }
+        });
+        let mut results = futures::stream::iter(jobs).buffer_unordered(group);
+        while let Some((i, host, outcome)) = results.next().await {
+            let timed_out = match outcome {
+                Ok(Ok(())) => false,
+                Ok(Err(e)) if is_host_timeout(&e) => true,
+                Ok(Err(e)) => return Err(e),
+                Err(_) => true,
+            };
+            if timed_out {
+                progress.say(1, || {
+                    format!("Skipping host {} due to host timeout", host.addr)
+                });
+                let h = &mut hosts[i];
+                h.ports.clear();
+                h.os = None;
+                h.timed_out = true;
+            } else {
+                progress.found(std::slice::from_ref(&host));
+                hosts[i] = host;
+            }
+        }
+        done(&progress);
+        Ok(())
+    }
+}
+
+/// Whether a scan error is the `--host-timeout` deadline passing.
+fn is_host_timeout(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| {
+        c.downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::TimedOut)
+    })
 }
 
 #[tokio::main]
@@ -761,7 +1085,10 @@ async fn main() -> Result<()> {
     let args = Args::parse_from(nmap_style_args(std::env::args()));
     let outputs = Outputs::from_args(&args)?;
     outputs.open_files()?;
-    let progress = Progress(args.verbose);
+    let progress = Progress {
+        level: args.verbose,
+        track: true,
+    };
     let version = if args.ipv6 {
         IpVersion::V6
     } else {
@@ -813,25 +1140,41 @@ async fn main() -> Result<()> {
         }
     }
 
-    let tcp_ports = match (&args.ports, args.top_ports) {
-        (Some(spec), _) => parse_ports(spec)?,
-        (None, n) => top_ports(n.unwrap_or(100)),
-    };
-    let udp_ports = match (&args.ports, args.top_ports) {
-        (Some(_), _) => tcp_ports.clone(),
-        (None, n) => top_udp_ports(n.unwrap_or(20)),
-    };
+    let PortLists {
+        tcp: tcp_ports,
+        udp: udp_ports,
+    } = port_lists(&args)?;
     if plan.ping_only && !plan.discovery && !trace {
         bail!("-sn with -Pn would do nothing (add --traceroute to only trace the route)");
     }
     if trace && !raw_sockets_available() {
         bail!("--traceroute sends raw packets: run as root or grant CAP_NET_RAW");
     }
-    if !plan.ping_only && tcp_ports.is_empty() {
-        bail!("no ports to scan");
+    if !plan.ping_only {
+        if plan.tcp.is_some() && tcp_ports.is_empty() {
+            if udp_ports.is_empty() {
+                bail!("no ports to scan");
+            }
+            bail!("no TCP ports to scan (U: ports are only scanned with -sU)");
+        }
+        if plan.udp && udp_ports.is_empty() {
+            bail!("no UDP ports to scan (mark them with U:, as in -p U:53)");
+        }
+    }
+    // The order probes go out in; reports keep the sorted lists.
+    let (mut tcp_order, mut udp_order) = (tcp_ports.clone(), udp_ports.clone());
+    if !args.ordered_ports {
+        shuffle(&mut tcp_order);
+        shuffle(&mut udp_order);
     }
 
-    let cfg = scan_config(&args);
+    let mut cfg = scan_config(&args);
+    let warnings = apply_min_rate(&mut cfg, &args, feroprobe_core::connect::open_file_limit())?;
+    // The warnings are about connect and UDP probes.
+    let sockets = !plan.ping_only && (plan.udp || plan.tcp.is_some_and(|t| t.raw_kind().is_none()));
+    for w in warnings.iter().filter(|_| sockets) {
+        eprintln!("Warning: {w}");
+    }
 
     if let Some(path) = &args.oui_file {
         feroprobe_core::oui::use_file(path)
@@ -840,6 +1183,15 @@ async fn main() -> Result<()> {
 
     let started = Instant::now();
     let start_time = SystemTime::now();
+    let stats = args.stats_every.filter(|d| !d.is_zero()).map(|every| {
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
+            loop {
+                tick.tick().await;
+                eprintln!("{}", stats_line(started.elapsed()));
+            }
+        })
+    });
     let mut hosts: Vec<HostResult> = if plan.discovery {
         let done = progress.phase("host discovery", targets.len());
         let probes = probes.unwrap_or_default();
@@ -881,63 +1233,31 @@ async fn main() -> Result<()> {
 
     let mut scan_types = Vec::new();
     if !plan.ping_only {
+        let job = ScanJob {
+            plan: &plan,
+            tcp: &tcp_order,
+            udp: &udp_order,
+            scanflags: args.scanflags,
+            version_wait: Duration::from_millis(args.version_timeout),
+            os,
+        };
+        scan_types = job.scan_types();
         // Only scan hosts that discovery found (all of them with -Pn).
         let scanned: Vec<usize> = (0..hosts.len())
             .filter(|&i| !plan.discovery || hosts[i].is_up())
             .collect();
         let live: Vec<Target> = scanned.iter().map(|&i| targets[i].clone()).collect();
-        let hint = "scan aborted (try a lower --concurrency)";
-
-        match plan.tcp.map(|t| (t, t.raw_kind())) {
-            Some((t, Some(kind))) => {
-                scan_types.push(tcp_scan_label(kind));
-                let mut scan = RawTcpScan::new(kind);
-                if let Some(flags) = args.scanflags {
-                    scan.flags = flags;
-                }
-                let done = progress.phase(
-                    &format!("TCP {} scan", kind.name().to_uppercase()),
-                    live.len(),
-                );
-                let r = raw_tcp_scan(&live, &tcp_ports, &cfg, scan)
-                    .await
-                    .with_context(|| format!("TCP {} scan ({}) failed", kind.name(), t.flag()))?;
-                progress.found(&r);
-                done(&progress);
-                merge(&mut hosts, &scanned, r);
+        let mut results: Vec<HostResult> = scanned.iter().map(|&i| hosts[i].clone()).collect();
+        // As in nmap, a host timeout of 0 means none.
+        match args.host_timeout.filter(|d| !d.is_zero()) {
+            None => job.run(&live, &mut results, &cfg, progress).await?,
+            Some(limit) => {
+                job.run_each(&live, &mut results, &cfg, limit, progress)
+                    .await?
             }
-            Some((_, None)) => {
-                scan_types.push("tcp-connect");
-                let done = progress.phase("TCP connect scan", live.len());
-                let r = connect_scan(&live, &tcp_ports, &cfg).await.context(hint)?;
-                progress.found(&r);
-                done(&progress);
-                merge(&mut hosts, &scanned, r);
-            }
-            None => {}
         }
-        if plan.udp {
-            scan_types.push("udp");
-            let done = progress.phase("UDP scan", live.len());
-            let r = udp_scan(&live, &udp_ports, &cfg).await.context(hint)?;
-            progress.found(&r);
-            done(&progress);
-            merge(&mut hosts, &scanned, r);
-        }
-        if plan.version {
-            scan_types.push("version");
-            let wait = Duration::from_millis(args.version_timeout);
-            let done = progress.phase("service detection", live.len());
-            detect_services(&mut hosts, &cfg, wait).await;
-            done(&progress);
-        }
-        if os {
-            scan_types.push("os");
-            let done = progress.phase("OS detection", live.len());
-            os_detect(&mut hosts, &cfg)
-                .await
-                .context("OS detection failed")?;
-            done(&progress);
+        for (&i, h) in scanned.iter().zip(results) {
+            hosts[i] = h;
         }
     } else {
         scan_types.push("ping");
@@ -950,13 +1270,22 @@ async fn main() -> Result<()> {
         } else {
             80
         };
-        let done = progress.phase("traceroute", hosts.len());
-        traceroute(&mut hosts, &cfg, !plan.discovery, fallback)
+        // Hosts given up on by --host-timeout are not traced either.
+        let keep: Vec<usize> = (0..hosts.len()).filter(|&i| !hosts[i].timed_out).collect();
+        let mut traced: Vec<HostResult> = keep.iter().map(|&i| hosts[i].clone()).collect();
+        let done = progress.phase("traceroute", traced.len());
+        traceroute(&mut traced, &cfg, !plan.discovery, fallback)
             .await
             .context("traceroute failed")?;
         done(&progress);
+        for (&i, h) in keep.iter().zip(traced) {
+            hosts[i] = h;
+        }
     }
 
+    if let Some(task) = stats {
+        task.abort();
+    }
     let ports_per_host =
         plan.tcp.map_or(0, |_| tcp_ports.len()) + if plan.udp { udp_ports.len() } else { 0 };
     let info = RunInfo {
@@ -1427,6 +1756,161 @@ mod tests {
         );
         assert!(Args::try_parse_from(["feroprobe", "-n", "-R", "x"]).is_err());
         assert!(Args::try_parse_from(["feroprobe", "--dns-servers", "ns.example", "x"]).is_err());
+    }
+
+    fn args(argv: &[&str]) -> Args {
+        let mut all = vec!["feroprobe"];
+        all.extend_from_slice(argv);
+        all.push("10.0.0.1");
+        Args::try_parse_from(nmap_style_args(all.iter().map(|s| s.to_string()))).unwrap()
+    }
+
+    #[test]
+    fn port_selection() {
+        let lists = |argv: &[&str]| port_lists(&args(argv)).unwrap();
+        let fast = lists(&["-F"]);
+        assert_eq!((fast.tcp.len(), fast.udp.len()), (100, 100));
+        assert_eq!(lists(&[]).udp.len(), 20);
+        let l = lists(&["-p", "22,U:53,161,T:80"]);
+        assert_eq!((l.tcp, l.udp), (vec![22, 80], vec![22, 53, 161]));
+        let l = lists(&["-p", "20-25,U:50-55", "--exclude-ports", "21-23,U:53"]);
+        assert_eq!(l.tcp, vec![20, 24, 25]);
+        assert_eq!(l.udp, vec![20, 24, 25, 50, 51, 52, 54, 55]);
+        let l = lists(&["--top-ports", "10", "--exclude-ports", "T:80"]);
+        assert!(!l.tcp.contains(&80) && l.tcp.len() == 9, "{:?}", l.tcp);
+        assert!(port_lists(&args(&["--exclude-ports", "S:1"])).is_err());
+        for bad in [&["-F", "-p", "22"][..], &["-F", "--top-ports", "5"]] {
+            let mut argv = vec!["feroprobe"];
+            argv.extend_from_slice(bad);
+            argv.push("10.0.0.1");
+            assert!(Args::try_parse_from(argv).is_err(), "{bad:?}");
+        }
+        assert!(args(&["-r"]).ordered_ports);
+        assert!(!args(&[]).ordered_ports);
+    }
+
+    #[test]
+    fn min_rate_raises_the_limits() {
+        let tuned = |argv: &[&str], files| {
+            let a = args(argv);
+            let mut cfg = scan_config(&a);
+            apply_min_rate(&mut cfg, &a, files).map(|w| (cfg, w))
+        };
+        // 1000 probes/s with 1.5 s timeouts needs 1500 in flight.
+        let (cfg, w) = tuned(&["--min-rate", "1000", "--timeout", "1500"], None).unwrap();
+        assert_eq!(cfg.concurrency, 1500);
+        assert_eq!(cfg.max_rate, 5000);
+        assert!(w.is_empty());
+        let (cfg, w) = tuned(&["--min-rate", "9000", "--timeout", "100"], Some(1024)).unwrap();
+        assert_eq!((cfg.max_rate, cfg.concurrency), (9000, 900));
+        assert!(w.is_empty());
+        // The open-file limit caps the parallelism, with a warning.
+        let (cfg, w) = tuned(&["--min-rate", "2000", "--timeout", "1000"], Some(1024)).unwrap();
+        assert_eq!(cfg.concurrency, 960);
+        assert_eq!(w.len(), 1, "{w:?}");
+        // An explicit --concurrency is kept, with a warning.
+        let (cfg, w) = tuned(&["--min-rate", "1000", "-c", "10"], None).unwrap();
+        assert_eq!(cfg.concurrency, 10);
+        assert_eq!(w.len(), 1);
+        // A template's scan delay gives way; an explicit one is an error.
+        let (cfg, _) = tuned(&["-T2", "--min-rate", "100"], None).unwrap();
+        assert_eq!(cfg.scan_delay, Duration::from_millis(10));
+        assert!(tuned(&["--scan-delay", "1s", "--min-rate", "10"], None).is_err());
+        assert!(tuned(&["--max-rate", "10", "--min-rate", "20"], None).is_err());
+        assert!(tuned(&["--min-rate", "0"], None).is_err());
+        let (cfg, w) = tuned(&[], None).unwrap();
+        assert_eq!(cfg.concurrency, ScanConfig::default().concurrency);
+        assert!(w.is_empty());
+    }
+
+    #[test]
+    fn stats_lines() {
+        assert_eq!(clock(Duration::from_secs(3723)), "1:02:03");
+        assert_eq!(clock(Duration::from_millis(59_900)), "0:00:59");
+        set_phase("TCP SYN scan", 200);
+        let line = stats_line(Duration::from_secs(5));
+        assert!(
+            line.starts_with("Stats: 0:00:05 elapsed; TCP SYN scan: "),
+            "{line}"
+        );
+        assert!(line.ends_with(" of 200 probes)"), "{line}");
+        set_phase("host discovery", 0);
+        assert_eq!(
+            stats_line(Duration::from_secs(1)),
+            "Stats: 0:00:01 elapsed; host discovery"
+        );
+        assert!(args(&["--stats-every", "10s"]).stats_every == Some(Duration::from_secs(10)));
+    }
+
+    #[tokio::test]
+    async fn host_timeout_drops_slow_hosts() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let open = listener.local_addr().unwrap().port();
+        let plan = Plan {
+            tcp: Some(ScanType::Connect),
+            udp: false,
+            version: false,
+            ping_only: false,
+            discovery: false,
+        };
+        let job = ScanJob {
+            plan: &plan,
+            tcp: &[open],
+            udp: &[],
+            scanflags: None,
+            version_wait: Duration::from_secs(1),
+            os: false,
+        };
+        let target = Target {
+            addr: "127.0.0.1".parse().unwrap(),
+            hostname: None,
+        };
+        let quiet = Progress {
+            level: 0,
+            track: false,
+        };
+        let fresh = || vec![HostResult::new(target.addr, None)];
+        let cfg = ScanConfig::default();
+        let mut hosts = fresh();
+        job.run_each(
+            std::slice::from_ref(&target),
+            &mut hosts,
+            &cfg,
+            Duration::from_secs(30),
+            quiet,
+        )
+        .await
+        .unwrap();
+        assert!(!hosts[0].timed_out);
+        assert_eq!(hosts[0].ports.len(), 1);
+        // Thousands of probes, a few at a time, cannot finish in 1 ms.
+        let many: Vec<u16> = (1..=5000).collect();
+        let slow = ScanJob { tcp: &many, ..job };
+        let cfg = ScanConfig {
+            concurrency: 4,
+            ..ScanConfig::default()
+        };
+        let mut hosts = fresh();
+        hosts[0].ports.push(feroprobe_core::PortResult {
+            port: 1,
+            protocol: feroprobe_core::Protocol::Tcp,
+            state: feroprobe_core::PortState::Open,
+            reason: "stale",
+            rtt_ms: None,
+            service: None,
+        });
+        slow.run_each(
+            std::slice::from_ref(&target),
+            &mut hosts,
+            &cfg,
+            Duration::from_millis(1),
+            quiet,
+        )
+        .await
+        .unwrap();
+        assert!(hosts[0].timed_out);
+        assert!(hosts[0].ports.is_empty());
+        drop(listener);
     }
 
     #[test]

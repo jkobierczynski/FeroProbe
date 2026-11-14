@@ -123,10 +123,12 @@ pub fn render_table(hosts: &[HostResult], info: &RunInfo) -> String {
                 None => w!(out, "MAC Address: {} (Unknown)", mac.addr),
             }
         }
-        if !info.ping_only {
+        if host.timed_out {
+            w!(out, "Skipping host {} due to host timeout", host.addr);
+        } else if !info.ping_only {
             print_ports(out, host, info);
         }
-        if info.show_os {
+        if info.show_os && !host.timed_out {
             print_os(out, host);
         }
         if info.show_trace {
@@ -254,6 +256,8 @@ struct JsonHost<'a> {
     #[serde(flatten)]
     host: JsonHostInfo<'a>,
     up: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    timed_out: bool,
     ports: Vec<JsonPort<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     os: Option<&'a feroprobe_core::OsMatch>,
@@ -338,6 +342,7 @@ pub fn render_json(hosts: &[HostResult], info: &RunInfo) -> Result<String> {
                     mac: h.mac.as_ref(),
                 },
                 up: reported(h, info),
+                timed_out: h.timed_out,
                 os: h.os.as_ref(),
                 trace: h.trace.as_ref(),
                 ports: visible(h, info.only_open).map(JsonPort::new).collect(),
@@ -396,5 +401,23 @@ pub(crate) mod tests {
             "{table}"
         );
         assert!(!table.contains("rDNS record for 10.0.0.7"), "{table}");
+    }
+
+    #[test]
+    fn timed_out_hosts_have_no_port_results() {
+        let mut host = HostResult::new("10.0.0.9".parse().unwrap(), None);
+        host.up_reason = Some("echo-reply");
+        host.timed_out = true;
+        let table = render_table(std::slice::from_ref(&host), &info());
+        assert!(
+            table.contains("Skipping host 10.0.0.9 due to host timeout"),
+            "{table}"
+        );
+        assert!(!table.contains("PORT"), "{table}");
+        let json = render_json(std::slice::from_ref(&host), &info()).unwrap();
+        assert!(json.contains("\"timed_out\": true"), "{json}");
+        host.timed_out = false;
+        let json = render_json(&[host], &info()).unwrap();
+        assert!(!json.contains("timed_out"), "{json}");
     }
 }

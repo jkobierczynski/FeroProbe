@@ -424,10 +424,19 @@ mod imp {
             .filter(|k| !results.contains_key(k))
             .collect();
 
+        // Probes settled before any is sent (no route) count as done.
+        crate::progress::tick((addrs.len() * ports.len() - pending.len()) as u64);
+
         let outcome = (|| -> io::Result<()> {
-            for _round in 0..=cfg.retries {
+            for round in 0..=cfg.retries {
                 let mut pacer = Pacer::for_config(cfg);
                 for &(h, p) in &pending {
+                    if round == 0 {
+                        crate::progress::tick(1);
+                    }
+                    if cfg.expired() {
+                        return Err(ScanConfig::timed_out());
+                    }
                     let Some(src) = sources[h] else { continue };
                     // Answered by a reply that came in during this round.
                     if results.contains_key(&(h, p)) {
@@ -484,7 +493,10 @@ mod imp {
                 }
                 // Wait for stragglers, but stop as soon as every probe is answered.
                 let mut unanswered = pending.iter().filter(|k| !results.contains_key(k)).count();
-                let deadline = Instant::now() + cfg.timeout;
+                let mut deadline = Instant::now() + cfg.timeout;
+                if let Some(limit) = cfg.deadline {
+                    deadline = deadline.min(limit);
+                }
                 while unanswered > 0
                     && let Some(left) = deadline.checked_duration_since(Instant::now())
                 {
@@ -500,6 +512,9 @@ mod imp {
                 pending.retain(|k| !results.contains_key(k));
                 if pending.is_empty() {
                     break;
+                }
+                if cfg.expired() {
+                    return Err(ScanConfig::timed_out());
                 }
             }
             Ok(())
@@ -625,6 +640,26 @@ mod imp {
             assert_eq!(state_of(open).reason, reason::SYN_ACK);
             assert_eq!(state_of(closed).state, PortState::Closed);
             assert_eq!(state_of(closed).reason, reason::RESET);
+        }
+
+        #[test]
+        fn deadline_stops_the_scan() {
+            if !privileged() {
+                return;
+            }
+            let cfg = ScanConfig {
+                deadline: Some(Instant::now()),
+                ..Default::default()
+            };
+            let target = Target::new("127.0.0.1".parse().unwrap());
+            let err = scan_blocking(
+                &[target],
+                &[1, 2, 3],
+                &cfg,
+                RawTcpScan::new(TcpScanKind::Syn),
+            )
+            .unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::TimedOut);
         }
 
         #[test]

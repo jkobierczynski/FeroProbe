@@ -18,9 +18,9 @@ no external binaries.
 | Reverse DNS names, `-n`, `-R`, `--dns-servers`; `--randomize-hosts` | ✅ |
 | ARP (IPv4) and neighbour discovery (IPv6) on the local network, with MAC address and vendor (Linux, root; `--disable-arp-ping` to turn off) | ✅ |
 | MAC vendor names from the full IEEE OUI list (system `oui.txt` or `--oui-file`) | ✅ |
-| Timing templates `-T0`…`-T5` and `--scan-delay` | ✅ |
+| Timing templates `-T0`…`-T5`, `--scan-delay`, `--min-rate`, `--host-timeout`, `--stats-every` | ✅ |
 | Targets: IPv4 and IPv6 addresses, CIDR, `a.b.c.X-Y` ranges, `fe80::1%eth0`, hostnames (`-6` for their IPv6 address) | ✅ |
-| nmap-style `-p` port specs and top ports | ✅ |
+| nmap-style `-p` port specs with `T:`/`U:`, top ports, `-F`, `--exclude-ports`, shuffled port order (`-r` keeps it) | ✅ |
 | Table, JSON, nmap-style XML and grepable output, `--reason`, `--open` | ✅ |
 | Report files `-oN`, `-oX`, `-oG`, `-oJ`, `-oA`; target lists `-iL`; `--exclude`, `--excludefile`; progress with `-v` | ✅ |
 | Service and version detection, `-sV`, with our own probes and rules | ✅ |
@@ -273,6 +273,20 @@ feroprobe -iL hosts.txt --exclude 10.0.0.1,10.0.9.0/24 -oA weekly
 feroprobe -v -oG - 192.168.1.0/24 | grep '/open/'
 ```
 
+### Choosing ports
+
+| Option | What it does |
+| --- | --- |
+| `-p 22,80,1000-2000` | These ports; `-p-` is all 65535 |
+| `-p 22,U:53,161,T:80` | `T:` and `U:` apply to the ports after them; ports before any prefix are both TCP and UDP. Here TCP gets 22 and 80, UDP gets 22, 53 and 161 |
+| `--top-ports N` | The N most common ports (by default 100 for TCP and 20 for UDP) |
+| `-F` | Fast: the 100 most common TCP and UDP ports |
+| `--exclude-ports SPEC` | Leave these out, written like `-p` |
+| `-r` | Probe ports in order; by default the order is shuffled, like nmap's (reports are always sorted) |
+
+A scan whose protocol ends up with no ports is an error: `-sU -p T:80`
+scans no UDP port, and `-p U:53` needs `-sU`.
+
 ### Host discovery and names
 
 Before scanning, FeroProbe checks which targets are up. By default it sends
@@ -332,6 +346,12 @@ On Windows no template goes below a 3 s timeout, since Windows reports a
 refused connection only about 2 s after the reset. `--timeout`, `--retries`,
 `-c/--concurrency`, `--max-rate` and `--scan-delay` override the template's
 value, so `-T4 --max-rate 2000` is aggressive with a lower packet rate.
+
+| Option | What it does |
+| --- | --- |
+| `--min-rate N` | Send at least N probes per second. It raises `--max-rate` to N, shortens a template's scan delay, and lets enough connect and UDP probes be in flight to keep N per second even when every probe times out (up to the open-file limit, with a warning). It is an error with a lower `--max-rate` or a longer explicit `--scan-delay` |
+| `--host-timeout TIME` | Give up on a host whose port scans and detection take longer than TIME (`30s`, `5m`). Hosts then run on their own clocks, up to 32 at once, sharing the parallelism and packet rate. A timed-out host is reported without ports: "Skipping host … due to host timeout", `Status: Timeout` in `-oG`, `timedout="true"` in XML |
+| `--stats-every TIME` | Print a progress line to standard error at this interval: `Stats: 0:01:05 elapsed; TCP SYN scan: 45.20% done (4520 of 10000 probes)` |
 
 ### MAC vendor names
 

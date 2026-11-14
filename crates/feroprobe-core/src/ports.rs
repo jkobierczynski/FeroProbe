@@ -114,6 +114,69 @@ pub fn parse_ports(spec: &str) -> Result<Vec<u16>, Error> {
     Ok(ports)
 }
 
+/// TCP and UDP ports from one nmap-style specification.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PortLists {
+    pub tcp: Vec<u16>,
+    pub udp: Vec<u16>,
+}
+
+/// Parse a port specification that may name its protocol, like nmap's
+/// `-p 22,T:80,U:53,161`: `T:` and `U:` apply to the ports after them until
+/// the next prefix, and ports before any prefix are both TCP and UDP. Each
+/// list is sorted and de-duplicated.
+pub fn parse_port_lists(spec: &str) -> Result<PortLists, Error> {
+    #[derive(Clone, Copy, PartialEq)]
+    enum Proto {
+        Both,
+        Tcp,
+        Udp,
+    }
+    let mut groups: Vec<(Proto, Vec<&str>)> = Vec::new();
+    let mut current = Proto::Both;
+    for part in spec.split(',').map(str::trim) {
+        let lower = part.get(..2).map(str::to_ascii_uppercase);
+        let rest = match lower.as_deref() {
+            Some("T:") => {
+                current = Proto::Tcp;
+                &part[2..]
+            }
+            Some("U:") => {
+                current = Proto::Udp;
+                &part[2..]
+            }
+            Some("S:" | "P:") => {
+                return Err(Error::InvalidPorts(format!(
+                    "'{part}': only T: (TCP) and U: (UDP) ports are supported"
+                )));
+            }
+            _ => part,
+        };
+        match groups.last_mut() {
+            Some((proto, parts)) if *proto == current => parts.push(rest),
+            _ => groups.push((current, vec![rest])),
+        }
+    }
+    let mut lists = PortLists::default();
+    for (proto, parts) in groups {
+        let ports = parse_ports(&parts.join(",")).map_err(|e| match e {
+            Error::InvalidPorts(why) => Error::InvalidPorts(format!("{why} (in '{spec}')")),
+            other => other,
+        })?;
+        if proto != Proto::Udp {
+            lists.tcp.extend(&ports);
+        }
+        if proto != Proto::Tcp {
+            lists.udp.extend(&ports);
+        }
+    }
+    for list in [&mut lists.tcp, &mut lists.udp] {
+        list.sort_unstable();
+        list.dedup();
+    }
+    Ok(lists)
+}
+
 /// The `n` most common ports, sorted ascending.
 ///
 /// Takes ports from [`TOP_PORTS`] first; if `n` is larger than that list, the
@@ -169,6 +232,24 @@ mod tests {
     #[test]
     fn dedup_overlapping() {
         assert_eq!(parse_ports("1-3,2,3-4").unwrap(), vec![1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn protocol_prefixes() {
+        let l = parse_port_lists("22,T:80,443,U:53,161").unwrap();
+        assert_eq!(l.tcp, vec![22, 80, 443]);
+        assert_eq!(l.udp, vec![22, 53, 161]);
+        let l = parse_port_lists("U:53,t:1-3").unwrap();
+        assert_eq!(l.tcp, vec![1, 2, 3]);
+        assert_eq!(l.udp, vec![53]);
+        let l = parse_port_lists("U:-").unwrap();
+        assert!(l.tcp.is_empty());
+        assert_eq!(l.udp.len(), 65535);
+        let l = parse_port_lists("80,80,T:80").unwrap();
+        assert_eq!((l.tcp, l.udp), (vec![80], vec![80]));
+        for bad in ["", "T:", "S:80", "U:0", "T:22,,80", "X:22"] {
+            assert!(parse_port_lists(bad).is_err(), "{bad} should fail");
+        }
     }
 
     #[test]
