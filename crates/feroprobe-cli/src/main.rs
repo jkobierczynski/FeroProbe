@@ -1,6 +1,7 @@
 //! `feroprobe`: an nmap-style network scanner, written natively in Rust.
 
 mod grep;
+mod help;
 mod output;
 mod xml;
 
@@ -225,30 +226,10 @@ fn render(format: Format, hosts: &[HostResult], info: &RunInfo) -> Result<String
     })
 }
 
-/// Fast, native network scanner with an nmap-style command line.
-///
-/// Examples:
-///   feroprobe 192.168.1.0/24
-///   sudo feroprobe -sS -p 1-65535 10.0.0.5
-///   feroprobe -sT -sU -p 53,123,161 scanme.example.org
-///   feroprobe -sn 192.168.1.0/24
-///   sudo feroprobe -sn 192.168.1.0/24   (ARP on a local network, shows MAC vendors)
-///   feroprobe -sV -p 22,80,443 10.0.0.5
-///   sudo feroprobe -O 10.0.0.5
-///   feroprobe -iL hosts.txt --exclude 10.0.0.1 -oA scan   (scan.nmap, scan.xml, scan.gnmap)
-///   feroprobe -v -oG - 10.0.0.0/24                     (grepable on stdout, progress on stderr)
-///   sudo feroprobe -A 10.0.0.5              (-sV -O --traceroute)
-///   sudo feroprobe --traceroute -p 443 example.org
-///   feroprobe -Pn --top-ports 1000 --open -o json 10.0.0.1-50
-///   feroprobe -T4 -p- 10.0.0.5             (aggressive timing)
-///   sudo feroprobe -sA -p 1-1024 10.0.0.5   (which ports does a firewall let through?)
-///   sudo feroprobe -sF -p 22,80 10.0.0.5    (FIN scan; also -sN, -sX, -sW, -sM)
-///   sudo feroprobe --scanflags SYNFIN -p 80 10.0.0.5
-///   feroprobe -T2 --scan-delay 1s 10.0.0.5
-///   sudo feroprobe -6 -sn fe80::1%eth0 2001:db8::/120   (IPv6, NDP on the local link)
-///   feroprobe -6 -p 22,443 scanme.example.org          (use the name's IPv6 address)
+/// Fast, native network scanner with an nmap-style command line. The help
+/// page is [`help::HELP`], laid out like nmap's.
 #[derive(Debug, Parser)]
-#[command(version, verbatim_doc_comment)]
+#[command(version, override_help = help::HELP, arg_required_else_help = true)]
 struct Args {
     /// Targets: IPv4 or IPv6 addresses, CIDR blocks (10.0.0.0/24, 2001:db8::/120),
     /// ranges (10.0.0.1-20), link-local addresses with their interface
