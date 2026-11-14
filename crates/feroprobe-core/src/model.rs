@@ -188,6 +188,9 @@ pub struct ScanConfig {
     /// sending and return an error of kind [`std::io::ErrorKind::TimedOut`]
     /// once it has passed. `None` means no limit.
     pub deadline: Option<Instant>,
+    /// A `max_rate` budget shared with other scans. `None` gives each scan
+    /// its own budget.
+    pub rate_schedule: Option<crate::timing::RateSchedule>,
 }
 
 impl ScanConfig {
@@ -215,6 +218,7 @@ impl Default for ScanConfig {
             scan_delay: Duration::ZERO,
             arp_ping: true,
             deadline: None,
+            rate_schedule: None,
         }
     }
 }

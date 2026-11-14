@@ -124,6 +124,7 @@ pub(crate) struct Pacer {
     sent: u32,
     interval: Duration,
     delay: Duration,
+    shared: Option<crate::timing::RateSchedule>,
 }
 
 impl Pacer {
@@ -133,11 +134,15 @@ impl Pacer {
             sent: 0,
             interval: Duration::from_secs_f64(1.0 / f64::from(rate.max(1))),
             delay,
+            shared: None,
         }
     }
 
     pub(crate) fn for_config(cfg: &crate::model::ScanConfig) -> Self {
-        Self::new(cfg.max_rate, cfg.scan_delay)
+        Self {
+            shared: cfg.rate_schedule.clone(),
+            ..Self::new(cfg.max_rate, cfg.scan_delay)
+        }
     }
 
     /// Call before each packet; sleeps until it may go. The first packet
@@ -166,7 +171,10 @@ impl Pacer {
     /// at least every [`crate::timing::CANCEL_POLL`], and once more after
     /// the wait). Returns whether the packet may be sent.
     fn wait_unless(&mut self, stop: &dyn Fn() -> bool) -> bool {
-        let due = self.start + self.interval.saturating_mul(self.sent);
+        let due = match &self.shared {
+            Some(schedule) => schedule.book(self.interval),
+            None => self.start + self.interval.saturating_mul(self.sent),
+        };
         loop {
             if stop() {
                 return false;
@@ -361,6 +369,24 @@ fn is_no_buffer_space(e: &io::Error) -> bool {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn scans_sharing_a_schedule_share_the_rate() {
+        // Like host jobs one after another: each new scan's first packet
+        // still waits for the shared budget.
+        let cfg = crate::model::ScanConfig {
+            max_rate: 20,
+            rate_schedule: Some(crate::timing::RateSchedule::new()),
+            ..Default::default()
+        };
+        let start = Instant::now();
+        for _ in 0..6 {
+            let mut pacer = Pacer::for_config(&cfg);
+            assert!(pacer.wait_until(None));
+        }
+        // Six packets at 20 per second: the last goes 250 ms in.
+        assert!(start.elapsed() >= Duration::from_millis(240));
+    }
 
     #[test]
     fn no_send_after_the_deadline() {

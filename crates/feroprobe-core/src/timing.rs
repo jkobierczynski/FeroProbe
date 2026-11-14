@@ -183,6 +183,31 @@ pub(crate) fn pace_blocking_unless(delay: Duration, stop: &dyn Fn() -> bool) -> 
     }
 }
 
+/// One `--max-rate` budget shared by several scans, such as the host jobs
+/// of a `--host-timeout` run or discovery probes sent side by side. Clones
+/// share the schedule. Each packet books the next free slot, so the rate
+/// holds across scans that start and finish at different times, and a
+/// sender that oversleeps lets the next ones catch up instead of slowing
+/// the average.
+#[derive(Debug, Clone, Default)]
+pub struct RateSchedule(std::sync::Arc<std::sync::Mutex<Option<std::time::Instant>>>);
+
+impl RateSchedule {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Book a slot `interval` after the previous one (or now, if that has
+    /// passed) and return when it is due.
+    pub(crate) fn book(&self, interval: Duration) -> std::time::Instant {
+        let mut next = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let now = std::time::Instant::now();
+        let due = next.map_or(now, |n| n.max(now));
+        *next = Some(due + interval);
+        due
+    }
+}
+
 /// How often a cancellable wait looks at its cancel flag.
 pub(crate) const CANCEL_POLL: Duration = Duration::from_millis(100);
 
@@ -239,6 +264,19 @@ mod tests {
         assert!(parse_duration("fast").is_err());
         assert!(parse_duration("5d").is_err());
         assert!(parse_duration("").is_err());
+    }
+
+    #[test]
+    fn shared_rate_schedule_spaces_bookings() {
+        let schedule = RateSchedule::new();
+        let other = schedule.clone();
+        let gap = Duration::from_millis(100);
+        let first = schedule.book(gap);
+        // A second scan sharing the schedule waits its turn.
+        assert!(other.book(gap) >= first + gap);
+        assert!(schedule.book(gap) >= first + gap * 2);
+        // Another schedule is independent.
+        assert!(RateSchedule::new().book(gap) < first + gap);
     }
 
     #[tokio::test]

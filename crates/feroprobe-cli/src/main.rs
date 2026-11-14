@@ -770,6 +770,9 @@ fn scan_config(args: &Args) -> ScanConfig {
         scan_delay: args.scan_delay.unwrap_or(base.scan_delay),
         arp_ping: !args.disable_arp_ping,
         deadline: None,
+        // One --max-rate for the whole run, like nmap's, however many scans
+        // and host jobs send side by side or one after another.
+        rate_schedule: Some(feroprobe_core::timing::RateSchedule::new()),
     }
 }
 
@@ -1063,7 +1066,8 @@ impl ScanJob<'_> {
         let group = host_group(live.len(), cfg);
         let mut shared = cfg.clone();
         shared.concurrency = (cfg.concurrency / group).max(1);
-        shared.max_rate = (cfg.max_rate / group as u32).max(1);
+        // The hosts share one --max-rate schedule (set in scan_config), so
+        // each may use the whole rate.
         let probes = self.plan.tcp.map_or(0, |_| self.tcp.len())
             + if self.plan.udp { self.udp.len() } else { 0 };
         let done = progress.phase_of(
@@ -1120,8 +1124,9 @@ impl ScanJob<'_> {
 
 /// How many hosts `--host-timeout` scans at once: at most [`HOST_GROUP`],
 /// and fewer when the budgets are small, so that every host gets at least
-/// one probe in flight and one packet per second while the totals stay
-/// within `--concurrency` and `--max-rate`.
+/// one probe in flight while the total stays within `--concurrency`. The
+/// hosts share one `--max-rate` schedule; capping the group by it keeps
+/// very low rates from spreading over many half-started hosts.
 fn host_group(hosts: usize, cfg: &ScanConfig) -> usize {
     hosts
         .min(HOST_GROUP)
