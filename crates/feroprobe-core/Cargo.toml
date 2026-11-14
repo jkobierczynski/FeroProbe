@@ -10,6 +10,7 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
+dns-lookup = "4.0.2"
 futures = "0.3.34"
 ipnet = "2.12.2"
 regex = { version = "1.13.1", default-features = false, features = ["std", "perf", "unicode-perl"] }

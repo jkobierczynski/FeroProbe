@@ -102,7 +102,7 @@ pub fn render_table(hosts: &[HostResult], info: &RunInfo) -> String {
     let mut up = 0;
     for host in hosts.iter().filter(|h| reported(h, info)) {
         up += 1;
-        match &host.hostname {
+        match host.hostname.as_ref().or(host.rdns.as_ref()) {
             Some(name) => w!(out, "\nScan report for {name} ({})", host.addr),
             None => w!(out, "\nScan report for {}", host.addr),
         }
@@ -110,6 +110,12 @@ pub fn render_table(hosts: &[HostResult], info: &RunInfo) -> String {
             (Some(ms), Some(why)) => w!(out, "Host is up, {why} ({ms:.2} ms latency)."),
             (None, Some(why)) => w!(out, "Host is up, {why}."),
             _ => {}
+        }
+        // A name given on the command line hides the address's own name.
+        if let (Some(given), Some(rdns)) = (&host.hostname, &host.rdns)
+            && !given.eq_ignore_ascii_case(rdns)
+        {
+            w!(out, "rDNS record for {}: {rdns}", host.addr);
         }
         if let Some(mac) = &host.mac {
             match mac.vendor {
@@ -261,6 +267,8 @@ struct JsonHostInfo<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     hostname: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    rdns: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     up_reason: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     latency_ms: Option<f64>,
@@ -324,6 +332,7 @@ pub fn render_json(hosts: &[HostResult], info: &RunInfo) -> Result<String> {
                 host: JsonHostInfo {
                     addr: h.addr.to_string(),
                     hostname: h.hostname.as_deref(),
+                    rdns: h.rdns.as_deref(),
                     up_reason: h.up_reason,
                     latency_ms: h.latency_ms,
                     mac: h.mac.as_ref(),
@@ -363,5 +372,29 @@ pub(crate) mod tests {
             nmap_label: false,
             verbosity: 0,
         }
+    }
+
+    #[test]
+    fn report_names_come_from_the_command_line_or_reverse_dns() {
+        let mut named = HostResult::new("10.0.0.5".parse().unwrap(), None);
+        named.up_reason = Some("echo-reply");
+        named.rdns = Some("web.example".into());
+        let mut both = HostResult::new("10.0.0.6".parse().unwrap(), Some("db".into()));
+        both.up_reason = Some("echo-reply");
+        both.rdns = Some("db7.example".into());
+        let mut same = HostResult::new("10.0.0.7".parse().unwrap(), Some("MAIL.example".into()));
+        same.up_reason = Some("echo-reply");
+        same.rdns = Some("mail.example".into());
+        let table = render_table(&[named, both, same], &info());
+        assert!(
+            table.contains("Scan report for web.example (10.0.0.5)"),
+            "{table}"
+        );
+        assert!(table.contains("Scan report for db (10.0.0.6)"), "{table}");
+        assert!(
+            table.contains("rDNS record for 10.0.0.6: db7.example"),
+            "{table}"
+        );
+        assert!(!table.contains("rDNS record for 10.0.0.7"), "{table}");
     }
 }

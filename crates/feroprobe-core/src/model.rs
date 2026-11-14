@@ -76,6 +76,8 @@ pub mod reason {
     pub const ADMIN_PROHIBITED: &str = "admin-prohibited";
     pub const UDP_RESPONSE: &str = "udp-response";
     pub const ECHO_REPLY: &str = "echo-reply";
+    pub const TIMESTAMP_REPLY: &str = "timestamp-reply";
+    pub const MASK_REPLY: &str = "addressmask-reply";
     pub const ARP_RESPONSE: &str = "arp-response";
     /// The host answered an IPv6 neighbour solicitation.
     pub const ND_RESPONSE: &str = "nd-response";
@@ -103,6 +105,9 @@ pub struct HostResult {
     pub addr: IpAddr,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hostname: Option<String>,
+    /// The name a reverse DNS (PTR) lookup of the address returned.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rdns: Option<String>,
     /// How host discovery decided the host is up, if discovery ran.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub up_reason: Option<&'static str>,
@@ -126,6 +131,7 @@ impl HostResult {
         Self {
             addr,
             hostname,
+            rdns: None,
             up_reason: None,
             latency_ms: None,
             mac: None,

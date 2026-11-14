@@ -177,16 +177,13 @@ fn write_host(x: &mut String, host: &HostResult, info: &RunInfo, start: u64, end
         }
         x.push_str("/>\n");
     }
-    match &host.hostname {
-        Some(name) => {
-            let _ = writeln!(
-                x,
-                "<hostnames>\n<hostname name=\"{}\" type=\"user\"/>\n</hostnames>",
-                esc(name)
-            );
+    x.push_str("<hostnames>\n");
+    for (name, kind) in [(&host.hostname, "user"), (&host.rdns, "PTR")] {
+        if let Some(name) = name {
+            let _ = writeln!(x, "<hostname name=\"{}\" type=\"{kind}\"/>", esc(name));
         }
-        None => x.push_str("<hostnames>\n</hostnames>\n"),
     }
+    x.push_str("</hostnames>\n");
     if !info.ping_only {
         let (hidden, rows) = port_rows(host, info);
         x.push_str("<ports>");
@@ -408,6 +405,7 @@ mod tests {
     #[test]
     fn report_layout() {
         let mut host = HostResult::new("10.0.0.5".parse().unwrap(), Some("box".into()));
+        host.rdns = Some("box.example".into());
         host.up_reason = Some("echo-reply");
         host.latency_ms = Some(0.25);
         // Built by hand: MacInfo::new would consult the system's OUI list.
@@ -434,7 +432,7 @@ mod tests {
             "<scaninfo type=\"connect\" protocol=\"tcp\" numservices=\"5\" services=\"22,80-82,443\"/>",
             "<status state=\"up\" reason=\"echo-reply\" reason_ttl=\"0\"/>",
             "<address addr=\"10.0.0.5\" addrtype=\"ipv4\"/>\n<address addr=\"00:50:56:01:02:03\" addrtype=\"mac\" vendor=\"VMware\"/>",
-            "<hostname name=\"box\" type=\"user\"/>",
+            "<hostnames>\n<hostname name=\"box\" type=\"user\"/>\n<hostname name=\"box.example\" type=\"PTR\"/>\n</hostnames>",
             "<extraports state=\"closed\" count=\"2\">",
             "<port protocol=\"tcp\" portid=\"22\"><state state=\"open\" reason=\"syn-ack\" reason_ttl=\"0\"/><service name=\"ssh\" product=\"OpenSSH\" version=\"9.6\" extrainfo=\"a &lt;b&gt; &amp; &quot;c&quot;\" method=\"probed\" conf=\"10\"/></port>",
             "<service name=\"https\" method=\"table\" conf=\"3\"/>",

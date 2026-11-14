@@ -61,7 +61,11 @@ pub fn render(hosts: &[HostResult], info: &RunInfo) -> String {
     let mut up = 0;
     for host in hosts.iter().filter(|h| reported(h, info)) {
         up += 1;
-        let name = host.hostname.as_deref().unwrap_or("");
+        let name = host
+            .hostname
+            .as_deref()
+            .or(host.rdns.as_deref())
+            .unwrap_or("");
         let head = format!("Host: {} ({name})", host.addr);
         let _ = writeln!(x, "{head}\tStatus: Up");
         if info.ping_only {

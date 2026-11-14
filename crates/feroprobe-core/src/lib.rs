@@ -17,6 +17,7 @@
 pub mod arp;
 pub mod connect;
 pub mod discovery;
+pub mod dns;
 pub mod model;
 pub mod ndp;
 pub mod netif;
@@ -34,7 +35,8 @@ pub mod udp;
 
 pub use arp::{MacAddr, MacInfo};
 pub use connect::connect_scan;
-pub use discovery::{discover, icmp_available};
+pub use discovery::{PingProbes, discover, icmp_available};
+pub use dns::reverse_lookup;
 pub use model::{HostResult, PortResult, PortState, Protocol, ScanConfig};
 pub use os::{OsMatch, TcpTraits, os_detect};
 pub use ports::{parse_ports, service_name, top_ports, top_udp_ports};

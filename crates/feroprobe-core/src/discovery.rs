@@ -5,14 +5,20 @@
 //! see [`crate::ndp`]), when the process may use raw sockets on Linux. Their
 //! answer, or its absence, decides them alone.
 //!
-//! For every other target, like nmap's default ping, several probes are sent
-//! and any answer counts:
+//! Every other target gets the probes in [`PingProbes`], and any answer
+//! counts. By default, like nmap's unprivileged ping:
 //!
 //! - an ICMP or ICMPv6 echo request ("ping"), when the process may send
 //!   ICMP: with raw sockets (root), or an unprivileged ICMP socket where the
 //!   OS allows one (not on Windows)
 //! - TCP connects to ports 443 and 80, where a completed handshake or a
 //!   reset both prove the host exists
+//!
+//! nmap's `-P` options pick other probes: TCP connects to chosen ports
+//! (`-PS`), bare TCP ACKs that a live host answers with a reset (`-PA`, raw
+//! sockets on Linux, else a connect), UDP datagrams that draw an answer or a
+//! port unreachable (`-PU`), and ICMP echo, timestamp and address mask
+//! requests (`-PE`, `-PP`, `-PM`; the last two need raw sockets and IPv4).
 //!
 //! Hosts that answer none of them are reported as down and not scanned
 //! (unless discovery is skipped with `-Pn`).
@@ -29,10 +35,71 @@ use crate::arp::{self, MacAddr, MacInfo};
 use crate::connect::probe_port;
 use crate::model::{HostResult, PortState, ScanConfig, reason};
 use crate::ndp;
+use crate::syn::{RawTcpScan, TcpScanKind, raw_tcp_scan};
 use crate::target::Target;
+use crate::udp::probe_udp;
 
-/// TCP ports probed during discovery.
+/// TCP ports probed during default discovery.
 pub const DISCOVERY_PORTS: [u16; 2] = [443, 80];
+
+/// The port `-PS` and `-PA` probe when no ports are given, as in nmap.
+pub const DEFAULT_TCP_PING_PORT: u16 = 80;
+
+/// The port `-PU` probes when no ports are given: nmap's choice, unlikely
+/// to be open, so a live host answers with a port unreachable.
+pub const DEFAULT_UDP_PING_PORT: u16 = 40125;
+
+/// Which probes host discovery sends, like nmap's `-P` options.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PingProbes {
+    /// `-PE`: ICMP (or ICMPv6) echo request.
+    pub echo: bool,
+    /// `-PP`: ICMP timestamp request (IPv4, raw sockets).
+    pub timestamp: bool,
+    /// `-PM`: ICMP address mask request (IPv4, raw sockets).
+    pub mask: bool,
+    /// `-PS`: TCP ports to connect to; a handshake or a reset proves the host.
+    pub syn: Vec<u16>,
+    /// `-PA`: TCP ports to send a bare ACK to, which a live host answers
+    /// with a reset. Needs raw sockets on Linux; elsewhere these ports get a
+    /// connect, as nmap does without privileges.
+    pub ack: Vec<u16>,
+    /// `-PU`: UDP ports to send a datagram to; an answer or a port
+    /// unreachable proves the host.
+    pub udp: Vec<u16>,
+}
+
+impl Default for PingProbes {
+    /// Echo request plus TCP connects to 443 and 80.
+    fn default() -> Self {
+        Self {
+            echo: true,
+            syn: DISCOVERY_PORTS.to_vec(),
+            ..Self::none()
+        }
+    }
+}
+
+impl PingProbes {
+    /// No probes at all, to add chosen ones to.
+    pub fn none() -> Self {
+        Self {
+            echo: false,
+            timestamp: false,
+            mask: false,
+            syn: Vec::new(),
+            ack: Vec::new(),
+            udp: Vec::new(),
+        }
+    }
+}
+
+/// One TCP or UDP discovery probe to a port.
+#[derive(Debug, Clone, Copy)]
+enum PortProbe {
+    Tcp(u16),
+    Udp(u16),
+}
 
 /// Sets a flag when dropped, so the blocking ICMP sweep stops even if
 /// discovery returns early with an error or its future is dropped.
@@ -46,7 +113,11 @@ impl Drop for CancelOnDrop {
 
 /// Probe every target and return one [`HostResult`] per target, in order,
 /// with `up_reason` set for the hosts that answered.
-pub async fn discover(targets: &[Target], cfg: &ScanConfig) -> io::Result<Vec<HostResult>> {
+pub async fn discover(
+    targets: &[Target],
+    cfg: &ScanConfig,
+    probes: &PingProbes,
+) -> io::Result<Vec<HostResult>> {
     let mut hosts: Vec<HostResult> = targets
         .iter()
         .map(|t| HostResult::new(t.addr, t.hostname.clone()))
@@ -73,46 +144,97 @@ pub async fn discover(targets: &[Target], cfg: &ScanConfig) -> io::Result<Vec<Ho
             .collect()
     };
 
-    // The ICMP sweeps (one per address family) run on blocking threads and
-    // stream replies back, so hosts that answer a ping skip their TCP probes.
+    // The ICMP sweeps (one per query type and address family) run on
+    // blocking threads and stream replies back, so hosts that answer one
+    // skip their TCP and UDP probes.
     let cancel = CancelOnDrop(Arc::new(AtomicBool::new(false)));
-    let (reply_tx, mut replies) = tokio::sync::mpsc::unbounded_channel::<(IpAddr, f64)>();
+    let (reply_tx, mut replies) =
+        tokio::sync::mpsc::unbounded_channel::<(IpAddr, f64, &'static str)>();
     let mut icmp = Vec::new();
-    for addrs in [undecided(false), undecided(true)] {
-        if addrs.is_empty() {
-            continue;
+    let queries = [
+        (probes.echo, icmp::Query::Echo),
+        (probes.timestamp, icmp::Query::Timestamp),
+        (probes.mask, icmp::Query::Mask),
+    ];
+    for (_, query) in queries.into_iter().filter(|(on, _)| *on) {
+        for v6 in [false, true] {
+            let addrs = undecided(v6);
+            // Timestamp and address mask requests exist only in ICMPv4.
+            if addrs.is_empty() || (v6 && query != icmp::Query::Echo) {
+                continue;
+            }
+            let (cfg, cancel, reply_tx) = (cfg.clone(), Arc::clone(&cancel.0), reply_tx.clone());
+            icmp.push(tokio::task::spawn_blocking(move || {
+                icmp::sweep(&addrs, &cfg, query, &cancel, &mut |addr, rtt| {
+                    let _ = reply_tx.send((addr, rtt, query.reason()));
+                })
+            }));
         }
-        let (cfg, cancel, reply_tx) = (cfg.clone(), Arc::clone(&cancel.0), reply_tx.clone());
-        icmp.push(tokio::task::spawn_blocking(move || {
-            icmp::sweep(&addrs, &cfg, &cancel, &mut |addr, rtt| {
-                let _ = reply_tx.send((addr, rtt));
-            })
-        }));
     }
     drop(reply_tx);
 
     let pinged: Vec<AtomicBool> = decided.iter().map(|&d| AtomicBool::new(d)).collect();
 
-    // An echo reply is the most direct proof of life; prefer its latency.
-    let mark_pinged = |hosts: &mut Vec<HostResult>, (addr, rtt): (IpAddr, f64)| {
+    // An ICMP reply is the most direct proof of life; prefer its latency
+    // over a TCP probe's, and keep the first one that came.
+    let mark_pinged = |hosts: &mut Vec<HostResult>,
+                       (addr, rtt, why): (IpAddr, f64, &'static str)| {
         if let Some(&h) = index.get(&addr)
             && !decided[h]
+            && !pinged[h].swap(true, Ordering::Relaxed)
         {
-            pinged[h].store(true, Ordering::Relaxed);
-            hosts[h].up_reason = Some(reason::ECHO_REPLY);
+            hosts[h].up_reason = Some(why);
             hosts[h].latency_ms = Some(rtt);
         }
     };
 
-    let jobs = DISCOVERY_PORTS
+    // Bare ACKs need raw sockets on Linux; without them nmap connects to
+    // the -PA ports instead, and so do we.
+    let raw_ack = !probes.ack.is_empty()
+        && cfg!(target_os = "linux")
+        && crate::raw::raw_sockets_available()
+        && (undecided(true).is_empty() || crate::raw::raw_ipv6_available());
+    let ack_scan = raw_ack.then(|| {
+        let live: Vec<Target> = targets
+            .iter()
+            .zip(&decided)
+            .filter(|(_, d)| !**d)
+            .map(|(t, _)| t.clone())
+            .collect();
+        let (ports, cfg) = (probes.ack.clone(), cfg.clone());
+        tokio::spawn(async move {
+            let scan = RawTcpScan::new(TcpScanKind::Ack);
+            raw_tcp_scan(&live, &ports, &cfg, scan).await
+        })
+    });
+
+    let mut tcp_ports = probes.syn.clone();
+    if !raw_ack {
+        tcp_ports.extend(&probes.ack);
+    }
+    let mut seen_ports = HashSet::new();
+    tcp_ports.retain(|p| seen_ports.insert(*p));
+    let port_probes: Vec<PortProbe> = tcp_ports
+        .into_iter()
+        .map(PortProbe::Tcp)
+        .chain(probes.udp.iter().map(|&p| PortProbe::Udp(p)))
+        .collect();
+    let jobs = port_probes
         .iter()
-        .flat_map(|&port| (0..targets.len()).map(move |h| (h, port)));
+        .flat_map(|&probe| (0..targets.len()).map(move |h| (h, probe)));
     let mut probes = stream::iter(jobs)
         // Checked when a probe is about to start: skip hosts already pinged.
         .filter(|&(h, _)| std::future::ready(!pinged[h].load(Ordering::Relaxed)))
-        .map(|(h, port)| {
-            let addr = crate::target::socket_addr(targets[h].addr, port);
-            async move { (h, probe_port(addr, cfg).await) }
+        .map(|(h, probe)| async move {
+            let r = match probe {
+                PortProbe::Tcp(port) => {
+                    probe_port(crate::target::socket_addr(targets[h].addr, port), cfg).await
+                }
+                PortProbe::Udp(port) => {
+                    probe_udp(crate::target::socket_addr(targets[h].addr, port), cfg).await
+                }
+            };
+            (h, r)
         })
         .buffer_unordered(cfg.concurrency.max(1));
 
@@ -136,9 +258,23 @@ pub async fn discover(targets: &[Target], cfg: &ScanConfig) -> io::Result<Vec<Ho
     }
     drop(probes);
 
-    // Late echo replies still count until the sweep's own timeout ends.
+    // Late ICMP replies still count until the sweep's own timeout ends.
     while let Some(reply) = replies.recv().await {
         mark_pinged(&mut hosts, reply);
+    }
+    // A reset to a bare ACK (unfiltered) proves the host is there.
+    if let Some(scan) = ack_scan {
+        let answered = scan.await.map_err(io::Error::other)??;
+        let undecided_hosts = (0..targets.len()).filter(|&h| !decided[h]);
+        for (h, r) in undecided_hosts.zip(answered) {
+            let host = &mut hosts[h];
+            if host.up_reason.is_none()
+                && let Some(p) = r.ports.iter().find(|p| p.state != PortState::Filtered)
+            {
+                host.up_reason = Some(p.reason);
+                host.latency_ms = p.rtt_ms;
+            }
+        }
     }
     // ICMP is best effort: if the OS does not let us ping (no privileges, or
     // a platform without usable ICMP sockets), the TCP probes decide alone.
@@ -249,8 +385,48 @@ mod icmp {
 
     use socket2::{Domain, Protocol, Socket, Type};
 
-    use crate::model::ScanConfig;
+    use crate::model::{ScanConfig, reason};
     use crate::packet::{self, ICMP_ECHO_REPLY, ICMPV6_ECHO_REPLY};
+
+    /// The ICMP query a sweep sends.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(super) enum Query {
+        Echo,
+        Timestamp,
+        Mask,
+    }
+
+    impl Query {
+        /// The request to send, with a valid checksum (ICMPv6 leaves that
+        /// to the kernel).
+        fn request(self, v6: bool, id: u16, seq: u16) -> Vec<u8> {
+            match self {
+                Query::Echo if v6 => packet::icmpv6_echo(id, seq, b"feroprobe"),
+                Query::Echo => packet::icmp_echo(id, seq, b"feroprobe"),
+                // Originate, receive and transmit timestamps.
+                Query::Timestamp => packet::icmp_query(packet::ICMP_TIMESTAMP, id, seq, 12),
+                Query::Mask => packet::icmp_query(packet::ICMP_ADDRESS_MASK, id, seq, 4),
+            }
+        }
+
+        /// The ICMP type of the answer.
+        fn reply(self, v6: bool) -> u8 {
+            match self {
+                Query::Echo if v6 => ICMPV6_ECHO_REPLY,
+                Query::Echo => ICMP_ECHO_REPLY,
+                Query::Timestamp => packet::ICMP_TIMESTAMP_REPLY,
+                Query::Mask => packet::ICMP_ADDRESS_MASK_REPLY,
+            }
+        }
+
+        pub(super) fn reason(self) -> &'static str {
+            match self {
+                Query::Echo => reason::ECHO_REPLY,
+                Query::Timestamp => reason::TIMESTAMP_REPLY,
+                Query::Mask => reason::MASK_REPLY,
+            }
+        }
+    }
     use crate::raw::{Pacer, send_with_backoff};
     use crate::target::socket_addr;
 
@@ -287,13 +463,14 @@ mod icmp {
     pub(super) fn sweep(
         addrs: &[IpAddr],
         cfg: &ScanConfig,
+        query: Query,
         cancel: &AtomicBool,
         on_reply: OnReply<'_>,
     ) -> io::Result<()> {
-        // Echo sequence numbers are 16 bits and identify the probe, so ping
-        // at most 65536 hosts per round.
+        // Sequence numbers are 16 bits and identify the probe, so query at
+        // most 65536 hosts per round.
         for chunk in addrs.chunks(1 << 16) {
-            sweep_chunk(chunk, cfg, cancel, on_reply)?;
+            sweep_chunk(chunk, cfg, query, cancel, on_reply)?;
         }
         Ok(())
     }
@@ -301,6 +478,7 @@ mod icmp {
     fn sweep_chunk(
         addrs: &[IpAddr],
         cfg: &ScanConfig,
+        query: Query,
         cancel: &AtomicBool,
         on_reply: OnReply<'_>,
     ) -> io::Result<()> {
@@ -311,6 +489,13 @@ mod icmp {
         let v6 = addrs[0].is_ipv6();
         debug_assert!(addrs.iter().all(|a| a.is_ipv6() == v6));
         let (sock, id_rewritten) = open(v6)?;
+        // Unprivileged ping sockets only carry echo requests.
+        if id_rewritten && query != Query::Echo {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "ICMP timestamp and address mask requests need raw sockets",
+            ));
+        }
         sock.set_read_timeout(Some(Duration::from_millis(50)))?;
         let sock = Arc::new(sock);
         let id = (std::process::id() & 0xffff) as u16;
@@ -358,12 +543,7 @@ mod icmp {
                     let Some(msg) = packet::parse_icmp(icmp) else {
                         continue;
                     };
-                    let reply = if v6 {
-                        ICMPV6_ECHO_REPLY
-                    } else {
-                        ICMP_ECHO_REPLY
-                    };
-                    if msg.kind != reply || (!id_rewritten && msg.id != id) {
+                    if msg.kind != query.reply(v6) || (!id_rewritten && msg.id != id) {
                         continue;
                     }
                     let _ = tx.send((sender, msg.seq, at));
@@ -396,11 +576,7 @@ mod icmp {
             for _ in 0..=cfg.retries {
                 let mut pacer = Pacer::for_config(cfg);
                 for &(seq, addr) in &pending {
-                    let pkt = if v6 {
-                        packet::icmpv6_echo(id, seq, b"feroprobe")
-                    } else {
-                        packet::icmp_echo(id, seq, b"feroprobe")
-                    };
+                    let pkt = query.request(v6, id, seq);
                     if !pacer.wait_or_cancel(cancel) {
                         return Ok(());
                     }
@@ -457,12 +633,73 @@ mod tests {
         };
         // Long enough for Windows, which reports a refused connect only ~2s
         // after the reset (there, only the TCP probes run).
-        let hosts = discover(&[Target::new("127.0.0.1".parse().unwrap())], &cfg)
+        let targets = [Target::new("127.0.0.1".parse().unwrap())];
+        let hosts = discover(&targets, &cfg, &PingProbes::default())
             .await
             .unwrap();
         // Either the ping or a TCP reset from 443/80 proves localhost is up.
         assert!(hosts[0].is_up(), "{:?}", hosts[0]);
         assert!(hosts[0].up_reason.is_some());
+    }
+
+    #[tokio::test]
+    async fn chosen_ping_probes() {
+        let cfg = ScanConfig {
+            timeout: Duration::from_secs(5),
+            ..Default::default()
+        };
+        let targets = [Target::new("127.0.0.1".parse().unwrap())];
+        let raw = cfg!(target_os = "linux") && crate::raw::raw_sockets_available();
+        let run = |probes: PingProbes| {
+            let cfg = cfg.clone();
+            let targets = targets.clone();
+            async move { discover(&targets, &cfg, &probes).await.unwrap().remove(0) }
+        };
+
+        // A closed port answers a connect with a reset.
+        let host = run(PingProbes {
+            syn: vec![1],
+            ..PingProbes::none()
+        })
+        .await;
+        assert_eq!(host.up_reason, Some(reason::CONN_REFUSED), "{host:?}");
+
+        // A bare ACK draws a reset; without raw sockets it is a connect.
+        let host = run(PingProbes {
+            ack: vec![1],
+            ..PingProbes::none()
+        })
+        .await;
+        let want = if raw {
+            reason::RESET
+        } else {
+            reason::CONN_REFUSED
+        };
+        assert_eq!(host.up_reason, Some(want), "{host:?}");
+
+        // A datagram to a closed UDP port draws a port unreachable.
+        if cfg!(unix) {
+            let host = run(PingProbes {
+                udp: vec![DEFAULT_UDP_PING_PORT],
+                ..PingProbes::none()
+            })
+            .await;
+            assert_eq!(host.up_reason, Some(reason::PORT_UNREACH), "{host:?}");
+        }
+
+        // Linux answers ICMP timestamp requests, but not address mask ones.
+        if raw {
+            let host = run(PingProbes {
+                timestamp: true,
+                ..PingProbes::none()
+            })
+            .await;
+            assert_eq!(host.up_reason, Some(reason::TIMESTAMP_REPLY), "{host:?}");
+        }
+
+        // No probes at all: nothing can answer.
+        let host = run(PingProbes::none()).await;
+        assert!(!host.is_up(), "{host:?}");
     }
 
     #[tokio::test]
@@ -478,7 +715,9 @@ mod tests {
             Target::new("::1".parse().unwrap()),
             Target::new("127.0.0.1".parse().unwrap()),
         ];
-        let hosts = discover(&targets, &cfg).await.unwrap();
+        let hosts = discover(&targets, &cfg, &PingProbes::default())
+            .await
+            .unwrap();
         assert!(hosts.iter().all(HostResult::is_up), "{hosts:?}");
         // On Linux with raw sockets the ICMPv6 echo is sure to run, and its
         // answer wins over a TCP reset. Elsewhere only the TCP probes may run.

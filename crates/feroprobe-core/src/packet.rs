@@ -26,6 +26,10 @@ pub const ICMP_ECHO_REPLY: u8 = 0;
 pub const ICMP_DEST_UNREACH: u8 = 3;
 pub const ICMP_TIME_EXCEEDED: u8 = 11;
 pub const ICMP_ECHO_REQUEST: u8 = 8;
+pub const ICMP_TIMESTAMP: u8 = 13;
+pub const ICMP_TIMESTAMP_REPLY: u8 = 14;
+pub const ICMP_ADDRESS_MASK: u8 = 17;
+pub const ICMP_ADDRESS_MASK_REPLY: u8 = 18;
 
 pub const ICMPV6_DEST_UNREACH: u8 = 1;
 pub const ICMPV6_TIME_EXCEEDED: u8 = 3;
@@ -244,6 +248,18 @@ pub fn icmp_echo(id: u16, seq: u16, payload: &[u8]) -> Vec<u8> {
     p[4..6].copy_from_slice(&id.to_be_bytes());
     p[6..8].copy_from_slice(&seq.to_be_bytes());
     p[8..].copy_from_slice(payload);
+    let sum = checksum(&p);
+    p[2..4].copy_from_slice(&sum.to_be_bytes());
+    p
+}
+
+/// Build an ICMP query of type `kind` (timestamp or address mask request)
+/// with `body_len` zero bytes after the identifier and sequence number, and
+/// a valid checksum.
+pub fn icmp_query(kind: u8, id: u16, seq: u16, body_len: usize) -> Vec<u8> {
+    let mut p = icmp_echo(id, seq, &vec![0; body_len]);
+    p[0] = kind;
+    p[2..4].copy_from_slice(&[0, 0]);
     let sum = checksum(&p);
     p[2..4].copy_from_slice(&sum.to_be_bytes());
     p
