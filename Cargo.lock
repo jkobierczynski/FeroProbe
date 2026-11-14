@@ -345,6 +345,7 @@ dependencies = [
  "anyhow",
  "clap",
  "feroprobe-core",
+ "futures",
  "roxmltree",
  "serde",
  "serde_json",

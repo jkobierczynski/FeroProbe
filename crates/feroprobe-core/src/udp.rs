@@ -207,6 +207,7 @@ pub async fn udp_scan(
         .buffer_unordered(cfg.concurrency.max(1));
     while let Some((h, r)) = results.next().await {
         hosts[h].ports.push(r?);
+        crate::progress::tick(1);
     }
     for host in &mut hosts {
         host.sort_ports();

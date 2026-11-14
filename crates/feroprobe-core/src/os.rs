@@ -382,7 +382,7 @@ mod imp {
 
     use socket2::Protocol as SockProto;
 
-    use crate::raw::{Pacer, Rng, raw_socket, send_with_backoff, source_addr_for};
+    use crate::raw::{Pacer, Rng, raw_socket, send_with_backoff_until, source_addr_for};
 
     /// Send one option-rich SYN to each job's port and collect the SYN-ACKs,
     /// in job order. Unanswered probes are retried `cfg.retries` times.
@@ -446,6 +446,9 @@ mod imp {
         };
 
         for _ in 0..=cfg.retries {
+            if cfg.expired() {
+                return Err(ScanConfig::timed_out());
+            }
             let mut waiting = (0..jobs.len())
                 .filter(|&j| found[j].is_none() && sources[j].is_some())
                 .count();
@@ -460,13 +463,18 @@ mod imp {
                     continue;
                 };
                 let pkt = packet::tcp_syn_with_options(src, addr, sport, port, seq, tsval);
-                pacer.wait();
-                send_with_backoff(&send_sock, &pkt, (addr, 0).into())?;
+                // The wait gives up at the host deadline (--host-timeout).
+                if !pacer.wait_until(cfg.deadline) {
+                    return Err(ScanConfig::timed_out());
+                }
+                send_with_backoff_until(&send_sock, &pkt, (addr, 0).into(), cfg.deadline)?;
                 // Bounded, so constant inbound traffic can't stall sending.
                 // Whatever is left is read by the next drain or the wait.
                 let drain_until = Instant::now() + Duration::from_millis(10);
                 while Instant::now() < drain_until {
                     match recv_sock.read(&mut buf) {
+                        // Late replies do not count, as in the wait below.
+                        Ok(_) if cfg.expired() => break,
                         Ok(n) => {
                             if take(&buf[..n], &mut found) {
                                 waiting -= 1;
@@ -478,9 +486,15 @@ mod imp {
                 }
             }
             recv_sock.set_nonblocking(false)?;
-            let deadline = Instant::now() + cfg.timeout;
+            let mut deadline = Instant::now() + cfg.timeout;
+            if let Some(limit) = cfg.deadline {
+                deadline = deadline.min(limit);
+            }
             while waiting > 0 && Instant::now() < deadline {
                 match recv_sock.read(&mut buf) {
+                    // A read can block past the host deadline: a reply
+                    // that arrives after it does not count.
+                    Ok(_) if cfg.expired() => break,
                     Ok(n) => {
                         if take(&buf[..n], &mut found) {
                             waiting -= 1;
@@ -489,6 +503,10 @@ mod imp {
                     Err(e) if quiet(&e) => {}
                     Err(e) => return Err(e),
                 }
+            }
+            // The wait ended at the host deadline with probes unanswered.
+            if waiting > 0 && cfg.expired() {
+                return Err(ScanConfig::timed_out());
             }
         }
         Ok(found)
@@ -607,5 +625,33 @@ mod tests {
         let os = hosts[0].os.as_ref().expect("an OS guess");
         assert_eq!(os.family, "Linux", "{:?}", os.traits);
         assert_eq!(os.distance, 0);
+    }
+
+    /// A host deadline that has passed stops OS detection with TimedOut.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn stops_at_the_host_deadline() {
+        if !crate::raw_sockets_available() {
+            assert!(
+                std::env::var_os("FEROPROBE_REQUIRE_RAW").is_none(),
+                "raw sockets required but unavailable"
+            );
+            return;
+        }
+        let mut host = HostResult::new("127.0.0.1".parse().unwrap(), None);
+        host.ports.push(crate::model::PortResult {
+            port: 9,
+            protocol: Protocol::Tcp,
+            state: PortState::Open,
+            reason: crate::model::reason::SYN_ACK,
+            rtt_ms: None,
+            service: None,
+        });
+        let cfg = ScanConfig {
+            deadline: Some(std::time::Instant::now()),
+            ..Default::default()
+        };
+        let err = os_detect(&mut [host], &cfg).await.unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut);
     }
 }

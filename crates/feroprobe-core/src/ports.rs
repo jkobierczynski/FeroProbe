@@ -15,10 +15,19 @@ pub const TOP_PORTS: &[u16] = &[
     11211, 5672, 1883, 8883, 2375, 6443, 9090, 9443, 5985, 5986, 161, 162, 69, 123,
 ];
 
-/// Commonly open UDP ports, used for UDP scans when no ports are specified.
+/// A curated list of UDP services, ordered roughly by how often they are
+/// found answering: network infrastructure first (DNS, NTP, SNMP, NetBIOS,
+/// DHCP, IKE, syslog, UPnP, mDNS), then VPN, VoIP, management, industrial
+/// and game ports. The first 20 are the default for UDP scans; `-F` takes
+/// all 100.
 pub const TOP_UDP_PORTS: &[u16] = &[
-    53, 67, 68, 69, 123, 135, 137, 138, 139, 161, 162, 445, 500, 514, 520, 631, 1434, 1900, 4500,
-    5353, 49152,
+    53, 123, 161, 137, 67, 68, 69, 500, 514, 520, 1900, 5353, 138, 139, 135, 445, 631, 1434, 4500,
+    49152, 162, 111, 88, 389, 2049, 1812, 1813, 1645, 1646, 1701, 1194, 5060, 3478, 443, 5355,
+    3702, 5683, 51820, 623, 546, 547, 427, 464, 177, 199, 521, 1719, 3283, 3389, 3544, 4789, 5004,
+    5005, 5351, 5632, 7, 9, 13, 17, 19, 37, 49, 513, 517, 518, 1025, 1026, 1027, 1028, 1029, 2123,
+    2152, 2427, 2727, 5000, 5093, 9600, 10000, 11211, 17185, 20000, 27015, 30718, 33434, 44818,
+    47808, 49153, 49154, 49156, 32768, 32769, 32771, 1718, 1604, 2222, 1985, 3784, 5684, 9987,
+    3074,
 ];
 
 /// The service usually found on a port, for display when version
@@ -114,6 +123,69 @@ pub fn parse_ports(spec: &str) -> Result<Vec<u16>, Error> {
     Ok(ports)
 }
 
+/// TCP and UDP ports from one nmap-style specification.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PortLists {
+    pub tcp: Vec<u16>,
+    pub udp: Vec<u16>,
+}
+
+/// Parse a port specification that may name its protocol, like nmap's
+/// `-p 22,T:80,U:53,161`: `T:` and `U:` apply to the ports after them until
+/// the next prefix, and ports before any prefix are both TCP and UDP. Each
+/// list is sorted and de-duplicated.
+pub fn parse_port_lists(spec: &str) -> Result<PortLists, Error> {
+    #[derive(Clone, Copy, PartialEq)]
+    enum Proto {
+        Both,
+        Tcp,
+        Udp,
+    }
+    let mut groups: Vec<(Proto, Vec<&str>)> = Vec::new();
+    let mut current = Proto::Both;
+    for part in spec.split(',').map(str::trim) {
+        let lower = part.get(..2).map(str::to_ascii_uppercase);
+        let rest = match lower.as_deref() {
+            Some("T:") => {
+                current = Proto::Tcp;
+                &part[2..]
+            }
+            Some("U:") => {
+                current = Proto::Udp;
+                &part[2..]
+            }
+            Some("S:" | "P:") => {
+                return Err(Error::InvalidPorts(format!(
+                    "'{part}': only T: (TCP) and U: (UDP) ports are supported"
+                )));
+            }
+            _ => part,
+        };
+        match groups.last_mut() {
+            Some((proto, parts)) if *proto == current => parts.push(rest),
+            _ => groups.push((current, vec![rest])),
+        }
+    }
+    let mut lists = PortLists::default();
+    for (proto, parts) in groups {
+        let ports = parse_ports(&parts.join(",")).map_err(|e| match e {
+            Error::InvalidPorts(why) => Error::InvalidPorts(format!("{why} (in '{spec}')")),
+            other => other,
+        })?;
+        if proto != Proto::Udp {
+            lists.tcp.extend(&ports);
+        }
+        if proto != Proto::Tcp {
+            lists.udp.extend(&ports);
+        }
+    }
+    for list in [&mut lists.tcp, &mut lists.udp] {
+        list.sort_unstable();
+        list.dedup();
+    }
+    Ok(lists)
+}
+
 /// The `n` most common ports, sorted ascending.
 ///
 /// Takes ports from [`TOP_PORTS`] first; if `n` is larger than that list, the
@@ -172,9 +244,43 @@ mod tests {
     }
 
     #[test]
+    fn protocol_prefixes() {
+        let l = parse_port_lists("22,T:80,443,U:53,161").unwrap();
+        assert_eq!(l.tcp, vec![22, 80, 443]);
+        assert_eq!(l.udp, vec![22, 53, 161]);
+        let l = parse_port_lists("U:53,t:1-3").unwrap();
+        assert_eq!(l.tcp, vec![1, 2, 3]);
+        assert_eq!(l.udp, vec![53]);
+        let l = parse_port_lists("U:-").unwrap();
+        assert!(l.tcp.is_empty());
+        assert_eq!(l.udp.len(), 65535);
+        let l = parse_port_lists("80,80,T:80").unwrap();
+        assert_eq!((l.tcp, l.udp), (vec![80], vec![80]));
+        for bad in ["", "T:", "S:80", "U:0", "T:22,,80", "X:22"] {
+            assert!(parse_port_lists(bad).is_err(), "{bad} should fail");
+        }
+    }
+
+    #[test]
     fn rejects_bad_input() {
         for bad in ["", "0", "70000", "abc", "10-5", "22,,80"] {
             assert!(parse_ports(bad).is_err(), "{bad} should fail");
+        }
+    }
+
+    #[test]
+    fn top_udp_ports_are_all_ranked() {
+        assert_eq!(TOP_UDP_PORTS.len(), 100);
+        let fast = top_udp_ports(100);
+        let mut ranked = TOP_UDP_PORTS.to_vec();
+        ranked.sort_unstable();
+        assert_eq!(fast, ranked);
+        let default = top_udp_ports(20);
+        for p in [53, 67, 69, 123, 137, 161, 500, 514, 1900, 5353] {
+            assert!(default.contains(&p), "{p}");
+        }
+        for p in [1194, 1812, 3478, 5060, 51820, 47808] {
+            assert!(fast.contains(&p) && !default.contains(&p), "{p}");
         }
     }
 
@@ -190,7 +296,7 @@ mod tests {
             assert!(ports.windows(2).all(|w| w[0] < w[1]));
         }
         assert_eq!(top_ports(3), vec![23, 80, 443]);
-        assert_eq!(top_udp_ports(2), vec![53, 67]);
+        assert_eq!(top_udp_ports(2), vec![53, 123]);
         assert_eq!(top_udp_ports(500).len(), 500);
     }
 }

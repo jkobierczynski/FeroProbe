@@ -78,6 +78,32 @@ pub async fn probe_port(addr: SocketAddr, cfg: &ScanConfig) -> io::Result<PortRe
     Ok(result(PortState::Filtered, reason::NO_RESPONSE, None))
 }
 
+/// How many files (sockets included) this process may have open at once,
+/// where the system says: the soft `RLIMIT_NOFILE` on Unix. Connect and UDP
+/// probes each hold a socket, so their parallelism must stay below this.
+pub fn open_file_limit() -> Option<u64> {
+    #[cfg(unix)]
+    {
+        let mut lim = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        // SAFETY: getrlimit only writes to the struct we pass.
+        if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) } == 0
+            && lim.rlim_cur != libc::RLIM_INFINITY
+        {
+            // rlim_t is u64 on Linux and macOS but not on every Unix.
+            #[allow(clippy::unnecessary_cast)]
+            return Some(lim.rlim_cur as u64);
+        }
+        None
+    }
+    #[cfg(not(unix))]
+    {
+        None
+    }
+}
+
 /// Scan every port on every target with a TCP connect scan.
 ///
 /// Probes for all hosts are interleaved through one bounded pool, so a slow
@@ -110,6 +136,7 @@ pub async fn connect_scan(
 
     while let Some((host_idx, result)) = results.next().await {
         hosts[host_idx].ports.push(result?);
+        crate::progress::tick(1);
     }
 
     for host in &mut hosts {

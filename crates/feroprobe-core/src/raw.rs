@@ -118,12 +118,13 @@ pub(crate) fn receive_loop<T>(
 
 /// Spaces out packets so that no more than `rate` are sent per second, and
 /// none closer than the scan delay to any other probe of this process (see
-/// [`crate::timing::pace_blocking_or_cancel`]).
+/// [`crate::timing::pace_blocking_unless`]).
 pub(crate) struct Pacer {
     start: Instant,
     sent: u32,
     interval: Duration,
     delay: Duration,
+    shared: Option<crate::timing::RateSchedule>,
 }
 
 impl Pacer {
@@ -133,11 +134,15 @@ impl Pacer {
             sent: 0,
             interval: Duration::from_secs_f64(1.0 / f64::from(rate.max(1))),
             delay,
+            shared: None,
         }
     }
 
     pub(crate) fn for_config(cfg: &crate::model::ScanConfig) -> Self {
-        Self::new(cfg.max_rate, cfg.scan_delay)
+        Self {
+            shared: cfg.rate_schedule.clone(),
+            ..Self::new(cfg.max_rate, cfg.scan_delay)
+        }
     }
 
     /// Call before each packet; sleeps until it may go. The first packet
@@ -151,9 +156,27 @@ impl Pacer {
     /// set. Returns whether the packet may be sent; `false` means cancelled.
     pub(crate) fn wait_or_cancel(&mut self, cancel: &std::sync::atomic::AtomicBool) -> bool {
         use std::sync::atomic::Ordering;
-        let due = self.start + self.interval.saturating_mul(self.sent);
+        self.wait_unless(&|| cancel.load(Ordering::Relaxed))
+    }
+
+    /// Like [`wait`](Self::wait), but gives up once `deadline` (if any)
+    /// has passed, also while waiting. Returns whether the packet may be
+    /// sent; `false` means the deadline passed.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn wait_until(&mut self, deadline: Option<Instant>) -> bool {
+        self.wait_unless(&|| deadline.is_some_and(|d| Instant::now() >= d))
+    }
+
+    /// Wait for the packet's turn unless `stop` returns true first (checked
+    /// at least every [`crate::timing::CANCEL_POLL`], and once more after
+    /// the wait). Returns whether the packet may be sent.
+    fn wait_unless(&mut self, stop: &dyn Fn() -> bool) -> bool {
+        let due = match &self.shared {
+            Some(schedule) => schedule.book(self.interval),
+            None => self.start + self.interval.saturating_mul(self.sent),
+        };
         loop {
-            if cancel.load(Ordering::Relaxed) {
+            if stop() {
                 return false;
             }
             let now = Instant::now();
@@ -163,7 +186,7 @@ impl Pacer {
             std::thread::sleep((due - now).min(crate::timing::CANCEL_POLL));
         }
         self.sent = self.sent.saturating_add(1);
-        crate::timing::pace_blocking_or_cancel(self.delay, cancel)
+        crate::timing::pace_blocking_unless(self.delay, stop) && !stop()
     }
 }
 
@@ -299,14 +322,33 @@ pub(crate) fn is_idle_read(e: &io::Error) -> bool {
 /// address with port 0, from [`crate::target::socket_addr`] so that a
 /// link-local IPv6 target keeps its interface.
 pub(crate) fn send_with_backoff(sock: &Socket, pkt: &[u8], to: SocketAddr) -> io::Result<()> {
+    send_with_backoff_until(sock, pkt, to, None)
+}
+
+/// [`send_with_backoff`] that stops retrying at `deadline` (the host
+/// deadline from `--host-timeout`) with a `TimedOut` error, so a full send
+/// buffer cannot carry a probe past it.
+pub(crate) fn send_with_backoff_until(
+    sock: &Socket,
+    pkt: &[u8],
+    to: SocketAddr,
+    deadline: Option<Instant>,
+) -> io::Result<()> {
     let addr = to.into();
     let mut attempts = 0;
     loop {
+        if deadline.is_some_and(|d| Instant::now() >= d) {
+            return Err(crate::model::ScanConfig::timed_out());
+        }
         match sock.send_to(pkt, &addr) {
             Ok(_) => return Ok(()),
             Err(e) if is_no_buffer_space(&e) && attempts < 50 => {
                 attempts += 1;
-                std::thread::sleep(Duration::from_millis(10));
+                let mut pause = Duration::from_millis(10);
+                if let Some(d) = deadline {
+                    pause = pause.min(d.saturating_duration_since(Instant::now()));
+                }
+                std::thread::sleep(pause);
             }
             Err(e) => return Err(e),
         }
@@ -327,6 +369,51 @@ fn is_no_buffer_space(e: &io::Error) -> bool {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn scans_sharing_a_schedule_share_the_rate() {
+        // Like host jobs one after another: each new scan's first packet
+        // still waits for the shared budget.
+        let cfg = crate::model::ScanConfig {
+            max_rate: 20,
+            rate_schedule: Some(crate::timing::RateSchedule::new()),
+            ..Default::default()
+        };
+        let start = Instant::now();
+        for _ in 0..6 {
+            let mut pacer = Pacer::for_config(&cfg);
+            assert!(pacer.wait_until(None));
+        }
+        // Six packets at 20 per second: the last goes 250 ms in.
+        assert!(start.elapsed() >= Duration::from_millis(240));
+    }
+
+    #[test]
+    fn no_send_after_the_deadline() {
+        let sock = Socket::new(Domain::IPV4, Type::DGRAM, None).unwrap();
+        let to: SocketAddr = "127.0.0.1:9".parse().unwrap();
+        let past = Some(Instant::now() - Duration::from_millis(1));
+        let err = send_with_backoff_until(&sock, b"x", to, past).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::TimedOut);
+        assert!(send_with_backoff_until(&sock, b"x", to, None).is_ok());
+    }
+
+    #[test]
+    fn deadline_cuts_a_wait_short() {
+        let mut pacer = Pacer::new(1, Duration::ZERO);
+        assert!(pacer.wait_until(None));
+        // The next packet is due in a second; the deadline comes first.
+        let t = Instant::now();
+        assert!(!pacer.wait_until(Some(t + Duration::from_millis(150))));
+        let waited = t.elapsed();
+        assert!(
+            waited >= Duration::from_millis(150) && waited < Duration::from_millis(600),
+            "{waited:?}"
+        );
+        // A deadline that has passed refuses even a packet that is due.
+        let mut pacer = Pacer::new(1000, Duration::ZERO);
+        assert!(!pacer.wait_until(Some(Instant::now())));
+    }
 
     #[test]
     fn cancel_cuts_a_wait_short() {

@@ -7,7 +7,6 @@
 
 use std::fmt;
 use std::str::FromStr;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use crate::model::ScanConfig;
@@ -167,11 +166,11 @@ pub(crate) async fn pace(delay: Duration) {
 }
 
 /// Wait until the next probe may be sent, from a blocking thread, giving up
-/// as soon as `cancel` is set (checked at least every [`CANCEL_POLL`]).
+/// as soon as `stop` returns true (checked at least every [`CANCEL_POLL`]).
 /// Returns whether the probe may be sent; send right after it returns true.
-pub(crate) fn pace_blocking_or_cancel(delay: Duration, cancel: &AtomicBool) -> bool {
+pub(crate) fn pace_blocking_unless(delay: Duration, stop: &dyn Fn() -> bool) -> bool {
     loop {
-        if cancel.load(Ordering::Relaxed) {
+        if stop() {
             return false;
         }
         if delay.is_zero() {
@@ -181,6 +180,31 @@ pub(crate) fn pace_blocking_or_cancel(delay: Duration, cancel: &AtomicBool) -> b
             None => return true,
             Some(wait) => std::thread::sleep(wait.min(CANCEL_POLL)),
         }
+    }
+}
+
+/// One `--max-rate` budget shared by several scans, such as the host jobs
+/// of a `--host-timeout` run or discovery probes sent side by side. Clones
+/// share the schedule. Each packet books the next free slot, so the rate
+/// holds across scans that start and finish at different times, and a
+/// sender that oversleeps lets the next ones catch up instead of slowing
+/// the average.
+#[derive(Debug, Clone, Default)]
+pub struct RateSchedule(std::sync::Arc<std::sync::Mutex<Option<std::time::Instant>>>);
+
+impl RateSchedule {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Book a slot `interval` after the previous one (or now, if that has
+    /// passed) and return when it is due.
+    pub(crate) fn book(&self, interval: Duration) -> std::time::Instant {
+        let mut next = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let now = std::time::Instant::now();
+        let due = next.map_or(now, |n| n.max(now));
+        *next = Some(due + interval);
+        due
     }
 }
 
@@ -242,6 +266,19 @@ mod tests {
         assert!(parse_duration("").is_err());
     }
 
+    #[test]
+    fn shared_rate_schedule_spaces_bookings() {
+        let schedule = RateSchedule::new();
+        let other = schedule.clone();
+        let gap = Duration::from_millis(100);
+        let first = schedule.book(gap);
+        // A second scan sharing the schedule waits its turn.
+        assert!(other.book(gap) >= first + gap);
+        assert!(schedule.book(gap) >= first + gap * 2);
+        // Another schedule is independent.
+        assert!(RateSchedule::new().book(gap) < first + gap);
+    }
+
     #[tokio::test]
     async fn probes_share_one_schedule() {
         // The only test that uses a non-zero delay, since the slot is global.
@@ -250,11 +287,9 @@ mod tests {
         // Async and blocking callers interleave on the same schedule.
         pace(delay).await;
         pace(delay).await;
-        tokio::task::spawn_blocking(move || {
-            pace_blocking_or_cancel(delay, &AtomicBool::new(false))
-        })
-        .await
-        .unwrap();
+        tokio::task::spawn_blocking(move || pace_blocking_unless(delay, &|| false))
+            .await
+            .unwrap();
         pace(delay).await;
         // Three gaps after the first probe, which went at once.
         assert!(
@@ -291,11 +326,9 @@ mod tests {
                 starts.lock().unwrap().push(std::time::Instant::now());
             }));
         }
-        tokio::task::spawn_blocking(move || {
-            pace_blocking_or_cancel(delay, &AtomicBool::new(false))
-        })
-        .await
-        .unwrap();
+        tokio::task::spawn_blocking(move || pace_blocking_unless(delay, &|| false))
+            .await
+            .unwrap();
         for t in tasks {
             t.await.unwrap();
         }
