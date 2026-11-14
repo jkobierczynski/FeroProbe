@@ -285,7 +285,9 @@ feroprobe -v -oG - 192.168.1.0/24 | grep '/open/'
 | `-r` | Probe ports in order; by default the order is shuffled, like nmap's (reports are always sorted) |
 
 A scan whose protocol ends up with no ports is an error: `-sU -p T:80`
-scans no UDP port, and `-p U:53` needs `-sU`.
+scans no UDP port, and `-p U:53` needs `-sU`. When only some ports are
+left out, FeroProbe warns like nmap does: `-sS -p 77,U:44` scans TCP 77
+and prints a warning that `U:44` needs `-sU`.
 
 ### Host discovery and names
 

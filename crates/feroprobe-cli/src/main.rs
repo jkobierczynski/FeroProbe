@@ -848,6 +848,27 @@ fn port_lists(args: &Args) -> Result<PortLists> {
     Ok(lists)
 }
 
+/// Warnings for `-p` ports marked for a protocol this scan does not use,
+/// like nmap's: `-sS -p U:53` scans no UDP port.
+fn protocol_warnings(spec: &str, tcp_scan: bool, udp_scan: bool) -> Vec<String> {
+    let marked = |prefix: &str| {
+        spec.split(',').any(|part| {
+            part.trim()
+                .get(..2)
+                .is_some_and(|p| p.eq_ignore_ascii_case(prefix))
+        })
+    };
+    let mut warnings = Vec::new();
+    if marked("U:") && !udp_scan {
+        warnings
+            .push("your ports include \"U:\" but you haven't asked for a UDP scan with -sU".into());
+    }
+    if marked("T:") && !tcp_scan {
+        warnings.push("your ports include \"T:\" but you haven't asked for a TCP scan".into());
+    }
+    warnings
+}
+
 /// "1:02:03" for an elapsed time, like nmap's stats lines.
 fn clock(d: Duration) -> String {
     let s = d.as_secs();
@@ -1172,6 +1193,13 @@ async fn main() -> Result<()> {
         }
         if plan.udp && udp_ports.is_empty() {
             bail!("no UDP ports to scan (mark them with U:, as in -p U:53)");
+        }
+    }
+    if !plan.ping_only
+        && let Some(spec) = &args.ports
+    {
+        for w in protocol_warnings(spec, plan.tcp.is_some(), plan.udp) {
+            eprintln!("Warning: {w}");
         }
     }
     // The order probes go out in; reports keep the sorted lists.
@@ -1792,6 +1820,11 @@ mod tests {
         let l = lists(&["--top-ports", "10", "--exclude-ports", "T:80"]);
         assert!(!l.tcp.contains(&80) && l.tcp.len() == 9, "{:?}", l.tcp);
         assert!(port_lists(&args(&["--exclude-ports", "S:1"])).is_err());
+        assert_eq!(protocol_warnings("77,U:44,T:33", true, false).len(), 1);
+        assert!(protocol_warnings("77,u:44", true, false)[0].contains("-sU"));
+        assert!(protocol_warnings("77,U:44,T:33", true, true).is_empty());
+        assert!(protocol_warnings("T:33", false, true)[0].contains("TCP"));
+        assert!(protocol_warnings("22,80", true, false).is_empty());
         for bad in [&["-F", "-p", "22"][..], &["-F", "--top-ports", "5"]] {
             let mut argv = vec!["feroprobe"];
             argv.extend_from_slice(bad);
