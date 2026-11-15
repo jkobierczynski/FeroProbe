@@ -1384,11 +1384,19 @@ also probes UDP ports left \f[V]open|filtered\f[R], and runs its version
 scripts on open ports
 T}
 T{
-\f[V]-O\f[R]
+\f[V]-O\f[R], IPv4
 T}@T{
 Sends 16 probes per host to an open TCP port, a closed TCP port and a
-closed UDP port; without a closed port from the scan it picks random
-ports between 30000 and 44780, outside \f[V]-p\f[R]
+closed UDP port; without a closed port from the scan it picks random TCP
+and UDP ports between 30000 and 44780, outside \f[V]-p\f[R]
+T}
+T{
+\f[V]-O\f[R], IPv6
+T}@T{
+Sends up to 17 probes per host, including a neighbour solicitation to
+on-link targets; without a closed TCP port it skips the closed-port TCP
+probes, but still picks a random closed UDP port between 30000 and
+44780, outside \f[V]-p\f[R]
 T}
 T{
 \f[V]--traceroute\f[R]
@@ -1651,8 +1659,8 @@ T{
 Probes outside the requested ports
 T}@T{
 \f[V]-A\f[R]\[aq]s scripts can probe other ports (\f[V]ms-sql-info\f[R]:
-UDP 1434 on every host); \f[V]-O\f[R] picks random closed TCP and UDP
-ports when the scan found none
+UDP 1434 on every host); \f[V]-O\f[R] picks a random closed UDP port
+(and for IPv4 also TCP) when the scan found none
 T}@T{
 Never: \f[V]-sV\f[R] and \f[V]-O\f[R] probe only open ports the scan
 found, and FeroProbe has no scripts

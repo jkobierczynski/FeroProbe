@@ -1510,6 +1510,7 @@ fn nmap_differences(
     d: &DryOrder,
     cfg: &ScanConfig,
     privileged: bool,
+    families: (bool, bool),
 ) -> Vec<String> {
     let mut v: Vec<String> = Vec::new();
     let scan = !plan.ping_only;
@@ -1537,13 +1538,24 @@ fn nmap_differences(
                 .into(),
         );
     }
-    if d.os {
+    let (v4, v6) = families;
+    if d.os && v4 {
         v.push(
-            "-O: nmap sends 16 probes per host: 6 SYNs, an ECN SYN and 3 more TCP probes to an \
-             open port, 3 TCP probes to a closed port, 2 ICMP echoes, and a UDP datagram to a \
-             closed port. With no closed port from the scan it picks random TCP and UDP ports \
-             between 30000 and 44780, outside -p. FeroProbe sends one SYN to an open port the \
-             scan found"
+            "-O (IPv4): nmap sends 16 probes per host: 6 SYNs, an ECN SYN and 3 more TCP probes \
+             to an open port, 3 TCP probes to a closed port, 2 ICMP echoes, and a UDP datagram \
+             to a closed port. With no closed port from the scan it picks random TCP and UDP \
+             ports between 30000 and 44780, outside -p. FeroProbe sends one SYN to an open port \
+             the scan found"
+                .into(),
+        );
+    }
+    if d.os && v6 {
+        v.push(
+            "-O (IPv6): nmap sends up to 17 probes per host: 6 SYNs, an ECN SYN and 3 more TCP \
+             probes to an open port, 3 TCP probes to a closed port (skipped when the scan found \
+             none), 2 ICMPv6 echoes, a neighbour solicitation to on-link targets, and a UDP \
+             datagram to a closed port, picked at random between 30000 and 44780 (outside -p) \
+             when the scan found none. FeroProbe sends one SYN to an open port the scan found"
                 .into(),
         );
     }
@@ -1656,7 +1668,17 @@ fn dry_run(
         evasion: &cfg.evasion,
         retries: cfg.retries,
         notes: dry_run_notes(args, plan, d, privileged),
-        nmap_differences: nmap_differences(args, plan, d, cfg, privileged),
+        nmap_differences: nmap_differences(
+            args,
+            plan,
+            d,
+            cfg,
+            privileged,
+            (
+                targets.iter().any(|t| t.addr.is_ipv4()),
+                targets.iter().any(|t| t.addr.is_ipv6()),
+            ),
+        ),
     };
     let stdout = std::io::stdout();
     let mut w = std::io::BufWriter::new(stdout.lock());
@@ -2697,7 +2719,7 @@ mod tests {
         };
         let cfg = ScanConfig::default();
         let a = args(&["-A", "-p", "502,102"]);
-        let all = nmap_differences(&a, &plan, &d, &cfg, true).join("\n");
+        let all = nmap_differences(&a, &plan, &d, &cfg, true, (true, false)).join("\n");
         // -A's scripts and the out-of-scope MS SQL probe.
         assert!(all.contains("-sC") && all.contains("1434"), "{all}");
         // -O's random closed ports.
@@ -2714,7 +2736,7 @@ mod tests {
             trace: false,
             ..dry_order()
         };
-        let all = nmap_differences(&a, &plan, &d, &cfg, false).join("\n");
+        let all = nmap_differences(&a, &plan, &d, &cfg, false, (true, false)).join("\n");
         assert!(all.contains("silently skips OS detection"), "{all}");
         // A plain connect scan still gets the timing difference.
         let connect = plan_with_tcp(Some(ScanType::Connect));
@@ -2724,6 +2746,7 @@ mod tests {
             &dry_order(),
             &cfg,
             false,
+            (true, false),
         );
         assert_eq!(few.len(), 1, "{few:?}");
         assert!(few[0].starts_with("Timing"), "{few:?}");
@@ -2734,9 +2757,33 @@ mod tests {
             &dry_order(),
             &cfg,
             true,
+            (true, false),
         )
         .join("\n");
         assert!(all.contains("-D with ME"), "{all}");
+        // -O is described per address family: IPv6 skips the closed-port
+        // TCP probes when none is known and adds a neighbour solicitation.
+        let d = DryOrder {
+            os: true,
+            ..dry_order()
+        };
+        let os = |fam| nmap_differences(&args(&["-O"]), &connect, &d, &cfg, true, fam).join("\n");
+        let v4 = os((true, false));
+        assert!(
+            v4.contains("-O (IPv4)") && !v4.contains("-O (IPv6)"),
+            "{v4}"
+        );
+        let v6 = os((false, true));
+        assert!(
+            v6.contains("-O (IPv6)") && !v6.contains("-O (IPv4)"),
+            "{v6}"
+        );
+        assert!(v6.contains("neighbour solicitation"), "{v6}");
+        let both = os((true, true));
+        assert!(
+            both.contains("-O (IPv4)") && both.contains("-O (IPv6)"),
+            "{both}"
+        );
     }
 
     #[test]
