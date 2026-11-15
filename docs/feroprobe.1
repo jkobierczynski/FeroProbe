@@ -1635,6 +1635,9 @@ Raw TCP scans (\f[V]-sS\f[R], \f[V]-sF\f[R], \f[V]-sN\f[R],
 .IP \[bu] 2
 UDP probes to ports without a service payload carry
 \f[V]FeroProbeScan/1\[rs]n\f[R].
+.IP \[bu] 2
+ICMP and ICMPv6 echo requests (host discovery) carry the 9-byte payload
+\f[V]feroprobe\f[R], where nmap\[aq]s are empty.
 .PP
 The connect scan and OS detection probes carry no mark, by design.
 Suricata and Snort rules matching the signature are in the
@@ -1685,10 +1688,11 @@ T}
 T{
 Probe signature
 T}@T{
-None
+None (empty ICMP echo payload)
 T}@T{
 Raw TCP probes use window 65109; generic UDP probes carry
-\f[V]FeroProbeScan/1\[rs]n\f[R]
+\f[V]FeroProbeScan/1\[rs]n\f[R]; ICMP echo requests carry
+\f[V]feroprobe\f[R]
 T}
 T{
 Unprivileged discovery

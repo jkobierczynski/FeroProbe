@@ -1096,6 +1096,8 @@ owners can recognize them:
 - Raw TCP scans (`-sS`, `-sF`, `-sN`, `-sX`, `-sA`, `-sW`, `-sM`,
   `--scanflags`) set the TCP window to 65109 (`0xFE55`).
 - UDP probes to ports without a service payload carry `FeroProbeScan/1\n`.
+- ICMP and ICMPv6 echo requests (host discovery) carry the 9-byte payload
+  `feroprobe`, where nmap's are empty.
 
 The connect scan and OS detection probes carry no mark, by design. Suricata
 and Snort rules matching the signature are in the repository's `rules/`
@@ -1111,7 +1113,7 @@ safeguard calls for a difference. The deliberate differences are:
 | `--packet-trace` with `-f`/`--mtu` | Prints one `SENT` line for the unfragmented probe, although fragments are what goes on the wire | Prints one line per fragment actually sent. nmap's display is treated as a bug |
 | Evasion options (`-f`, `--mtu`, `-D`, `-S`) | Allowed against any address | Raw IPv4 TCP scans only; public targets, decoys or spoofed sources need `--allow-public-evasion` |
 | Decoy order (`-D ...,ME,...`) | `ME` places the real probe | `ME` is accepted, but the real probe always goes last |
-| Probe signature | None | Raw TCP probes use window 65109; generic UDP probes carry `FeroProbeScan/1\n` |
+| Probe signature | None (empty ICMP echo payload) | Raw TCP probes use window 65109; generic UDP probes carry `FeroProbeScan/1\n`; ICMP echo requests carry `feroprobe` |
 | Unprivileged discovery | TCP connects to 80 and 443 only | The same, plus an ICMP echo through an unprivileged ping socket where the OS offers one |
 | `--explain`, `--dry-run` | No equivalent | FeroProbe's own planning and checking options |
 | Settings files, `ics_protection`, `--override-ics-protection` | No equivalent | FeroProbe's own; off by default, so default behaviour is unchanged |

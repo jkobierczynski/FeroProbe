@@ -169,6 +169,16 @@ class Compare(unittest.TestCase):
         self.assertIn("known", alone[0])
         self.assertNotIn("known", extra[0])
 
+    def test_echo_marker_documented_alone(self):
+        known = nd.load_known(os.path.join(os.path.dirname(os.path.abspath(__file__)), "known-differences.txt"))
+        mark = nd.payload_label(b"feroprobe")
+        alone = [{"case": "c", "text": f"icmp echo-request payload: nmap [-] vs FeroProbe [{mark}]"}]
+        extra = [{"case": "c", "text": f"icmp echo-request payload: nmap [-] vs FeroProbe [{mark}, 3B 'abc' #a9993e]"}]
+        nd.annotate(alone, known)
+        nd.annotate(extra, known)
+        self.assertIn("known", alone[0])
+        self.assertNotIn("known", extra[0])
+
     def test_findings(self):
         n = self.summary([(22, 0x02, 1024), (443, 0x02, 1024), (443, 0x02, 1024)])
         f = self.summary([(22, 0x02, 65109), (443, 0x02, 1024), (8080, 0x02, 1024)])

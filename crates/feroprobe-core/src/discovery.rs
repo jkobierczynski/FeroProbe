@@ -497,8 +497,8 @@ mod icmp {
         /// to the kernel).
         fn request(self, v6: bool, id: u16, seq: u16) -> Vec<u8> {
             match self {
-                Query::Echo if v6 => packet::icmpv6_echo(id, seq, b"feroprobe"),
-                Query::Echo => packet::icmp_echo(id, seq, b"feroprobe"),
+                Query::Echo if v6 => packet::icmpv6_echo(id, seq, packet::ECHO_MARKER),
+                Query::Echo => packet::icmp_echo(id, seq, packet::ECHO_MARKER),
                 // Originate, receive and transmit timestamps.
                 Query::Timestamp => packet::icmp_query(packet::ICMP_TIMESTAMP, id, seq, 12),
                 Query::Mask => packet::icmp_query(packet::ICMP_ADDRESS_MASK, id, seq, 4),
