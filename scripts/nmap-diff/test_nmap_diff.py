@@ -122,6 +122,15 @@ class Scope(unittest.TestCase):
         self.assertTrue(nd.in_scope("ip proto 1", scope))
         self.assertFalse(nd.in_scope("udp/40125", scope))
 
+    def test_icmp_outside_an_ip_protocol_scan(self):
+        echo = nd.decode_frame(1, eth(SCAN_MAC, ip4("10.77.0.1", "10.77.0.2", 1, bytes([8, 0, 0, 0, 0, 1, 0, 1]))))
+        dest = nd.dest_key(echo, "10.77.0.2")
+        self.assertEqual(dest, "icmp echo-request")
+        self.assertFalse(nd.in_scope(dest, nd.scope_of(["-sO", "-p", "6"], "lan", True)))
+        self.assertTrue(nd.in_scope(dest, nd.scope_of(["-sO", "-p", "1,6"], "lan", True)))
+        # routed: host discovery sends ICMP echo itself
+        self.assertIsNone(nd.in_scope(dest, nd.scope_of(["-sO", "-p", "6"], "routed", True)))
+
     def test_macros(self):
         self.assertEqual(nd.expand_macros("-p @TCP"), "-p " + ",".join(map(str, nd.TCP_PORTS)))
 
@@ -133,6 +142,22 @@ class Compare(unittest.TestCase):
             p = nd.decode_frame(1, eth(SCAN_MAC, ip4("10.77.0.1", "10.77.0.2", 6, tcp(40000, dport, flags, win))))
             sent.append(p)
         return nd.summarise(sent, "10.77.0.2")[0]
+
+    def test_same_probes_in_different_numbers(self):
+        n = self.summary([(22, 0x02, 1024)] * 3 + [(22, 0x04, 1024)])
+        f = self.summary([(22, 0x02, 1024)] + [(22, 0x04, 1024)] * 3)
+        found = nd.compare("c", n, f, {"tcp": {22}}, {}, {})
+        self.assertEqual([x["severity"] for x in found], ["count"])
+
+    def test_signature_note_needs_the_marker_alone(self):
+        known = nd.load_known(os.path.join(os.path.dirname(os.path.abspath(__file__)), "known-differences.txt"))
+        mark = nd.payload_label(b"FeroProbeScan/1\n")
+        alone = [{"case": "c", "text": f"udp/9 payload: nmap [-] vs FeroProbe [{mark}]"}]
+        extra = [{"case": "c", "text": f"udp/9 payload: nmap [-] vs FeroProbe [{mark}, 3B 'abc' #a9993e]"}]
+        nd.annotate(alone, known)
+        nd.annotate(extra, known)
+        self.assertIn("known", alone[0])
+        self.assertNotIn("known", extra[0])
 
     def test_findings(self):
         n = self.summary([(22, 0x02, 1024), (443, 0x02, 1024), (443, 0x02, 1024)])

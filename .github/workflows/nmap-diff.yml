@@ -21,6 +21,9 @@ on:
         description: "Comma-separated globs of case names"
         default: "*"
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -38,7 +41,9 @@ jobs:
         run: python3 -m unittest discover -s scripts/nmap-diff -v
       - run: cargo build --release
       - name: Run the matrix
-        run: sudo python3 scripts/nmap-diff/nmap_diff.py --cases "${{ github.event.inputs.cases || '*' }}"
+        env:
+          CASES: ${{ github.event.inputs.cases || '*' }}
+        run: sudo python3 scripts/nmap-diff/nmap_diff.py --cases "$CASES"
       - name: Report to the run summary
         if: always()
         run: |

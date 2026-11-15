@@ -187,18 +187,29 @@ class Capture:
             path = os.path.join(self.outdir, f"{self.tag}.{iface}.pcap")
             p = subprocess.Popen(
                 ["ip", "netns", "exec", NS_SCAN, "tcpdump", "-i", iface, "-s", "0", "-U", "-n",
-                 "--immediate-mode", "-w", path],
+                 "--immediate-mode", "-Z", "root", "-w", path],
                 stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
             self.procs.append(p)
             self.files[iface] = path
-        # wait until every tcpdump says it is listening
-        for p in self.procs:
-            deadline = time.time() + 10
-            while time.time() < deadline:
+        # wait until every tcpdump says it is listening; anything else
+        # (it exited, or said something else first) is a failed capture
+        for iface, p in zip(SCAN_IFACES, self.procs):
+            seen = []
+            while True:
                 line = p.stderr.readline()
-                if "listening on" in line or not line:
+                if "listening on" in line:
                     break
+                if not line:
+                    self.kill()
+                    raise RuntimeError(f"tcpdump on {iface} did not start: {' '.join(seen).strip()}")
+                seen.append(line)
         time.sleep(0.3)
+
+    def kill(self):
+        for p in self.procs:
+            if p.poll() is None:
+                p.kill()
+                p.wait()
 
     def stop(self):
         time.sleep(1.0)  # let late replies and last probes land
@@ -666,6 +677,8 @@ def scope_of(argv, target_kind, privileged):
             scope[proto] |= ps
         ip_discovery = target_kind in ("routed", "local") or not privileged or \
             "--send-ip" in argv or "--disable-arp-ping" in argv
+        if "ip" in scope and (ip_discovery or explicit_ping):
+            scope["icmp-discovery"] = {1}
         if not explicit_ping and ip_discovery:
             scope["tcp"] |= {80, 443}
     return dict(scope)
@@ -678,11 +691,20 @@ def scope_of(argv, target_kind, privileged):
 
 def run_tool(tool, binary, argv, target, privileged, outdir, tag, timeout, unpriv_bin):
     xml = os.path.join(outdir, f"{tag}.xml")
-    cmd = [binary] + argv + ["-oX", xml, target]
+    # never read an earlier run's XML
+    if os.path.lexists(xml):
+        os.unlink(xml)
+    cmd = [binary, *argv, "-oX", xml, target]
+    private = None
     if not privileged:
-        os.chmod(outdir, 0o777)
-        cmd = ["setpriv", "--reuid=65534", "--regid=65534", "--clear-groups", "--inh-caps=-all", "--"] + \
-            ([unpriv_bin] if tool == "feroprobe" else [binary]) + argv + ["-oX", xml, target]
+        # The unprivileged tool writes its XML into a directory of its own;
+        # the output directory itself is never made writable for others.
+        private = tempfile.mkdtemp(prefix="fpd-xml-")
+        os.chown(private, 65534, 65534)
+        os.chmod(private, 0o700)
+        user_xml = os.path.join(private, "out.xml")
+        cmd = ["setpriv", "--reuid=65534", "--regid=65534", "--clear-groups", "--inh-caps=-all", "--",
+               unpriv_bin if tool == "feroprobe" else binary, *argv, "-oX", user_xml, target]
     full = ["ip", "netns", "exec", NS_SCAN] + cmd
     t0 = time.time()
     try:
@@ -692,10 +714,22 @@ def run_tool(tool, binary, argv, target, privileged, outdir, tag, timeout, unpri
     except subprocess.TimeoutExpired as e:
         out, code = (e.stdout or b"").decode() if isinstance(e.stdout, bytes) else (e.stdout or ""), "timeout"
     elapsed = time.time() - t0
-    with open(os.path.join(outdir, f"{tag}.out"), "w") as f:
-        f.write("$ " + shlex.join(cmd) + "\n" + out)
+    if private:
+        if os.path.isfile(user_xml) and not os.path.islink(user_xml):
+            shutil.copyfile(user_xml, xml, follow_symlinks=False)
+        shutil.rmtree(private, ignore_errors=True)
+    write_private(os.path.join(outdir, f"{tag}.out"), "$ " + shlex.join(cmd) + "\n" + out)
     return {"cmd": shlex.join([tool] + argv + [target]), "exit": code, "seconds": round(elapsed, 2),
             "output": out, "xml": xml}
+
+
+def write_private(path, text):
+    """Write a file as root without following a symlink planted in its place."""
+    if os.path.lexists(path):
+        os.unlink(path)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+    with os.fdopen(fd, "w") as f:
+        f.write(text)
 
 
 def parse_xml_ports(path):
@@ -794,6 +828,11 @@ def in_scope(dest, scope):
     m = re.match(r"^ip proto (\d+)$", dest)
     if m and "ip" in scope:
         return int(m.group(1)) in scope["ip"]
+    # -sO: ICMP probes are protocol 1 (58 for ICMPv6), unless host
+    # discovery sends them
+    m = re.match(r"^(icmp6?) [a-z-]+$", dest)
+    if m and "ip" in scope and not scope.get("icmp-discovery"):
+        return (58 if m.group(1) == "icmp6" else 1) in scope["ip"]
     return None
 
 
@@ -847,8 +886,14 @@ def compare(case, n_sum, f_sum, scope, n_ports, f_ports):
                 shape = True
                 add("shape", dest, f"{dest} {field}: nmap [{fmt_counter(nv)}] vs FeroProbe [{fmt_counter(fv)}]",
                     detail=f"{field}: nmap [{', '.join(sorted(map(str, nv)))}] vs FeroProbe [{', '.join(sorted(map(str, fv)))}]")
-        if not shape and n["count"] != f["count"]:
-            add("count", dest, f"{dest}: nmap sent {n['count']}, FeroProbe {f['count']}")
+        same_counts = all(n["fields"].get(k) == f["fields"].get(k) for k in set(n["fields"]) | set(f["fields"]))
+        if not shape and (n["count"] != f["count"] or not same_counts):
+            add("count", dest, f"{dest}: nmap sent {n['count']}, FeroProbe {f['count']}"
+                + ("" if same_counts else " (same probes, in different numbers: "
+                   + "; ".join(f"{k} nmap [{fmt_counter(n['fields'].get(k, {}))}] FeroProbe "
+                               f"[{fmt_counter(f['fields'].get(k, {}))}]"
+                               for k in sorted(set(n["fields"]) | set(f["fields"]))
+                               if n["fields"].get(k) != f["fields"].get(k)) + ")"))
 
     # exit status
     if str(n_ports.get("_exit")) != str(f_ports.get("_exit")):
@@ -1046,7 +1091,7 @@ def scope_text(scope):
     if scope is None:
         return "not checked (port list not explicit)"
     return "; ".join(f"{p} {','.join('any' if x == ANY_PORT else str(x) for x in sorted(v))}"
-                     for p, v in sorted(scope.items())) or "none"
+                     for p, v in sorted(scope.items()) if p != "icmp-discovery") or "none"
 
 
 def analyse(r, argv, known):
@@ -1121,7 +1166,7 @@ def main():
     os.makedirs(args.out, exist_ok=True)
     raw = os.path.join(args.out, "raw")
     os.makedirs(raw, exist_ok=True)
-    os.chmod(raw, 0o777)
+    os.chmod(raw, 0o755)
 
     # an unprivileged user cannot always reach the repo's target dir
     unpriv_dir = tempfile.mkdtemp(prefix="fpd-bin-")
@@ -1180,8 +1225,12 @@ def main():
                 tag = f"{c['case']}.{tool}"
                 cap = Capture(raw, tag)
                 cap.start()
-                run = run_tool("nmap" if tool == "nmap" else "feroprobe", binary, argv, target, priv, raw, tag,
-                               args.timeout, unpriv_bin)
+                try:
+                    run = run_tool("nmap" if tool == "nmap" else "feroprobe", binary, argv, target, priv, raw, tag,
+                                   args.timeout, unpriv_bin)
+                except BaseException:
+                    cap.kill()
+                    raise
                 files = cap.stop()
                 sent = load_sent(files, macs)
                 summary, ttl = summarise(sent, target)
