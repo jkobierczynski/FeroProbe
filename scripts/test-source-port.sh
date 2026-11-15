@@ -53,6 +53,9 @@ check "UDP probes from another port than 53" "$(udp_probes '&& $6!=53')" 0
 
 echo "== -sS without -g (sanity) =="
 fero_captured -Pn -sS -p "$TCP_PORTS" "$TGT_A"
+check "exit status" "$RC" 0
+total=$(tcp_probes "")
+check_true "SYN probes were sent ($total)" test "$total" -gt 0
 check "SYN probes from port 53" "$(tcp_probes '&& $6==53')" 0
 
 echo "== -sT -g 53 (connect scan) =="

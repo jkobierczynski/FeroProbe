@@ -3,7 +3,7 @@
 # Source it from a test script. It builds a small, private lab out of two
 # network namespaces, so nothing touches your own network:
 #
-#   fpt-scan (scanner)                       fpt-tgt (target)
+#   fpt-scan-<pid> (scanner)                 fpt-tgt-<pid> (target)
 #   fpt-a0  10.66.1.1/24  <---- link A ---->  fpt-a1  10.66.1.2/24
 #   fpt-b0  10.66.2.1/24  <---- link B ---->  fpt-b1  10.66.2.2/24
 #
@@ -24,8 +24,9 @@
 
 set -euo pipefail
 
-NS_SCAN=fpt-scan
-NS_TGT=fpt-tgt
+# Names of this run's own, so two test scripts can run at the same time.
+NS_SCAN=fpt-scan-$$
+NS_TGT=fpt-tgt-$$
 TGT_A=10.66.1.2
 TGT_B=10.66.2.2
 SCAN_A=10.66.1.1
@@ -45,7 +46,7 @@ BIN=${BIN:-}
 
 fails=0
 _PIDS=()
-_TMP=()
+_RUN_DIR=""   # every temporary file of this run lives under it
 
 lab_usage_args() {   # parse the options every test script takes
     while [ $# -gt 0 ]; do
@@ -100,16 +101,16 @@ lab_down() {
     done
     ip netns del "$NS_SCAN" 2>/dev/null || true
     ip netns del "$NS_TGT" 2>/dev/null || true
-    for p in "${_TMP[@]:-}"; do
-        if [ -n "$p" ]; then rm -rf "$p"; fi
-    done
+    if [ -n "$_RUN_DIR" ]; then rm -rf "$_RUN_DIR"; fi
 }
 
-lab_tmp() { local f; f="$(mktemp -d)"; _TMP+=("$f"); echo "$f"; }
+# A new directory under the run's directory (safe to call in $(...): the
+# EXIT handler removes the whole run directory).
+lab_tmp() { mktemp -d -p "$_RUN_DIR"; }
 
 lab_up() {
-    lab_down
     trap lab_down EXIT
+    _RUN_DIR="$(mktemp -d)"
     ip netns add "$NS_SCAN"
     ip netns add "$NS_TGT"
     nsx "$NS_SCAN" ip link set lo up
@@ -160,7 +161,9 @@ for a in sys.argv[3:]:
 print("ready", flush=True)
 threading.Event().wait()
 PY
-    nsx "$NS_TGT" python3 "$svc" "$TCP_OPEN" "$UDP_OPEN" "$TGT_A" "$TGT_B" >/dev/null 2>&1 &
+    # ip netns exec directly, not nsx: $! must be the process itself, not a
+    # subshell running the function, for lab_down to stop it.
+    ip netns exec "$NS_TGT" python3 "$svc" "$TCP_OPEN" "$UDP_OPEN" "$TGT_A" "$TGT_B" >/dev/null 2>&1 &
     _PIDS+=($!)
     # Wait until the target's listener answers over link A.
     nsx "$NS_SCAN" python3 - "$TGT_A" "$TCP_OPEN" <<'PY' \
@@ -183,7 +186,7 @@ _SNIFF_PID=""
 CAP=""
 capture_start() {   # capture everything in the scanner namespace into $CAP
     CAP="$(lab_tmp)/cap.txt"
-    nsx "$NS_SCAN" python3 "$LIB_DIR/sniff.py" "$CAP" >/dev/null 2>&1 &
+    ip netns exec "$NS_SCAN" python3 "$LIB_DIR/sniff.py" "$CAP" >/dev/null 2>&1 &
     _SNIFF_PID=$!
     _PIDS+=("$_SNIFF_PID")
     local i
