@@ -47,6 +47,7 @@ BIN=${BIN:-}
 fails=0
 _PIDS=()
 _RUN_DIR=""   # every temporary file of this run lives under it
+_NETNS=()     # namespaces this run created (the only ones it deletes)
 
 lab_usage_args() {   # parse the options every test script takes
     while [ $# -gt 0 ]; do
@@ -99,8 +100,9 @@ lab_down() {
     for p in "${_PIDS[@]:-}"; do
         if [ -n "$p" ]; then kill "$p" 2>/dev/null || true; fi
     done
-    ip netns del "$NS_SCAN" 2>/dev/null || true
-    ip netns del "$NS_TGT" 2>/dev/null || true
+    for p in "${_NETNS[@]:-}"; do
+        if [ -n "$p" ]; then ip netns del "$p" 2>/dev/null || true; fi
+    done
     if [ -n "$_RUN_DIR" ]; then rm -rf "$_RUN_DIR"; fi
 }
 
@@ -111,8 +113,11 @@ lab_tmp() { mktemp -d -p "$_RUN_DIR"; }
 lab_up() {
     trap lab_down EXIT
     _RUN_DIR="$(mktemp -d)"
-    ip netns add "$NS_SCAN"
-    ip netns add "$NS_TGT"
+    local ns
+    for ns in "$NS_SCAN" "$NS_TGT"; do
+        ip netns add "$ns" || { echo "lab: cannot create namespace $ns" >&2; exit 1; }
+        _NETNS+=("$ns")
+    done
     nsx "$NS_SCAN" ip link set lo up
     nsx "$NS_TGT" ip link set lo up
     ip link add fpt-a0 netns "$NS_SCAN" type veth peer name fpt-a1 netns "$NS_TGT"
