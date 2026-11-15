@@ -68,7 +68,8 @@ line asks for any of these options:
 
 Script scanning will join this list if FeroProbe ever gets it.
 
-The refusal happens before any name is resolved or any packet is sent, and
+The refusal happens before any name is resolved or any packet is sent
+(a `--dry-run` gets a warning instead; see below), and
 names the options that caused it (the message is one line; wrapped here):
 
 ```text
@@ -82,6 +83,21 @@ once anyway
 Host discovery and plain port scans (`-sS`, `-sT`, `-sU`, `-sn`, and the
 rest) are not refused. They are also not harmless on a control network, so
 choose gentle timing (`-T2` or slower) there anyway.
+
+### Dry runs
+
+`--dry-run` sends nothing, so it is never refused. With protection on and
+`-sV`, `-O` or `-A` on the command line, it prints the preview as usual plus
+a warning that a real run would be refused, so the habit is learned before
+it matters:
+
+```text
+$ feroprobe --dry-run -sV 10.20.0.15
+Warning: ICS protection is on (ics_protection = true in .feroproberc): a real run with -sV
+would be refused, since version and OS detection send probes that can hang or crash fragile
+OT/ICS devices such as PLCs. This dry run sends nothing, so it goes ahead. For the real scan,
+leave out -sV or pass --override-ics-protection
+```
 
 ### Override for one run
 

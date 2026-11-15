@@ -1176,7 +1176,9 @@ fn ics_source(settings: &config::Settings) -> String {
 
 /// The ICS protection guard. With `ics_protection` on, refuse a run that
 /// asks for a device-hostile option, unless `--override-ics-protection`
-/// lets it through with a warning. Returns the lines to print.
+/// lets it through with a warning. A `--dry-run` is never refused, since
+/// it sends nothing, but gets a warning naming what a real run would
+/// refuse. Returns the lines to print.
 fn gate_ics(settings: &config::Settings, args: &Args) -> Result<Vec<String>> {
     if !settings.ics_protection {
         if args.override_ics_protection {
@@ -1192,6 +1194,17 @@ fn gate_ics(settings: &config::Settings, args: &Args) -> Result<Vec<String>> {
         return Ok(Vec::new());
     }
     let list = hostile.join(", ");
+    if !args.override_ics_protection && args.dry_run {
+        // A dry run sends nothing, so it is allowed, but says what a real
+        // run would do: the habit is the thing to teach.
+        return Ok(vec![format!(
+            "Warning: ICS protection is on ({}): a real run with {list} would be refused, \
+             since version and OS detection send probes that can hang or crash fragile \
+             OT/ICS devices such as PLCs. This dry run sends nothing, so it goes ahead. \
+             For the real scan, leave out {list} or pass --override-ics-protection",
+            ics_source(settings)
+        )]);
+    }
     if !args.override_ics_protection {
         bail!(
             "ICS protection is on ({}), so {list} is refused: version and OS detection \
@@ -2923,6 +2936,36 @@ mod tests {
         let lines = gate_ics(&ics(false), &a).unwrap();
         assert_eq!(lines.len(), 1);
         assert!(lines[0].contains("has no effect"));
+    }
+
+    #[test]
+    fn ics_dry_run_previews_with_a_warning() {
+        let a = argv(&["--dry-run", "-sV", "-O", "10.0.0.1"]);
+        let lines = gate_ics(&ics(true), &a).unwrap();
+        assert_eq!(lines.len(), 1);
+        assert!(
+            lines[0].starts_with("Warning: ICS protection is on"),
+            "{}",
+            lines[0]
+        );
+        assert!(
+            lines[0].contains("a real run with -sV, -O would be refused"),
+            "{}",
+            lines[0]
+        );
+        assert!(
+            lines[0].contains("--override-ics-protection"),
+            "{}",
+            lines[0]
+        );
+        // Protection off: a dry run is as quiet as any other run.
+        assert!(gate_ics(&ics(false), &a).unwrap().is_empty());
+        // The same command without --dry-run is still refused.
+        assert!(gate_ics(&ics(true), &argv(&["-sV", "-O", "10.0.0.1"])).is_err());
+        // With the override too, the override's warning applies.
+        let a = argv(&["--dry-run", "-A", "--override-ics-protection", "10.0.0.1"]);
+        let lines = gate_ics(&ics(true), &a).unwrap();
+        assert!(lines.iter().any(|l| l.contains("running -A although")));
     }
 
     #[test]

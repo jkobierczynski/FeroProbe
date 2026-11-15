@@ -81,6 +81,8 @@ Setting `ics_protection = true` in a settings file
 directory) makes FeroProbe refuse those options, before it resolves or
 sends anything, with a message naming the option.
 `--override-ics-protection` lets one run through with a prominent warning.
+A `--dry-run` is not refused, since it sends nothing, but warns that the
+real run would be.
 With protection on, scanning a well-known OT port (Modbus 502, S7comm 102,
 EtherNet/IP 44818, DNP3 20000, BACnet 47808) also prints a warning.
 
