@@ -412,7 +412,7 @@ struct Args {
     #[arg(short = 'p', long, conflicts_with = "top_ports")]
     ports: Option<String>,
 
-    /// Scan the N most common ports (default 100 for TCP, 20 for UDP)
+    /// Scan the N most common ports (default 1000, as in nmap)
     #[arg(long, value_name = "N")]
     top_ports: Option<usize>,
 
@@ -1191,8 +1191,8 @@ fn port_lists(args: &Args, ip_proto: bool, port_scan: bool) -> Result<PortLists>
         None => {
             let n = if args.fast { Some(100) } else { args.top_ports };
             PortLists {
-                tcp: top_ports(n.unwrap_or(100)),
-                udp: top_udp_ports(n.unwrap_or(20)),
+                tcp: top_ports(n.unwrap_or(1000)),
+                udp: top_udp_ports(n.unwrap_or(1000)),
                 sctp: top_sctp_ports(n.unwrap_or(50)),
                 // -sO with no -p scans every IP protocol.
                 protocols: (0..=255).collect(),
@@ -3131,7 +3131,8 @@ mod tests {
         let lists = |argv: &[&str]| port_lists(&args(argv), false, true).unwrap();
         let fast = lists(&["-F"]);
         assert_eq!((fast.tcp.len(), fast.udp.len()), (100, 100));
-        assert_eq!(lists(&[]).udp.len(), 20);
+        let default = lists(&[]);
+        assert_eq!((default.tcp.len(), default.udp.len()), (1000, 1000));
         let l = lists(&["-p", "22,U:53,161,T:80"]);
         assert_eq!((l.tcp, l.udp), (vec![22, 80], vec![22, 53, 161]));
         let l = lists(&["-p", "20-25,U:50-55", "--exclude-ports", "21-23,U:53"]);

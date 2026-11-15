@@ -68,7 +68,7 @@ the SCTP, IP protocol, IPv6 OS detection and probe-signature work).
 | Target lists | `-iL` | `-` for standard input |
 | Exclusions | `--exclude`, `--excludefile` | |
 | Port specs | `-p` | Ranges, `-p-`, `T:`/`U:`/`S:`/`P:` prefixes, mismatch warnings like nmap's |
-| Common ports | `--top-ports`, `-F` | |
+| Common ports | default, `--top-ports`, `-F` | Default 1000 TCP and 1000 UDP ports, as nmap; `-F` 100. FeroProbe's own three-tier ranking (`ports.rs`: hand-ranked, curated by category, then IANA-registered ascending), not nmap-services |
 | Port exclusions | `--exclude-ports` | Also removed from the ping probes, like nmap |
 | Port order | `-r` | Shuffled by default, like nmap |
 
@@ -160,6 +160,7 @@ the SCTP, IP protocol, IPv6 OS detection and probe-signature work).
 | UDP service payloads (`-sU`) | nmap's payload database: several probes per port (two DNS queries to 53, two NTP versions to 123, SNMPv1 and v3 to 161, three NetBIOS queries to 137) | FeroProbe's own, one per port (DNS, NTP, SNMP, SSDP), else `FeroProbeScan/1\n` | nmap's payloads cannot be redistributed; found by `scripts/nmap-diff` and kept (Jurgen, 2026-11-15) |
 | ICMP echo payload | Empty | The 9 bytes `feroprobe` | Part of the probe signature, so defenders can match discovery pings; found by `scripts/nmap-diff` and kept (Jurgen, 2026-11-15) |
 | OS detection probes (`-O`) | About 16 probes per host, sent several times: about 150 packets | One SYN offering every common TCP option to an open port: a handful of packets | Lighter on the target and stays inside the scanned ports; found by `scripts/nmap-diff` and kept (Jurgen, 2026-11-15) |
+| Default port lists | nmap-services' 1000 most common ports | Its own 1000-port ranking: the hand-ranked top tier agrees with nmap's most common ports, the rest partly differs (about 30% overlap over all 1000 TCP ports, measured against nmap 7.94) | nmap-services cannot be redistributed; written independently (Jurgen, 2026-11-15) |
 | Dry run | No equivalent. The closest is the list scan `-sL`, which only lists (and reverse-resolves) the targets | `--dry-run` lists every probe, per target and port, without sending any, and does no reverse DNS | A safe way to check exactly what a command would put on the wire. It lists FeroProbe's probes only. The manual's `--dry-run` section documents what nmap sends differently per option; an in-output "not nmap" box was tried and dropped (Jurgen, 2026-11-15) |
 
 ## Roadmap to nmap parity
