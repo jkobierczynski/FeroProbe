@@ -532,6 +532,20 @@ pub(crate) mod tests {
         let table = render_table(std::slice::from_ref(&host), &vvv);
         assert!(table.contains("Not shown: 200 closed ports"), "{table}");
         assert!(table.contains("1100/tcp   open|filtered"), "{table}");
+        // -oG and -oX use the same rows.
+        let g = crate::grep::render(std::slice::from_ref(&host), &vvv);
+        assert!(g.contains("1100/open|filtered/tcp"), "{g}");
+        assert!(g.contains("Ignored State: closed (200)"), "{g}");
+        let x = crate::xml::render(std::slice::from_ref(&host), &vvv);
+        assert!(
+            x.contains("<extraports state=\"closed\" count=\"200\">"),
+            "{x}"
+        );
+        assert!(!x.contains("<extraports state=\"open|filtered\""), "{x}");
+        assert!(
+            x.contains("portid=\"1100\"><state state=\"open|filtered\""),
+            "{x}"
+        );
     }
 
     #[test]
