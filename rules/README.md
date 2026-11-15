@@ -43,27 +43,37 @@ rule-files:
 
 Then reload: `suricatasc -c reload-rules`, or restart Suricata.
 
-### Snort
+First copy `feroprobe.snort.rules` to a directory Snort already searches —
+usually the one that holds your other rule files — or note its absolute
+path, so the include below can find it.
 
-For **Snort 2.9.x**, include the file from `snort.conf`:
+For **Snort 2.9.x**, add it to `snort.conf`, where `$RULE_PATH` is the
+rules directory your config already defines:
 
 ```
 include $RULE_PATH/feroprobe.snort.rules
 ```
 
-For **Snort 3.x**, add it to the `ips` module in `snort.lua` (the `include`
-directive above is not valid Lua):
+For **Snort 3.x**, add an `include` entry to the `ips` table in
+`snort.lua` (the `include` directive above is not valid Lua). Add the entry
+**inside your existing `ips` table** — do not paste this as a new `ips = {
+... }` assignment, which would replace the table and drop its other
+entries, such as the `variables` that define `$HOME_NET`:
 
 ```lua
 ips =
 {
-    include = 'feroprobe.snort.rules',
+    -- ... your existing entries (variables, policy, …) stay here ...
+
+    -- a path Snort can find: a bare name only if the file is on the
+    -- include search path, otherwise an absolute path.
+    include = '/etc/snort/rules/feroprobe.snort.rules',
 }
 ```
 
-If your `ips` table already sets `include` (it takes a single file), load
-these rules inline through `ips.rules` instead, following your existing
-configuration.
+`ips.include` takes a single file. If your `ips` table already sets it,
+load these rules inline through `ips.rules` instead, following your
+existing configuration.
 
 The rules use the local SID range `9100000+` and the `attempted-recon`
 class. Adjust the SIDs and `$HOME_NET` to fit your deployment.
