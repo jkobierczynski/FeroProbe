@@ -107,7 +107,9 @@ and sends nothing: no host discovery, no port scan, no reverse DNS. It does
 not list the probes of steps that depend on replies: service detection
 (`-sV`), OS detection (`-O`) and `--traceroute` run on the hosts and open
 ports a real scan finds, so the dry run only names them. Retransmissions of
-unanswered probes are not listed either. It needs no root, so you can review
+unanswered probes are not listed either. Since nothing answers, the port-scan
+probes are listed for every target as if each were up; a real scan skips the
+targets host discovery finds down, so it can send fewer. It needs no root, so you can review
 a scan (its targets, ports, flags, fragments, decoys and spoofed source)
 before running it for real, or show a network owner exactly what you will
 send. Only target hostnames are resolved, through the system resolver (even
