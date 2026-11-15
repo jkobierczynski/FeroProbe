@@ -543,12 +543,14 @@ mod icmp {
         } else {
             (Domain::IPV4, Protocol::ICMPV4)
         };
-        match Socket::new(domain, Type::RAW, Some(proto)) {
-            Ok(s) => Ok((s, false)),
+        let (sock, rewrites_id) = match Socket::new(domain, Type::RAW, Some(proto)) {
+            Ok(s) => (s, false),
             Err(raw_err) => Socket::new(domain, Type::DGRAM, Some(proto))
                 .map(|s| (s, true))
-                .map_err(|_| raw_err),
-        }
+                .map_err(|_| raw_err)?,
+        };
+        crate::netif::bind_socket(&sock, v6)?;
+        Ok((sock, rewrites_id))
     }
 
     /// Callback for each host that answered, with its RTT in ms.

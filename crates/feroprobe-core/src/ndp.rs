@@ -105,7 +105,8 @@ mod linux {
         let macs = crate::netif::ethernet_macs();
         Ok(crate::netif::ipv6_addrs()
             .into_iter()
-            .filter(|a| a.resolves_neighbours)
+            // With -e, only that interface's links are local.
+            .filter(|a| a.resolves_neighbours && crate::netif::allowed(a.index))
             .filter_map(|a| {
                 Some(LocalLink {
                     mac: *macs.get(&a.index)?,

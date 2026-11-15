@@ -363,6 +363,27 @@ pub(crate) fn explain(args: &Args, f: &Facts) -> Vec<String> {
             c.max_rate
         ),
     );
+    if let Some(min) = args.min_parallelism {
+        say(
+            &mut out,
+            format!("--min-parallelism {min}: at least {min} connect/UDP probes at once"),
+        );
+    }
+    if let Some(name) = &args.interface {
+        say(
+            &mut out,
+            format!("send and receive on interface {name} (-e); only its networks count as local"),
+        );
+    }
+    if let Some(port) = args.source_port {
+        say(
+            &mut out,
+            format!(
+                "raw TCP/UDP/SCTP probes and UDP scan probes from source port {port} (-g); \
+                 connect scans, -sV, traceroute and DNS keep their own ports"
+            ),
+        );
+    }
     if !c.scan_delay.is_zero() {
         say(
             &mut out,

@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 
 use super::*;
 use crate::model::{PortResult, reason};
