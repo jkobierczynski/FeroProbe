@@ -188,6 +188,14 @@ fn describe_raw_ipv4(pkt: &[u8], to: SocketAddr) -> String {
         return format!("IP {src} > {dst} proto {proto} frag offset={offset}{tail}");
     }
     let payload = pkt.get(ihl..).unwrap_or(&[]);
+    // The first fragment (offset 0, more set) with `-f` carries only 8 bytes
+    // of the TCP header, too few for parse_tcp. Show the addresses and ports
+    // from what is there rather than falling back to a byte count.
+    if more && proto == packet::IPPROTO_TCP && (4..20).contains(&payload.len()) {
+        let sport = u16::from_be_bytes([payload[0], payload[1]]);
+        let dport = u16::from_be_bytes([payload[2], payload[3]]);
+        return format!("TCP {src}:{sport} > {dst}:{dport} (frag)");
+    }
     let mut line = describe(proto, payload, Some(IpAddr::V4(src)), Some(IpAddr::V4(dst)));
     if more {
         line.push_str(" (frag)");
@@ -274,17 +282,16 @@ mod tests {
             describe_raw_ipv4(&ip, to),
             "TCP 10.0.0.9:40000 > 10.0.0.2:80 S seq=7 win=65109"
         );
-        // A later fragment is shown as a fragment, not parsed as TCP.
-        let payload: Vec<u8> = (0..24u8).collect();
-        let ip = packet::ipv4_packet(
-            "10.0.0.9".parse().unwrap(),
-            "10.0.0.2".parse().unwrap(),
-            packet::IPPROTO_TCP,
-            64,
-            1,
-            &payload,
-        );
+        // Fragmenting the same probe (24-byte SYN) into 8-byte pieces.
         let frags = crate::evasion::fragment_ipv4(&ip, crate::evasion::Fragment::Eight);
+        assert_eq!(frags.len(), 3);
+        // The first fragment holds only 8 bytes of TCP (too few to parse as a
+        // full header): show the addresses and ports, not a bare byte count.
+        assert_eq!(
+            describe_raw_ipv4(&frags[0], to),
+            "TCP 10.0.0.9:40000 > 10.0.0.2:80 (frag)"
+        );
+        // A later fragment is shown as a fragment, not parsed as TCP.
         let line = describe_raw_ipv4(&frags[1], to);
         assert!(line.contains("frag offset=8"), "{line}");
         let echo = packet::icmp_echo(5, 1, &[]);
