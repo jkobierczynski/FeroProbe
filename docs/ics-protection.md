@@ -20,7 +20,11 @@ When FeroProbe runs as root under `sudo` (which points `HOME` at root's
 home), it also reads the invoking user's `~/.config/feroprobe/config.toml`
 (found from `SUDO_USER`) right after root's own file, so a protection you
 set for yourself still applies to `sudo feroprobe ...`. Raw scans, `-O`
-and `-A` need root, so this is the usual way they run.
+and `-A` need root, so this is the usual way they run. If sudo kept an
+absolute `XDG_CONFIG_HOME` (for example with `sudo -E`), that already names
+your settings, so FeroProbe reads it alone and skips this step. If the
+invoking user cannot be looked up because the account database fails,
+FeroProbe stops rather than run without their settings.
 
 `XDG_CONFIG_HOME` is used only when it is set to an absolute path, as the
 XDG base directory specification says; otherwise the user file is

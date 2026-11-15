@@ -967,7 +967,8 @@ precedence first:
    when `XDG_CONFIG_HOME` is unset or not absolute; `%APPDATA%\feroprobe\config.toml`
    on Windows without `HOME`);
 2. under `sudo`, the same file in the invoking user's home (from
-   `SUDO_USER`), since sudo points `HOME` at root's;
+   `SUDO_USER`), since sudo points `HOME` at root's (skipped when sudo kept
+   an absolute `XDG_CONFIG_HOME`, which already names your file);
 3. `.feroproberc` in the current directory.
 
 A key in a later file replaces the same key from an earlier one, and

@@ -1386,7 +1386,8 @@ precedence first:
 .IP "2." 3
 under \f[V]sudo\f[R], the same file in the invoking user\[aq]s home
 (from \f[V]SUDO_USER\f[R]), since sudo points \f[V]HOME\f[R] at
-root\[aq]s;
+root\[aq]s (skipped when sudo kept an absolute
+\f[V]XDG_CONFIG_HOME\f[R], which already names your file);
 .IP "3." 3
 \f[V].feroproberc\f[R] in the current directory.
 .PP

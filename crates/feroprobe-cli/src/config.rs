@@ -5,8 +5,10 @@
 //! 1. the user's file, `$XDG_CONFIG_HOME/feroprobe/config.toml`
 //!    (`~/.config/feroprobe/config.toml` when `XDG_CONFIG_HOME` is unset;
 //!    `%APPDATA%\feroprobe\config.toml` on Windows when there is no `HOME`);
-//!    under `sudo`, the invoking user's file is read next, so a setting in
-//!    your own file still applies to `sudo feroprobe ...`;
+//!    under `sudo`, the invoking user's `~/.config/feroprobe/config.toml`
+//!    is read next, so a setting in your own file still applies to
+//!    `sudo feroprobe ...` (skipped when an absolute `XDG_CONFIG_HOME` was
+//!    kept, since that already names the file to use);
 //! 2. `.feroproberc` in the current working directory.
 //!
 //! A key set in a later file overrides the same key in an earlier one, and
@@ -72,16 +74,23 @@ pub fn user_file(
     Some(base.join("feroprobe").join("config.toml"))
 }
 
-/// The files to read, lowest precedence first.
-pub fn default_files() -> Vec<PathBuf> {
-    files_for(
-        user_file(
-            std::env::var_os("XDG_CONFIG_HOME"),
-            std::env::var_os("HOME"),
-            std::env::var_os("APPDATA"),
-        ),
-        sudo_user_home().and_then(|h| user_file(None, Some(h.into_os_string()), None)),
-    )
+/// The files to read, lowest precedence first. Fails only when the
+/// invoking user of `sudo` cannot be looked up, rather than silently
+/// leaving their settings out.
+pub fn default_files() -> Result<Vec<PathBuf>> {
+    let xdg = std::env::var_os("XDG_CONFIG_HOME");
+    // A preserved, absolute XDG_CONFIG_HOME (sudo -E, or env_keep) already
+    // names the invoking user's settings: use it alone, as they chose it.
+    let xdg_used = xdg
+        .as_ref()
+        .is_some_and(|x| !x.is_empty() && std::path::Path::new(x).is_absolute());
+    let own = user_file(xdg, std::env::var_os("HOME"), std::env::var_os("APPDATA"));
+    let invoking = if xdg_used {
+        None
+    } else {
+        sudo_user_home()?.and_then(|h| user_file(None, Some(h.into_os_string()), None))
+    };
+    Ok(files_for(own, invoking))
 }
 
 /// The file list: this user's file, then (under sudo) the invoking user's
@@ -100,48 +109,69 @@ fn files_for(own: Option<PathBuf>, invoking: Option<PathBuf>) -> Vec<PathBuf> {
 }
 
 /// The home directory of the user who ran `sudo`, when this process runs
-/// as root under sudo (`SUDO_USER` names someone other than root).
+/// as root under sudo (`SUDO_USER` names someone other than root). `None`
+/// when not under sudo or no such account exists; an error when the
+/// account database cannot be read.
 #[cfg(unix)]
-fn sudo_user_home() -> Option<PathBuf> {
+fn sudo_user_home() -> Result<Option<PathBuf>> {
     use std::ffi::{CStr, CString};
     use std::os::unix::ffi::OsStrExt;
     // SAFETY: geteuid has no preconditions.
     if unsafe { libc::geteuid() } != 0 {
-        return None;
+        return Ok(None);
     }
-    let name = std::env::var_os("SUDO_USER").filter(|n| !n.is_empty() && n != "root")?;
-    let name = CString::new(name.as_bytes()).ok()?;
-    let mut pw: libc::passwd = unsafe { std::mem::zeroed() };
-    let mut result: *mut libc::passwd = std::ptr::null_mut();
-    let mut buf = vec![0 as libc::c_char; 16 * 1024];
-    // SAFETY: every pointer is valid for the call; buf outlives the use of
-    // pw's string fields below.
-    let rc = unsafe {
-        libc::getpwnam_r(
-            name.as_ptr(),
-            &mut pw,
-            buf.as_mut_ptr(),
-            buf.len(),
-            &mut result,
-        )
+    let Some(user) = std::env::var_os("SUDO_USER").filter(|n| !n.is_empty() && n != "root") else {
+        return Ok(None);
     };
-    if rc != 0 || result.is_null() || pw.pw_dir.is_null() {
-        return None;
+    let Ok(name) = CString::new(user.as_bytes()) else {
+        return Ok(None);
+    };
+    let mut size = 16 * 1024;
+    loop {
+        // SAFETY: passwd is plain data; getpwnam_r fills it in.
+        let mut pw: libc::passwd = unsafe { std::mem::zeroed() };
+        let mut result: *mut libc::passwd = std::ptr::null_mut();
+        let mut buf = vec![0 as libc::c_char; size];
+        // SAFETY: every pointer is valid for the call; buf outlives the use
+        // of pw's string fields below.
+        let rc = unsafe {
+            libc::getpwnam_r(
+                name.as_ptr(),
+                &mut pw,
+                buf.as_mut_ptr(),
+                buf.len(),
+                &mut result,
+            )
+        };
+        if rc == libc::ERANGE && size < 1024 * 1024 {
+            size *= 4;
+            continue;
+        }
+        if rc != 0 {
+            bail!(
+                "looking up SUDO_USER {} to read their settings file: {}",
+                user.to_string_lossy(),
+                std::io::Error::from_raw_os_error(rc)
+            );
+        }
+        if result.is_null() || pw.pw_dir.is_null() {
+            return Ok(None);
+        }
+        // SAFETY: getpwnam_r succeeded, so pw_dir points to a C string in buf.
+        let dir = unsafe { CStr::from_ptr(pw.pw_dir) };
+        let dir = PathBuf::from(std::ffi::OsStr::from_bytes(dir.to_bytes()));
+        return Ok(dir.is_absolute().then_some(dir));
     }
-    // SAFETY: getpwnam_r succeeded, so pw_dir points to a C string in buf.
-    let dir = unsafe { CStr::from_ptr(pw.pw_dir) };
-    let dir = PathBuf::from(std::ffi::OsStr::from_bytes(dir.to_bytes()));
-    dir.is_absolute().then_some(dir)
 }
 
 #[cfg(not(unix))]
-fn sudo_user_home() -> Option<PathBuf> {
-    None
+fn sudo_user_home() -> Result<Option<PathBuf>> {
+    Ok(None)
 }
 
 /// Read the settings files in [`default_files`].
 pub fn load() -> Result<Loaded> {
-    load_from(&default_files())
+    load_from(&default_files()?)
 }
 
 /// Read `files`, lowest precedence first. Missing files are skipped.
