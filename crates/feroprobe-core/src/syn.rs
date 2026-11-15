@@ -623,10 +623,7 @@ mod imp {
                 }
                 // Wait for stragglers, but stop as soon as every probe is answered.
                 let outstanding = |results: &HashMap<(usize, u16), PortResult>| {
-                    pending
-                        .iter()
-                        .filter(|&&(h, p)| !results.contains_key(&(h, p)) && !is_done(h))
-                        .count()
+                    outstanding(&pending, results, is_done)
                 };
                 let mut unanswered = outstanding(&results);
                 let mut deadline = Instant::now() + cfg.timeout;
@@ -691,6 +688,21 @@ mod imp {
                 host
             })
             .collect())
+    }
+
+    /// The probes in `pending` still waiting for an answer: not answered
+    /// yet, and for a host not already known to be up. Counted afresh
+    /// rather than decremented per reply, so a late reply from a host that
+    /// is already up never stands in for another host's answer.
+    fn outstanding(
+        pending: &[(usize, u16)],
+        results: &HashMap<(usize, u16), PortResult>,
+        is_done: impl Fn(usize) -> bool,
+    ) -> usize {
+        pending
+            .iter()
+            .filter(|&&(h, p)| !results.contains_key(&(h, p)) && !is_done(h))
+            .count()
     }
 
     /// Store the first answer for a probe, with its round-trip time.
@@ -817,6 +829,33 @@ mod imp {
             let hosts = scan_blocking(&[a, b], &[closed], &cfg, syn, Some(&done)).unwrap();
             assert_eq!(hosts[0].ports[0].reason, reason::NO_RESPONSE);
             assert_eq!(hosts[1].ports[0].state, PortState::Closed);
+        }
+
+        /// Hosts A and B both have a probe out; ICMP proves A up, then A's
+        /// delayed TCP reply arrives. That reply must not use up B's count.
+        #[test]
+        fn late_reply_from_done_host_keeps_waiting_for_others() {
+            let pending = [(0, 80), (1, 80)];
+            let mut results = HashMap::new();
+            let sent_at = HashMap::new();
+            let a_up = std::cell::Cell::new(false);
+            let is_done = |h: usize| h == 0 && a_up.get();
+            assert_eq!(outstanding(&pending, &results, is_done), 2);
+            a_up.set(true);
+            assert_eq!(outstanding(&pending, &results, is_done), 1);
+            let now = Instant::now();
+            assert!(record(
+                &mut results,
+                &sent_at,
+                (0, 80, PortState::Closed, reason::RESET, now)
+            ));
+            assert_eq!(outstanding(&pending, &results, is_done), 1);
+            record(
+                &mut results,
+                &sent_at,
+                (1, 80, PortState::Closed, reason::RESET, now),
+            );
+            assert_eq!(outstanding(&pending, &results, is_done), 0);
         }
 
         #[test]
