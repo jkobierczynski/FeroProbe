@@ -92,6 +92,9 @@ pub mod reason {
     /// The host answered an IPv6 neighbour solicitation.
     pub const ND_RESPONSE: &str = "nd-response";
     pub const USER_SET: &str = "user-set";
+    /// The target is this machine (its traffic stays on the loopback
+    /// interface), so nmap marks it up without probing it.
+    pub const LOCALHOST: &str = "localhost-response";
     /// ICMP time exceeded: the probe died on the way.
     pub const TIME_EXCEEDED: &str = "time-exceeded";
     /// SCTP: the port answered an INIT with an INIT-ACK.

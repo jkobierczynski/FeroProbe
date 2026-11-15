@@ -291,9 +291,10 @@ struct Args {
     scanflags: Option<u8>,
 
     /// Host discovery, nmap style. -Pn: skip it and scan every target as if
-    /// it were up. Otherwise pick the probes (default: ICMP echo plus TCP
-    /// connects to 443 and 80): -PS[ports] TCP connect (default 80),
-    /// -PA[ports] TCP ACK (raw sockets on Linux, else a connect; default 80),
+    /// it were up. Otherwise pick the probes (default as nmap's: as root,
+    /// ICMP echo and timestamp, a TCP SYN to 443 and an ACK to 80; else TCP
+    /// connects to 80 and 443): -PS[ports] TCP SYN (default 80),
+    /// -PA[ports] TCP ACK (default 80; both raw on Linux, else a connect),
     /// -PU[ports] UDP (default 40125), -PE ICMP echo, -PP ICMP timestamp,
     /// -PM ICMP address mask (the last two IPv4 with raw sockets).
     /// Ports run on without a space: -PS22,443. Can be repeated
@@ -1314,7 +1315,11 @@ async fn main() -> Result<()> {
     }
     let any_ipv6 = targets.iter().any(|t| t.addr.is_ipv6());
     let syn_ok = raw_sockets_available() && (!any_ipv6 || raw_ipv6_available());
-    let mut probes = ping_probes(&args.ping)?.unwrap_or_default();
+    // nmap's default probes depend on privileges: raw SYN/ACK plus ICMP
+    // echo and timestamp as root, TCP connects otherwise.
+    let raw_pings = feroprobe_core::raw_tcp_pings(&targets);
+    let mut probes =
+        ping_probes(&args.ping)?.unwrap_or_else(|| PingProbes::nmap_default(raw_pings));
     let skip_discovery = args.ping.contains(&PingArg::Skip);
     let mut plan = plan(&args.scan, skip_discovery, syn_ok, args.scanflags.is_some())?;
     let (mut os, trace) = aggressive(&mut plan, &args, raw_sockets_available())?;
@@ -1413,6 +1418,12 @@ async fn main() -> Result<()> {
 
     if args.explain {
         let privileged = raw_sockets_available();
+        // As root, targets that are this machine skip discovery, so ARP
+        // and the ping probes only see the others.
+        let (localhost, others): (Vec<Target>, Vec<Target>) = targets
+            .iter()
+            .cloned()
+            .partition(|t| privileged && feroprobe_core::is_localhost(t.addr));
         let facts = explain::Facts {
             targets: &targets,
             excluded,
@@ -1420,8 +1431,10 @@ async fn main() -> Result<()> {
             probes: &probes,
             privileged,
             icmp: feroprobe_core::icmp_available(),
+            raw_pings,
+            localhost: localhost.len(),
             local: if plan.discovery && privileged && cfg.arp_ping {
-                explain::local_targets(&targets)
+                explain::local_targets(&others)
             } else {
                 Default::default()
             },
