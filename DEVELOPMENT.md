@@ -176,7 +176,7 @@ the SCTP, IP protocol, IPv6 OS detection and probe-signature work).
 
 - 2026-11-15: while this project was being built with an AI coding
   assistant, one of the assistant's status updates about the evasion
-  options (`-f`, `-D`, `-S`) was incorrectly flagged by the assistant's
-  safety safeguards, and the session was switched to another model to
-  continue. The work itself was the authorization-gated evasion feature
-  described above.
+  options (`-f`, `--mtu`, `-D`, `-S`; branch `claude/project-thread-qatskg`,
+  PR #23) was incorrectly flagged by the assistant's safety safeguards, and
+  the session was switched to another model to continue. The work itself
+  was the authorization-gated evasion feature described above.
