@@ -233,8 +233,9 @@ trust in the script: by default a script may connect only to the host it runs
 on and only to the ports the scan probed, like nmap's
 `mssql.scanned-ports-only` but for everything. A wider scope needs an explicit
 option (name to be settled, e.g. `--script-scope=host`). `--dry-run` lists
-which scripts would run against which host and port, and the scope each one
-is allowed, without running them. It cannot list a script's individual
+the candidate scripts for each host and port and the scope each one is
+allowed, without running them. It cannot say which of them will actually
+run, because a `portrule` usually depends on what the scan finds. It cannot list a script's individual
 requests, because a script picks them from the replies it gets; the dry-run
 section of the manual says so.
 Discovery-style `prerule` scripts that broadcast are off unless named
