@@ -83,7 +83,7 @@ fn is_udp_filtered(e: &io::Error) -> bool {
 
 /// Whether the reply was larger than our buffer. Windows reports this as an
 /// error (WSAEMSGSIZE) instead of truncating; either way the port answered.
-fn is_truncated_reply(e: &io::Error) -> bool {
+pub(crate) fn is_truncated_reply(e: &io::Error) -> bool {
     cfg!(windows) && e.raw_os_error() == Some(10040)
 }
 

@@ -620,6 +620,12 @@ pub async fn detect_udp(
                     data = buf[..n].to_vec();
                     break;
                 }
+                // Windows reports a reply larger than the buffer as an
+                // error: the port answered, but we cannot read the reply.
+                Ok(Err(e)) if crate::udp::is_truncated_reply(&e) => {
+                    round.answered = true;
+                    break;
+                }
                 // ICMP port unreachable: the port has closed.
                 Ok(Err(_)) => break 'probes,
                 Err(_) => {}

@@ -611,6 +611,9 @@ lines.
 ```
 feroprobe-service-rules 1
 
+probe null tcp
+  rarity 0
+
 probe redis tcp
   rarity 6
   ports 6379,6380
