@@ -585,7 +585,8 @@ mod imp {
                     while let Ok(a) = rx.try_recv() {
                         record(&mut results, &sent_at, a);
                     }
-                    if results.contains_key(&(h, p)) {
+                    // Another probe may have proven the host up meanwhile.
+                    if results.contains_key(&(h, p)) || is_done(h) {
                         continue;
                     }
                     sent_at.insert((h, p), Instant::now());
