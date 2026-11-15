@@ -107,6 +107,34 @@ SENT (0.0543s) TCP 10.0.0.2:48100 > 10.0.0.5:22 S seq=2448842408 win=1024
 RCVD (0.0545s) TCP 10.0.0.5:22 > 10.0.0.2:48100 SA seq=1290442 win=64240 ttl=64
 ```
 
+To see what a command would send without sending anything, use
+`--dry-run`. It prints one line per probe, in the `--packet-trace` layout,
+then stops; it needs no root and gets no answers, so there are no port
+states:
+
+```
+# Dry run (--dry-run): these are the probes the scan would send. Nothing is sent.
+# Target 10.0.0.5 from 10.0.0.2
+# Host discovery
+NOT SENT (dry run) ICMP [10.0.0.2 > 10.0.0.5 Echo request (type=8/code=0) id=14847 seq=0]
+NOT SENT (dry run) CONN TCP localhost > 10.0.0.5:443
+NOT SENT (dry run) CONN TCP localhost > 10.0.0.5:80
+# TCP scan with raw packets, flags S
+NOT SENT (dry run) TCP 10.0.0.2:43970 > 10.0.0.5:22 S seq=1654920040 win=65109
+```
+
+nmap has no such option; its list scan (`-sL`) only lists the targets.
+
+This matters most on operational-technology and industrial-control (OT/ICS)
+networks, where an unexpected packet can hang or reset a fragile device such
+as a PLC or RTU. With `--dry-run`, an operator can check every target,
+port, flag and fragment a command would send, and confirm that it stays
+within the approved scope, before any scan probe is sent. Hostname targets
+are still resolved through the system resolver, even with `-n`, so give
+numeric addresses when no DNS traffic is allowed. Then run
+the same command without `--dry-run`, ideally with a gentle timing template
+(`-T0`/`-T1`), a low `--max-rate` and a short, explicit port list.
+
 Example output:
 
 ```

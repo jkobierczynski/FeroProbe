@@ -17,9 +17,69 @@
 //! can be mixed.
 
 use std::io;
+use std::net::IpAddr;
 
 use crate::model::{HostResult, ScanConfig};
+use crate::packet::{
+    self, IPPROTO_ICMP, IPPROTO_ICMPV6, IPPROTO_IGMP, IPPROTO_SCTP, IPPROTO_TCP, IPPROTO_UDP,
+};
 use crate::target::Target;
+
+/// The ports nmap's protocol probes go to: TCP and SCTP to port 80,
+/// UDP to a port that is very likely closed.
+const TCP_PORT: u16 = 80;
+const UDP_PORT: u16 = 40125;
+const SCTP_PORT: u16 = 80;
+
+/// The fixed parts of this scan's probes.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Probe {
+    pub sport: u16,
+    pub seq: u32,
+    // Only the Linux scanner builds whole packets (the dry run shows bodies).
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub ipid: u16,
+    pub icmp_id: u16,
+}
+
+impl Probe {
+    /// The body of the probe for protocol `proto`, after the IP header.
+    pub(crate) fn body(&self, proto: u8, src: IpAddr, dst: IpAddr) -> Vec<u8> {
+        match (proto, src, dst) {
+            (IPPROTO_ICMP, IpAddr::V4(_), _) => packet::icmp_echo(self.icmp_id, 0, &[]),
+            (IPPROTO_ICMPV6, IpAddr::V6(s), IpAddr::V6(d)) => {
+                packet::icmpv6_echo_with_checksum(s, d, self.icmp_id, 0)
+            }
+            (IPPROTO_IGMP, IpAddr::V4(_), _) => packet::igmp_query().to_vec(),
+            (IPPROTO_TCP, ..) => packet::tcp_probe(
+                src,
+                dst,
+                self.sport,
+                TCP_PORT,
+                self.seq,
+                self.seq,
+                packet::TCP_ACK,
+            )
+            .to_vec(),
+            (IPPROTO_UDP, ..) => packet::udp_packet(src, dst, self.sport, UDP_PORT, &[]),
+            (IPPROTO_SCTP, ..) => packet::sctp_init(self.sport, SCTP_PORT, self.seq, self.seq),
+            _ => Vec::new(),
+        }
+    }
+
+    /// The whole packet, IP header included.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn packet(&self, proto: u8, src: IpAddr, dst: IpAddr) -> Vec<u8> {
+        let body = self.body(proto, src, dst);
+        match (src, dst) {
+            (IpAddr::V4(s), IpAddr::V4(d)) => {
+                packet::ipv4_packet(s, d, proto, 64, self.ipid, &body)
+            }
+            (IpAddr::V6(s), IpAddr::V6(d)) => packet::ipv6_packet(s, d, proto, 64, &body),
+            _ => Vec::new(),
+        }
+    }
+}
 
 /// Run an IP protocol scan of every protocol number in `protocols` (each
 /// at most 255) on every target. Target addresses must be distinct (the
@@ -56,72 +116,16 @@ mod imp {
 mod imp {
     use super::*;
 
-    use std::net::IpAddr;
-
     use socket2::{Domain, Protocol as SockProto, Socket};
 
     use crate::capture::Packet;
     use crate::model::{PortState, Protocol, reason};
     use crate::packet::{
-        self, ICMP_DEST_UNREACH, ICMP_ECHO_REPLY, ICMPV6_DEST_UNREACH, ICMPV6_PARAM_PROBLEM,
-        IPPROTO_ICMP, IPPROTO_ICMPV6, IPPROTO_IGMP, IPPROTO_SCTP, IPPROTO_TCP, IPPROTO_UDP,
+        ICMP_DEST_UNREACH, ICMP_ECHO_REPLY, ICMPV6_DEST_UNREACH, ICMPV6_PARAM_PROBLEM,
     };
     use crate::raw::{Rng, raw_socket_in, send_logged_until};
     use crate::rawscan::{self, Answer, Index};
     use crate::target::socket_addr;
-
-    /// The ports nmap's protocol probes go to: TCP and SCTP to port 80,
-    /// UDP to a port that is very likely closed.
-    const TCP_PORT: u16 = 80;
-    const UDP_PORT: u16 = 40125;
-    const SCTP_PORT: u16 = 80;
-
-    /// The fixed parts of this scan's probes.
-    #[derive(Debug, Clone, Copy)]
-    pub(super) struct Probe {
-        pub sport: u16,
-        pub seq: u32,
-        pub ipid: u16,
-        pub icmp_id: u16,
-    }
-
-    impl Probe {
-        /// The body of the probe for protocol `proto`, after the IP header.
-        pub(super) fn body(&self, proto: u8, src: IpAddr, dst: IpAddr) -> Vec<u8> {
-            match (proto, src, dst) {
-                (IPPROTO_ICMP, IpAddr::V4(_), _) => packet::icmp_echo(self.icmp_id, 0, &[]),
-                (IPPROTO_ICMPV6, IpAddr::V6(s), IpAddr::V6(d)) => {
-                    packet::icmpv6_echo_with_checksum(s, d, self.icmp_id, 0)
-                }
-                (IPPROTO_IGMP, IpAddr::V4(_), _) => packet::igmp_query().to_vec(),
-                (IPPROTO_TCP, ..) => packet::tcp_probe(
-                    src,
-                    dst,
-                    self.sport,
-                    TCP_PORT,
-                    self.seq,
-                    self.seq,
-                    packet::TCP_ACK,
-                )
-                .to_vec(),
-                (IPPROTO_UDP, ..) => packet::udp_packet(src, dst, self.sport, UDP_PORT, &[]),
-                (IPPROTO_SCTP, ..) => packet::sctp_init(self.sport, SCTP_PORT, self.seq, self.seq),
-                _ => Vec::new(),
-            }
-        }
-
-        /// The whole packet, IP header included.
-        pub(super) fn packet(&self, proto: u8, src: IpAddr, dst: IpAddr) -> Vec<u8> {
-            let body = self.body(proto, src, dst);
-            match (src, dst) {
-                (IpAddr::V4(s), IpAddr::V4(d)) => {
-                    packet::ipv4_packet(s, d, proto, 64, self.ipid, &body)
-                }
-                (IpAddr::V6(s), IpAddr::V6(d)) => packet::ipv6_packet(s, d, proto, 64, &body),
-                _ => Vec::new(),
-            }
-        }
-    }
 
     pub(super) fn scan_blocking(
         targets: &[Target],
