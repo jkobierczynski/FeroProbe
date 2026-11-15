@@ -145,10 +145,12 @@ mod tests {
         ));
         // Create it exclusively (fails if it exists) and private, so no
         // other user can plant files or symlinks in it first.
-        let mut builder = std::fs::DirBuilder::new();
         #[cfg(unix)]
-        std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
-        builder.create(&dir).unwrap();
+        std::os::unix::fs::DirBuilderExt::mode(&mut std::fs::DirBuilder::new(), 0o700)
+            .create(&dir)
+            .unwrap();
+        #[cfg(not(unix))]
+        std::fs::DirBuilder::new().create(&dir).unwrap();
         dir
     }
 
