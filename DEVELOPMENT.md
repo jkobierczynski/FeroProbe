@@ -8,6 +8,8 @@ The goal is nmap parity: FeroProbe behaves like nmap unless nmap's behaviour is
 clearly wrong. The deliberate exceptions are listed under
 [Not planned](#not-planned), [Anti-abuse safeguards](#anti-abuse-safeguards)
 and [Deliberate differences from nmap](#deliberate-differences-from-nmap).
+What is still missing, and the order it will be built in, is under
+[Roadmap to nmap parity](#roadmap-to-nmap-parity).
 
 Last audited against the source: 2026-11-15 (main at `34559fb`, v0.2.0 plus
 the SCTP, IP protocol, IPv6 OS detection and probe-signature work).
@@ -151,49 +153,130 @@ the SCTP, IP protocol, IPv6 OS detection and probe-signature work).
 | OS detection probes (`-O`) | About 16 probes per host, sent several times: about 150 packets | One SYN offering every common TCP option to an open port: a handful of packets | Lighter on the target and stays inside the scanned ports; found by `scripts/nmap-diff` and kept (Jurgen, 2026-11-15) |
 | Dry run | No equivalent. The closest is the list scan `-sL`, which only lists (and reverse-resolves) the targets | `--dry-run` lists every probe, per target and port, without sending any, and does no reverse DNS | A safe way to check exactly what a command would put on the wire. It lists FeroProbe's probes only. The manual's `--dry-run` section documents what nmap sends differently per option; an in-output "not nmap" box was tried and dropped (Jurgen, 2026-11-15) |
 
-## Remaining gap to nmap parity
+## Roadmap to nmap parity
 
-### Large
+Every remaining gap to nmap is planned, except the items under
+[Not planned](#not-planned). The steps are in order of importance, and each
+step is one pull request (or a few, where noted) that also updates this file,
+`docs/manual.md`, the man page and `--help`. A step that adds a probe follows
+the scope rule (no probes outside the command's ports and protocols, see
+[Deliberate differences](#deliberate-differences-from-nmap)) and adds a
+`--dry-run` line for it, and a step that changes what goes on the wire gets an
+`scripts/nmap-diff` case.
 
-| Feature | nmap options | Notes |
-| --- | --- | --- |
-| Scripting engine | `-sC`, `--script`, `--script-args` | NSE scripts can't be shipped (licence) and an embedded language would not run them. Skipped for now, see below |
-| Deeper version detection | `--version-intensity`, `--version-light`, `--version-all`, `--version-trace` | Our rule set covers about 25 protocols; nmap's database has thousands of signatures |
-| Full OS fingerprinting | `--osscan-limit`, `--osscan-guess`, `--max-os-tries` | We send one probe and guess the family; nmap sends 16 probes and names versions |
+### Phase 5: v0.4.0
 
-### Medium
+| Step | Feature | nmap options | Plan |
+| --- | --- | --- | --- |
+| 5.1 | Deeper version detection | `--version-intensity`, `--version-light`, `--version-all`, `--version-trace` | Move the rules in `service/rules.rs` into a data file in our own format (probe, ports, rarity 1-9, match and soft-match patterns, version and CPE fields), compiled into the binary and overridable with a file, like `--oui-file`. Intensity picks probes by rarity, as nmap does. `--version-trace` prints each probe and reply. Then grow the rule set protocol by protocol from public protocol documentation and our own captures (never from `nmap-service-probes`). Several pull requests: the format and options first, then batches of protocols |
+| 5.2 | Full OS fingerprinting | `--osscan-limit`, `--osscan-guess`, `--max-os-tries` | A multi-probe fingerprint of our own design (TCP option and window tests to the open port and, where the scan found one, a closed port; IP ID sequence), sent only to ports and protocols the scan already probed (an ICMP test only when the command already sends ICMP, such as default discovery or `-PE`), with our own signature file naming OS versions where the probes can tell them apart. Keeps the [lighter-than-nmap difference](#deliberate-differences-from-nmap) as far as possible: the probe count is documented and stays well under nmap's. `--osscan-limit` skips hosts without an open and a closed port, `--osscan-guess` prints near matches, `--max-os-tries` sets the retries |
+| 5.3 | Adaptive RTT timeouts | `--min-rtt-timeout`, `--max-rtt-timeout`, `--initial-rtt-timeout` | Per-host smoothed RTT and variance (nmap's and TCP's RFC 6298 formula), timeout = srtt + 4·rttvar clamped to the min and max; the `-T` templates set the three values as nmap's do. `--timeout` stays as FeroProbe's fixed-timeout option and sets all three |
+| 5.4 | Interface and source port | `-e`, `-g` / `--source-port` | `-e` binds raw, capture, ARP/NDP and connect sockets to the interface (`netif.rs`). `-g` sets the source port on raw TCP/UDP/SCTP probes and binds UDP sockets to it, with nmap's caveats (DNS lookups and some OS detection probes keep their own ports; connect scans cannot reuse one port for parallel connections) |
+| 5.5 | nmap's names for tuning options | `--max-retries`, `--min-hostgroup`, `--max-hostgroup`, `--min-parallelism`, `--max-parallelism` | `--max-retries` as an alias of `--retries`, `--max-parallelism` of `-c`; host groups become real (scan hosts in groups and report each group as it finishes, as nmap does). Our own names stay |
 
-| Feature | nmap options | Notes |
-| --- | --- | --- |
-| Resume an aborted scan | `--resume` | Planned (phase 4, step 6) |
-| Compare two reports | `ndiff` | Planned (phase 4, step 7) |
-| List scan | `-sL` | List targets (and names) without sending probes. `--dry-run` covers the "send nothing" part and lists the probes too, but is not nmap's option and does no reverse DNS |
-| More ping types | `-PR`, `-PO`, `-PY` | ARP happens automatically, but can't be asked for alone; IP protocol and SCTP ping are missing |
-| RTT-based timeouts | `--min-rtt-timeout`, `--max-rtt-timeout`, `--initial-rtt-timeout` | We use a fixed `--timeout` |
-| Host groups and parallelism | `--min-hostgroup`, `--max-hostgroup`, `--min-parallelism`, `--max-parallelism`, `--max-retries` | We have `-c` and `--retries` under our own names |
-| Interface and source port | `-e`, `-g` / `--source-port` | |
-| Interactive keys during a scan | `v`, `d`, `p`, ... | |
-| Debug output | `-d`, `--iflist` | |
-| Output extras | `--append-output`, `-oS`, `--stylesheet`, `--webxml`, `--no-stylesheet` | |
+### Phase 6: v0.5.0
 
-### Small
+| Step | Feature | nmap options | Plan |
+| --- | --- | --- | --- |
+| 6.1 | Resume an aborted scan | `--resume` | Read the `-oN`/`-oG`/`-oX` file of the aborted run, take the command line from it, skip the hosts already finished and append to the same files, as nmap does. Needs `--append-output` (6.6) first, or in the same pull request |
+| 6.2 | Compare two reports | `ndiff` | A `feroprobe-diff` binary (or `feroprobe --diff a.xml b.xml`) comparing two XML reports: hosts up/down, ports opened/closed, service and OS changes, in text and XML like `ndiff` |
+| 6.3 | List scan | `-sL` | Lists the targets with reverse DNS (unless `-n`), sends nothing to them, as nmap does. Stays separate from `--dry-run` |
+| 6.4 | More ping types | `-PR`, `-PO`, `-PY` | `-PR` asks for ARP/NDP alone; `-PO` sends IP protocol pings (ICMP, IGMP, IP-in-IP by default, like nmap) through `ipproto.rs`; `-PY` sends SCTP INIT through `sctp.rs` |
+| 6.5 | Debug output and interactive keys | `-d`, `-d1`…`-d9`, `--iflist`, keys `v`/`V`, `d`/`D`, `p`/`P`, `?`, any other key for a status line | `-d` levels on top of `-v`; `--iflist` prints interfaces and routes (`netif.rs`); keys read from a raw-mode terminal on standard input while the scan runs, only when it is a terminal |
+| 6.6 | Output extras | `--append-output`, `-oS`, `--stylesheet`, `--webxml`, `--no-stylesheet` | Append mode for every format; `-oS` for parity; an XML stylesheet of our own (nmap's `nmap.xsl` is not reused), referenced by default, `--webxml` points at a published copy |
+| 6.7 | Small options | `--data-length`, `--data`, `--data-string`, `--ttl`, `--ip-options`, `--badsum`, `--spoof-mac`, `-b`, `--privileged`, `--unprivileged`, `--system-dns`, `--port-ratio`, `--defeat-rst-ratelimit` | One pull request per group: payload options; IP header options; `--badsum`; `--spoof-mac` (behind the same private-range / `--allow-public-evasion` gate as the evasion options); FTP bounce `-b` (also behind that gate, since it scans a third party through someone else's server); the rest. Open question for each payload option: whether the probe signature is kept when the user supplies the payload (see `docs/responsible-use.md`) |
 
-| Feature | nmap options | Notes |
-| --- | --- | --- |
-| Spoofed MAC | `--spoof-mac` | Would fall under the private-range gate |
-| Padding and payloads | `--data-length`, `--data`, `--data-string` | |
-| IP header options | `--ttl`, `--ip-options` | |
-| Bad checksums | `--badsum` | |
-| FTP bounce scan | `-b` | |
-| Random targets | `-iR` | Would conflict with the anti-abuse stance |
-| Misc | `--privileged`, `--unprivileged`, `--system-dns`, `--port-ratio`, `--defeat-rst-ratelimit` | |
+### Phase 7: script engine (v0.6.0)
+
+| Step | Feature | nmap options | Plan |
+| --- | --- | --- | --- |
+| 7.1 | Engine and script format | `--script`, `--script-args`, `--script-args-file`, `--script-help`, `--script-timeout` | Embedded Lua, see [Script engine design](#script-engine-design). The engine, the sandbox, script selection and output in every format |
+| 7.2 | Script libraries | | Sockets (TCP, UDP, TLS), port-rule helpers, HTTP client, output tables, shared registry, `--script-args` access; raw packets only as root and only to scanned targets |
+| 7.3 | Default scripts | `-sC`, `-A` | Our own scripts in the `default` category, written from protocol documentation; `-A` then adds `-sC`, as in nmap |
+| 7.4 | More scripts | `--script <category>` | Grows script by script, each with a test against a local service |
+| 7.5 | Script tracing and updates | `--script-trace`, `--script-updatedb` | Trace of every script socket call in the `--packet-trace` layout; an index of installed scripts and their categories |
+
+### Script engine design
+
+**Language.** Lua 5.4, embedded with the [`mlua`](https://crates.io/crates/mlua)
+crate (MIT) and its `vendored` and `async` features, so the Lua interpreter
+(MIT) is built into the binary on Linux, macOS and Windows and script I/O
+runs on the same tokio runtime as the scan. Lua because script authors know it
+from nmap, it is small, and it sandboxes well. A pure-Rust interpreter would
+avoid the C build but none is mature enough yet. Rhai was considered earlier
+and rejected because it is not what nmap users write.
+
+**Script format.** Same shape as an nmap script, so the model is familiar: a
+`.lua` file with `description`, `author`, `license`, `categories`, one or more
+of `prerule`, `hostrule`, `portrule`, `postrule`, and an `action` function that
+returns a string or an output table. The libraries live in our own namespace
+(`fero.socket`, `fero.shortport`-like helpers under our own names, `fero.http`,
+`fero.output`, `fero.args`, `fero.registry`), designed and documented by us.
+nmap's scripts will not run unchanged, because they depend on nmap's own
+libraries (`stdnse`, `shortport`, `http`, …), which FeroProbe cannot ship (see
+[Licence](#licence-caveats)).
+
+**Selection.** `--script` takes script names, file or directory paths,
+categories and boolean expressions (`"default and safe"`, `"not intrusive"`),
+like nmap. `-sC` means `--script default`. Users can load their own scripts
+from a path; FeroProbe's own live in a `lua-scripts/` directory in the repository
+(name to be settled) and are compiled into the binary.
+
+**Sandbox.** Scripts get Lua's `string`, `table`, `math`, `utf8` and coroutine
+libraries, and FeroProbe's libraries. No `io`, `os.execute`, `package.loadlib`
+or `debug`, and file reads only through an explicit library call limited to
+`--script-args` files. Each script run has a memory limit, an instruction limit
+and `--script-timeout`.
+
+**Scope (no surprises).** Script sockets are checked by the engine, not by
+trust in the script: by default a script may connect only to the host it runs
+on and only to the ports the scan probed, like nmap's
+`mssql.scanned-ports-only` but for everything. A wider scope needs an explicit
+option (name to be settled, e.g. `--script-scope=host`). `--dry-run` lists
+the candidate scripts for each host and port and the scope each one is
+allowed, without running them. It cannot say which of them will actually
+run, because a `portrule` usually depends on what the scan finds. It cannot list a script's individual
+requests, because a script picks them from the replies it gets; the dry-run
+section of the manual says so.
+Discovery-style `prerule` scripts that broadcast are off unless named
+explicitly.
+
+**ICS protection.** With `ics_protection = true`, every script run is refused
+(`-sC`, `--script`, and the scripts `-A` adds) unless
+`--override-ics-protection` is given, the same as `-sV` and `-O` today.
+`--dry-run` is not refused but warns.
+
+**Signature.** Script traffic is ordinary application traffic, so the raw-probe
+markers cannot apply. The HTTP library sends a `User-Agent` naming FeroProbe's
+script engine, as nmap's does, and `docs/responsible-use.md` documents what
+script traffic looks like.
+
+**Output.** Normal output under each port or host like nmap's `|_` lines;
+`<script id output>` elements with `<elem>`/`<table>` in XML, as nmap's;
+structured results in JSON.
+
+### Licence caveats
+
+- FeroProbe is GPL-3.0-or-later. nmap's scripts (`scripts/*.nse`), libraries
+  (`nselib/`), `nmap-service-probes`, `nmap-os-db`, `nmap-payloads` and
+  `nmap.xsl` are under the Nmap Public Source License, which adds terms of its
+  own. None of them may be copied into FeroProbe, translated line by line, or
+  shipped with it, and neither may their documentation text.
+- Our scripts, service rules and OS signatures are written from protocol
+  specifications, RFCs, vendor documentation and our own captures of real
+  services. Writing an equivalent of an nmap script means starting from the
+  protocol, not from nmap's script.
+- Users may load any script they have the right to use, including their own.
+  FeroProbe does not fetch or bundle third-party scripts.
+- Lua and `mlua` are MIT, compatible with GPL-3.0.
 
 ### Not planned
 
 | Feature | Why |
 | --- | --- |
 | Idle scan `-sI` | Dropped: little use beyond teaching, and nmap already covers that |
-| nmap's probe, service and OS databases | Their licence does not allow redistributing them; FeroProbe writes its own |
+| Random targets `-iR` | Scanning random internet hosts conflicts with the anti-abuse stance (Jurgen, 2026-11-15) |
+| nmap's probe, service, OS and script databases | Their licence does not allow redistributing them; FeroProbe writes its own (see [Licence caveats](#licence-caveats)) |
 
 ## Development notes
 
