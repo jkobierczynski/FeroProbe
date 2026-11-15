@@ -1,0 +1,26 @@
+# Known, documented differences. Format: case-glob | regex on the finding text | note
+# (fields are separated by " | " with spaces, so a regex may use | without them)
+# Matching findings are still reported, marked "documented". Add a line only when
+# DEVELOPMENT.md or docs/responsible-use.md documents the divergence.
+
+* | ^tcp/\d+ \[[A-Za-z]+\] win: nmap \[[^]]*\] vs FeroProbe \[65109( x\d+)?\]$ | probe signature: raw TCP window 65109 (docs/responsible-use.md)
+* | ^udp/\d+ payload: nmap \[[^]]*\] vs FeroProbe \[16B 'FeroProbeScan/1\\\\n' #[0-9a-f]+( x\d+)?\]$ | probe signature: generic UDP payload FeroProbeScan/1 (docs/responsible-use.md)
+* | ^icmp6? echo-request payload: nmap \[[^]]*\] vs FeroProbe \[9B 'feroprobe' #[0-9a-f]+( x\d+)?\]$ | probe signature: ICMP echo payload feroprobe (docs/responsible-use.md; Jurgen, 2026-11-15)
+
+# DEVELOPMENT.md, "Deliberate differences from nmap" (Jurgen, 2026-11-15)
+* | ^udp/(53|123|161|1900|5353) payload: | own UDP service payloads, one per port (UDP service payloads)
+* | ^udp/(53|123|161|1900|5353) df: | own UDP service payloads, one per port (UDP service payloads)
+*aggressive* | ^(udp/1434 was not asked for, but nmap only sent to it|only nmap sent to udp/1434:) | nmap's ms-sql-info script probe; FeroProbe has no scripts (Probes outside the requested ports)
+*version* | ^tcp/\d+ \[(PA|A|FA|RA|R)\]( payload)?: | own service probes (Service and OS signatures)
+*aggressive* | ^tcp/\d+ \[(PA|A|FA|RA|R)\]( payload)?: | own service probes (Service and OS signatures)
+os | ^only nmap sent to udp/\d+: .*300B 'C | nmap's OS detection UDP probe to an unscanned port (Probes outside the requested ports)
+*aggressive* | ^only nmap sent to udp/\d+: .*300B 'C | nmap's OS detection UDP probe to an unscanned port (Probes outside the requested ports)
+os | ^udp/\d+ was not asked for, but nmap only sent to it | nmap's OS detection UDP probe to an unscanned port (Probes outside the requested ports)
+*aggressive* | ^udp/\d+ was not asked for, but nmap only sent to it | nmap's OS detection UDP probe to an unscanned port (Probes outside the requested ports)
+os | ^only nmap sent to icmp echo-request: .*120B | nmap's OS detection ICMP probes (OS detection probes)
+*aggressive* | ^only nmap sent to icmp echo-request: .*120B | nmap's OS detection ICMP probes (OS detection probes)
+os | ^tcp/\d+ \[[A-Za-z]+\]: only nmap sent these | nmap's OS detection TCP probes (OS detection probes)
+*aggressive* | ^tcp/\d+ \[[A-Za-z]+\]: only nmap sent these | nmap's OS detection TCP probes (OS detection probes)
+os | ^tcp/\d+ \[S\] (opts|win|df): nmap \[.*(M265|M1400|M536|M640|31337) | nmap's OS detection TCP probes (OS detection probes)
+*aggressive* | ^tcp/\d+ \[S\] (opts|win|df): nmap \[.*(M265|M1400|M536|M640|31337) | nmap's OS detection TCP probes (OS detection probes)
+

@@ -40,6 +40,67 @@ pub(crate) fn raw_socket_in(domain: Domain, proto: Protocol) -> io::Result<Socke
     })
 }
 
+/// A TTL (IPv6: hop limit) for one probe, picked like nmap does when no
+/// `--ttl` is given: at random from 37 to 59 (`build_ip_raw` in nmap's
+/// tcpip.cc). A fresh value for every probe.
+pub(crate) fn probe_ttl() -> u8 {
+    use std::cell::Cell;
+    thread_local! {
+        static STATE: Cell<u64> = Cell::new({
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos() as u64)
+                .unwrap_or(0);
+            (nanos ^ (u64::from(std::process::id()) << 32)) | 1
+        });
+    }
+    STATE.with(|s| {
+        let mut x = s.get();
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        s.set(x);
+        37 + ((x >> 32) % 23) as u8
+    })
+}
+
+/// Give the next probe sent on `sock` nmap's IP header: "don't fragment"
+/// clear (IPv4) and a random TTL or hop limit from [`probe_ttl`]. Call it
+/// before each probe on a socket whose IP header the kernel writes. Best
+/// effort: an option the system refuses leaves its default in place.
+pub(crate) fn nmap_ip_header(sock: &Socket, ipv6: bool) {
+    let ttl = u32::from(probe_ttl());
+    if ipv6 {
+        let _ = sock.set_unicast_hops_v6(ttl);
+    } else {
+        clear_dont_fragment(sock);
+        let _ = sock.set_ttl_v4(ttl);
+    }
+}
+
+/// Stop the kernel from setting "don't fragment" on IPv4 packets from
+/// `sock` (it does by default, for path MTU discovery). nmap sends its
+/// probes without it unless asked (`--df`).
+pub(crate) fn clear_dont_fragment(sock: &Socket) {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::AsRawFd;
+        let val: libc::c_int = libc::IP_PMTUDISC_DONT;
+        // SAFETY: valid socket fd, and a pointer/length pair for a c_int.
+        unsafe {
+            libc::setsockopt(
+                sock.as_raw_fd(),
+                libc::IPPROTO_IP,
+                libc::IP_MTU_DISCOVER,
+                (&raw const val).cast(),
+                std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+            );
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = sock;
+}
+
 /// The local address the OS would use to reach `dst`, found by "connecting" a
 /// UDP socket (which sends nothing).
 #[cfg(target_os = "linux")]

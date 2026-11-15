@@ -327,7 +327,8 @@ mod imp {
     use crate::connect::is_network_error;
     use crate::model::{PortResult, Protocol};
     use crate::raw::{
-        Pacer, Rng, raw_socket_in, receive_loop, send_with_backoff_until, source_addr_for,
+        Pacer, Rng, nmap_ip_header, probe_ttl, raw_socket_in, receive_loop,
+        send_with_backoff_until, source_addr_for,
     };
     use crate::target::socket_addr;
 
@@ -382,7 +383,7 @@ mod imp {
             // A distinct identification per datagram; fragments of one
             // datagram share it, as reassembly needs.
             let id = (seq as u16) ^ dport ^ (i as u16);
-            let pkt = packet::ipv4_packet(src4, dst4, packet::IPPROTO_TCP, 64, id, &seg);
+            let pkt = packet::ipv4_packet(src4, dst4, packet::IPPROTO_TCP, probe_ttl(), id, &seg);
             let frags = match cfg.evasion.fragment {
                 Some(f) => crate::evasion::fragment_ipv4(&pkt, f),
                 None => vec![pkt],
@@ -560,8 +561,11 @@ mod imp {
                     }
                     let Some(src) = sources[h] else { continue };
                     // Answered by a reply that came in during this round, or
-                    // the host is already known to be up.
-                    if results.contains_key(&(h, p)) || is_done(h) {
+                    // (on a retry) the host is already known to be up. The
+                    // first round always goes out: nmap sends a host all
+                    // its discovery probes in one burst, so an early ICMP
+                    // reply does not hold back the SYN or ACK.
+                    if results.contains_key(&(h, p)) || (round > 0 && is_done(h)) {
                         continue;
                     }
                     let Some(send_sock) = send_socks[usize::from(addrs[h].is_ipv6())].as_ref()
@@ -586,7 +590,7 @@ mod imp {
                         record(&mut results, &sent_at, a);
                     }
                     // Another probe may have proven the host up meanwhile.
-                    if results.contains_key(&(h, p)) || is_done(h) {
+                    if results.contains_key(&(h, p)) || (round > 0 && is_done(h)) {
                         continue;
                     }
                     sent_at.insert((h, p), Instant::now());
@@ -598,10 +602,12 @@ mod imp {
                             send_evasion(raw, src, addrs[h], sport, p, cookie, ack, scan.flags, cfg)
                         } else if scan.flags == TCP_SYN {
                             let pkt = packet::tcp_syn(src, addrs[h], sport, p, cookie);
+                            nmap_ip_header(send_sock, addrs[h].is_ipv6());
                             send_with_backoff_until(send_sock, &pkt, to, cfg.deadline)
                         } else {
                             let pkt =
                                 packet::tcp_probe(src, addrs[h], sport, p, cookie, ack, scan.flags);
+                            nmap_ip_header(send_sock, addrs[h].is_ipv6());
                             send_with_backoff_until(send_sock, &pkt, to, cfg.deadline)
                         };
                     match sent {
@@ -790,7 +796,9 @@ mod imp {
             };
             let target = Target::new("127.0.0.1".parse().unwrap());
             let syn = RawTcpScan::new(TcpScanKind::Syn);
-            // Already proven up: nothing is sent, and the scan does not wait.
+            // Already proven up: the first probe still goes out (nmap sends
+            // a host's discovery probes in one burst), but the scan does
+            // not wait for its answer.
             let done = HostsDone {
                 flags: Arc::new(vec![AtomicBool::new(false), AtomicBool::new(true)]),
                 tcp: Arc::new(vec![AtomicBool::new(false), AtomicBool::new(false)]),
@@ -806,7 +814,7 @@ mod imp {
             )
             .unwrap();
             assert!(started.elapsed() < Duration::from_secs(2));
-            assert_eq!(hosts[0].ports[0].reason, reason::NO_RESPONSE);
+            assert_eq!(hosts[0].ports.len(), 1);
             // Not yet up: probed, and the reset marks the host done.
             let done = HostsDone {
                 flags: Arc::new(vec![AtomicBool::new(false)]),
@@ -817,8 +825,9 @@ mod imp {
             assert_eq!(hosts[0].ports[0].state, PortState::Closed);
             assert!(done.is_done(0));
 
-            // Two hosts, one already up: the other still gets its answer
-            // counted, with no retry to fall back on.
+            // Two hosts, one already up: both get their first probe, and the
+            // other still gets its answer counted, with no retry to fall
+            // back on.
             let cfg = ScanConfig { retries: 0, ..cfg };
             let a = Target::new("127.0.0.1".parse().unwrap());
             let b = Target::new("127.0.0.2".parse().unwrap());
@@ -828,7 +837,7 @@ mod imp {
                 index: vec![0, 1],
             };
             let hosts = scan_blocking(&[a, b], &[closed], &cfg, syn, Some(&done)).unwrap();
-            assert_eq!(hosts[0].ports[0].reason, reason::NO_RESPONSE);
+            assert_eq!(hosts[0].ports.len(), 1);
             assert_eq!(hosts[1].ports[0].state, PortState::Closed);
         }
 

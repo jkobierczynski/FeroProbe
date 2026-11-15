@@ -109,6 +109,9 @@ can tell FeroProbe traffic apart from other traffic. The marks are:
   payload `FeroProbeScan/1` instead of an empty datagram. Service probes
   (DNS, NTP, SNMP, SSDP and so on) keep their own payloads, which are
   already identifiable as the standard probe for that service.
+- **ICMP and ICMPv6 echo requests** sent for host discovery carry the
+  9-byte ASCII payload `feroprobe` (nmap's echo requests are empty). Echo
+  replies copy the payload back, so the marker shows in both directions.
 
 Two scans carry no marker, on purpose:
 

@@ -497,6 +497,12 @@ An explicit scan type (\f[V]-sU\f[R], \f[V]-sY\f[R], \f[V]-sZ\f[R],
 The raw-socket scans need Linux with root or \f[V]CAP_NET_RAW\f[R]; see
 Privileges and platforms.
 All scan types support IPv4 and IPv6.
+.PP
+Like nmap\[aq]s, the probes of the raw-socket scans, of host discovery
+and of the UDP scan go out without the \[dq]don\[aq]t fragment\[dq] bit
+and with a random TTL (IPv6: hop limit) from 37 to 59, picked again for
+every probe.
+Traceroute sets its own TTLs.
 .SS TCP SYN scan (\f[V]-sS\f[R])
 .PP
 Sends a SYN and reads the answer without completing the handshake: a
@@ -510,6 +516,8 @@ Asks the operating system to connect to each port, so it needs no
 privileges and works on Linux, macOS and Windows.
 A completed connection means \f[V]open\f[R], a refused one
 \f[V]closed\f[R], and a timeout \f[V]filtered\f[R].
+An open port\[aq]s connection is closed at once with a reset, as nmap
+does, rather than with a FIN.
 This is the default scan without raw sockets.
 It carries no FeroProbe signature, since it is an ordinary connection.
 On Windows, a refused connection is reported only about 2 seconds after
@@ -857,14 +865,22 @@ TCP scan; with \f[V]-sn\f[R], the first TCP port given with
 \f[V]-PA\f[R], or the default 443 as root).
 Traceroute never probes a port outside the scan: when the command probes
 no TCP port at all (for example \f[V]-sU -Pn\f[R]), hosts without an
-open or closed TCP port are not traced and a warning says why, and
-\f[V]-sn -Pn --traceroute\f[R] without \f[V]-p\f[R] is refused.
+open or closed TCP port are not traced and a warning says why (with
+\f[V]-sn\f[R], name the port with \f[V]-p\f[R]).
+A directly connected host needs no port, since it gets no probes (see
+below).
 Routers answer the probes that expire with ICMP time exceeded, and the
 first probe that reaches the host ends the route.
 A hop that never answers is shown as \f[V]...\f[R].
 Needs raw sockets.
 With \f[V]-Pn\f[R] every target is traced, even one that never answered.
 Hosts given up on by \f[V]--host-timeout\f[R] are not traced.
+.PP
+As in nmap, this machine itself (a loopback address or one of its own)
+is not traced at all, and a host on a directly connected network gets no
+probes: its route is the host alone, at hop 1, with the latency the scan
+measured, under a plain \f[V]TRACEROUTE\f[R] header (in XML, a
+\f[V]<trace>\f[R] element without a port).
 .IP
 .nf
 \f[C]
@@ -914,6 +930,7 @@ Any of \f[V]--timeout\f[R], \f[V]--retries\f[R],
 \f[V]--scan-delay\f[R] given explicitly overrides the template\[aq]s
 value for that setting, so \f[V]-T4 --max-rate 2000\f[R] is aggressive
 with a lower packet rate.
+Given more than once, the last \f[V]-T\f[R] wins, as in nmap.
 .PP
 .TS
 tab(@);
@@ -1618,6 +1635,9 @@ Raw TCP scans (\f[V]-sS\f[R], \f[V]-sF\f[R], \f[V]-sN\f[R],
 .IP \[bu] 2
 UDP probes to ports without a service payload carry
 \f[V]FeroProbeScan/1\[rs]n\f[R].
+.IP \[bu] 2
+ICMP and ICMPv6 echo requests (host discovery) carry the 9-byte payload
+\f[V]feroprobe\f[R], where nmap\[aq]s are empty.
 .PP
 The connect scan and OS detection probes carry no mark, by design.
 Suricata and Snort rules matching the signature are in the
@@ -1668,10 +1688,11 @@ T}
 T{
 Probe signature
 T}@T{
-None
+None (empty ICMP echo payload)
 T}@T{
 Raw TCP probes use window 65109; generic UDP probes carry
-\f[V]FeroProbeScan/1\[rs]n\f[R]
+\f[V]FeroProbeScan/1\[rs]n\f[R]; ICMP echo requests carry
+\f[V]feroprobe\f[R]
 T}
 T{
 Unprivileged discovery
@@ -1717,6 +1738,39 @@ nmap\[aq]s databases
 T}@T{
 FeroProbe\[aq]s own (nmap\[aq]s cannot be redistributed); OS detection
 names the family, not the version
+T}
+T{
+UDP service payloads (\f[V]-sU\f[R])
+T}@T{
+nmap\[aq]s payload database: several probes per port (two DNS queries to
+53, two NTP versions to 123, SNMPv1 and v3 to 161, three NetBIOS queries
+to 137), up to dozens with \f[V]-sV\f[R]
+T}@T{
+FeroProbe\[aq]s own, one per port: DNS (53, 5353), NTP (123), SNMP (161)
+and SSDP (1900); every other port gets \f[V]FeroProbeScan/1\[rs]n\f[R].
+nmap\[aq]s payloads cannot be redistributed; one payload per service is
+enough to make it answer
+T}
+T{
+OS detection probes (\f[V]-O\f[R])
+T}@T{
+About 16 probes per host (6 SYNs with varied options, ECN, T2-T7 to open
+and closed ports, 2 ICMP echoes, a UDP probe to a closed port), sent
+several times: about 150 packets
+T}@T{
+One TCP SYN to an open port, offering every common option, plus the
+scan\[aq]s own probes: a handful of packets.
+Lighter on the target, and no probes outside the scanned ports; the
+price is a family rather than an exact version
+T}
+T{
+Port names
+T}@T{
+nmap-services
+T}@T{
+The same names for the common ports, from the IANA registry, and
+\f[V]unknown\f[R] for the rest.
+nmap-services cannot be redistributed
 T}
 T{
 Timeouts

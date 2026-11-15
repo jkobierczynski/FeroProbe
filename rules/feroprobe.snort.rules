@@ -5,6 +5,7 @@
 # scan traffic so the owner of a scanned network can recognize it:
 #   * Raw-socket TCP scan probes carry TCP window 65109 (0xFE55).
 #   * UDP probes without a service-specific payload carry "FeroProbeScan/1".
+#   * ICMP/ICMPv6 echo requests carry the 9-byte payload "feroprobe".
 #
 # The TCP connect scan (-sT) and OS-detection probes (-O) are the documented
 # exceptions and carry no marker.
@@ -19,3 +20,7 @@ alert tcp any any -> $HOME_NET any (msg:"FeroProbe stateless TCP scan probe (win
 
 # UDP scan probe carrying FeroProbe's payload marker.
 alert udp any any -> $HOME_NET any (msg:"FeroProbe UDP scan probe (payload marker)"; content:"FeroProbeScan/1"; depth:16; classtype:attempted-recon; sid:9100003; rev:1;)
+
+# ICMP echo request (host discovery) carrying FeroProbe's 9-byte payload.
+alert icmp any any -> $HOME_NET any (msg:"FeroProbe ping probe (echo payload marker)"; itype:8; dsize:9; content:"feroprobe"; depth:9; classtype:attempted-recon; sid:9100004; rev:1;)
+alert icmp any any -> $HOME_NET any (msg:"FeroProbe IPv6 ping probe (echo payload marker)"; itype:128; dsize:9; content:"feroprobe"; depth:9; classtype:attempted-recon; sid:9100005; rev:1;)

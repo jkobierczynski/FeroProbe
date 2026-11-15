@@ -418,7 +418,8 @@ struct Args {
     /// Timing template: 0-5 or paranoid, sneaky, polite, normal, aggressive,
     /// insane (-T4 = aggressive). Sets timeout, retries, concurrency, rate and
     /// scan delay; those flags still override it. [default: 3, normal]
-    #[arg(short = 'T', value_name = "0-5", value_parser = parse_timing)]
+    /// Given more than once, the last one wins, as in nmap.
+    #[arg(short = 'T', value_name = "0-5", value_parser = parse_timing, overrides_with = "timing")]
     timing: Option<Timing>,
 
     /// Per-probe timeout in milliseconds [default: from -T; normally 1500, or 3000 on Windows]
@@ -1585,8 +1586,14 @@ fn dry_run_notes(args: &Args, plan: &Plan, d: &DryOrder, privileged: bool) -> Ve
                  each host, else to TCP port {port}, which this command names"
             ),
             None => format!(
-                "Traceroute would use an open or closed TCP port the scan finds; hosts without \
-                 one are not traced: {TRACE_NO_PORT}"
+                "Traceroute would use an open or closed TCP port the scan finds; a directly \
+                 connected host gets a one-hop trace without probes, and other hosts without \
+                 such a port are not traced: {}",
+                if plan.ping_only {
+                    TRACE_NO_PORT_SN
+                } else {
+                    TRACE_NO_PORT
+                }
             ),
         });
     }
@@ -1808,11 +1815,6 @@ async fn main() -> Result<()> {
         bail!("-sn with -Pn would do nothing (add --traceroute to only trace the route)");
     }
     let trace_fallback = trace_fallback_port(&args, &plan, &tcp_ports, &probes);
-    if trace && plan.ping_only && trace_fallback.is_none() {
-        // With -sn no host can have a scanned TCP port, so nothing would
-        // be traced: say so up front rather than after discovery.
-        bail!("--traceroute with -sn: {TRACE_NO_PORT_SN}");
-    }
     if trace && !raw_sockets_available() && !args.dry_run {
         bail!("--traceroute sends raw packets: run as root or grant CAP_NET_RAW");
     }
@@ -2050,8 +2052,15 @@ async fn main() -> Result<()> {
             .await
             .context("traceroute failed")?;
         if untraced > 0 {
+            // A directly connected host needs no port (it gets no probes),
+            // so only the hosts further away are left untraced.
+            let why = if plan.ping_only {
+                TRACE_NO_PORT_SN
+            } else {
+                TRACE_NO_PORT
+            };
             eprintln!(
-                "Warning: {untraced} host{} not traced: {TRACE_NO_PORT}",
+                "Warning: {untraced} host{} not traced: {why}",
                 if untraced == 1 { "" } else { "s" }
             );
         }
@@ -2191,6 +2200,9 @@ mod tests {
     fn timing_templates_and_overrides() {
         let a = Args::try_parse_from(["feroprobe", "-T4", "10.0.0.1"]).unwrap();
         assert_eq!(a.timing, Some(Timing::Aggressive));
+        // Like nmap, a repeated -T is not an error: the last one wins.
+        let b = Args::try_parse_from(["feroprobe", "-T2", "-T4", "10.0.0.1"]).unwrap();
+        assert_eq!(b.timing, Some(Timing::Aggressive));
         let cfg = scan_config(&a);
         assert_eq!(cfg.concurrency, Timing::Aggressive.config().concurrency);
         assert_eq!(cfg.timeout, Timing::Aggressive.config().timeout);

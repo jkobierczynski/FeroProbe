@@ -1,0 +1,59 @@
+name: nmap diff
+
+# Runs nmap and FeroProbe side by side in a namespace lab and reports every
+# difference in what they send (scripts/nmap-diff/README.md). Report only:
+# the job does not fail on differences, it uploads the report and shows it
+# in the run summary. Pinned to ubuntu-24.04, whose archive ships nmap 7.94
+# (scripts/nmap-diff/NMAP_VERSION).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - "scripts/nmap-diff/**"
+      - ".github/workflows/nmap-diff.yml"
+  schedule:
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+    inputs:
+      cases:
+        description: "Comma-separated globs of case names"
+        default: "*"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  nmap-diff:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install nmap and tools
+        run: sudo apt-get update && sudo apt-get install -y nmap tcpdump iproute2 iptables
+      - name: Unit tests
+        run: python3 -m unittest discover -s scripts/nmap-diff -v
+      - run: cargo build --release
+      - name: Run the matrix
+        env:
+          CASES: ${{ github.event.inputs.cases || '*' }}
+        run: sudo python3 scripts/nmap-diff/nmap_diff.py --cases "$CASES"
+      - name: Report to the run summary
+        if: always()
+        run: |
+          if [ -f target/nmap-diff/report.md ]; then
+            # the job summary is limited to 1 MiB
+            head -c 1000000 target/nmap-diff/report.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: nmap-diff-report
+          path: target/nmap-diff/
+          if-no-files-found: ignore

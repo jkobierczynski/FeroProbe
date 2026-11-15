@@ -280,7 +280,12 @@ fn print_trace(out: &mut String, host: &HostResult) {
         w!(out, "TRACEROUTE: no hops answered");
         return;
     }
-    w!(out, "TRACEROUTE (using port {}/{})", t.port, t.protocol);
+    if t.direct {
+        // nmap's header when no probe was sent (a directly connected host).
+        w!(out, "TRACEROUTE");
+    } else {
+        w!(out, "TRACEROUTE (using port {}/{})", t.port, t.protocol);
+    }
     w!(out, "HOP RTT        ADDRESS");
     for hop in &t.hops {
         let rtt = hop

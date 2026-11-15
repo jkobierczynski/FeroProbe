@@ -103,7 +103,7 @@ mod imp {
     use crate::capture::Packet;
     use crate::model::{PortState, Protocol};
     use crate::packet::{self, IPPROTO_ICMP, IPPROTO_ICMPV6, IPPROTO_SCTP};
-    use crate::raw::{Rng, raw_socket_in, send_with_backoff_until};
+    use crate::raw::{Rng, nmap_ip_header, raw_socket_in, send_with_backoff_until};
     use crate::rawscan::{self, Answer, Index};
     use crate::target::socket_addr;
 
@@ -155,6 +155,7 @@ mod imp {
             let Some(sock) = sock else {
                 return Err(io::Error::from_raw_os_error(libc::ENETUNREACH));
             };
+            nmap_ip_header(sock, dst.is_ipv6());
             send_with_backoff_until(sock, &pkt, socket_addr(dst, 0), cfg.deadline)
         };
         let classify = move |pkt: &Packet<'_>, index: &Index| -> Vec<Answer> {

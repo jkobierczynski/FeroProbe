@@ -10,7 +10,7 @@
 
 use std::io::{self, ErrorKind};
 use std::net::SocketAddr;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use futures::stream::{self, StreamExt};
 use tokio::net::TcpStream;
@@ -72,7 +72,13 @@ pub async fn probe_port(addr: SocketAddr, cfg: &ScanConfig) -> io::Result<PortRe
             },
         );
         match outcome {
-            Ok(Ok(_stream)) => return Ok(result(PortState::Open, reason::SYN_ACK, rtt)),
+            Ok(Ok(stream)) => {
+                // Close with a reset, not a FIN, as nmap's connect scan
+                // does: a zero linger time makes the close abort.
+                let _ = socket2::SockRef::from(&stream).set_linger(Some(Duration::ZERO));
+                drop(stream);
+                return Ok(result(PortState::Open, reason::SYN_ACK, rtt));
+            }
             Ok(Err(e)) if e.kind() == ErrorKind::ConnectionRefused => {
                 return Ok(result(PortState::Closed, reason::CONN_REFUSED, rtt));
             }

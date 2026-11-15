@@ -521,11 +521,11 @@ fn discovery(
             let (proto, msg) = match kind {
                 packet::ICMP_ECHO_REQUEST if v6 => (
                     packet::IPPROTO_ICMPV6,
-                    packet::icmpv6_echo(v.icmp_id, seq, b"feroprobe"),
+                    packet::icmpv6_echo(v.icmp_id, seq, packet::ECHO_MARKER),
                 ),
                 packet::ICMP_ECHO_REQUEST => (
                     packet::IPPROTO_ICMP,
-                    packet::icmp_echo(v.icmp_id, seq, b"feroprobe"),
+                    packet::icmp_echo(v.icmp_id, seq, packet::ECHO_MARKER),
                 ),
                 packet::ICMP_TIMESTAMP => (
                     packet::IPPROTO_ICMP,

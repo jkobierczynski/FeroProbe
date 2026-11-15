@@ -1,0 +1,78 @@
+# Option matrix for nmap-diff.py.
+#
+# One case per line:   name | target | privileges | options
+#
+#   target      lan     on the same link as the scanner (ARP/ND discovery)
+#               routed  one router hop away (ICMP/TCP discovery, traceroute)
+#               lan6    the target's IPv6 address on the same link
+#               local   127.0.0.1 in the scanner's own namespace
+#   privileges  root    run both tools as root
+#               user    run both tools as an unprivileged user
+#   options     passed unchanged to BOTH nmap and FeroProbe. The words
+#               @TCP, @UDP, @ALL expand to the lab's TCP, UDP and both port
+#               lists (see "Lab ports" in README.md), so a case scans
+#               exactly the ports the lab has listeners, closed and
+#               filtered ports on.
+#
+# The harness adds its base options (-n -T4 by default, see --base-opts)
+# in front of every case. Blank lines and lines starting with # are ignored.
+
+# --- Port scans, root --------------------------------------------------------
+syn              | lan    | root | -sS -p @TCP
+syn-routed       | routed | root | -sS -p @TCP
+connect-root     | lan    | root | -sT -p @TCP
+udp              | lan    | root | -sU -p @UDP
+fin              | lan    | root | -sF -p @TCP
+null             | lan    | root | -sN -p @TCP
+xmas             | lan    | root | -sX -p @TCP
+ack              | lan    | root | -sA -p @TCP
+window           | lan    | root | -sW -p @TCP
+maimon           | lan    | root | -sM -p @TCP
+scanflags        | lan    | root | --scanflags SYNFIN -p @TCP
+sctp-init        | lan    | root | -sY -p 80,2905
+ipproto          | lan    | root | -sO -p 1,6,17,132
+syn-and-udp      | lan    | root | -sS -sU -p T:@TCP,U:@UDP
+skip-discovery   | routed | root | -Pn -sS -p @TCP
+
+# --- Detection, root ---------------------------------------------------------
+version          | lan    | root | -sV -p @TCP
+version-udp      | lan    | root | -sU -sV -p @UDP
+version-closed   | lan    | root | -sV -p 102,502
+os               | lan    | root | -O -p @TCP
+aggressive       | lan    | root | -A -p @TCP
+aggressive-routed| routed | root | -A -p @TCP
+traceroute       | routed | root | --traceroute -p @TCP
+
+# --- Loopback (nmap treats localhost specially) ----------------------------
+syn-local        | local  | root | -sS -p @TCP
+ping-local       | local  | root | -sn
+version-local    | local  | root | -sV -p @TCP
+aggressive-local | local  | root | -T2 -A --max-rate 10 -p 502,102
+
+# --- Evasion, root -----------------------------------------------------------
+fragment         | lan    | root | -sS -f -p @TCP
+mtu16            | lan    | root | -sS --mtu 16 -p @TCP
+
+# --- Host discovery, root ----------------------------------------------------
+ping-lan         | lan    | root | -sn
+ping-routed      | routed | root | -sn
+ping-echo        | routed | root | -sn -PE
+ping-timestamp   | routed | root | -sn -PP
+ping-mask        | routed | root | -sn -PM
+ping-syn         | routed | root | -sn -PS22,80
+ping-ack         | routed | root | -sn -PA80
+ping-udp         | routed | root | -sn -PU
+ping-send-ip     | lan    | root | -sn --send-ip
+
+# --- Top ports (exposes port-list differences) -------------------------------
+fast             | lan    | root | -sS -F
+
+# --- IPv6 --------------------------------------------------------------------
+syn6             | lan6   | root | -6 -sS -p @TCP
+ping6            | lan6   | root | -6 -sn
+
+# --- Unprivileged ------------------------------------------------------------
+user-default     | lan    | user | -p @TCP
+user-ping        | routed | user | -sn
+user-version     | lan    | user | -sV -p @TCP
+user-aggressive  | lan    | user | -A -p @TCP

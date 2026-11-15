@@ -10,6 +10,11 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use crate::arp::MacAddr;
 
+/// Payload of the ICMP and ICMPv6 echo requests FeroProbe sends for host
+/// discovery: part of the probe signature (docs/responsible-use.md). nmap's
+/// echo is empty. The IP protocol scan (`-sO`) sends an empty echo, like nmap.
+pub const ECHO_MARKER: &[u8] = b"feroprobe";
+
 pub const IPPROTO_ICMP: u8 = 1;
 pub const IPPROTO_TCP: u8 = 6;
 

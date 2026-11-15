@@ -21,6 +21,7 @@ the SCTP, IP protocol, IPv6 OS detection and probe-signature work).
 | [docs/feroprobe.1](docs/feroprobe.1) | The man page, generated from `docs/manual.md` | Rebuild with `scripts/build-manpage.sh` (needs pandoc) whenever the manual changes, and commit both |
 | `--help` (`crates/feroprobe-cli/src/help.rs`) | One-page option summary, laid out like nmap's | A test fails when an option is missing |
 | [docs/responsible-use.md](docs/responsible-use.md) | The anti-abuse safeguards and why they exist | When a safeguard changes |
+| [scripts/nmap-diff/README.md](scripts/nmap-diff/README.md) | The nmap differential test harness, its lab and its severities | When a case or the lab changes. Add a `known-differences.txt` line when a divergence below is documented |
 | [rules/README.md](rules/README.md) | The Suricata and Snort rules for the probe signature | When the signature changes |
 | This file | Implemented features and the gap to nmap | With every feature change |
 
@@ -30,7 +31,8 @@ the SCTP, IP protocol, IPv6 OS detection and probe-signature work).
 
 | Feature | Options | Notes |
 | --- | --- | --- |
-| TCP connect scan | `-sT` | No privileges needed; default when not root |
+| TCP connect scan | `-sT` | No privileges needed; default when not root. Closes open ports' connections with a reset, like nmap |
+| nmap's IP header on probes | | Raw scans, discovery and UDP probes: no DF bit, random TTL / hop limit 37-59 per probe (`raw::nmap_ip_header`), as nmap's `build_ip_raw` |
 | TCP SYN scan | `-sS` | Raw sockets (Linux, root or `CAP_NET_RAW`); default when root. IPv4 and IPv6 |
 | FIN, NULL, Xmas scans | `-sF`, `-sN`, `-sX` | Raw sockets, IPv4 and IPv6 |
 | ACK, Window, Maimon scans | `-sA`, `-sW`, `-sM` | Raw sockets, IPv4 and IPv6 |
@@ -53,7 +55,7 @@ the SCTP, IP protocol, IPv6 OS detection and probe-signature work).
 | MAC vendor names | `--oui-file` | Full IEEE OUI list from the system or a file, small built-in fallback |
 | Reverse DNS | `-n`, `-R`, `--dns-servers` | Own resolver for `--dns-servers` (`dns.rs`) |
 | Random host order | `--randomize-hosts` | |
-| Traceroute | `--traceroute` | TCP SYN probes, IPv4 and IPv6 (`trace.rs`); only through a TCP port the command names (scanned, `-p` with `-sn`, or discovery) (see [Deliberate differences](#deliberate-differences-from-nmap)) |
+| Traceroute | `--traceroute` | TCP SYN probes, IPv4 and IPv6 (`trace.rs`); only through a TCP port the command names (scanned, `-p` with `-sn`, or discovery) (see [Deliberate differences](#deliberate-differences-from-nmap)). Like nmap: this machine is not traced, a directly connected host gets no probes (one hop, the host) |
 
 ### Targets and ports
 
@@ -90,7 +92,7 @@ the SCTP, IP protocol, IPv6 OS detection and probe-signature work).
 
 | Feature | Options | Notes |
 | --- | --- | --- |
-| Timing templates | `-T0` … `-T5` (or names `paranoid` … `insane`) | Set timeout, retries, parallelism, rate and scan delay (`timing.rs`); explicit flags override |
+| Timing templates | `-T0` … `-T5` (or names `paranoid` … `insane`) | Set timeout, retries, parallelism, rate and scan delay (`timing.rs`); explicit flags override; a repeated `-T` takes the last one, like nmap |
 | Probe timeout and retries | `--timeout`, `--retries` | |
 | Parallelism | `-c`, `--concurrency` | Connect and UDP probes in flight |
 | Packet rate | `--min-rate`, `--max-rate` | `--max-rate` caps raw-socket probes (SYN, ICMP, ARP, NDP) on one schedule shared across the run; connect and UDP probes are paced by `--scan-delay` and bounded by `--concurrency`. `--min-rate` raises `--max-rate` and the connect/UDP parallelism, and shortens a template's scan delay |
@@ -119,7 +121,7 @@ the SCTP, IP protocol, IPv6 OS detection and probe-signature work).
 
 | Feature | Notes |
 | --- | --- |
-| Recognizable probe signature | Raw TCP scans use window 65109 (`0xFE55`); generic UDP probes carry `FeroProbeScan/1\n`. Documented in `docs/responsible-use.md` |
+| Recognizable probe signature | Raw TCP scans use window 65109 (`0xFE55`); generic UDP probes carry `FeroProbeScan/1\n`; ICMP/ICMPv6 echo requests carry `feroprobe` (`packet::ECHO_MARKER`). Documented in `docs/responsible-use.md` |
 | IDS rules | Suricata (`rules/feroprobe.rules`) and Snort (`rules/feroprobe.snort.rules`) |
 | Settings files | `~/.config/feroprobe/config.toml` (XDG), under sudo also the invoking user's (`SUDO_USER`), then `./.feroproberc`; CLI wins; `-v` shows what was read. FeroProbe's own, nmap has none. `crates/feroprobe-cli/src/config.rs` |
 | ICS protection | `ics_protection = true` refuses `-sV`, `-O`, `-A` (future script scanning too); `--override-ics-protection` allows one run with a warning; `--dry-run` is not refused but warns; warns on OT ports 102, 502, 20000, 44818, 47808. Off by default, so nmap behaviour is unchanged; Cargo feature `ics-protection-default` builds it always on (files cannot switch it off). `docs/ics-protection.md` |
@@ -134,6 +136,7 @@ the SCTP, IP protocol, IPv6 OS detection and probe-signature work).
 | CI | ubuntu, macOS, Windows, plus a root job for raw sockets |
 | Releases | `release.yml` builds binaries on `v*` tags |
 | Live test scripts | `scripts/test-sctp.sh`, `scripts/test-os6.sh` |
+| nmap differential test | `scripts/nmap-diff/`: runs nmap and FeroProbe with the same options in a namespace lab, captures both, and reports every difference in what they send (out-of-scope ports, probe contents, counts, results). Report only; CI runs it in the `nmap diff` workflow against the pinned nmap (`NMAP_VERSION`) |
 
 ## Deliberate differences from nmap
 
@@ -143,6 +146,9 @@ the SCTP, IP protocol, IPv6 OS detection and probe-signature work).
 | Evasion against public addresses | Allowed | Needs `--allow-public-evasion` | Anti-abuse safeguard, see `docs/responsible-use.md` |
 | Probes outside the requested ports | `-A`'s scripts probe other ports (`ms-sql-info` sends a 1-byte UDP datagram to 1434 on every host, seen in Jurgen's tcpdump of `nmap -A -p 502,102`); `-O` picks a random UDP port, and for IPv4 also TCP (30000-44780, regardless of `-p`), when the scan found no closed or unfiltered one | Never. `-sV` and `-O` probe only open ports the scan found; there are no scripts. Traceroute falls back to a TCP port of the command: a scanned port, the `-p` port with `-sn` (even with `-Pn`, where nothing else probes it), or a discovery port, else skips the host with a warning (it used to fall back to port 80) | An OT operator must be able to rely on the command's ports (`-p` plus the documented host-discovery ports, which `-Pn` or `-P*` control) being the whole scope (Jurgen, 2026-11-15). When script scanning is added, scripts must default to the scanned ports (like nmap's `mssql.scanned-ports-only`) |
 | `-A` without root | Silently drops `-O` and traceroute | Drops them too, with a warning naming them and why | No silent downgrade (Jurgen, 2026-11-15) |
+| UDP service payloads (`-sU`) | nmap's payload database: several probes per port (two DNS queries to 53, two NTP versions to 123, SNMPv1 and v3 to 161, three NetBIOS queries to 137) | FeroProbe's own, one per port (DNS, NTP, SNMP, SSDP), else `FeroProbeScan/1\n` | nmap's payloads cannot be redistributed; found by `scripts/nmap-diff` and kept (Jurgen, 2026-11-15) |
+| ICMP echo payload | Empty | The 9 bytes `feroprobe` | Part of the probe signature, so defenders can match discovery pings; found by `scripts/nmap-diff` and kept (Jurgen, 2026-11-15) |
+| OS detection probes (`-O`) | About 16 probes per host, sent several times: about 150 packets | One SYN offering every common TCP option to an open port: a handful of packets | Lighter on the target and stays inside the scanned ports; found by `scripts/nmap-diff` and kept (Jurgen, 2026-11-15) |
 | Dry run | No equivalent. The closest is the list scan `-sL`, which only lists (and reverse-resolves) the targets | `--dry-run` lists every probe, per target and port, without sending any, and does no reverse DNS | A safe way to check exactly what a command would put on the wire. It lists FeroProbe's probes only. The manual's `--dry-run` section documents what nmap sends differently per option; an in-output "not nmap" box was tried and dropped (Jurgen, 2026-11-15) |
 
 ## Remaining gap to nmap parity
