@@ -73,9 +73,11 @@ impl Probe {
         let body = self.body(proto, src, dst);
         match (src, dst) {
             (IpAddr::V4(s), IpAddr::V4(d)) => {
-                packet::ipv4_packet(s, d, proto, 64, self.ipid, &body)
+                packet::ipv4_packet(s, d, proto, crate::raw::probe_ttl(), self.ipid, &body)
             }
-            (IpAddr::V6(s), IpAddr::V6(d)) => packet::ipv6_packet(s, d, proto, 64, &body),
+            (IpAddr::V6(s), IpAddr::V6(d)) => {
+                packet::ipv6_packet(s, d, proto, crate::raw::probe_ttl(), &body)
+            }
             _ => Vec::new(),
         }
     }

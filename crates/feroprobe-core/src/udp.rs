@@ -97,6 +97,8 @@ pub(crate) async fn connected_socket(addr: SocketAddr) -> io::Result<UdpSocket> 
     let sock = Socket::new(domain, Type::DGRAM, Some(SockProtocol::UDP))?;
     #[cfg(target_os = "linux")]
     enable_recverr(&sock, addr.is_ipv4())?;
+    // nmap's raw UDP probes: no "don't fragment", random TTL.
+    crate::raw::nmap_ip_header(&sock, addr.is_ipv6());
     sock.set_nonblocking(true)?;
     sock.bind(&bind.into())?;
     let sock = UdpSocket::from_std(sock.into())?;

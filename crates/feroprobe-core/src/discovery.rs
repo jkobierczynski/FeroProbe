@@ -523,7 +523,7 @@ mod icmp {
             }
         }
     }
-    use crate::raw::{Pacer, send_with_backoff};
+    use crate::raw::{Pacer, nmap_ip_header, send_with_backoff};
     use crate::target::socket_addr;
 
     /// Open an ICMP (or, with `v6`, ICMPv6) socket: raw if privileged,
@@ -681,6 +681,7 @@ mod icmp {
                         return Ok(());
                     }
                     sent_at.insert(seq, (addr, Instant::now()));
+                    nmap_ip_header(&sock, v6);
                     if let Err(e) = send_with_backoff(&sock, &pkt, socket_addr(addr, 0))
                         && !crate::connect::is_network_error(&e)
                     {

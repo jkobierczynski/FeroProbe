@@ -321,6 +321,11 @@ The raw-socket scans need Linux with root or `CAP_NET_RAW`; see
 [Privileges and platforms](#privileges-and-platforms). All scan types
 support IPv4 and IPv6.
 
+Like nmap's, the probes of the raw-socket scans, of host discovery and of
+the UDP scan go out without the "don't fragment" bit and with a random TTL
+(IPv6: hop limit) from 37 to 59, picked again for every probe. Traceroute
+sets its own TTLs.
+
 ### TCP SYN scan (`-sS`)
 
 Sends a SYN and reads the answer without completing the handshake: a
@@ -332,7 +337,9 @@ default scan as root.
 
 Asks the operating system to connect to each port, so it needs no
 privileges and works on Linux, macOS and Windows. A completed connection
-means `open`, a refused one `closed`, and a timeout `filtered`. This is the
+means `open`, a refused one `closed`, and a timeout `filtered`. An open
+port's connection is closed at once with a reset, as nmap does, rather
+than with a FIN. This is the
 default scan without raw sockets. It carries no FeroProbe signature, since
 it is an ordinary connection. On Windows, a refused connection is reported
 only about 2 seconds after the reset arrives, which is why the default
@@ -565,6 +572,12 @@ reaches the host ends the route. A hop that never answers is shown as
 `...`. Needs raw sockets. With `-Pn` every target is traced, even one that
 never answered. Hosts given up on by `--host-timeout` are not traced.
 
+As in nmap, this machine itself (a loopback address or one of its own) is
+not traced at all, and a host on a directly connected network gets no
+probes: its route is the host alone, at hop 1, with the latency the scan
+measured, under a plain `TRACEROUTE` header (in XML, a `<trace>` element
+without a port).
+
 ```
 TRACEROUTE (using port 443/tcp)
 HOP RTT        ADDRESS
@@ -603,6 +616,7 @@ bundle of timing settings, as in nmap. `-T3` (normal) is the default. Any of
 `--timeout`, `--retries`, `-c`/`--concurrency`, `--max-rate` and
 `--scan-delay` given explicitly overrides the template's value for that
 setting, so `-T4 --max-rate 2000` is aggressive with a lower packet rate.
+Given more than once, the last `-T` wins, as in nmap.
 
 | Template | Timeout | Retries | Parallel connect/UDP probes | Max rate (packets/s) | Scan delay |
 | --- | --- | --- | --- | --- | --- |
@@ -1103,6 +1117,9 @@ safeguard calls for a difference. The deliberate differences are:
 | JSON output (`-oJ`) | No equivalent | FeroProbe's own format |
 | XML `scanner` attribute | `nmap` | `feroprobe`, unless `--nmap-label` |
 | Service and OS signatures | nmap's databases | FeroProbe's own (nmap's cannot be redistributed); OS detection names the family, not the version |
+| UDP service payloads (`-sU`) | nmap's payload database: several probes per port (two DNS queries to 53, two NTP versions to 123, SNMPv1 and v3 to 161, three NetBIOS queries to 137), up to dozens with `-sV` | FeroProbe's own, one per port: DNS (53, 5353), NTP (123), SNMP (161) and SSDP (1900); every other port gets `FeroProbeScan/1\n` | nmap's payloads cannot be redistributed; one payload per service is enough to make it answer |
+| OS detection probes (`-O`) | About 16 probes per host (6 SYNs with varied options, ECN, T2-T7 to open and closed ports, 2 ICMP echoes, a UDP probe to a closed port), sent several times: about 150 packets | One TCP SYN to an open port, offering every common option, plus the scan's own probes: a handful of packets | Lighter on the target, and no probes outside the scanned ports; the price is a family rather than an exact version |
+| Port names | nmap-services | The same names for the common ports, from the IANA registry, and `unknown` for the rest | nmap-services cannot be redistributed |
 | Timeouts | Adapt to measured round-trip times | A fixed `--timeout` per probe, set by the template |
 | Old-style IPv4 numbers as targets (`2222`, `10.1.2`, `010.0.0.1`) | Passed to the resolver | Refused with an explanation |
 | Probes outside the requested ports | `-A`'s scripts can probe other ports (`ms-sql-info`: UDP 1434 on every host); `-O` picks a random UDP port (and for IPv4 also TCP), regardless of `-p`, when the scan found no closed or unfiltered one | Never beyond the command's own ports (`-p` plus the host-discovery ports): `-sV` and `-O` probe only open ports the scan found, traceroute only a scanned port, a discovery port, or (with `-sn`) the `-p` port, and FeroProbe has no scripts |

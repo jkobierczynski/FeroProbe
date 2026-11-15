@@ -48,6 +48,11 @@ pub struct Trace {
     pub hops: Vec<Hop>,
     /// Whether the host itself answered, so the last hop is the host.
     pub reached: bool,
+    /// The host is on a directly connected network: like nmap, no probe
+    /// was sent, and the one hop is the host with the scan's round-trip
+    /// time. `port` is meaningless then.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub direct: bool,
 }
 
 /// The port to trace a host with: open, else closed, else `fallback`
@@ -62,6 +67,46 @@ fn trace_port(host: &HostResult, fallback: Option<u16>) -> Option<u16> {
     tcp(PortState::Open)
         .or_else(|| tcp(PortState::Closed))
         .or(fallback)
+}
+
+/// The networks this machine reaches directly (ARP for IPv4, neighbour
+/// discovery for IPv6), for nmap's "directly connected" test.
+struct DirectNets {
+    v4: Vec<crate::arp::LocalNet>,
+    v6: Vec<crate::ndp::LocalLink>,
+}
+
+impl DirectNets {
+    fn load() -> Self {
+        Self {
+            v4: crate::arp::local_networks().unwrap_or_default(),
+            v6: crate::ndp::local_links().unwrap_or_default(),
+        }
+    }
+
+    fn contains(&self, addr: IpAddr) -> bool {
+        match addr {
+            IpAddr::V4(a) => crate::arp::local_net_for(a, &self.v4).is_some(),
+            IpAddr::V6(a) => crate::ndp::link_for(a, &self.v6).is_some(),
+        }
+    }
+}
+
+/// The route to a directly connected host, without sending anything: the
+/// host itself at hop 1, with the latency the scan measured
+/// (`traceroute_direct` in nmap).
+fn direct_trace(host: &HostResult) -> Trace {
+    Trace {
+        port: 0,
+        protocol: Protocol::Tcp,
+        hops: vec![Hop {
+            ttl: 1,
+            addr: Some(host.addr),
+            rtt_ms: host.latency_ms,
+        }],
+        reached: true,
+        direct: true,
+    }
 }
 
 /// What came back for one probe: the host index, TTL, who answered, whether
@@ -102,6 +147,7 @@ fn build_trace(port: u16, answers: &[HopAnswer]) -> Trace {
         protocol: Protocol::Tcp,
         hops,
         reached: distance.is_some(),
+        direct: false,
     }
 }
 
@@ -111,18 +157,28 @@ fn build_trace(port: u16, answers: &[HopAnswer]) -> Trace {
 /// open or closed TCP port (as after `-sn`) are traced with `fallback_port`,
 /// which should be a TCP port the command names (in -p, the scan or discovery); with `None` they
 /// are not traced. Returns how many hosts were left untraced for that reason.
+///
+/// As in nmap (`traceroute()` in traceroute.cc), this machine itself is not
+/// traced at all, and a host on a directly connected network gets no probe:
+/// its route is the host alone, one hop away.
 pub async fn traceroute(
     hosts: &mut [HostResult],
     cfg: &ScanConfig,
     assume_up: bool,
     fallback_port: Option<u16>,
 ) -> io::Result<usize> {
-    let wanted: Vec<(usize, IpAddr, Option<u16>)> = hosts
-        .iter()
-        .enumerate()
-        .filter(|(_, h)| assume_up || h.is_up())
-        .map(|(i, h)| (i, h.addr, trace_port(h, fallback_port)))
-        .collect();
+    let direct = DirectNets::load();
+    let mut wanted: Vec<(usize, IpAddr, Option<u16>)> = Vec::new();
+    for (i, h) in hosts.iter_mut().enumerate() {
+        if !(assume_up || h.is_up()) || crate::discovery::is_localhost(h.addr) {
+            continue;
+        }
+        if direct.contains(h.addr) {
+            h.trace = Some(direct_trace(h));
+            continue;
+        }
+        wanted.push((i, h.addr, trace_port(h, fallback_port)));
+    }
     let skipped = wanted.iter().filter(|j| j.2.is_none()).count();
     let jobs: Vec<(usize, IpAddr, u16)> = wanted
         .into_iter()
@@ -339,6 +395,7 @@ mod imp {
                         if addr.is_ipv6() {
                             sock.set_unicast_hops_v6(u32::from(ttl))?;
                         } else {
+                            crate::raw::clear_dont_fragment(sock);
                             sock.set_ttl_v4(u32::from(ttl))?;
                         }
                         let sport = base + u16::from(ttl);
@@ -443,6 +500,42 @@ mod tests {
             reached,
             rtt_ms: Some(f64::from(ttl)),
         }
+    }
+
+    #[test]
+    fn localhost_is_not_traced_and_sends_nothing() {
+        let mut hosts = vec![HostResult::new("127.0.0.1".parse().unwrap(), None)];
+        hosts[0].up_reason = Some(reason::LOCALHOST);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let untraced = rt
+            .block_on(traceroute(
+                &mut hosts,
+                &ScanConfig::default(),
+                false,
+                Some(80),
+            ))
+            .unwrap();
+        assert_eq!(untraced, 0);
+        assert!(hosts[0].trace.is_none());
+    }
+
+    #[test]
+    fn direct_route_is_the_host_alone() {
+        let mut host = HostResult::new("192.0.2.9".parse().unwrap(), None);
+        host.latency_ms = Some(0.25);
+        let t = direct_trace(&host);
+        assert!(t.direct && t.reached);
+        assert_eq!(
+            t.hops,
+            vec![Hop {
+                ttl: 1,
+                addr: Some(host.addr),
+                rtt_ms: Some(0.25)
+            }]
+        );
     }
 
     #[test]

@@ -232,7 +232,12 @@ fn write_host(x: &mut String, host: &HostResult, info: &RunInfo, start: u64, end
     if let Some(t) = &host.trace
         && !t.hops.is_empty()
     {
-        let _ = writeln!(x, "<trace port=\"{}\" proto=\"{}\">", t.port, t.protocol);
+        if t.direct {
+            // No probe was sent, so nmap names no port.
+            x.push_str("<trace>\n");
+        } else {
+            let _ = writeln!(x, "<trace port=\"{}\" proto=\"{}\">", t.port, t.protocol);
+        }
         // nmap leaves silent hops out of the XML.
         for hop in t.hops.iter().filter(|h| h.addr.is_some()) {
             let _ = write!(x, "<hop ttl=\"{}\"", hop.ttl);
@@ -505,6 +510,7 @@ mod tests {
                 hop(3, Some("203.0.113.5"), Some(12.345)),
             ],
             reached: true,
+            direct: false,
         });
         let xml = render(&[host], &info());
         assert!(

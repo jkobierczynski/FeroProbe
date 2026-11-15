@@ -418,7 +418,8 @@ struct Args {
     /// Timing template: 0-5 or paranoid, sneaky, polite, normal, aggressive,
     /// insane (-T4 = aggressive). Sets timeout, retries, concurrency, rate and
     /// scan delay; those flags still override it. [default: 3, normal]
-    #[arg(short = 'T', value_name = "0-5", value_parser = parse_timing)]
+    /// Given more than once, the last one wins, as in nmap.
+    #[arg(short = 'T', value_name = "0-5", value_parser = parse_timing, overrides_with = "timing")]
     timing: Option<Timing>,
 
     /// Per-probe timeout in milliseconds [default: from -T; normally 1500, or 3000 on Windows]
@@ -2191,6 +2192,9 @@ mod tests {
     fn timing_templates_and_overrides() {
         let a = Args::try_parse_from(["feroprobe", "-T4", "10.0.0.1"]).unwrap();
         assert_eq!(a.timing, Some(Timing::Aggressive));
+        // Like nmap, a repeated -T is not an error: the last one wins.
+        let b = Args::try_parse_from(["feroprobe", "-T2", "-T4", "10.0.0.1"]).unwrap();
+        assert_eq!(b.timing, Some(Timing::Aggressive));
         let cfg = scan_config(&a);
         assert_eq!(cfg.concurrency, Timing::Aggressive.config().concurrency);
         assert_eq!(cfg.timeout, Timing::Aggressive.config().timeout);
