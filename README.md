@@ -118,6 +118,14 @@ states:
 
 ```
 # Dry run (--dry-run): these are the probes the scan would send. Nothing is sent.
+# =======================================================================
+# NOT A PREVIEW OF NMAP. These are FeroProbe's probes. nmap run with the same
+# options sends different packets, sometimes to ports outside -p. Do not use
+# this list to check what an nmap command will send.
+# What nmap would send differently with these options:
+#   - Raw TCP probes: nmap uses TCP window 1024; FeroProbe uses 65109, ...
+#   - Timing: nmap adapts its timeouts to measured round-trip times and ...
+# =======================================================================
 # Target 10.0.0.5 from 10.0.0.2
 # Host discovery
 NOT SENT (dry run) ICMP [10.0.0.2 > 10.0.0.5 Echo request (type=8/code=0) id=14847 seq=0]
@@ -128,6 +136,19 @@ NOT SENT (dry run) TCP 10.0.0.2:43970 > 10.0.0.5:22 S seq=1654920040 win=65109
 ```
 
 nmap has no such option; its list scan (`-sL`) only lists the targets.
+
+**A dry run shows FeroProbe's probes, not nmap's.** Do not use it to check
+an nmap command before running it with nmap: with the same options nmap
+sends different packets, and some of its features probe outside `-p` (for
+example `-A` runs nmap's scripts, one of which sends a UDP datagram to port
+1434 of every host, and `-O` may pick random closed ports). Every dry run
+starts with a box saying so, listing what nmap would send differently with
+the options given.
+
+FeroProbe itself never probes outside the scan: `-sV` and `-O` only probe
+the open ports the scan found, and `--traceroute` only uses a TCP port the
+command already probes. When `-A` runs without root, the parts it skips are
+named in a warning instead of being dropped silently as nmap does.
 
 This matters most on operational-technology and industrial-control (OT/ICS)
 networks, where an unexpected packet can hang or reset a fragile device such
