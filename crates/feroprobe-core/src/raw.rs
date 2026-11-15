@@ -1,9 +1,9 @@
 //! Helpers shared by the raw-socket techniques (SYN scan, ICMP discovery).
 
 use std::io;
-use std::net::SocketAddr;
 #[cfg(target_os = "linux")]
-use std::net::{IpAddr, UdpSocket};
+use std::net::IpAddr;
+use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use socket2::{Domain, Protocol, Socket, Type};
@@ -28,7 +28,7 @@ pub(crate) fn raw_socket(proto: Protocol) -> io::Result<Socket> {
 /// Open a raw socket of `domain` (IPv4 or IPv6) for `proto`.
 #[cfg(target_os = "linux")]
 pub(crate) fn raw_socket_in(domain: Domain, proto: Protocol) -> io::Result<Socket> {
-    Socket::new(domain, Type::RAW, Some(proto)).map_err(|e| {
+    let sock = Socket::new(domain, Type::RAW, Some(proto)).map_err(|e| {
         if e.kind() == io::ErrorKind::PermissionDenied {
             io::Error::new(
                 e.kind(),
@@ -37,7 +37,9 @@ pub(crate) fn raw_socket_in(domain: Domain, proto: Protocol) -> io::Result<Socke
         } else {
             e
         }
-    })
+    })?;
+    crate::netif::bind_socket(&sock, domain == Domain::IPV6)?;
+    Ok(sock)
 }
 
 /// A TTL (IPv6: hop limit) for one probe, picked like nmap does when no
@@ -101,16 +103,19 @@ pub(crate) fn clear_dont_fragment(sock: &Socket) {
     let _ = sock;
 }
 
-/// The local address the OS would use to reach `dst`, found by "connecting" a
-/// UDP socket (which sends nothing).
+/// The local address the OS would use to reach `dst` (through the `-e`
+/// interface, if one was chosen); see [`crate::netif::route_source`].
 #[cfg(target_os = "linux")]
 pub(crate) fn source_addr_for(dst: IpAddr) -> io::Result<IpAddr> {
-    let sock = match dst {
-        IpAddr::V4(_) => UdpSocket::bind("0.0.0.0:0")?,
-        IpAddr::V6(_) => UdpSocket::bind("[::]:0")?,
-    };
-    sock.connect(crate::target::socket_addr(dst, 53))?;
-    Ok(sock.local_addr()?.ip())
+    crate::netif::route_source(dst)
+}
+
+/// The source port for a raw scan's probes: the `-g` port if one was
+/// given, else a random one from 40000-59999, fixed for the scan.
+#[cfg(target_os = "linux")]
+pub(crate) fn probe_sport(cfg: &crate::model::ScanConfig, rng: &mut Rng) -> u16 {
+    let random = 40000 + (rng.next_u32() % 20000) as u16;
+    cfg.source_port.unwrap_or(random)
 }
 
 /// A small xorshift generator seeded from the clock and process id. Good

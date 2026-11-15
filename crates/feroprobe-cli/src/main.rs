@@ -326,6 +326,19 @@ struct Args {
     #[arg(long = "allow-public-evasion")]
     allow_public_evasion: bool,
 
+    /// -e IFACE: send and receive on this network interface (nmap's -e):
+    /// every socket of the scan is bound to it, its address is the source,
+    /// and only its networks count as local for ARP and neighbour discovery
+    #[arg(short = 'e', value_name = "IFACE")]
+    interface: Option<String>,
+
+    /// -g PORT: send raw TCP, UDP and SCTP probes (port scan, discovery
+    /// pings, OS detection) and UDP scan probes from this source port, like
+    /// nmap's -g. Connect scans, version detection, traceroute and DNS keep
+    /// their own ports
+    #[arg(short = 'g', long = "source-port", value_name = "PORT")]
+    source_port: Option<u16>,
+
     /// Host discovery, nmap style. -Pn: skip it and scan every target as if
     /// it were up. Otherwise pick the probes (default as nmap's: as root,
     /// ICMP echo and timestamp, a TCP SYN to 443 and an ACK to 80; else TCP
@@ -426,9 +439,22 @@ struct Args {
     #[arg(long, value_name = "MS")]
     timeout: Option<u64>,
 
-    /// Maximum connect/UDP probes in flight at once [default: from -T; normally 500]
-    #[arg(short = 'c', long, value_name = "N")]
+    /// Maximum connect/UDP probes in flight at once [default: from -T; normally 500].
+    /// nmap's names --max-parallelism and -M work too
+    #[arg(
+        short = 'c',
+        long,
+        value_name = "N",
+        short_alias = 'M',
+        visible_alias = "max-parallelism",
+        value_parser = parse_parallelism
+    )]
     concurrency: Option<usize>,
+
+    /// At least this many connect/UDP probes in flight at once: raises the
+    /// template's parallelism (nmap's --min-parallelism)
+    #[arg(long, value_name = "N", value_parser = parse_parallelism)]
+    min_parallelism: Option<usize>,
 
     /// Maximum packets per second for raw-socket probes (SYN, ICMP, ARP, NDP) [default: from -T; normally 5000]
     #[arg(long, value_name = "PPS")]
@@ -458,8 +484,9 @@ struct Args {
     #[arg(long, value_name = "MS", default_value_t = 3000)]
     version_timeout: u64,
 
-    /// Extra attempts for probes that get no answer [default: from -T; normally 1]
-    #[arg(long, value_name = "N")]
+    /// Extra attempts for probes that get no answer [default: from -T; normally 1].
+    /// nmap's name --max-retries works too
+    #[arg(long, value_name = "N", visible_alias = "max-retries")]
     retries: Option<u32>,
 
     /// Only show open (and open|filtered, unfiltered) ports
@@ -831,6 +858,63 @@ fn parse_timing(s: &str) -> Result<Timing, String> {
     s.parse()
 }
 
+/// A parallelism (`-c`/`-M`/`--max-parallelism`, `--min-parallelism`):
+/// at least 1, as nmap requires.
+fn parse_parallelism(s: &str) -> Result<usize, String> {
+    match s.trim().parse::<usize>() {
+        Ok(0) => Err("must be at least 1".to_string()),
+        Ok(n) => Ok(n),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Apply `--min-parallelism`: raise the parallelism to it, or fail like
+/// nmap when an explicit `-c`/`--max-parallelism` is lower. Returns nmap's
+/// warning for a very high value.
+fn apply_min_parallelism(cfg: &mut ScanConfig, args: &Args) -> Result<Vec<String>> {
+    let Some(min) = args.min_parallelism else {
+        return Ok(Vec::new());
+    };
+    if let Some(max) = args.concurrency
+        && min > max
+    {
+        bail!("--min-parallelism={min} must be less than or equal to --max-parallelism={max}");
+    }
+    cfg.concurrency = cfg.concurrency.max(min);
+    Ok(if min > 100 {
+        vec![format!(
+            "a --min-parallelism of {min} is pretty high, which can hurt reliability"
+        )]
+    } else {
+        Vec::new()
+    })
+}
+
+/// nmap's warnings for `-g`: a connect scan cannot use it, and port 0 may
+/// not work (UDP probes, which go through the system's sockets, cannot
+/// send from it at all).
+fn source_port_warnings(port: u16, connect_scan: bool, udp: bool) -> Vec<String> {
+    let mut w = Vec::new();
+    if connect_scan {
+        w.push(
+            "-g is incompatible with the connect scan (-sT), which keeps the system's source \
+             ports. Use a raw scan such as -sS if you want to set the source port"
+                .to_string(),
+        );
+    }
+    if port == 0 {
+        let udp = if udp {
+            "; UDP probes cannot be sent from port 0 and use a random port instead"
+        } else {
+            ""
+        };
+        w.push(format!(
+            "a source port of zero may not work on all systems{udp}"
+        ));
+    }
+    w
+}
+
 /// The timing template's settings, with any explicit flags on top.
 fn scan_config(args: &Args) -> ScanConfig {
     let base = args.timing.unwrap_or_default().config();
@@ -847,6 +931,7 @@ fn scan_config(args: &Args) -> ScanConfig {
         rate_schedule: Some(feroprobe_core::timing::RateSchedule::new()),
         // Set later by configure_evasion once the targets are known.
         evasion: Evasion::default(),
+        source_port: args.source_port,
     }
 }
 
@@ -1674,6 +1759,7 @@ fn dry_run(
         },
         evasion: &cfg.evasion,
         retries: cfg.retries,
+        source_port: cfg.source_port,
         notes: dry_run_notes(args, plan, d, privileged),
     };
     let stdout = std::io::stdout();
@@ -1724,6 +1810,13 @@ async fn main() -> Result<()> {
         };
         format!("ICS protection {ics}; {read}")
     });
+    // -e: every socket from here on is bound to the interface.
+    if let Some(name) = &args.interface {
+        let ifc = feroprobe_core::netif::use_interface(name).context("-e")?;
+        progress.say(1, || {
+            format!("Using interface {} (index {})", ifc.name, ifc.index)
+        });
+    }
     let version = if args.ipv6 {
         IpVersion::V6
     } else {
@@ -1877,6 +1970,9 @@ async fn main() -> Result<()> {
     }
 
     let mut cfg = scan_config(&args);
+    for w in apply_min_parallelism(&mut cfg, &args)? {
+        eprintln!("Warning: {w}");
+    }
     let warnings = apply_min_rate(&mut cfg, &args, feroprobe_core::connect::open_file_limit())?;
     // Evasion options are refused unless every target is private; see
     // gate_evasion. Parsed and checked before the scan sends anything.
@@ -1888,6 +1984,13 @@ async fn main() -> Result<()> {
         bail!("evasion options send raw packets: run as root or grant CAP_NET_RAW");
     }
     cfg.evasion = evasion;
+    if let Some(port) = args.source_port {
+        let connect = !plan.ping_only && plan.tcp.is_some_and(|t| t.raw_kind().is_none());
+        let udp = (!plan.ping_only && plan.udp) || (plan.discovery && !probes.udp.is_empty());
+        for w in source_port_warnings(port, connect, udp) {
+            eprintln!("Warning: {w}");
+        }
+    }
     // The warnings are about connect and UDP probes.
     let sockets = !plan.ping_only && (plan.udp || plan.tcp.is_some_and(|t| t.raw_kind().is_none()));
     for w in warnings.iter().filter(|_| sockets) {
@@ -2194,6 +2297,67 @@ mod tests {
         assert!(p(&[ScanType::Syn, ScanType::Connect], false, true).is_err());
         assert!(p(&[ScanType::PingOnly, ScanType::Udp], false, true).is_err());
         assert!(p(&[ScanType::PingOnly, ScanType::Version], false, true).is_err());
+    }
+
+    #[test]
+    fn nmap_tuning_names() {
+        let parse = |args: &[&str]| {
+            let mut v = vec!["feroprobe"];
+            v.extend_from_slice(args);
+            v.push("10.0.0.1");
+            Args::try_parse_from(v)
+        };
+        let a = parse(&["--max-retries", "4"]).unwrap();
+        assert_eq!(scan_config(&a).retries, 4);
+        for flag in ["-c", "-M", "--concurrency", "--max-parallelism"] {
+            let a = parse(&[flag, "7"]).unwrap();
+            assert_eq!(scan_config(&a).concurrency, 7, "{flag}");
+        }
+        // nmap: the argument to -M must be at least 1.
+        assert!(parse(&["-M", "0"]).is_err());
+        assert!(parse(&["--min-parallelism", "0"]).is_err());
+
+        // --min-parallelism raises the template's parallelism...
+        let a = parse(&["-T2", "--min-parallelism", "40"]).unwrap();
+        let mut cfg = scan_config(&a);
+        assert!(apply_min_parallelism(&mut cfg, &a).unwrap().is_empty());
+        assert_eq!(cfg.concurrency, 40);
+        // ... never lowers it ...
+        let a = parse(&["--min-parallelism", "3"]).unwrap();
+        let mut cfg = scan_config(&a);
+        apply_min_parallelism(&mut cfg, &a).unwrap();
+        assert_eq!(cfg.concurrency, ScanConfig::default().concurrency);
+        // ... warns when very high, like nmap ...
+        let a = parse(&["--min-parallelism", "150"]).unwrap();
+        let mut cfg = scan_config(&a);
+        assert_eq!(apply_min_parallelism(&mut cfg, &a).unwrap().len(), 1);
+        // ... and may not exceed an explicit maximum.
+        let a = parse(&["--min-parallelism", "20", "--max-parallelism", "10"]).unwrap();
+        let mut cfg = scan_config(&a);
+        let e = apply_min_parallelism(&mut cfg, &a).unwrap_err().to_string();
+        assert!(e.contains("--min-parallelism=20"), "{e}");
+    }
+
+    #[test]
+    fn interface_and_source_port_options() {
+        let a = Args::try_parse_from(["feroprobe", "-e", "eth0", "-g", "53", "10.0.0.1"]).unwrap();
+        assert_eq!(a.interface.as_deref(), Some("eth0"));
+        assert_eq!(scan_config(&a).source_port, Some(53));
+        let a = Args::try_parse_from(["feroprobe", "--source-port", "20", "10.0.0.1"]).unwrap();
+        assert_eq!(a.source_port, Some(20));
+        assert!(Args::try_parse_from(["feroprobe", "-g", "70000", "10.0.0.1"]).is_err());
+        assert_eq!(
+            scan_config(&Args::try_parse_from(["feroprobe", "x"]).unwrap()).source_port,
+            None
+        );
+
+        assert!(source_port_warnings(53, false, true).is_empty());
+        let w = source_port_warnings(53, true, false);
+        assert!(w.len() == 1 && w[0].contains("connect scan"), "{w:?}");
+        let w = source_port_warnings(0, false, true);
+        assert!(w.len() == 1 && w[0].contains("UDP"), "{w:?}");
+        let w = source_port_warnings(0, false, false);
+        assert!(w.len() == 1 && !w[0].contains("UDP"), "{w:?}");
     }
 
     #[test]

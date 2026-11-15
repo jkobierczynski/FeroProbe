@@ -13,7 +13,6 @@ use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use futures::stream::{self, StreamExt};
-use tokio::net::TcpStream;
 
 use crate::model::{HostResult, PortResult, PortState, Protocol, ScanConfig, elapsed_ms, reason};
 use crate::target::Target;
@@ -57,7 +56,7 @@ pub async fn probe_port(addr: SocketAddr, cfg: &ScanConfig) -> io::Result<PortRe
     for _ in 0..=cfg.retries {
         pace(cfg.scan_delay).await;
         let start = Instant::now();
-        let outcome = tokio::time::timeout(cfg.timeout, TcpStream::connect(addr)).await;
+        let outcome = tokio::time::timeout(cfg.timeout, crate::netif::connect_tcp(addr)).await;
         let rtt = Some(elapsed_ms(start));
         crate::packet_trace::conn(
             addr,

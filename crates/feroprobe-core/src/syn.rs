@@ -469,7 +469,7 @@ mod imp {
             .flatten();
 
         let mut rng = Rng::new();
-        let sport = 40000 + (rng.next_u32() % 20000) as u16;
+        let sport = crate::raw::probe_sport(cfg, &mut rng);
         let cookie = rng.next_u32();
         let ack = if scan.flags & TCP_ACK != 0 { cookie } else { 0 };
         let no_answer = scan.kind.no_response();

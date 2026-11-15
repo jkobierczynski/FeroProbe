@@ -29,7 +29,10 @@ SCAN TECHNIQUES:
   -sY/sZ: SCTP INIT and COOKIE ECHO scans
   -sO: IP protocol scan - which protocols (TCP, UDP, ICMP, ...) a host runs
   --scanflags <flags>: Send these TCP flags (e.g. SYNFIN) instead
-FIREWALL/IDS EVASION (raw IPv4 TCP scans; private ranges, or public with opt-in):
+FIREWALL/IDS EVASION AND SPOOFING:
+  -e <iface>: Send and receive on this network interface
+  -g, --source-port <portnum>: Send raw and UDP probes from this source port
+  The next four: raw IPv4 TCP scans; private ranges, or public with opt-in:
   -f, --mtu <n>: Fragment raw IPv4 probes (8-byte pieces, or <n> per fragment)
   -D, --decoys <a,b,ME,c>: Cloak the scan among decoy source addresses
   -S, --source <addr>: Spoof the source address of raw IPv4 probes
@@ -50,8 +53,9 @@ TIMING AND PERFORMANCE:
   A <time> is in seconds unless it ends in ms, s, m or h (e.g. 500ms, 30m).
   -T<0-5>: Timing template, from paranoid (0) to insane (5)
   --timeout <ms>: How long to wait for an answer to each probe
-  --retries <tries>: Extra attempts for probes without an answer
-  -c, --concurrency <number>: Connect/UDP probes in flight at once
+  --retries, --max-retries <tries>: Extra attempts for probes without an answer
+  -c, -M, --concurrency, --max-parallelism <number>: Connect/UDP probes in flight
+  --min-parallelism <number>: At least <number> connect/UDP probes in flight
   --min-rate <number>: Send at least <number> packets per second
   --max-rate <number>: Send at most <number> packets per second
   --scan-delay <time>: Wait at least <time> between probes

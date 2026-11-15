@@ -27,7 +27,7 @@ every such case in one place.
 - [OS detection](#os-detection)
 - [Traceroute and aggressive mode](#traceroute-and-aggressive-mode)
 - [Timing and performance](#timing-and-performance)
-- [Firewall/IDS evasion](#firewallids-evasion)
+- [Firewall/IDS evasion and spoofing](#firewallids-evasion-and-spoofing)
 - [Output](#output)
 - [Checking a scan before and while it runs](#checking-a-scan-before-and-while-it-runs)
 - [Miscellaneous options](#miscellaneous-options)
@@ -614,8 +614,8 @@ scripts. Cannot be combined with `-sn`.
 
 `-T0` to `-T5`, or `-T` with a name (`-T paranoid` ... `-T insane`), pick a
 bundle of timing settings, as in nmap. `-T3` (normal) is the default. Any of
-`--timeout`, `--retries`, `-c`/`--concurrency`, `--max-rate` and
-`--scan-delay` given explicitly overrides the template's value for that
+`--timeout`, `--retries`, `-c`/`--concurrency`, `--min-parallelism`,
+`--max-rate` and `--scan-delay` given explicitly overrides the template's value for that
 setting, so `-T4 --max-rate 2000` is aggressive with a lower packet rate.
 Given more than once, the last `-T` wins, as in nmap.
 
@@ -639,17 +639,29 @@ from the template: 1500 (3000 on Windows). nmap adapts its timeouts to
 measured round-trip times (`--min-rtt-timeout` and friends); FeroProbe
 uses this fixed value. Below 20 ms it warns that accuracy may suffer.
 
-#### `--retries <tries>`
+#### `--retries <tries>`, `--max-retries <tries>`
 
 How many more times to send a probe that got no answer. Default from the
-template: 1. This is nmap's `--max-retries` under FeroProbe's own name.
+template: 1. `--max-retries` is nmap's name for it and works the same.
+nmap treats the number as a cap and may retry less on a network that
+loses nothing; FeroProbe always sends the retries a silent port needs.
 
 #### `-c <number>`, `--concurrency <number>`
 
 The most connect and UDP probes in flight at once. Default from the
-template: 500. It warns above 900, and when the number is above the
-system's open-file limit (`ulimit -n`). Raw-socket probes are paced by
-`--max-rate` instead.
+template: 500. nmap's names `--max-parallelism <number>` and `-M <number>`
+work too. It must be at least 1, warns above 900, and warns when the number
+is above the system's open-file limit (`ulimit -n`). Raw-socket probes are
+paced by `--max-rate` instead.
+
+#### `--min-parallelism <number>`
+
+Keep at least this many connect and UDP probes in flight: it raises the
+template's parallelism (or the one `--min-rate` picked) to this number. It
+must be at least 1, warns above 100, and is an error above an explicit
+`-c`/`--max-parallelism`, with nmap's message. FeroProbe's parallelism is a
+fixed number rather than nmap's adaptive window, so the minimum and the
+maximum simply bound that number.
 
 #### `--max-rate <number>`
 
@@ -685,16 +697,67 @@ normal output, `Status: Timeout` in grepable output and `timedout="true"`
 in XML. It is not traced. `0` means no limit, as in nmap.
 
 nmap's `--max-scan-delay`, `--min-rtt-timeout`, `--max-rtt-timeout`,
-`--initial-rtt-timeout`, `--min-hostgroup`, `--max-hostgroup`,
-`--min-parallelism` and `--max-parallelism` are not available.
+`--initial-rtt-timeout`, `--min-hostgroup` and `--max-hostgroup` are not
+available.
 
-## Firewall/IDS evasion
+## Firewall/IDS evasion and spoofing
+
+### Interface and source port
+
+These two work against any target, like in nmap; they do not need
+`--allow-public-evasion`.
+
+#### `-e <interface>`
+
+Send and receive on this network interface (`eth0`, `wlan0`, `tun0`, as
+`ip link` names them), as nmap's `-e` does. Every socket of the scan is
+bound to it: raw probes, the packet capture of IPv6 OS detection, ARP and
+neighbour discovery, connect scans, UDP probes, version detection and the
+reverse DNS queries of `--dns-servers`. The interface's own address is the
+source of the probes (unless `-S` gives another), and only its networks
+count as local for ARP and neighbour discovery: a target on another
+interface's network is reached through `-e`'s interface, as if it were on
+that link. Forward lookups of target names use the system resolver, which
+is not bound.
+
+It is an error when there is no such interface. Linux and macOS only.
+Binding a socket to an interface needs root (or `CAP_NET_RAW`) on Linux
+kernels older than 5.7; newer kernels allow it to any user. With `-v`,
+FeroProbe prints the interface it uses.
+
+#### `-g <portnum>`, `--source-port <portnum>`
+
+Send probes from this source port, as nmap's `-g` does: some firewalls let
+in anything from port 53 (DNS) or 20 (FTP data). It applies to:
+
+- the raw TCP scans (`-sS`, `-sA`, `-sF`, ..., `--scanflags`), SCTP scans
+  (`-sY`, `-sZ`) and the TCP, UDP and SCTP probes of the IP protocol scan
+  (`-sO`);
+- the raw TCP pings (`-PS`, `-PA` as root) and UDP pings (`-PU`);
+- the UDP scan (`-sU`);
+- OS detection (`-O`).
+
+As in nmap, it does not apply to the connect scan (`-sT`; FeroProbe warns,
+with nmap's message, and keeps the system's ports), to unprivileged TCP
+pings (connects), to version detection, to traceroute (whose source port
+tells its probes apart) or to DNS. `-g 0` warns that port 0 may not work;
+the UDP probes, which go through the system's sockets, cannot be sent from
+port 0 and keep a random port (the warning says so).
+
+FeroProbe already sends every raw probe of a scan from one source port
+(random, from 40000-59999), so `-g` only fixes which one; the probe
+signature (`docs/responsible-use.md`) is unchanged. UDP probes from a fixed
+port share it between sockets (`SO_REUSEADDR`), each connected to a
+different target port. If another program holds the port, the UDP scan
+fails with an error naming it.
+
+### Fragmentation, decoys and spoofed source
 
 FeroProbe has nmap's fragmentation, decoy and spoofed-source options for
 testing your own firewalls and intrusion detection, and for authorized
 penetration tests. Unlike nmap, they are gated by an authorization model.
 
-### Authorization model
+#### Authorization model
 
 - The options work only with a raw TCP scan (`-sS`, `-sF`, `-sN`, `-sX`,
   `-sA`, `-sW`, `-sM`, or `--scanflags`), on IPv4 targets. Anything else is
@@ -714,8 +777,6 @@ penetration tests. Unlike nmap, they are gated by an authorization model.
   check.
 
 The reasons are in [docs/responsible-use.md](responsible-use.md).
-
-### Options
 
 #### `-f` (fragment packets)
 
@@ -897,7 +958,7 @@ RCVD (0.0545s) TCP 10.0.0.5:22 > 10.0.0.2:48100 SA seq=1290442 win=64240 ttl=64
 ```
 
 With `-f`/`--mtu` every fragment gets its own line (see
-[Firewall/IDS evasion](#firewallids-evasion)).
+[Firewall/IDS evasion and spoofing](#firewallids-evasion-and-spoofing)).
 
 #### `--dry-run`
 
@@ -952,6 +1013,8 @@ per option:
 | `-sU` | Payloads for many more ports, empty datagrams elsewhere (FeroProbe: `FeroProbeScan/1`) |
 | `-f`, `--mtu` | Sends fragments too, but its `--packet-trace` shows the unfragmented packet |
 | `-D` with `ME` | Sends the real probe at `ME`'s place, not last |
+| `-g` with `-O` | Sends its OS detection probes from a run of source ports starting at the `-g` port, not all from it |
+| `-g 0` with `-sU` or `-PU` | Sends the UDP probes from port 0 (FeroProbe cannot, and uses a random port, with a warning) |
 | Default discovery without root | Only TCP connects to 80 and 443, no ICMP echo |
 | Any scan | Adaptive timeouts and up to 10 resends, instead of a fixed `--timeout` and `--retries` |
 
@@ -1124,6 +1187,8 @@ safeguard calls for a difference. The deliberate differences are:
 | OS detection probes (`-O`) | About 16 probes per host (6 SYNs with varied options, ECN, T2-T7 to open and closed ports, 2 ICMP echoes, a UDP probe to a closed port), sent several times: about 150 packets | One TCP SYN to an open port, offering every common option, plus the scan's own probes: a handful of packets. Lighter on the target, and no probes outside the scanned ports; the price is a family rather than an exact version |
 | Port names | nmap-services | The same names for the common ports, from the IANA registry, and `unknown` for the rest. nmap-services cannot be redistributed |
 | Timeouts | Adapt to measured round-trip times | A fixed `--timeout` per probe, set by the template |
+| Parallelism (`--min-parallelism`, `--max-parallelism`/`-M`/`-c`) and `--max-retries` | An adaptive window between the minimum and maximum; retries capped by `--max-retries` and adapted to packet loss | A fixed number of connect/UDP probes in flight, raised to `--min-parallelism`; a fixed number of retries |
+| `-g` with UDP scans | Raw UDP packets from the port, any port including 0 | UDP probes go through the system's sockets, which share the port between them; port 0 cannot be used and falls back to a random port, with a warning |
 | Old-style IPv4 numbers as targets (`2222`, `10.1.2`, `010.0.0.1`) | Passed to the resolver | Refused with an explanation |
 | Probes outside the requested ports | `-A`'s scripts can probe other ports (`ms-sql-info`: UDP 1434 on every host); `-O` picks a random UDP port (and for IPv4 also TCP), regardless of `-p`, when the scan found no closed or unfiltered one | Never beyond the command's own ports (`-p` plus the host-discovery ports): `-sV` and `-O` probe only open ports the scan found, traceroute only a scanned port, a discovery port, or (with `-sn`) the `-p` port, and FeroProbe has no scripts |
 | Traceroute port | The probe that got the best answer during discovery or the scan, else ICMP echo | TCP SYNs to an open or closed scanned port, else a TCP port the command names (`-p` with `-sn`, or a discovery port), else the host is not traced (FeroProbe used to fall back to port 80) |
@@ -1149,11 +1214,9 @@ with an error naming the supported alternatives:
   `--version-light`, `--version-all`, `--version-trace`, `--osscan-limit`,
   `--osscan-guess`, `--max-os-tries`.
 - Timing: `--min-rtt-timeout`, `--max-rtt-timeout`, `--initial-rtt-timeout`,
-  `--max-retries` (use `--retries`), `--min-hostgroup`, `--max-hostgroup`,
-  `--min-parallelism`, `--max-parallelism` (use `-c`), `--max-scan-delay`,
+  `--min-hostgroup`, `--max-hostgroup`, `--max-scan-delay`,
   `--defeat-rst-ratelimit`.
-- Evasion and packet options: `--spoof-mac`, `-g`/`--source-port`, `-e`,
-  `--data`, `--data-string`, `--data-length`, `--ip-options`, `--ttl`,
+- Evasion and packet options: `--spoof-mac`, `--data`, `--data-string`, `--data-length`, `--ip-options`, `--ttl`,
   `--badsum`.
 - Output and misc: `-oS`, `--append-output`, `--resume`, `--stylesheet`,
   `--webxml`, `--no-stylesheet`, `-d`, `--iflist`, `--privileged`,

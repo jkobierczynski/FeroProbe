@@ -24,7 +24,6 @@ use std::time::{Duration, Instant};
 use futures::stream::{self, StreamExt};
 use serde::Serialize;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::net::TcpStream;
 
 use crate::model::{HostResult, PortState, Protocol, ScanConfig};
 use crate::ports::service_name;
@@ -152,7 +151,7 @@ async fn plain_probe(
     wait: Duration,
 ) -> Option<Vec<u8>> {
     pace(cfg.scan_delay).await;
-    let mut stream = tokio::time::timeout(cfg.timeout, TcpStream::connect(addr))
+    let mut stream = tokio::time::timeout(cfg.timeout, crate::netif::connect_tcp(addr))
         .await
         .ok()?
         .ok()?;
@@ -268,7 +267,7 @@ pub async fn detect_tcp(
 /// know how to ask.
 pub async fn detect_udp(addr: SocketAddr, cfg: &ScanConfig, wait: Duration) -> Option<ServiceInfo> {
     let payload = udp_info::payload(addr.port())?;
-    let sock = crate::udp::connected_socket(addr).await.ok()?;
+    let sock = crate::udp::connected_socket(addr, None).await.ok()?;
     let mut buf = [0u8; 4096];
     for _ in 0..=cfg.retries {
         pace(cfg.scan_delay).await;

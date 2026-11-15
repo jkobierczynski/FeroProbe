@@ -95,13 +95,20 @@ the SCTP, IP protocol, IPv6 OS detection and probe-signature work).
 | Feature | Options | Notes |
 | --- | --- | --- |
 | Timing templates | `-T0` … `-T5` (or names `paranoid` … `insane`) | Set timeout, retries, parallelism, rate and scan delay (`timing.rs`); explicit flags override; a repeated `-T` takes the last one, like nmap |
-| Probe timeout and retries | `--timeout`, `--retries` | |
-| Parallelism | `-c`, `--concurrency` | Connect and UDP probes in flight |
+| Probe timeout and retries | `--timeout`, `--retries` (nmap's name `--max-retries` too) | A fixed number of retries, where nmap's `--max-retries` caps an adaptive count |
+| Parallelism | `-c`, `--concurrency` (nmap's names `-M`, `--max-parallelism` too), `--min-parallelism` | Connect and UDP probes in flight: a fixed number, which `--min-parallelism` raises; at least 1, nmap's warnings and its min > max error |
 | Packet rate | `--min-rate`, `--max-rate` | `--max-rate` caps raw-socket probes (SYN, ICMP, ARP, NDP) on one schedule shared across the run; connect and UDP probes are paced by `--scan-delay` and bounded by `--concurrency`. `--min-rate` raises `--max-rate` and the connect/UDP parallelism, and shortens a template's scan delay |
 | Delay between probes | `--scan-delay` | |
 | Per-host time limit | `--host-timeout` | |
 | Progress | `--stats-every`, `-v`, `-vv` | |
 | Benchmarks | | criterion benches in `crates/feroprobe-core/benches` |
+
+### Interface and source port
+
+| Feature | Options | Notes |
+| --- | --- | --- |
+| Interface | `-e` | Every socket of the run is bound to it (`netif::use_interface`, `netif::bind_socket`): raw sockets, the `AF_PACKET` capture, ARP and NDP, connect, UDP, `-sV` and the `--dns-servers` resolver. Source address from the interface; only its networks are local. Linux and macOS |
+| Source port | `-g`, `--source-port` | Raw TCP/SCTP/IP-protocol scans, raw TCP and UDP pings, OS detection (`raw::probe_sport`) and UDP scan sockets (shared with `SO_REUSEADDR`, bound on the route's source address). Not for connect scans (nmap's warning), `-sV`, traceroute, DNS, as in nmap. `-g 0` warns; UDP cannot use port 0. nmap-diff cases `source-port*`, `interface-*` |
 
 ### Output
 
@@ -171,8 +178,8 @@ the scope rule (no probes outside the command's ports and protocols, see
 | 5.1 | Deeper version detection | `--version-intensity`, `--version-light`, `--version-all`, `--version-trace` | Move the rules in `service/rules.rs` into a data file in our own format (probe, ports, rarity 1-9, match and soft-match patterns, version and CPE fields), compiled into the binary and overridable with a file, like `--oui-file`. Intensity picks probes by rarity, as nmap does. `--version-trace` prints each probe and reply. Then grow the rule set protocol by protocol from public protocol documentation and our own captures (never from `nmap-service-probes`). Several pull requests: the format and options first, then batches of protocols |
 | 5.2 | Full OS fingerprinting | `--osscan-limit`, `--osscan-guess`, `--max-os-tries` | A multi-probe fingerprint of our own design (TCP option and window tests to the open port and, where the scan found one, a closed port; IP ID sequence), sent only to ports and protocols the scan already probed (an ICMP test only when the command already sends ICMP, such as default discovery or `-PE`), with our own signature file naming OS versions where the probes can tell them apart. Keeps the [lighter-than-nmap difference](#deliberate-differences-from-nmap) as far as possible: the probe count is documented and stays well under nmap's. `--osscan-limit` skips hosts without an open and a closed port, `--osscan-guess` prints near matches, `--max-os-tries` sets the retries |
 | 5.3 | Adaptive RTT timeouts | `--min-rtt-timeout`, `--max-rtt-timeout`, `--initial-rtt-timeout` | Per-host smoothed RTT and variance (nmap's and TCP's RFC 6298 formula), timeout = srtt + 4·rttvar clamped to the min and max; the `-T` templates set the three values as nmap's do. `--timeout` stays as FeroProbe's fixed-timeout option and sets all three |
-| 5.4 | Interface and source port | `-e`, `-g` / `--source-port` | `-e` binds raw, capture, ARP/NDP and connect sockets to the interface (`netif.rs`). `-g` sets the source port on raw TCP/UDP/SCTP probes and binds UDP sockets to it, with nmap's caveats (DNS lookups and some OS detection probes keep their own ports; connect scans cannot reuse one port for parallel connections) |
-| 5.5 | nmap's names for tuning options | `--max-retries`, `--min-hostgroup`, `--max-hostgroup`, `--min-parallelism`, `--max-parallelism` | `--max-retries` as an alias of `--retries`, `--max-parallelism` of `-c`; host groups become real (scan hosts in groups and report each group as it finishes, as nmap does). Our own names stay |
+| 5.4 | Interface and source port | `-e`, `-g` / `--source-port` | **Done** (see [Interface and source port](#interface-and-source-port)). `-e` binds raw, capture, ARP/NDP and connect sockets to the interface (`netif.rs`). `-g` sets the source port on raw TCP/UDP/SCTP probes and binds UDP sockets to it, with nmap's caveats (DNS lookups and some OS detection probes keep their own ports; connect scans cannot reuse one port for parallel connections) |
+| 5.5 | nmap's names for tuning options | `--max-retries`, `--min-hostgroup`, `--max-hostgroup`, `--min-parallelism`, `--max-parallelism` | **Names done**: `--max-retries`, `-M`/`--max-parallelism` and `--min-parallelism`. **Host groups still to do** (`--min-hostgroup`, `--max-hostgroup`), in their own pull request since they change how results are reported. `--max-retries` as an alias of `--retries`, `--max-parallelism` of `-c`; host groups become real (scan hosts in groups and report each group as it finishes, as nmap does). Our own names stay |
 
 ### Phase 6: v0.5.0
 

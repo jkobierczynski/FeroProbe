@@ -926,10 +926,10 @@ Cannot be combined with \f[V]-sn\f[R].
 \f[V]-T insane\f[R]), pick a bundle of timing settings, as in nmap.
 \f[V]-T3\f[R] (normal) is the default.
 Any of \f[V]--timeout\f[R], \f[V]--retries\f[R],
-\f[V]-c\f[R]/\f[V]--concurrency\f[R], \f[V]--max-rate\f[R] and
-\f[V]--scan-delay\f[R] given explicitly overrides the template\[aq]s
-value for that setting, so \f[V]-T4 --max-rate 2000\f[R] is aggressive
-with a lower packet rate.
+\f[V]-c\f[R]/\f[V]--concurrency\f[R], \f[V]--min-parallelism\f[R],
+\f[V]--max-rate\f[R] and \f[V]--scan-delay\f[R] given explicitly
+overrides the template\[aq]s value for that setting, so
+\f[V]-T4 --max-rate 2000\f[R] is aggressive with a lower packet rate.
 Given more than once, the last \f[V]-T\f[R] wins, as in nmap.
 .PP
 .TS
@@ -1039,19 +1039,33 @@ nmap adapts its timeouts to measured round-trip times
 (\f[V]--min-rtt-timeout\f[R] and friends); FeroProbe uses this fixed
 value.
 Below 20 ms it warns that accuracy may suffer.
-.SS \f[V]--retries <tries>\f[R]
+.SS \f[V]--retries <tries>\f[R], \f[V]--max-retries <tries>\f[R]
 .PP
 How many more times to send a probe that got no answer.
 Default from the template: 1.
-This is nmap\[aq]s \f[V]--max-retries\f[R] under FeroProbe\[aq]s own
-name.
+\f[V]--max-retries\f[R] is nmap\[aq]s name for it and works the same.
+nmap treats the number as a cap and may retry less on a network that
+loses nothing; FeroProbe always sends the retries a silent port needs.
 .SS \f[V]-c <number>\f[R], \f[V]--concurrency <number>\f[R]
 .PP
 The most connect and UDP probes in flight at once.
 Default from the template: 500.
-It warns above 900, and when the number is above the system\[aq]s
-open-file limit (\f[V]ulimit -n\f[R]).
+nmap\[aq]s names \f[V]--max-parallelism <number>\f[R] and
+\f[V]-M <number>\f[R] work too.
+It must be at least 1, warns above 900, and warns when the number is
+above the system\[aq]s open-file limit (\f[V]ulimit -n\f[R]).
 Raw-socket probes are paced by \f[V]--max-rate\f[R] instead.
+.SS \f[V]--min-parallelism <number>\f[R]
+.PP
+Keep at least this many connect and UDP probes in flight: it raises the
+template\[aq]s parallelism (or the one \f[V]--min-rate\f[R] picked) to
+this number.
+It must be at least 1, warns above 100, and is an error above an
+explicit \f[V]-c\f[R]/\f[V]--max-parallelism\f[R], with nmap\[aq]s
+message.
+FeroProbe\[aq]s parallelism is a fixed number rather than nmap\[aq]s
+adaptive window, so the minimum and the maximum simply bound that
+number.
 .SS \f[V]--max-rate <number>\f[R]
 .PP
 Send at most this many raw-socket packets per second (SYN and other raw
@@ -1090,10 +1104,68 @@ It is not traced.
 .PP
 nmap\[aq]s \f[V]--max-scan-delay\f[R], \f[V]--min-rtt-timeout\f[R],
 \f[V]--max-rtt-timeout\f[R], \f[V]--initial-rtt-timeout\f[R],
-\f[V]--min-hostgroup\f[R], \f[V]--max-hostgroup\f[R],
-\f[V]--min-parallelism\f[R] and \f[V]--max-parallelism\f[R] are not
+\f[V]--min-hostgroup\f[R] and \f[V]--max-hostgroup\f[R] are not
 available.
-.SH FIREWALL/IDS EVASION
+.SH FIREWALL/IDS EVASION AND SPOOFING
+.SS Interface and source port
+.PP
+These two work against any target, like in nmap; they do not need
+\f[V]--allow-public-evasion\f[R].
+.SS \f[V]-e <interface>\f[R]
+.PP
+Send and receive on this network interface (\f[V]eth0\f[R],
+\f[V]wlan0\f[R], \f[V]tun0\f[R], as \f[V]ip link\f[R] names them), as
+nmap\[aq]s \f[V]-e\f[R] does.
+Every socket of the scan is bound to it: raw probes, the packet capture
+of IPv6 OS detection, ARP and neighbour discovery, connect scans, UDP
+probes, version detection and the reverse DNS queries of
+\f[V]--dns-servers\f[R].
+The interface\[aq]s own address is the source of the probes (unless
+\f[V]-S\f[R] gives another), and only its networks count as local for
+ARP and neighbour discovery: a target on another interface\[aq]s network
+is reached through \f[V]-e\f[R]\[aq]s interface, as if it were on that
+link.
+Forward lookups of target names use the system resolver, which is not
+bound.
+.PP
+It is an error when there is no such interface.
+Linux and macOS only.
+Binding a socket to an interface needs root (or \f[V]CAP_NET_RAW\f[R])
+on Linux kernels older than 5.7; newer kernels allow it to any user.
+With \f[V]-v\f[R], FeroProbe prints the interface it uses.
+.SS \f[V]-g <portnum>\f[R], \f[V]--source-port <portnum>\f[R]
+.PP
+Send probes from this source port, as nmap\[aq]s \f[V]-g\f[R] does: some
+firewalls let in anything from port 53 (DNS) or 20 (FTP data).
+It applies to:
+.IP \[bu] 2
+the raw TCP scans (\f[V]-sS\f[R], \f[V]-sA\f[R], \f[V]-sF\f[R], ...,
+\f[V]--scanflags\f[R]), SCTP scans (\f[V]-sY\f[R], \f[V]-sZ\f[R]) and
+the TCP, UDP and SCTP probes of the IP protocol scan (\f[V]-sO\f[R]);
+.IP \[bu] 2
+the raw TCP pings (\f[V]-PS\f[R], \f[V]-PA\f[R] as root) and UDP pings
+(\f[V]-PU\f[R]);
+.IP \[bu] 2
+the UDP scan (\f[V]-sU\f[R]);
+.IP \[bu] 2
+OS detection (\f[V]-O\f[R]).
+.PP
+As in nmap, it does not apply to the connect scan (\f[V]-sT\f[R];
+FeroProbe warns, with nmap\[aq]s message, and keeps the system\[aq]s
+ports), to unprivileged TCP pings (connects), to version detection, to
+traceroute (whose source port tells its probes apart) or to DNS.
+\f[V]-g 0\f[R] warns that port 0 may not work; the UDP probes, which go
+through the system\[aq]s sockets, cannot be sent from port 0 and keep a
+random port (the warning says so).
+.PP
+FeroProbe already sends every raw probe of a scan from one source port
+(random, from 40000-59999), so \f[V]-g\f[R] only fixes which one; the
+probe signature (\f[V]docs/responsible-use.md\f[R]) is unchanged.
+UDP probes from a fixed port share it between sockets
+(\f[V]SO_REUSEADDR\f[R]), each connected to a different target port.
+If another program holds the port, the UDP scan fails with an error
+naming it.
+.SS Fragmentation, decoys and spoofed source
 .PP
 FeroProbe has nmap\[aq]s fragmentation, decoy and spoofed-source options
 for testing your own firewalls and intrusion detection, and for
@@ -1125,7 +1197,6 @@ A real run then needs raw sockets; \f[V]--dry-run\f[R] needs none and
 applies the same address check.
 .PP
 The reasons are in docs/responsible-use.md.
-.SS Options
 .SS \f[V]-f\f[R] (fragment packets)
 .PP
 Split each raw IPv4 probe into IP fragments that carry 8 bytes of
@@ -1311,7 +1382,7 @@ RCVD (0.0545s) TCP 10.0.0.5:22 > 10.0.0.2:48100 SA seq=1290442 win=64240 ttl=64
 .fi
 .PP
 With \f[V]-f\f[R]/\f[V]--mtu\f[R] every fragment gets its own line (see
-Firewall/IDS evasion).
+Firewall/IDS evasion and spoofing).
 .SS \f[V]--dry-run\f[R]
 .PP
 Send nothing.
@@ -1436,6 +1507,18 @@ T{
 \f[V]-D\f[R] with \f[V]ME\f[R]
 T}@T{
 Sends the real probe at \f[V]ME\f[R]\[aq]s place, not last
+T}
+T{
+\f[V]-g\f[R] with \f[V]-O\f[R]
+T}@T{
+Sends its OS detection probes from a run of source ports starting at the
+\f[V]-g\f[R] port, not all from it
+T}
+T{
+\f[V]-g 0\f[R] with \f[V]-sU\f[R] or \f[V]-PU\f[R]
+T}@T{
+Sends the UDP probes from port 0 (FeroProbe cannot, and uses a random
+port, with a warning)
 T}
 T{
 Default discovery without root
@@ -1780,6 +1863,26 @@ T}@T{
 A fixed \f[V]--timeout\f[R] per probe, set by the template
 T}
 T{
+Parallelism (\f[V]--min-parallelism\f[R],
+\f[V]--max-parallelism\f[R]/\f[V]-M\f[R]/\f[V]-c\f[R]) and
+\f[V]--max-retries\f[R]
+T}@T{
+An adaptive window between the minimum and maximum; retries capped by
+\f[V]--max-retries\f[R] and adapted to packet loss
+T}@T{
+A fixed number of connect/UDP probes in flight, raised to
+\f[V]--min-parallelism\f[R]; a fixed number of retries
+T}
+T{
+\f[V]-g\f[R] with UDP scans
+T}@T{
+Raw UDP packets from the port, any port including 0
+T}@T{
+UDP probes go through the system\[aq]s sockets, which share the port
+between them; port 0 cannot be used and falls back to a random port,
+with a warning
+T}
+T{
 Old-style IPv4 numbers as targets (\f[V]2222\f[R], \f[V]10.1.2\f[R],
 \f[V]010.0.0.1\f[R])
 T}@T{
@@ -1846,14 +1949,11 @@ Version and OS detection tuning: \f[V]--version-intensity\f[R],
 \f[V]--osscan-guess\f[R], \f[V]--max-os-tries\f[R].
 .IP \[bu] 2
 Timing: \f[V]--min-rtt-timeout\f[R], \f[V]--max-rtt-timeout\f[R],
-\f[V]--initial-rtt-timeout\f[R], \f[V]--max-retries\f[R] (use
-\f[V]--retries\f[R]), \f[V]--min-hostgroup\f[R],
-\f[V]--max-hostgroup\f[R], \f[V]--min-parallelism\f[R],
-\f[V]--max-parallelism\f[R] (use \f[V]-c\f[R]),
-\f[V]--max-scan-delay\f[R], \f[V]--defeat-rst-ratelimit\f[R].
+\f[V]--initial-rtt-timeout\f[R], \f[V]--min-hostgroup\f[R],
+\f[V]--max-hostgroup\f[R], \f[V]--max-scan-delay\f[R],
+\f[V]--defeat-rst-ratelimit\f[R].
 .IP \[bu] 2
-Evasion and packet options: \f[V]--spoof-mac\f[R],
-\f[V]-g\f[R]/\f[V]--source-port\f[R], \f[V]-e\f[R], \f[V]--data\f[R],
+Evasion and packet options: \f[V]--spoof-mac\f[R], \f[V]--data\f[R],
 \f[V]--data-string\f[R], \f[V]--data-length\f[R],
 \f[V]--ip-options\f[R], \f[V]--ttl\f[R], \f[V]--badsum\f[R].
 .IP \[bu] 2

@@ -149,12 +149,13 @@ fn first_ptr(buf: &[u8]) -> Option<PtrAnswer> {
 
 /// Ask one server for the PTR record `name`, waiting up to `cfg.timeout`.
 async fn ask(server: SocketAddr, name: &str, id: u16, cfg: &ScanConfig) -> PtrAnswer {
-    let bind: SocketAddr = if server.is_ipv4() {
-        (std::net::Ipv4Addr::UNSPECIFIED, 0).into()
-    } else {
-        (std::net::Ipv6Addr::UNSPECIFIED, 0).into()
+    // From the -e interface, if one was chosen, like nmap's own resolver.
+    let open = || -> std::io::Result<UdpSocket> {
+        let sock = crate::netif::udp_socket(server.is_ipv6())?;
+        sock.bind(&crate::netif::any_addr(server.ip(), 0).into())?;
+        UdpSocket::from_std(sock.into())
     };
-    let Ok(sock) = UdpSocket::bind(bind).await else {
+    let Ok(sock) = open() else {
         return PtrAnswer::Retry;
     };
     if sock.connect(server).await.is_err() || sock.send(&ptr_query(id, name)).await.is_err() {

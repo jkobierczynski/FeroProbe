@@ -462,7 +462,7 @@ mod imp {
         recv_sock.set_read_timeout(Some(Duration::from_millis(50)))?;
 
         let mut rng = Rng::new();
-        let sport = 40000 + (rng.next_u32() % 20000) as u16;
+        let sport = crate::raw::probe_sport(cfg, &mut rng);
         let seq = rng.next_u32();
         let tsval = rng.next_u32();
         let mut found: Vec<Option<TcpTraits>> = vec![None; jobs.len()];
@@ -634,7 +634,7 @@ mod imp {
 
         let mut found = found;
         let mut rng = Rng::new();
-        let sport = 40000 + (rng.next_u32() % 20000) as u16;
+        let sport = crate::raw::probe_sport(cfg, &mut rng);
         let seq = rng.next_u32();
         let tsval = rng.next_u32();
         let sources: Vec<Option<Ipv6Addr>> = jobs

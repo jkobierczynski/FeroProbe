@@ -221,6 +221,11 @@ pub struct ScanConfig {
     /// IPv4 TCP scans. Only used when every target is private; the
     /// command-line layer enforces that. Inactive by default.
     pub evasion: crate::evasion::Evasion,
+    /// nmap's `-g`: the source port of raw TCP, UDP and SCTP probes (port
+    /// scan, discovery pings, OS detection) and of UDP scan probes. `None`
+    /// picks a random port. Connect scans, version detection, traceroute
+    /// and DNS keep their own ports, as in nmap.
+    pub source_port: Option<u16>,
 }
 
 impl ScanConfig {
@@ -250,6 +255,7 @@ impl Default for ScanConfig {
             deadline: None,
             rate_schedule: None,
             evasion: crate::evasion::Evasion::default(),
+            source_port: None,
         }
     }
 }
