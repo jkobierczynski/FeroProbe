@@ -874,7 +874,10 @@ FeroProbe warns.
 .PP
 Print what version detection does to standard output: each probe sent,
 each reply (escaped, up to 120 bytes), and each match with the rule that
-made it, in the layout of nmap\[aq]s version trace:
+made it, in the layout of nmap\[aq]s version trace.
+When a JSON, XML or grepable report goes to standard output
+(\f[V]-o json\f[R], \f[V]-oX -\f[R], ...), the trace goes to standard
+error instead, so the report stays readable:
 .IP
 .nf
 \f[C]
@@ -1569,7 +1572,8 @@ No reverse DNS query is made.
 With \f[V]--traceroute\f[R], a note names the TCP port traceroute would
 fall back to (or says hosts would not be traced).
 With \f[V]-sV\f[R], the notes describe its probes instead of listing
-them, since they go only to the ports found open: at the intensity in
+them, since they go only to the TCP ports found open and the UDP ports
+found \f[V]open\f[R] or \f[V]open|filtered\f[R]: at the intensity in
 use, the TLS-first ports, the probes meant for each scanned port, the
 listen probe, then the other probes in the order they would be tried,
 for TCP and UDP.
@@ -2060,10 +2064,8 @@ scan, not planned), \f[V]-b\f[R] (FTP bounce), \f[V]-PO\f[R],
 Scripting: \f[V]-sC\f[R], \f[V]--script\f[R] and related options
 (nmap\[aq]s scripts cannot be shipped under their licence).
 .IP \[bu] 2
-Version and OS detection tuning: \f[V]--version-intensity\f[R],
-\f[V]--version-light\f[R], \f[V]--version-all\f[R],
-\f[V]--version-trace\f[R], \f[V]--osscan-limit\f[R],
-\f[V]--osscan-guess\f[R], \f[V]--max-os-tries\f[R].
+OS detection tuning: \f[V]--osscan-limit\f[R], \f[V]--osscan-guess\f[R],
+\f[V]--max-os-tries\f[R].
 .IP \[bu] 2
 Timing: \f[V]--min-rtt-timeout\f[R], \f[V]--max-rtt-timeout\f[R],
 \f[V]--initial-rtt-timeout\f[R], \f[V]--max-retries\f[R] (use

@@ -1163,6 +1163,14 @@ fn version_scan(args: &Args) -> Result<VersionScan> {
     let mut vs = VersionScan::new(Duration::from_millis(args.version_timeout));
     vs.intensity = version_intensity(args);
     vs.trace = args.version_trace;
+    // nmap prints the trace to standard output; keep it off a
+    // machine-readable report there.
+    let outputs = Outputs::from_args(args)?;
+    vs.trace_to_stderr = if outputs.stdout_taken() {
+        outputs.normal.iter().all(|p| p != "-")
+    } else {
+        !matches!(args.output, Format::Table)
+    };
     if let Some(path) = &args.service_rules {
         let db = feroprobe_core::ServiceDb::load(path)
             .map_err(|e| anyhow::anyhow!("reading service rules {}: {e}", path.display()))?;
@@ -2795,6 +2803,11 @@ mod tests {
             Some("--version-trace")
         );
         assert_eq!(version_option(&args(&["-sV"])), None);
+        let to_stderr = |argv: &[&str]| version_scan(&args(argv)).unwrap().trace_to_stderr;
+        assert!(!to_stderr(&["-sV", "--version-trace"]));
+        assert!(to_stderr(&["-sV", "--version-trace", "-o", "json"]));
+        assert!(to_stderr(&["-sV", "--version-trace", "-oX", "-"]));
+        assert!(!to_stderr(&["-sV", "--version-trace", "-oN", "-"]));
     }
 
     fn dry_order() -> DryOrder<'static> {

@@ -571,7 +571,9 @@ HTTP, the generic line probe and TLS.
 
 Print what version detection does to standard output: each probe sent,
 each reply (escaped, up to 120 bytes), and each match with the rule that
-made it, in the layout of nmap's version trace:
+made it, in the layout of nmap's version trace. When a JSON, XML or
+grepable report goes to standard output (`-o json`, `-oX -`, ...), the
+trace goes to standard error instead, so the report stays readable:
 
 ```
 Service scan sending probe null to 10.0.0.5:22 (tcp)
@@ -1062,7 +1064,8 @@ and the routing table is consulted (without sending) for the source
 address. No reverse DNS query is made. With `--traceroute`, a note names
 the TCP port traceroute would fall back to (or says hosts would not be
 traced). With `-sV`, the notes describe its probes instead of listing them,
-since they go only to the ports found open: at the intensity in use, the
+since they go only to the TCP ports found open and the UDP ports found
+`open` or `open|filtered`: at the intensity in use, the
 TLS-first ports, the probes meant for each scanned port, the listen probe,
 then the other probes in the order they would be tried, for TCP and UDP.
 
@@ -1277,9 +1280,8 @@ with an error naming the supported alternatives:
   `--resolve-all`.
 - Scripting: `-sC`, `--script` and related options (nmap's scripts cannot
   be shipped under their licence).
-- Version and OS detection tuning: `--version-intensity`,
-  `--version-light`, `--version-all`, `--version-trace`, `--osscan-limit`,
-  `--osscan-guess`, `--max-os-tries`.
+- OS detection tuning: `--osscan-limit`, `--osscan-guess`,
+  `--max-os-tries`.
 - Timing: `--min-rtt-timeout`, `--max-rtt-timeout`, `--initial-rtt-timeout`,
   `--max-retries` (use `--retries`), `--min-hostgroup`, `--max-hostgroup`,
   `--min-parallelism`, `--max-parallelism` (use `-c`), `--max-scan-delay`,

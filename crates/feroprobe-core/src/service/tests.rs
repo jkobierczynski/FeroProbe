@@ -256,6 +256,37 @@ async fn open_filtered_udp_that_answers_becomes_open() {
     assert_eq!(p.service.as_ref().unwrap().name, "memcache");
 }
 
+#[tokio::test]
+async fn empty_udp_datagram_marks_the_port_open() {
+    let sock = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let addr = sock.local_addr().unwrap();
+    tokio::spawn(async move {
+        let mut buf = [0u8; 1500];
+        while let Ok((_, from)) = sock.recv_from(&mut buf).await {
+            let _ = sock.send_to(b"", from).await;
+        }
+    });
+    let vs = VersionScan {
+        wait: Duration::from_millis(100),
+        intensity: 0,
+        ..vs()
+    };
+    let cfg = ScanConfig {
+        retries: 0,
+        ..cfg()
+    };
+    let info = detect_udp(addr, &cfg, &vs).await;
+    // Intensity 0 on an unknown port sends no probe at all.
+    assert_eq!(info, None);
+    let vs = VersionScan {
+        intensity: VersionScan::ALL,
+        ..vs
+    };
+    let info = detect_udp(addr, &cfg, &vs).await.unwrap();
+    assert!(info.name.ends_with('?'), "{info:?}");
+    assert_eq!(info.fingerprint, None);
+}
+
 #[test]
 fn dry_run_describes_the_probes() {
     let lines = dry_run_lines(&vs(), &[22, 80, 443], &[53]);

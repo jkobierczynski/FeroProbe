@@ -658,156 +658,156 @@ match http ^HTTP/1\.[01] \d{3}.*\{"couchdb"\s*:\s*"Welcome".*?"version"\s*:\s*"(
   version ${1}
   cpe cpe:/a:apache:couchdb:${1}
 
-match http ^HTTP/1\.[01] \d{3}.*?\r\n(?i:x-jenkins):\s*([\w.\-]+)
+match http ^HTTP/1\.[01] \d{3}[^\r\n]*\r\n(?:[^\r\n]+\r\n)*?(?i:x-jenkins):\s*([\w.\-]+)
   product Jenkins
   version ${1}
   cpe cpe:/a:jenkins:jenkins:${1}
 
-match http ^HTTP/1\.[01] \d{3}.*?\r\n(?i:x-influxdb-version):\s*v?([\w.\-]+)
+match http ^HTTP/1\.[01] \d{3}[^\r\n]*\r\n(?:[^\r\n]+\r\n)*?(?i:x-influxdb-version):\s*v?([\w.\-]+)
   product InfluxDB http admin
   version ${1}
   cpe cpe:/a:influxdata:influxdb:${1}
 
-match http-proxy ^HTTP/1\.[01] \d{3}.*?\r\n(?i:server):[ \t]*squid/([\w.]+)
+match http-proxy ^HTTP/1\.[01] \d{3}[^\r\n]*\r\n(?:[^\r\n]+\r\n)*?(?i:server):[ \t]*squid/([\w.]+)
   product Squid http proxy
   version ${1}
   cpe cpe:/a:squid-cache:squid:${1}
 
-match http ^HTTP/1\.[01] \d{3}.*?\r\n(?i:server):[ \t]*Apache/([\d.]+)(?: \(([^)\r\n]+)\))?
+match http ^HTTP/1\.[01] \d{3}[^\r\n]*\r\n(?:[^\r\n]+\r\n)*?(?i:server):[ \t]*Apache/([\d.]+)(?: \(([^)\r\n]+)\))?
   product Apache httpd
   version ${1}
   info ${2}
   cpe cpe:/a:apache:http_server:${1}
 
-match http ^HTTP/1\.[01] \d{3}.*?\r\n(?i:server):[ \t]*nginx/([\d.]+)(?: \(([^)\r\n]+)\))?
+match http ^HTTP/1\.[01] \d{3}[^\r\n]*\r\n(?:[^\r\n]+\r\n)*?(?i:server):[ \t]*nginx/([\d.]+)(?: \(([^)\r\n]+)\))?
   product nginx
   version ${1}
   info ${2}
   cpe cpe:/a:f5:nginx:${1}
 
-match http ^HTTP/1\.[01] \d{3}.*?\r\n(?i:server):[ \t]*Microsoft-IIS/([\d.]+)
+match http ^HTTP/1\.[01] \d{3}[^\r\n]*\r\n(?:[^\r\n]+\r\n)*?(?i:server):[ \t]*Microsoft-IIS/([\d.]+)
   product Microsoft IIS httpd
   version ${1}
   os Windows
   cpe cpe:/a:microsoft:internet_information_services:${1}
   cpe cpe:/o:microsoft:windows
 
-match http ^HTTP/1\.[01] \d{3}.*?\r\n(?i:server):[ \t]*Microsoft-HTTPAPI/([\d.]+)
+match http ^HTTP/1\.[01] \d{3}[^\r\n]*\r\n(?:[^\r\n]+\r\n)*?(?i:server):[ \t]*Microsoft-HTTPAPI/([\d.]+)
   product Microsoft HTTPAPI httpd
   version ${1}
   os Windows
   cpe cpe:/o:microsoft:windows
 
-match http ^HTTP/1\.[01] \d{3}.*?\r\n(?i:server):[ \t]*lighttpd/([\d.]+)
+match http ^HTTP/1\.[01] \d{3}[^\r\n]*\r\n(?:[^\r\n]+\r\n)*?(?i:server):[ \t]*lighttpd/([\d.]+)
   product lighttpd
   version ${1}
   cpe cpe:/a:lighttpd:lighttpd:${1}
 
-match http ^HTTP/1\.[01] \d{3}.*?\r\n(?i:server):[ \t]*Caddy\r\n
+match http ^HTTP/1\.[01] \d{3}[^\r\n]*\r\n(?:[^\r\n]+\r\n)*?(?i:server):[ \t]*Caddy\r\n
   product Caddy httpd
   cpe cpe:/a:caddyserver:caddy
 
-match http ^HTTP/1\.[01] \d{3}.*?\r\n(?i:server):[ \t]*openresty(?:/([\d.]+))?
+match http ^HTTP/1\.[01] \d{3}[^\r\n]*\r\n(?:[^\r\n]+\r\n)*?(?i:server):[ \t]*openresty(?:/([\d.]+))?
   product OpenResty web app server
   version ${1}
   cpe cpe:/a:openresty:openresty:${1}
 
-match http ^HTTP/1\.[01] \d{3}.*?\r\n(?i:server):[ \t]*LiteSpeed
+match http ^HTTP/1\.[01] \d{3}[^\r\n]*\r\n(?:[^\r\n]+\r\n)*?(?i:server):[ \t]*LiteSpeed
   product LiteSpeed httpd
   cpe cpe:/a:litespeedtech:litespeed_web_server
 
-match http ^HTTP/1\.[01] \d{3}.*?\r\n(?i:server):[ \t]*Jetty\(([\w.\-]+)\)
+match http ^HTTP/1\.[01] \d{3}[^\r\n]*\r\n(?:[^\r\n]+\r\n)*?(?i:server):[ \t]*Jetty\(([\w.\-]+)\)
   product Jetty
   version ${1}
   cpe cpe:/a:eclipse:jetty:${1}
 
-match http ^HTTP/1\.[01] \d{3}.*?\r\n(?i:server):[ \t]*Apache-Coyote/([\d.]+)
+match http ^HTTP/1\.[01] \d{3}[^\r\n]*\r\n(?:[^\r\n]+\r\n)*?(?i:server):[ \t]*Apache-Coyote/([\d.]+)
   product Apache Tomcat/Coyote JSP engine
   version ${1}
   cpe cpe:/a:apache:coyote_http_connector:${1}
 
-match http ^HTTP/1\.[01] \d{3}.*?\r\n(?i:server):[ \t]*MiniServ/([\d.]+)
+match http ^HTTP/1\.[01] \d{3}[^\r\n]*\r\n(?:[^\r\n]+\r\n)*?(?i:server):[ \t]*MiniServ/([\d.]+)
   product MiniServ
   version ${1}
   info Webmin httpd
   cpe cpe:/a:webmin:webmin
 
-match http ^HTTP/1\.[01] \d{3}.*?\r\n(?i:server):[ \t]*Boa/([\w.]+)
+match http ^HTTP/1\.[01] \d{3}[^\r\n]*\r\n(?:[^\r\n]+\r\n)*?(?i:server):[ \t]*Boa/([\w.]+)
   product Boa httpd
   version ${1}
   cpe cpe:/a:boa:boa_web_server:${1}
 
-match http ^HTTP/1\.[01] \d{3}.*?\r\n(?i:server):[ \t]*GoAhead-(?:Webs|http)
+match http ^HTTP/1\.[01] \d{3}[^\r\n]*\r\n(?:[^\r\n]+\r\n)*?(?i:server):[ \t]*GoAhead-(?:Webs|http)
   product GoAhead WebServer
   cpe cpe:/a:embedthis:goahead
 
-match http ^HTTP/1\.[01] \d{3}.*?\r\n(?i:server):[ \t]*mini_httpd/([\d.]+)
+match http ^HTTP/1\.[01] \d{3}[^\r\n]*\r\n(?:[^\r\n]+\r\n)*?(?i:server):[ \t]*mini_httpd/([\d.]+)
   product mini_httpd
   version ${1}
   cpe cpe:/a:acme:mini_httpd:${1}
 
-match http ^HTTP/1\.[01] \d{3}.*?\r\n(?i:server):[ \t]*thttpd/([\w.]+)
+match http ^HTTP/1\.[01] \d{3}[^\r\n]*\r\n(?:[^\r\n]+\r\n)*?(?i:server):[ \t]*thttpd/([\w.]+)
   product thttpd
   version ${1}
   cpe cpe:/a:acme:thttpd:${1}
 
-match http ^HTTP/1\.[01] \d{3}.*?\r\n(?i:server):[ \t]*Kestrel
+match http ^HTTP/1\.[01] \d{3}[^\r\n]*\r\n(?:[^\r\n]+\r\n)*?(?i:server):[ \t]*Kestrel
   product Microsoft Kestrel httpd
   cpe cpe:/a:microsoft:kestrel
 
-match http ^HTTP/1\.[01] \d{3}.*?\r\n(?i:server):[ \t]*Werkzeug/([\d.]+)(?: (Python/[\d.]+))?
+match http ^HTTP/1\.[01] \d{3}[^\r\n]*\r\n(?:[^\r\n]+\r\n)*?(?i:server):[ \t]*Werkzeug/([\d.]+)(?: (Python/[\d.]+))?
   product Werkzeug httpd
   version ${1}
   info ${2}
   cpe cpe:/a:palletsprojects:werkzeug:${1}
 
-match http ^HTTP/1\.[01] \d{3}.*?\r\n(?i:server):[ \t]*SimpleHTTP/([\d.]+) Python/([\d.]+)
+match http ^HTTP/1\.[01] \d{3}[^\r\n]*\r\n(?:[^\r\n]+\r\n)*?(?i:server):[ \t]*SimpleHTTP/([\d.]+) Python/([\d.]+)
   product Python SimpleHTTPServer
   version ${1}
   info Python ${2}
 
-match http ^HTTP/1\.[01] \d{3}.*?\r\n(?i:server):[ \t]*gunicorn(?:/([\d.]+))?
+match http ^HTTP/1\.[01] \d{3}[^\r\n]*\r\n(?:[^\r\n]+\r\n)*?(?i:server):[ \t]*gunicorn(?:/([\d.]+))?
   product Gunicorn
   version ${1}
   cpe cpe:/a:gunicorn:gunicorn:${1}
 
-match http ^HTTP/1\.[01] \d{3}.*?\r\n(?i:server):[ \t]*uvicorn
+match http ^HTTP/1\.[01] \d{3}[^\r\n]*\r\n(?:[^\r\n]+\r\n)*?(?i:server):[ \t]*uvicorn
   product Uvicorn
 
-match http ^HTTP/1\.[01] \d{3}.*?\r\n(?i:server):[ \t]*TornadoServer/([\d.]+)
+match http ^HTTP/1\.[01] \d{3}[^\r\n]*\r\n(?:[^\r\n]+\r\n)*?(?i:server):[ \t]*TornadoServer/([\d.]+)
   product Tornado httpd
   version ${1}
   cpe cpe:/a:tornadoweb:tornado:${1}
 
-match http ^HTTP/1\.[01] \d{3}.*?\r\n(?i:server):[ \t]*CherryPy/([\w.]+)
+match http ^HTTP/1\.[01] \d{3}[^\r\n]*\r\n(?:[^\r\n]+\r\n)*?(?i:server):[ \t]*CherryPy/([\w.]+)
   product CherryPy httpd
   version ${1}
   cpe cpe:/a:cherrypy:cherrypy:${1}
 
-match http ^HTTP/1\.[01] \d{3}.*?\r\n(?i:server):[ \t]*Docker/([\w.\-]+)(?: \((\w+)\))?
+match http ^HTTP/1\.[01] \d{3}[^\r\n]*\r\n(?:[^\r\n]+\r\n)*?(?i:server):[ \t]*Docker/([\w.\-]+)(?: \((\w+)\))?
   product Docker API
   version ${1}
   os ${2}
   cpe cpe:/a:docker:docker:${1}
 
-match http ^HTTP/1\.[01] \d{3}.*?\r\n(?i:server):[ \t]*MinIO
+match http ^HTTP/1\.[01] \d{3}[^\r\n]*\r\n(?:[^\r\n]+\r\n)*?(?i:server):[ \t]*MinIO
   product MinIO object storage
   cpe cpe:/a:minio:minio
 
-match http ^HTTP/1\.[01] \d{3}.*?\r\n(?i:server):[ \t]*Splunkd
+match http ^HTTP/1\.[01] \d{3}[^\r\n]*\r\n(?:[^\r\n]+\r\n)*?(?i:server):[ \t]*Splunkd
   product Splunkd httpd
   cpe cpe:/a:splunk:splunk
 
-match http ^HTTP/1\.[01] \d{3}.*?\r\n(?i:server):[ \t]*envoy\r\n
+match http ^HTTP/1\.[01] \d{3}[^\r\n]*\r\n(?:[^\r\n]+\r\n)*?(?i:server):[ \t]*envoy\r\n
   product Envoy proxy
   cpe cpe:/a:envoyproxy:envoy
 
-match http ^HTTP/1\.[01] \d{3}.*?\r\n(?i:server):[ \t]*CUPS/([\d.]+)
+match http ^HTTP/1\.[01] \d{3}[^\r\n]*\r\n(?:[^\r\n]+\r\n)*?(?i:server):[ \t]*CUPS/([\d.]+)
   product CUPS
   version ${1}
   cpe cpe:/a:apple:cups:${1}
 
-match http ^HTTP/1\.[01] \d{3}(?:[^\r\n]*\r\n)*?(?i:x-powered-by):[ \t]*Express\r\n
+match http ^HTTP/1\.[01] \d{3}[^\r\n]*\r\n(?:[^\r\n]+\r\n)*?(?i:x-powered-by):[ \t]*Express\r\n
   product Node.js Express framework
   cpe cpe:/a:expressjs:express
 

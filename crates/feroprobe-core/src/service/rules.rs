@@ -533,6 +533,9 @@ mod tests {
         let i = m(b"HTTP/1.1 200 OK\r\nServer: Docker/24.0.7 (linux)\r\n\r\n");
         assert_eq!(spv(&i), ("http", Some("Docker API"), Some("24.0.7")));
         assert_eq!(i.os_type.as_deref(), Some("linux"));
+        // A Server line in the body does not count.
+        let i = m(b"HTTP/1.1 200 OK\r\nServer: TestServer/1.0\r\n\r\nServer: Apache/2.4.58\r\n");
+        assert_eq!(spv(&i), ("http", Some("TestServer"), Some("1.0")));
         // No rule for this server: the generic header reader.
         let i = m(b"HTTP/1.0 200 OK\r\nServer: TestServer/1.2.3 (Test)\r\n\r\n");
         assert_eq!(spv(&i), ("http", Some("TestServer"), Some("1.2.3")));

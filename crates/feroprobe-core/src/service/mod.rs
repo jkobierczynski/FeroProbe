@@ -172,8 +172,11 @@ pub struct VersionScan {
     pub wait: Duration,
     /// 0-9: probes rarer than this are not sent, except to their own ports.
     pub intensity: u8,
-    /// Print each probe, reply and match to standard output.
+    /// Print each probe, reply and match to standard output, like nmap.
     pub trace: bool,
+    /// Print the trace to standard error instead, so it cannot spoil a
+    /// JSON, XML or grepable report written to standard output.
+    pub trace_to_stderr: bool,
     pub db: Arc<ServiceDb>,
 }
 
@@ -191,12 +194,18 @@ impl VersionScan {
             wait,
             intensity: Self::DEFAULT_INTENSITY,
             trace: false,
+            trace_to_stderr: false,
             db: ServiceDb::builtin(),
         }
     }
 
     fn trace(&self, line: impl FnOnce() -> String) {
-        if self.trace {
+        if !self.trace {
+            return;
+        }
+        if self.trace_to_stderr {
+            eprintln!("{}", line());
+        } else {
             println!("{}", line());
         }
     }
@@ -297,6 +306,8 @@ struct Round {
     unknown: Option<Vec<u8>>,
     /// A reply looked like TLS.
     saw_tls: bool,
+    /// Something answered, even an empty UDP datagram.
+    answered: bool,
 }
 
 /// Note what a reply to `probe` showed in `round`, tracing it.
@@ -383,6 +394,11 @@ fn finish(round: Round, protocol: Protocol, port: u16, vs: &VersionScan) -> Opti
             info.fingerprint = fingerprint(&data);
             Some(info)
         }
+        // An empty UDP datagram: the port is open, the service unknown.
+        (None, None) if round.answered => Some(ServiceInfo::named(&format!(
+            "{}?",
+            service_name(protocol, port)
+        ))),
         (None, None) => None,
     }
 }
@@ -562,13 +578,17 @@ pub async fn detect_udp(
     cfg: &ScanConfig,
     vs: &VersionScan,
 ) -> Option<ServiceInfo> {
-    let sock = crate::udp::connected_socket(addr).await.ok()?;
     let mut buf = vec![0u8; 8192];
     let mut round = Round::default();
     'probes: for (probe, hinted) in probe_order(&vs.db, Protocol::Udp, addr.port(), Listen::Never) {
         if !allowed(&vs.db, probe, hinted, round.soft.as_deref(), vs.intensity) {
             continue;
         }
+        // A socket (so a source port) per probe: a late reply to an earlier
+        // probe cannot be read as the answer to this one.
+        let Ok(sock) = crate::udp::connected_socket(addr).await else {
+            break;
+        };
         let mut data = Vec::new();
         for _ in 0..=cfg.retries {
             vs.trace(|| {
@@ -584,6 +604,7 @@ pub async fn detect_udp(
             }
             match tokio::time::timeout(vs.wait, sock.recv(&mut buf)).await {
                 Ok(Ok(n)) => {
+                    round.answered = true;
                     data = buf[..n].to_vec();
                     break;
                 }
