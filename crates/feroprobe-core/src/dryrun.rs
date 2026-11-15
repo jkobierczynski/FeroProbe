@@ -429,6 +429,19 @@ fn discovery(
     v: &Values,
 ) -> io::Result<()> {
     out.note("Host discovery")?;
+    let mut decided = vec![false; run.targets.len()];
+    // Like nmap with privileges, this machine itself is up without a probe.
+    if d.privileged {
+        for (i, t) in run.targets.iter().enumerate() {
+            if crate::discovery::is_localhost(t.addr) {
+                decided[i] = true;
+                out.note(&format!(
+                    "{} is this machine: up without a probe (localhost-response)",
+                    t.addr
+                ))?;
+            }
+        }
+    }
     // ARP and neighbour discovery settle the targets on local networks; no
     // other probe goes to them. They need raw sockets on Linux.
     let neighbour = d.arp_ping && d.privileged && cfg!(target_os = "linux");
@@ -440,9 +453,12 @@ fn discovery(
     } else {
         Default::default()
     };
-    let mut decided = vec![false; run.targets.len()];
+    let before_neighbour = decided.clone();
     let mut seen = HashSet::new();
     for (i, t) in run.targets.iter().enumerate() {
+        if decided[i] {
+            continue;
+        }
         let line = match t.addr {
             IpAddr::V4(ip) => arp::local_net_for(ip, &nets)
                 .map(|n| format!("ARP who-has {ip} tell {} ({}, {})", n.addr, n.ifname, n.mac)),
@@ -462,7 +478,7 @@ fn discovery(
             }
         }
     }
-    if decided.iter().any(|&d| d) {
+    if decided != before_neighbour {
         out.note(
             "Targets on a local network are settled by the ARP/ND answer alone and get no other probe",
         )?;
@@ -523,33 +539,50 @@ fn discovery(
             out.probe(&packet_trace::describe(proto, &msg, *src, Some(t.addr)))?;
         }
     }
-    // Bare ACKs need raw sockets on Linux; otherwise the -PA ports get a
-    // connect, as in nmap without privileges.
-    let raw_ack = !p.ack.is_empty() && cfg!(target_os = "linux") && d.privileged;
-    if raw_ack {
-        let scan = RawTcpScan::new(crate::syn::TcpScanKind::Ack);
-        for &port in &p.ack {
-            for (t, src) in &rest {
-                let line = match src {
-                    Some(s) => {
-                        let seg = tcp_segment(*s, t.addr, port, v, v.cookie, scan.flags);
-                        packet_trace::describe(packet::IPPROTO_TCP, &seg, Some(*s), Some(t.addr))
-                    }
-                    None => format!("TCP * > {} (no route)", host_port(Some(t.addr), Some(port))),
-                };
-                out.probe(&line)?;
+    // With raw sockets on Linux, -PS and -PA send bare SYNs and ACKs, as
+    // nmap does when privileged (discovery::raw_tcp_pings); otherwise both
+    // port lists get a connect.
+    let raw_tcp = cfg!(target_os = "linux")
+        && d.privileged
+        && (!rest.iter().any(|(t, _)| t.addr.is_ipv6()) || crate::raw::raw_ipv6_available());
+    if raw_tcp {
+        for (flags, ports) in [(packet::TCP_SYN, &p.syn), (packet::TCP_ACK, &p.ack)] {
+            let ack = if flags == packet::TCP_ACK {
+                v.cookie
+            } else {
+                0
+            };
+            for &port in ports {
+                for (t, src) in &rest {
+                    let line = match src {
+                        Some(s) => {
+                            let seg = tcp_segment(*s, t.addr, port, v, ack, flags);
+                            packet_trace::describe(
+                                packet::IPPROTO_TCP,
+                                &seg,
+                                Some(*s),
+                                Some(t.addr),
+                            )
+                        }
+                        None => format!(
+                            "TCP * > {} {} (no route)",
+                            host_port(Some(t.addr), Some(port)),
+                            packet_trace::tcp_flags(flags)
+                        ),
+                    };
+                    out.probe(&line)?;
+                }
             }
         }
-    }
-    let mut tcp_ports = p.syn.clone();
-    if !raw_ack {
+    } else {
+        let mut tcp_ports = p.syn.clone();
         tcp_ports.extend(&p.ack);
-    }
-    let mut seen_ports = HashSet::new();
-    tcp_ports.retain(|port| seen_ports.insert(*port));
-    for &port in &tcp_ports {
-        for (t, _) in &rest {
-            out.probe(&conn_line(t.addr, port))?;
+        let mut seen_ports = HashSet::new();
+        tcp_ports.retain(|port| seen_ports.insert(*port));
+        for &port in &tcp_ports {
+            for (t, _) in &rest {
+                out.probe(&conn_line(t.addr, port))?;
+            }
         }
     }
     for &port in &p.udp {
@@ -712,50 +745,92 @@ mod tests {
 
     #[test]
     fn discovery_follows_privileges() {
-        let targets = [target("127.0.0.1")];
+        // A documentation address: not this machine, so it gets probes.
+        let targets = [target("192.0.2.9")];
         let ev = Evasion::default();
-        let probes = PingProbes {
-            ack: vec![8080],
-            timestamp: true,
-            udp: vec![40125],
-            ..PingProbes::default()
-        };
-        let disc = |privileged| DryDiscovery {
-            probes: probes.clone(),
+        let disc = |probes: PingProbes, privileged| DryDiscovery {
+            probes,
             privileged,
             icmp: true,
             // Keep the host's own networks out of the test.
             arp_ping: false,
         };
+        // Unprivileged: nmap's default is an echo plus connects to 80, 443.
         let run = DryRun {
-            discovery: Some(disc(false)),
+            discovery: Some(disc(PingProbes::nmap_default(false), false)),
             ..base(&targets, &ev)
         };
         let (text, summary) = run_to_string(&run);
-        // Echo + connects to 443, 80 and 8080 (the ACK becomes a connect)
-        // + UDP; no timestamp without raw sockets.
-        assert_eq!(summary.discovery, 5, "{text}");
+        assert_eq!(summary.discovery, 3, "{text}");
         assert!(
-            text.contains("CONN TCP localhost > 127.0.0.1:8080"),
+            text.contains("CONN TCP localhost > 192.0.2.9:443"),
+            "{text}"
+        );
+        assert!(text.contains("Echo request"), "{text}");
+        // -PA and -PP without raw sockets: the ACK becomes a connect, and
+        // the timestamp request is skipped.
+        let probes = PingProbes {
+            ack: vec![8080],
+            timestamp: true,
+            udp: vec![40125],
+            ..PingProbes::none()
+        };
+        let run = DryRun {
+            discovery: Some(disc(probes, false)),
+            ..base(&targets, &ev)
+        };
+        let (text, summary) = run_to_string(&run);
+        assert_eq!(summary.discovery, 2, "{text}");
+        assert!(
+            text.contains("CONN TCP localhost > 192.0.2.9:8080"),
             "{text}"
         );
         assert!(
             text.contains("timestamp/address mask requests skipped"),
             "{text}"
         );
-        assert!(text.contains("Echo request"), "{text}");
 
+        // Privileged: nmap's default is echo, a raw SYN to 443, a raw ACK
+        // to 80 and a timestamp request, and no connects (on Linux).
+        let run = DryRun {
+            discovery: Some(disc(PingProbes::nmap_default(true), true)),
+            ..base(&targets, &ev)
+        };
+        let (text, summary) = run_to_string(&run);
+        assert_eq!(summary.discovery, 4, "{text}");
+        assert!(text.contains("Timestamp request"), "{text}");
+        if cfg!(target_os = "linux") {
+            assert!(!text.contains("CONN"), "{text}");
+            assert!(text.contains("192.0.2.9:443 S"), "{text}");
+            assert!(text.contains("192.0.2.9:80 A"), "{text}");
+        }
+    }
+
+    #[test]
+    fn localhost_needs_no_probe_when_privileged() {
+        let targets = [target("127.0.0.1")];
+        let ev = Evasion::default();
+        let disc = |privileged| DryDiscovery {
+            probes: PingProbes::nmap_default(privileged),
+            privileged,
+            icmp: true,
+            arp_ping: true,
+        };
         let run = DryRun {
             discovery: Some(disc(true)),
             ..base(&targets, &ev)
         };
         let (text, summary) = run_to_string(&run);
-        assert!(text.contains("Timestamp request"), "{text}");
-        if cfg!(target_os = "linux") {
-            // A bare ACK instead of a connect.
-            assert!(text.contains("> 127.0.0.1:8080 A "), "{text}");
-            assert_eq!(summary.discovery, 6, "{text}");
-        }
+        assert_eq!(summary.discovery, 0, "{text}");
+        assert!(text.contains("localhost-response"), "{text}");
+        // Unprivileged, nmap pings it like any other host.
+        let run = DryRun {
+            discovery: Some(disc(false)),
+            ..base(&targets, &ev)
+        };
+        let (text, summary) = run_to_string(&run);
+        assert_eq!(summary.discovery, 3, "{text}");
+        assert!(!text.contains("localhost-response"), "{text}");
     }
 
     #[test]
