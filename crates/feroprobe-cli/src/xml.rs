@@ -126,18 +126,31 @@ fn write_port(x: &mut String, p: &PortResult) {
                 ("product", &s.product),
                 ("version", &s.version),
                 ("extrainfo", &s.extra_info),
+                ("hostname", &s.hostname),
+                ("ostype", &s.os_type),
+                ("devicetype", &s.device_type),
             ] {
                 if let Some(v) = value {
                     let _ = write!(x, " {key}=\"{}\"", esc(v));
                 }
             }
-            if let Some(t) = s.tunnel {
-                let _ = write!(x, " tunnel=\"{t}\"");
-            }
+            // nmap's attribute order: servicefp before tunnel.
             if let Some(fp) = &s.fingerprint {
                 let _ = write!(x, " servicefp=\"{}\"", esc(fp));
             }
-            x.push_str(" method=\"probed\" conf=\"10\"/>");
+            if let Some(t) = s.tunnel {
+                let _ = write!(x, " tunnel=\"{t}\"");
+            }
+            x.push_str(" method=\"probed\" conf=\"10\"");
+            if s.cpe.is_empty() {
+                x.push_str("/>");
+            } else {
+                x.push('>');
+                for c in &s.cpe {
+                    let _ = write!(x, "<cpe>{}</cpe>", esc(c));
+                }
+                x.push_str("</service>");
+            }
         }
         None => {
             let _ = write!(
@@ -442,8 +455,16 @@ mod tests {
             extra_info: Some("a <b> & \"c\"".into()),
             ..Default::default()
         };
+        let smtp = ServiceInfo {
+            name: "smtp".into(),
+            hostname: Some("mail.example".into()),
+            os_type: Some("Linux".into()),
+            cpe: vec!["cpe:/a:postfix:postfix".into()],
+            ..Default::default()
+        };
         host.ports = vec![
             port(22, PortState::Open, Some(ssh)),
+            port(25, PortState::Open, Some(smtp)),
             port(80, PortState::Closed, None),
             port(81, PortState::Closed, None),
             port(443, PortState::Open, None),
@@ -455,6 +476,7 @@ mod tests {
         for want in [
             "args=\"feroprobe -sV &lt;x&gt; &amp; &quot;y&quot;\"",
             "<scaninfo type=\"connect\" protocol=\"tcp\" numservices=\"5\" services=\"22,80-82,443\"/>",
+            "<service name=\"smtp\" hostname=\"mail.example\" ostype=\"Linux\" method=\"probed\" conf=\"10\"><cpe>cpe:/a:postfix:postfix</cpe></service>",
             "<status state=\"up\" reason=\"echo-reply\" reason_ttl=\"0\"/>",
             "<address addr=\"10.0.0.5\" addrtype=\"ipv4\"/>\n<address addr=\"00:50:56:01:02:03\" addrtype=\"mac\" vendor=\"VMware\"/>",
             "<hostnames>\n<hostname name=\"box\" type=\"user\"/>\n<hostname name=\"box.example\" type=\"PTR\"/>\n</hostnames>",

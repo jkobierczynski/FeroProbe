@@ -44,6 +44,11 @@ PORT SPECIFICATION AND SCAN ORDER:
 SERVICE/VERSION DETECTION:
   -sV: Ask open ports which service and version they run
   --version-timeout <ms>: How long to wait for each service reply
+  --version-intensity <0-9>: How many probes to try (default 7; 9 tries all)
+  --version-light: Only the most likely probes (intensity 2)
+  --version-all: Every probe (intensity 9)
+  --version-trace: Print each service probe, reply and matching rule
+  --service-rules <file>: Use these probes and rules instead of the built-in ones
 OS DETECTION:
   -O: Guess the operating system
 TIMING AND PERFORMANCE:
