@@ -31,6 +31,7 @@ every such case in one place.
 - [Output](#output)
 - [Checking a scan before and while it runs](#checking-a-scan-before-and-while-it-runs)
 - [Miscellaneous options](#miscellaneous-options)
+- [Settings files and ICS protection](#settings-files-and-ics-protection)
 - [Privileges and platforms](#privileges-and-platforms)
 - [Probe signature](#probe-signature)
 - [Differences from nmap](#differences-from-nmap)
@@ -931,6 +932,12 @@ Use the IPv6 address of hostname targets; see
 Version detection, OS detection and traceroute; see
 [Traceroute and aggressive mode](#traceroute-and-aggressive-mode).
 
+#### `--override-ics-protection`
+
+Run once despite ICS protection, allowing `-sV`, `-O` and `-A`, with a
+prominent warning naming what it allowed. Changes no settings file. See
+[Settings files and ICS protection](#settings-files-and-ics-protection).
+
 #### `--oui-file <file>`
 
 The IEEE OUI list used to name the vendor of MAC addresses found by ARP
@@ -950,6 +957,60 @@ Print the version and exit.
 
 Print the help page and exit. Running `feroprobe` with no arguments does
 the same.
+
+## Settings files and ICS protection
+
+FeroProbe reads optional settings from TOML files when it starts, lowest
+precedence first:
+
+1. `$XDG_CONFIG_HOME/feroprobe/config.toml` (`~/.config/feroprobe/config.toml`
+   when `XDG_CONFIG_HOME` is unset or not absolute; `%APPDATA%\feroprobe\config.toml`
+   on Windows without `HOME`);
+2. under `sudo`, the same file in the invoking user's home (from
+   `SUDO_USER`), since sudo points `HOME` at root's (skipped when sudo kept
+   an absolute `XDG_CONFIG_HOME`, which already names your file);
+3. `.feroproberc` in the current directory.
+
+A key in a later file replaces the same key from an earlier one, and
+command-line options win over all of them. A missing file is skipped; one
+that cannot be read, is not valid TOML or gives a value of the wrong type
+stops the run. Unknown keys only warn. `-v` prints which files were read
+and whether ICS protection is on. nmap has no such files.
+
+The one setting is `ics_protection`, **off by default**: FeroProbe is a
+general scanner and behaves like nmap unless you ask otherwise.
+
+```toml
+ics_protection = true
+```
+
+With it on:
+
+- `-sV`, `-O` and `-A` are refused before any name is resolved or packet
+  sent, with a message naming the option and where protection was turned
+  on. Version detection sends application-protocol probes (HTTP, TLS, ...)
+  to every open port, and fragile PLCs and RTUs can fault or hang when,
+  for example, their Modbus handler on port 502 receives an HTTP request.
+- `--override-ics-protection` lets a single run through with a warning.
+- `--dry-run` is not refused, since it sends no probes, but warns that the
+  real run would be.
+- A scan that includes a well-known OT port (102/tcp S7comm, 502/tcp
+  Modbus, 20000/tcp+udp DNP3, 44818/tcp+udp EtherNet/IP, 47808/udp BACnet)
+  prints a warning. Ports are never refused.
+
+### Hardened build
+
+Building with the `ics-protection-default` Cargo feature makes protection
+always on in that binary: settings files cannot switch it off (a
+`ics_protection = false` is ignored with a warning), and only
+`--override-ics-protection` allows a single run. For teams that hand out
+a FeroProbe binary for use on control networks:
+
+```sh
+cargo build --release -p feroprobe --features ics-protection-default
+```
+
+See [docs/ics-protection.md](ics-protection.md) for the full rationale.
 
 ## Privileges and platforms
 
@@ -999,6 +1060,7 @@ safeguard calls for a difference. The deliberate differences are:
 | Probe signature | None | Raw TCP probes use window 65109; generic UDP probes carry `FeroProbeScan/1\n` |
 | Unprivileged discovery | TCP connects to 80 and 443 only | The same, plus an ICMP echo through an unprivileged ping socket where the OS offers one |
 | `--explain`, `--dry-run` | No equivalent | FeroProbe's own planning and checking options |
+| Settings files, `ics_protection`, `--override-ics-protection` | No equivalent | FeroProbe's own; off by default, so default behaviour is unchanged |
 | JSON output (`-oJ`) | No equivalent | FeroProbe's own format |
 | XML `scanner` attribute | `nmap` | `feroprobe`, unless `--nmap-label` |
 | Service and OS signatures | nmap's databases | FeroProbe's own (nmap's cannot be redistributed); OS detection names the family, not the version |
@@ -1054,6 +1116,7 @@ output.
 | Path | Use |
 | --- | --- |
 | `/usr/share/hwdata/oui.txt`, `/usr/share/ieee-data/oui.txt` and similar | MAC vendor names, unless `--oui-file` is given |
+| `~/.config/feroprobe/config.toml` (`$XDG_CONFIG_HOME`), the invoking user's under `sudo`, and `./.feroproberc` | Settings; see [Settings files and ICS protection](#settings-files-and-ics-protection) |
 | The system resolver's configuration (`/etc/resolv.conf` on Unix) | Resolving target hostnames, and reverse DNS without `--dns-servers` |
 
 FeroProbe needs no other data files: its port rankings, service rules and
