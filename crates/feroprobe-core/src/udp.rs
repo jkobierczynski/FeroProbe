@@ -18,7 +18,7 @@
 //! them into open|filtered. Lower `--concurrency` for more accurate results.
 
 use std::io::{self, ErrorKind};
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr, SocketAddrV6};
 use std::time::Instant;
 
 use futures::stream::{self, StreamExt};
@@ -86,6 +86,18 @@ fn is_truncated_reply(e: &io::Error) -> bool {
     cfg!(windows) && e.raw_os_error() == Some(10040)
 }
 
+/// The source port a UDP probe to `addr` really uses with `-g` (`None`:
+/// a random one). Probing this machine's own `-g` port from that port
+/// would send the probe to the probing socket itself, so that one probe
+/// uses a random port. On Windows, sockets sharing a UDP port do not each
+/// get their own peer's answers, so `-g` does not apply to UDP there (the
+/// command line warns).
+pub(crate) fn effective_sport(sport: Option<u16>, addr: SocketAddr) -> Option<u16> {
+    sport.filter(|&p| {
+        !cfg!(windows) && !(p == addr.port() && crate::discovery::is_localhost(addr.ip()))
+    })
+}
+
 /// A UDP socket connected to `addr`. On Linux it also asks for all ICMP
 /// errors (`IP_RECVERR`): by default Linux drops "soft" ones such as host
 /// unreachable on UDP sockets, which would turn filtered ports into
@@ -114,21 +126,30 @@ pub(crate) async fn connected_socket(
     // address (a DNS stub on 127.0.0.53:53, say) does not get in the way.
     let bind = match sport {
         Some(p) => match crate::netif::route_source(addr.ip()) {
+            // A link-local source needs the target's interface (scope).
+            Ok(IpAddr::V6(src)) if crate::target::is_link_local(src) => {
+                let scope = match addr {
+                    SocketAddr::V6(v6) => v6.scope_id(),
+                    SocketAddr::V4(_) => 0,
+                };
+                SocketAddr::V6(SocketAddrV6::new(src, p, 0, scope))
+            }
             Ok(ip) => SocketAddr::new(ip, p),
             Err(_) => crate::netif::any_addr(addr.ip(), p),
         },
         None => crate::netif::any_addr(addr.ip(), 0),
     };
     sock.bind(&bind.into()).map_err(|e| match sport {
-        Some(p) if e.kind() == io::ErrorKind::AddrInUse => io::Error::new(
-            e.kind(),
-            format!("source port {p} (-g) is in use by another program"),
-        ),
-        Some(p) if e.kind() == io::ErrorKind::PermissionDenied => io::Error::new(
-            e.kind(),
-            format!("source port {p} (-g): ports below 1024 need root on this system"),
-        ),
-        _ => e,
+        // Kind Other, so the probe reports a local failure rather than
+        // classifying it as a network answer (EACCES reads as filtered).
+        Some(p) if e.kind() == io::ErrorKind::AddrInUse => {
+            io::Error::other(format!("source port {p} (-g) is in use by another program"))
+        }
+        Some(p) if e.kind() == io::ErrorKind::PermissionDenied => io::Error::other(format!(
+            "source port {p} (-g): ports below 1024 need root on this system"
+        )),
+        Some(p) => io::Error::other(format!("binding source port {p} (-g): {e}")),
+        None => e,
     })?;
     let sock = UdpSocket::from_std(sock.into())?;
     sock.connect(addr).await?;
@@ -185,15 +206,7 @@ pub async fn probe_udp(addr: SocketAddr, cfg: &ScanConfig) -> io::Result<PortRes
     };
     // Creating, binding and connecting the socket can already fail for
     // network reasons (no route, IPv6 disabled); classify those too.
-    // Probing this machine's own -g port from that port would send the
-    // probe to the probing socket itself; that one probe uses a random
-    // port instead.
-    // On Windows, sockets sharing a UDP port do not each get their own
-    // peer's answers, so -g does not apply to UDP there (the command line
-    // warns).
-    let sport = cfg.source_port.filter(|&p| {
-        !cfg!(windows) && !(p == addr.port() && crate::discovery::is_localhost(addr.ip()))
-    });
+    let sport = effective_sport(cfg.source_port, addr);
     let sock = match connected_socket(addr, sport).await {
         Ok(s) => s,
         Err(e) => return classify(e, None),

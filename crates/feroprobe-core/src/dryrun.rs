@@ -281,6 +281,7 @@ pub fn write(run: &DryRun<'_>, w: &mut dyn Write) -> io::Result<Summary> {
 /// The UDP datagram a UDP probe sends; the kernel picks the source port
 /// unless `-g` gave one.
 fn udp_line(src: Option<IpAddr>, sport: Option<u16>, dst: IpAddr, port: u16) -> String {
+    let sport = crate::udp::effective_sport(sport, crate::target::socket_addr(dst, port));
     format!(
         "UDP {} > {} len={}",
         host_port(src, sport),
@@ -647,7 +648,9 @@ mod tests {
         let (text, _) = run_to_string(&run);
         assert!(text.contains("TCP 127.0.0.1:53 > 127.0.0.1:22 S"), "{text}");
         assert!(text.contains("TCP 127.0.0.1:53 > 127.0.0.1:80 S"), "{text}");
-        assert!(text.contains("UDP 127.0.0.1:53 > 127.0.0.1:53"), "{text}");
+        // This machine's own -g port is probed from a random port, as in a
+        // real run (and on Windows -g does not apply to UDP at all).
+        assert!(text.contains("UDP 127.0.0.1:* > 127.0.0.1:53"), "{text}");
     }
 
     #[test]

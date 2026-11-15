@@ -49,6 +49,12 @@ pub fn use_interface(name: &str) -> io::Result<&'static Interface> {
             chosen.name
         )));
     }
+    // Bind one socket now, so a refusal (no privileges, say) stops the run
+    // up front instead of turning every probe into a failed one.
+    let probe = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))
+        .or_else(|_| Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP)))?;
+    let ipv6 = probe.domain().is_ok_and(|d| d == Domain::IPV6);
+    bind_socket(&probe, ipv6)?;
     Ok(chosen)
 }
 
