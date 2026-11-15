@@ -1,24 +1,31 @@
 //! Host discovery: find out which targets are up before port scanning them.
 //!
+//! With raw sockets, a target that is this machine (a loopback address, or
+//! one of its own addresses, which Linux routes over `lo`) is marked up
+//! without any probe, with the reason `localhost-response`, as nmap does.
+//!
 //! Targets on a directly connected Ethernet network are asked for their MAC
 //! address with ARP (IPv4, see [`crate::arp`]) or neighbour discovery (IPv6,
 //! see [`crate::ndp`]), when the process may use raw sockets on Linux. Their
 //! answer, or its absence, decides them alone.
 //!
 //! Every other target gets the probes in [`PingProbes`], and any answer
-//! counts. By default, like nmap's unprivileged ping:
+//! counts. By default they are nmap's (see [`PingProbes::nmap_default`]):
 //!
-//! - an ICMP or ICMPv6 echo request ("ping"), when the process may send
-//!   ICMP: with raw sockets (root), or an unprivileged ICMP socket where the
-//!   OS allows one (not on Windows)
-//! - TCP connects to ports 443 and 80, where a completed handshake or a
-//!   reset both prove the host exists
+//! - with raw sockets (root on Linux): an ICMP or ICMPv6 echo request, a
+//!   bare TCP SYN to port 443, a bare TCP ACK to port 80, and an ICMP
+//!   timestamp request (IPv4 only)
+//! - without them: TCP connects to ports 80 and 443, where a completed
+//!   handshake or a reset both prove the host exists, plus an ICMP echo
+//!   request through an unprivileged ping socket where the OS offers one
+//!   (nmap has no such socket, so it sends no ICMP here)
 //!
-//! nmap's `-P` options pick other probes: TCP connects to chosen ports
-//! (`-PS`), bare TCP ACKs that a live host answers with a reset (`-PA`, raw
-//! sockets on Linux, else a connect), UDP datagrams that draw an answer or a
-//! port unreachable (`-PU`), and ICMP echo, timestamp and address mask
-//! requests (`-PE`, `-PP`, `-PM`; the last two need raw sockets and IPv4).
+//! nmap's `-P` options pick other probes: TCP SYNs to chosen ports (`-PS`),
+//! bare TCP ACKs that a live host answers with a reset (`-PA`), UDP
+//! datagrams that draw an answer or a port unreachable (`-PU`), and ICMP
+//! echo, timestamp and address mask requests (`-PE`, `-PP`, `-PM`; the last
+//! two need raw sockets and IPv4). The TCP probes are raw packets when raw
+//! sockets are available on Linux, and connects otherwise, as in nmap.
 //!
 //! Hosts that answer none of them are reported as down and not scanned
 //! (unless discovery is skipped with `-Pn`).
@@ -35,12 +42,20 @@ use crate::arp::{self, MacAddr, MacInfo};
 use crate::connect::probe_port;
 use crate::model::{HostResult, PortState, ScanConfig, reason};
 use crate::ndp;
-use crate::syn::{RawTcpScan, TcpScanKind, raw_tcp_scan};
+use crate::raw::{raw_ipv6_available, raw_sockets_available};
+use crate::syn::{HostsDone, RawTcpScan, TcpScanKind, raw_tcp_scan_until};
 use crate::target::Target;
 use crate::udp::probe_udp;
 
-/// TCP ports probed during default discovery.
-pub const DISCOVERY_PORTS: [u16; 2] = [443, 80];
+/// TCP ports connected to during default discovery without raw sockets
+/// (nmap's `DEFAULT_PING_CONNECT_PORT_SPEC`).
+pub const DISCOVERY_PORTS: [u16; 2] = [80, 443];
+
+/// The port the default raw TCP SYN probe goes to, as in nmap.
+pub const DEFAULT_SYN_PING_PORT: u16 = 443;
+
+/// The port the default raw TCP ACK probe goes to, as in nmap.
+pub const DEFAULT_ACK_PING_PORT: u16 = 80;
 
 /// The port `-PS` and `-PA` probe when no ports are given, as in nmap.
 pub const DEFAULT_TCP_PING_PORT: u16 = 80;
@@ -58,7 +73,8 @@ pub struct PingProbes {
     pub timestamp: bool,
     /// `-PM`: ICMP address mask request (IPv4, raw sockets).
     pub mask: bool,
-    /// `-PS`: TCP ports to connect to; a handshake or a reset proves the host.
+    /// `-PS`: TCP ports to send a SYN to; a SYN/ACK or a reset proves the
+    /// host. Raw SYNs on Linux with raw sockets, else a connect.
     pub syn: Vec<u16>,
     /// `-PA`: TCP ports to send a bare ACK to, which a live host answers
     /// with a reset. Needs raw sockets on Linux; elsewhere these ports get a
@@ -70,17 +86,36 @@ pub struct PingProbes {
 }
 
 impl Default for PingProbes {
-    /// Echo request plus TCP connects to 443 and 80.
+    /// The unprivileged default: see [`PingProbes::nmap_default`].
     fn default() -> Self {
-        Self {
-            echo: true,
-            syn: DISCOVERY_PORTS.to_vec(),
-            ..Self::none()
-        }
+        Self::nmap_default(false)
     }
 }
 
 impl PingProbes {
+    /// nmap's default probes. With raw TCP probes (`raw`, see
+    /// [`raw_tcp_pings`]): ICMP echo, a SYN to 443, an ACK to 80 and an ICMP
+    /// timestamp request (sent to IPv4 targets only). Without: connects to
+    /// 80 and 443, plus an ICMP echo that goes out only if the OS offers an
+    /// unprivileged ping socket.
+    pub fn nmap_default(raw: bool) -> Self {
+        if raw {
+            Self {
+                echo: true,
+                timestamp: true,
+                syn: vec![DEFAULT_SYN_PING_PORT],
+                ack: vec![DEFAULT_ACK_PING_PORT],
+                ..Self::none()
+            }
+        } else {
+            Self {
+                echo: true,
+                syn: DISCOVERY_PORTS.to_vec(),
+                ..Self::none()
+            }
+        }
+    }
+
     /// No probes at all, to add chosen ones to.
     pub fn none() -> Self {
         Self {
@@ -111,6 +146,29 @@ impl Drop for CancelOnDrop {
     }
 }
 
+/// Whether discovery sends its TCP probes (`-PS`, `-PA`) as raw SYN and
+/// ACK packets, as nmap does with privileges: raw sockets on Linux, for
+/// IPv6 too when any target needs it. Otherwise they are connects.
+pub fn raw_tcp_pings(targets: &[Target]) -> bool {
+    cfg!(target_os = "linux")
+        && raw_sockets_available()
+        && (!targets.iter().any(|t| t.addr.is_ipv6()) || raw_ipv6_available())
+}
+
+/// Whether `addr` is this machine: a loopback address, or one of its own
+/// addresses (the OS picks it as the source to reach itself; Linux routes
+/// that traffic over `lo`). nmap skips the ping for these targets when it
+/// runs privileged, since they route over the loopback interface.
+pub fn is_localhost(addr: IpAddr) -> bool {
+    #[cfg(target_os = "linux")]
+    let own =
+        || !addr.is_unspecified() && crate::raw::source_addr_for(addr).is_ok_and(|src| src == addr);
+    // Elsewhere only loopback addresses count.
+    #[cfg(not(target_os = "linux"))]
+    let own = || false;
+    addr.is_loopback() || own()
+}
+
 /// Probe every target and return one [`HostResult`] per target, in order,
 /// with `up_reason` set for the hosts that answered.
 pub async fn discover(
@@ -118,17 +176,37 @@ pub async fn discover(
     cfg: &ScanConfig,
     probes: &PingProbes,
 ) -> io::Result<Vec<HostResult>> {
+    discover_with(targets, cfg, probes, raw_sockets_available()).await
+}
+
+/// [`discover`], with the localhost shortcut on or off (`localhost_up`),
+/// so tests can still send probes to 127.0.0.1 when running as root.
+async fn discover_with(
+    targets: &[Target],
+    cfg: &ScanConfig,
+    probes: &PingProbes,
+    localhost_up: bool,
+) -> io::Result<Vec<HostResult>> {
     let mut hosts: Vec<HostResult> = targets
         .iter()
         .map(|t| HostResult::new(t.addr, t.hostname.clone()))
         .collect();
-    // Hosts that ARP or NDP already settled, up or down, skip the other
-    // probes.
-    let decided = if cfg.arp_ping {
-        neighbour_phase(targets, cfg, &mut hosts).await?
-    } else {
-        vec![false; targets.len()]
-    };
+    // Hosts already settled, up or down, skip the other probes. Like nmap
+    // with privileges, this machine itself is up without a probe.
+    let mut decided = vec![false; targets.len()];
+    if localhost_up {
+        for (h, t) in targets.iter().enumerate() {
+            if is_localhost(t.addr) {
+                hosts[h].up_reason = Some(reason::LOCALHOST);
+                decided[h] = true;
+            }
+        }
+    }
+    // Then ARP or NDP for hosts on a local Ethernet network.
+    if cfg.arp_ping {
+        neighbour_phase(targets, cfg, &mut hosts, &mut decided).await?;
+    }
+    let decided = decided;
 
     let index: HashMap<IpAddr, usize> = targets
         .iter()
@@ -173,7 +251,10 @@ pub async fn discover(
     }
     drop(reply_tx);
 
-    let pinged: Vec<AtomicBool> = decided.iter().map(|&d| AtomicBool::new(d)).collect();
+    // Hosts proven up (or settled before the probes): later probes skip
+    // them, the raw SYN and ACK scans included.
+    let pinged: Arc<Vec<AtomicBool>> =
+        Arc::new(decided.iter().map(|&d| AtomicBool::new(d)).collect());
 
     // An ICMP reply is the most direct proof of life; prefer its latency
     // over a TCP probe's, and keep the first one that came.
@@ -188,28 +269,34 @@ pub async fn discover(
         }
     };
 
-    // Bare ACKs need raw sockets on Linux; without them nmap connects to
-    // the -PA ports instead, and so do we.
-    let raw_ack = !probes.ack.is_empty()
-        && cfg!(target_os = "linux")
-        && crate::raw::raw_sockets_available()
-        && (undecided(true).is_empty() || crate::raw::raw_ipv6_available());
-    let ack_scan = raw_ack.then(|| {
-        let live: Vec<Target> = targets
-            .iter()
-            .zip(&decided)
-            .filter(|(_, d)| !**d)
-            .map(|(t, _)| t.clone())
-            .collect();
-        let (ports, cfg) = (probes.ack.clone(), cfg.clone());
+    // With raw sockets on Linux, -PS and -PA send bare SYNs and ACKs, as
+    // nmap does when privileged. Without them nmap connects to both port
+    // lists instead, and so do we.
+    let live_index: Vec<usize> = (0..targets.len()).filter(|&h| !decided[h]).collect();
+    let live: Vec<Target> = live_index.iter().map(|&h| targets[h].clone()).collect();
+    let done = HostsDone {
+        flags: Arc::clone(&pinged),
+        tcp: Arc::new(targets.iter().map(|_| AtomicBool::new(false)).collect()),
+        index: live_index,
+    };
+    let raw_tcp = !live.is_empty() && raw_tcp_pings(&live);
+    let raw_scans: Vec<_> = [
+        (TcpScanKind::Syn, &probes.syn),
+        (TcpScanKind::Ack, &probes.ack),
+    ]
+    .into_iter()
+    .filter(|(_, ports)| raw_tcp && !ports.is_empty())
+    .map(|(kind, ports)| {
+        let (live, ports, cfg, done) = (live.clone(), ports.clone(), cfg.clone(), done.clone());
         tokio::spawn(async move {
-            let scan = RawTcpScan::new(TcpScanKind::Ack);
-            raw_tcp_scan(&live, &ports, &cfg, scan).await
+            raw_tcp_scan_until(&live, &ports, &cfg, RawTcpScan::new(kind), Some(done)).await
         })
-    });
+    })
+    .collect();
 
-    let mut tcp_ports = probes.syn.clone();
-    if !raw_ack {
+    let mut tcp_ports = Vec::new();
+    if !raw_tcp {
+        tcp_ports.extend(&probes.syn);
         tcp_ports.extend(&probes.ack);
     }
     let mut seen_ports = HashSet::new();
@@ -223,8 +310,13 @@ pub async fn discover(
         .iter()
         .flat_map(|&probe| (0..targets.len()).map(move |h| (h, probe)));
     let mut probes = stream::iter(jobs)
-        // Checked when a probe is about to start: skip hosts already pinged.
-        .filter(|&(h, _)| std::future::ready(!pinged[h].load(Ordering::Relaxed)))
+        // Checked when a probe is about to start: skip hosts already proven
+        // up by ICMP (pinged) or by a raw TCP answer (done.tcp).
+        .filter(|&(h, _)| {
+            std::future::ready(
+                !pinged[h].load(Ordering::Relaxed) && !done.tcp[h].load(Ordering::Relaxed),
+            )
+        })
         .map(|(h, probe)| async move {
             let r = match probe {
                 PortProbe::Tcp(port) => {
@@ -262,8 +354,9 @@ pub async fn discover(
     while let Some(reply) = replies.recv().await {
         mark_pinged(&mut hosts, reply);
     }
-    // A reset to a bare ACK (unfiltered) proves the host is there.
-    if let Some(scan) = ack_scan {
+    // A SYN/ACK or reset to a bare SYN (open or closed), or a reset to a
+    // bare ACK (unfiltered), proves the host is there.
+    for scan in raw_scans {
         let answered = scan.await.map_err(io::Error::other)??;
         let undecided_hosts = (0..targets.len()).filter(|&h| !decided[h]);
         for (h, r) in undecided_hosts.zip(answered) {
@@ -284,24 +377,24 @@ pub async fn discover(
     Ok(hosts)
 }
 
-/// Ask every target that sits on a local Ethernet network for its MAC
-/// address: with ARP for IPv4 and neighbour discovery for IPv6. Fills in the
-/// hosts that answered and returns, per target, whether it was decided. A
-/// network where this cannot run (no privileges, not Linux) decides nothing,
-/// so those targets fall back to the ICMP and TCP probes.
+/// Ask every target not yet decided that sits on a local Ethernet network
+/// for its MAC address: with ARP for IPv4 and neighbour discovery for IPv6.
+/// Fills in the hosts that answered and marks, per target, whether it is
+/// now decided. A network where this cannot run (no privileges, not Linux)
+/// decides nothing, so those targets fall back to the ICMP and TCP probes.
 async fn neighbour_phase(
     targets: &[Target],
     cfg: &ScanConfig,
     hosts: &mut [HostResult],
-) -> io::Result<Vec<bool>> {
-    let mut decided = vec![false; targets.len()];
+    decided: &mut [bool],
+) -> io::Result<()> {
     let nets = arp::local_networks().unwrap_or_default();
     let links = ndp::local_links().unwrap_or_default();
     // Group the targets by the local network they are on.
     let mut arp_groups: Vec<(arp::LocalNet, Vec<Ipv4Addr>)> = Vec::new();
     let mut nd_groups: Vec<(ndp::LocalLink, Vec<Ipv6Addr>)> = Vec::new();
     let mut seen: HashSet<IpAddr> = HashSet::new();
-    for t in targets {
+    for (t, _) in targets.iter().zip(decided.iter()).filter(|(_, d)| !**d) {
         if !seen.insert(t.addr) {
             continue;
         }
@@ -319,7 +412,7 @@ async fn neighbour_phase(
         }
     }
     if arp_groups.is_empty() && nd_groups.is_empty() {
-        return Ok(decided);
+        return Ok(());
     }
 
     let cancel = CancelOnDrop(Arc::new(AtomicBool::new(false)));
@@ -349,6 +442,9 @@ async fn neighbour_phase(
     .map_err(io::Error::other)?;
 
     for (i, t) in targets.iter().enumerate() {
+        if decided[i] {
+            continue;
+        }
         decided[i] = settled.contains(&t.addr);
         if let Some(&(mac, rtt, why)) = replies.get(&t.addr) {
             hosts[i].up_reason = Some(why);
@@ -358,7 +454,7 @@ async fn neighbour_phase(
             decided[i] = true;
         }
     }
-    Ok(decided)
+    Ok(())
 }
 
 /// Add `ip` to the group for `net`, starting one if needed.
@@ -641,9 +737,52 @@ mod tests {
         let hosts = discover(&targets, &cfg, &PingProbes::default())
             .await
             .unwrap();
-        // Either the ping or a TCP reset from 443/80 proves localhost is up.
+        // As root it is up without a probe (localhost-response); otherwise
+        // the ping or a TCP reset from 80/443 proves it.
         assert!(hosts[0].is_up(), "{:?}", hosts[0]);
         assert!(hosts[0].up_reason.is_some());
+    }
+
+    #[tokio::test]
+    async fn localhost_shortcut_sends_nothing() {
+        // As nmap does when privileged: this machine is up without a probe,
+        // even with no probes to send at all.
+        let targets = [
+            Target::new("127.0.0.1".parse().unwrap()),
+            Target::new("127.0.0.2".parse().unwrap()),
+        ];
+        let cfg = ScanConfig::default();
+        let hosts = discover_with(&targets, &cfg, &PingProbes::none(), true)
+            .await
+            .unwrap();
+        for h in &hosts {
+            assert_eq!(h.up_reason, Some(reason::LOCALHOST), "{h:?}");
+            assert_eq!(h.latency_ms, None);
+        }
+    }
+
+    #[test]
+    fn localhost_addresses() {
+        assert!(is_localhost("127.0.0.1".parse().unwrap()));
+        assert!(is_localhost("127.1.2.3".parse().unwrap()));
+        assert!(is_localhost("::1".parse().unwrap()));
+        assert!(!is_localhost("0.0.0.0".parse().unwrap()));
+        // Documentation range: never one of our own addresses.
+        assert!(!is_localhost("192.0.2.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn nmap_default_probes() {
+        // nmap as root: -PE -PS443 -PA80 -PP.
+        let root = PingProbes::nmap_default(true);
+        assert!(root.echo && root.timestamp && !root.mask);
+        assert_eq!((root.syn, root.ack), (vec![443], vec![80]));
+        assert!(root.udp.is_empty());
+        // nmap without privileges: connects to 80 and 443.
+        let user = PingProbes::nmap_default(false);
+        assert_eq!(user.syn, vec![80, 443]);
+        assert!(user.ack.is_empty() && !user.timestamp);
+        assert_eq!(user, PingProbes::default());
     }
 
     #[tokio::test]
@@ -657,16 +796,28 @@ mod tests {
         let run = |probes: PingProbes| {
             let cfg = cfg.clone();
             let targets = targets.clone();
-            async move { discover(&targets, &cfg, &probes).await.unwrap().remove(0) }
+            // The probes themselves, without the localhost shortcut that
+            // skips them as root.
+            async move {
+                discover_with(&targets, &cfg, &probes, false)
+                    .await
+                    .unwrap()
+                    .remove(0)
+            }
         };
 
-        // A closed port answers a connect with a reset.
+        // A closed port answers a SYN (raw, or a connect) with a reset.
         let host = run(PingProbes {
             syn: vec![1],
             ..PingProbes::none()
         })
         .await;
-        assert_eq!(host.up_reason, Some(reason::CONN_REFUSED), "{host:?}");
+        let want = if raw {
+            reason::RESET
+        } else {
+            reason::CONN_REFUSED
+        };
+        assert_eq!(host.up_reason, Some(want), "{host:?}");
 
         // A bare ACK draws a reset; without raw sockets it is a connect.
         let host = run(PingProbes {
@@ -719,7 +870,8 @@ mod tests {
             Target::new("::1".parse().unwrap()),
             Target::new("127.0.0.1".parse().unwrap()),
         ];
-        let hosts = discover(&targets, &cfg, &PingProbes::default())
+        // Without the localhost shortcut, so the probes run even as root.
+        let hosts = discover_with(&targets, &cfg, &PingProbes::default(), false)
             .await
             .unwrap();
         assert!(hosts.iter().all(HostResult::is_up), "{hosts:?}");

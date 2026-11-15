@@ -45,7 +45,7 @@ pub mod udp;
 
 pub use arp::{MacAddr, MacInfo};
 pub use connect::connect_scan;
-pub use discovery::{PingProbes, discover, icmp_available};
+pub use discovery::{PingProbes, discover, icmp_available, is_localhost, raw_tcp_pings};
 pub use dns::reverse_lookup;
 pub use evasion::{Evasion, Fragment};
 pub use ipproto::ip_protocol_scan;

@@ -19,6 +19,11 @@ pub(crate) struct Facts<'a> {
     pub privileged: bool,
     /// ICMP echo can be sent (raw, or an unprivileged ping socket).
     pub icmp: bool,
+    /// The TCP ping probes go out as raw SYNs and ACKs, not connects.
+    pub raw_pings: bool,
+    /// Targets that are this machine, marked up without a probe (only
+    /// counted when privileged, as nmap only skips them then).
+    pub localhost: usize,
     /// Targets on a directly connected network, by interface name.
     pub local: BTreeMap<String, usize>,
     pub tcp_ports: &'a [u16],
@@ -110,6 +115,21 @@ pub(crate) fn explain(args: &Args, f: &Facts) -> Vec<String> {
             "skipped (-Pn): every target is treated as up".into(),
         );
     } else {
+        if f.localhost > 0 {
+            say(
+                &mut out,
+                format!(
+                    "{} {} this machine, so {} up without a probe (localhost-response), as nmap does when privileged",
+                    plural(f.localhost, "target"),
+                    if f.localhost == 1 { "is" } else { "are" },
+                    if f.localhost == 1 {
+                        "it is"
+                    } else {
+                        "they are"
+                    },
+                ),
+            );
+        }
         let local: usize = f.local.values().sum();
         if local > 0 {
             let nets: Vec<String> = if f.local.len() == 1 {
@@ -138,7 +158,7 @@ pub(crate) fn explain(args: &Args, f: &Facts) -> Vec<String> {
                 "no ARP or neighbour discovery: that needs raw sockets (root on Linux)".into(),
             );
         }
-        if local > 0 && local == f.targets.len() {
+        if local + f.localhost == f.targets.len() {
             say(
                 &mut out,
                 "no other hosts, so no ping probes are sent".into(),
@@ -172,16 +192,21 @@ pub(crate) fn explain(args: &Args, f: &Facts) -> Vec<String> {
                 );
             }
             if !pr.syn.is_empty() {
-                say(
-                    &mut out,
+                let line = if f.raw_pings {
+                    format!(
+                        "  TCP SYN to port {} (raw; a SYN/ACK or a reset proves the host)",
+                        ports(&pr.syn)
+                    )
+                } else {
                     format!(
                         "  TCP connect to port {} (a handshake or a reset proves the host)",
                         ports(&pr.syn)
-                    ),
-                );
+                    )
+                };
+                say(&mut out, line);
             }
             if !pr.ack.is_empty() {
-                let how = if f.privileged {
+                let how = if f.raw_pings {
                     "bare ACK, answered by a reset"
                 } else {
                     "a connect, since a bare ACK needs raw sockets"
@@ -436,6 +461,8 @@ mod tests {
             probes: &probes,
             privileged: false,
             icmp: true,
+            raw_pings: false,
+            localhost: 0,
             local: BTreeMap::new(),
             tcp_ports: &[22, 443],
             udp_ports: &[],

@@ -242,10 +242,51 @@ pub async fn raw_tcp_scan(
     cfg: &ScanConfig,
     scan: RawTcpScan,
 ) -> io::Result<Vec<HostResult>> {
+    raw_tcp_scan_until(targets, ports, cfg, scan, None).await
+}
+
+/// Hosts already proven up, so a raw scan used as a discovery probe sends
+/// them nothing more. Target `h` of the scan is done once `flags[index[h]]`
+/// (set by other probes, such as ICMP) or `tcp[index[h]]` (set when a raw
+/// TCP probe draws an answer) is set. The two are kept apart so a TCP
+/// answer does not stop an ICMP reply from being reported as the reason.
+#[derive(Clone)]
+pub(crate) struct HostsDone {
+    pub flags: std::sync::Arc<Vec<std::sync::atomic::AtomicBool>>,
+    pub tcp: std::sync::Arc<Vec<std::sync::atomic::AtomicBool>>,
+    pub index: Vec<usize>,
+}
+
+impl HostsDone {
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    fn is_done(&self, h: usize) -> bool {
+        use std::sync::atomic::Ordering::Relaxed;
+        let i = self.index[h];
+        self.flags[i].load(Relaxed) || self.tcp[i].load(Relaxed)
+    }
+
+    /// Mark target `h` of the scan done: it answered a raw TCP probe.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    fn mark(&self, h: usize) {
+        self.tcp[self.index[h]].store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// [`raw_tcp_scan`], skipping the probes still pending for hosts that
+/// `done` marks as finished. Their skipped ports come back as no answer.
+pub(crate) async fn raw_tcp_scan_until(
+    targets: &[Target],
+    ports: &[u16],
+    cfg: &ScanConfig,
+    scan: RawTcpScan,
+    done: Option<HostsDone>,
+) -> io::Result<Vec<HostResult>> {
     let (targets, ports, cfg) = (targets.to_vec(), ports.to_vec(), cfg.clone());
-    tokio::task::spawn_blocking(move || imp::scan_blocking(&targets, &ports, &cfg, scan))
-        .await
-        .map_err(io::Error::other)?
+    tokio::task::spawn_blocking(move || {
+        imp::scan_blocking(&targets, &ports, &cfg, scan, done.as_ref())
+    })
+    .await
+    .map_err(io::Error::other)?
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -257,6 +298,7 @@ mod imp {
         _: &[u16],
         _: &ScanConfig,
         scan: RawTcpScan,
+        _: Option<&HostsDone>,
     ) -> io::Result<Vec<HostResult>> {
         let what = match scan.kind {
             TcpScanKind::Syn => "SYN scan is",
@@ -357,7 +399,29 @@ mod imp {
         ports: &[u16],
         cfg: &ScanConfig,
         scan: RawTcpScan,
+        done: Option<&HostsDone>,
     ) -> io::Result<Vec<HostResult>> {
+        let is_done = |h: usize| done.is_some_and(|d| d.is_done(h));
+        // A TCP answer (not an ICMP error) proves the host up for the other
+        // discovery probes too.
+        let record = |results: &mut HashMap<(usize, u16), PortResult>,
+                      sent_at: &HashMap<(usize, u16), Instant>,
+                      a: Answer| {
+            if let Some(d) = done
+                && a.2 != PortState::Filtered
+            {
+                d.mark(a.0);
+                // As a discovery probe, a TCP answer is proof of life, so it
+                // replaces an ICMP error stored earlier for the same probe.
+                if results
+                    .get(&(a.0, a.1))
+                    .is_some_and(|r| r.state == PortState::Filtered)
+                {
+                    results.remove(&(a.0, a.1));
+                }
+            }
+            record(results, sent_at, a)
+        };
         let addrs: Vec<IpAddr> = targets.iter().map(|t| t.addr).collect();
         let index: Arc<HashMap<IpAddr, usize>> =
             Arc::new(addrs.iter().enumerate().map(|(i, a)| (*a, i)).collect());
@@ -495,8 +559,9 @@ mod imp {
                         return Err(ScanConfig::timed_out());
                     }
                     let Some(src) = sources[h] else { continue };
-                    // Answered by a reply that came in during this round.
-                    if results.contains_key(&(h, p)) {
+                    // Answered by a reply that came in during this round, or
+                    // the host is already known to be up.
+                    if results.contains_key(&(h, p)) || is_done(h) {
                         continue;
                     }
                     let Some(send_sock) = send_socks[usize::from(addrs[h].is_ipv6())].as_ref()
@@ -520,7 +585,8 @@ mod imp {
                     while let Ok(a) = rx.try_recv() {
                         record(&mut results, &sent_at, a);
                     }
-                    if results.contains_key(&(h, p)) {
+                    // Another probe may have proven the host up meanwhile.
+                    if results.contains_key(&(h, p)) || is_done(h) {
                         continue;
                     }
                     sent_at.insert((h, p), Instant::now());
@@ -557,24 +623,39 @@ mod imp {
                     }
                 }
                 // Wait for stragglers, but stop as soon as every probe is answered.
-                let mut unanswered = pending.iter().filter(|k| !results.contains_key(k)).count();
+                let outstanding = |results: &HashMap<(usize, u16), PortResult>| {
+                    outstanding(&pending, results, is_done)
+                };
+                let mut unanswered = outstanding(&results);
                 let mut deadline = Instant::now() + cfg.timeout;
                 if let Some(limit) = cfg.deadline {
                     deadline = deadline.min(limit);
                 }
+                // As a discovery probe, hosts can be proven up by other
+                // probes while we wait: wake up regularly and count again,
+                // so a reply from such a host never stands in for another's.
+                let slice = if done.is_some() {
+                    Duration::from_millis(100)
+                } else {
+                    Duration::MAX
+                };
                 while unanswered > 0
                     && let Some(left) = deadline.checked_duration_since(Instant::now())
                 {
-                    match rx.recv_timeout(left) {
+                    match rx.recv_timeout(left.min(slice)) {
                         Ok(a) => {
-                            if record(&mut results, &sent_at, a) {
+                            if record(&mut results, &sent_at, a) && done.is_none() {
                                 unanswered -= 1;
                             }
                         }
+                        Err(mpsc::RecvTimeoutError::Timeout) if done.is_some() => {}
                         Err(_) => break,
                     }
+                    if done.is_some() {
+                        unanswered = outstanding(&results);
+                    }
                 }
-                pending.retain(|k| !results.contains_key(k));
+                pending.retain(|&(h, p)| !results.contains_key(&(h, p)) && !is_done(h));
                 if pending.is_empty() {
                     break;
                 }
@@ -608,6 +689,21 @@ mod imp {
                 host
             })
             .collect())
+    }
+
+    /// The probes in `pending` still waiting for an answer: not answered
+    /// yet, and for a host not already known to be up. Counted afresh
+    /// rather than decremented per reply, so a late reply from a host that
+    /// is already up never stands in for another host's answer.
+    fn outstanding(
+        pending: &[(usize, u16)],
+        results: &HashMap<(usize, u16), PortResult>,
+        is_done: impl Fn(usize) -> bool,
+    ) -> usize {
+        pending
+            .iter()
+            .filter(|&&(h, p)| !results.contains_key(&(h, p)) && !is_done(h))
+            .count()
     }
 
     /// Store the first answer for a probe, with its round-trip time.
@@ -678,6 +774,92 @@ mod imp {
         }
 
         #[test]
+        fn done_hosts_get_no_more_probes() {
+            if !privileged() {
+                return;
+            }
+            use std::sync::Arc;
+            use std::sync::atomic::AtomicBool;
+            let closed = {
+                let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+                l.local_addr().unwrap().port()
+            };
+            let cfg = ScanConfig {
+                timeout: Duration::from_secs(5),
+                ..Default::default()
+            };
+            let target = Target::new("127.0.0.1".parse().unwrap());
+            let syn = RawTcpScan::new(TcpScanKind::Syn);
+            // Already proven up: nothing is sent, and the scan does not wait.
+            let done = HostsDone {
+                flags: Arc::new(vec![AtomicBool::new(false), AtomicBool::new(true)]),
+                tcp: Arc::new(vec![AtomicBool::new(false), AtomicBool::new(false)]),
+                index: vec![1],
+            };
+            let started = Instant::now();
+            let hosts = scan_blocking(
+                std::slice::from_ref(&target),
+                &[closed],
+                &cfg,
+                syn,
+                Some(&done),
+            )
+            .unwrap();
+            assert!(started.elapsed() < Duration::from_secs(2));
+            assert_eq!(hosts[0].ports[0].reason, reason::NO_RESPONSE);
+            // Not yet up: probed, and the reset marks the host done.
+            let done = HostsDone {
+                flags: Arc::new(vec![AtomicBool::new(false)]),
+                tcp: Arc::new(vec![AtomicBool::new(false)]),
+                index: vec![0],
+            };
+            let hosts = scan_blocking(&[target], &[closed], &cfg, syn, Some(&done)).unwrap();
+            assert_eq!(hosts[0].ports[0].state, PortState::Closed);
+            assert!(done.is_done(0));
+
+            // Two hosts, one already up: the other still gets its answer
+            // counted, with no retry to fall back on.
+            let cfg = ScanConfig { retries: 0, ..cfg };
+            let a = Target::new("127.0.0.1".parse().unwrap());
+            let b = Target::new("127.0.0.2".parse().unwrap());
+            let done = HostsDone {
+                flags: Arc::new(vec![AtomicBool::new(true), AtomicBool::new(false)]),
+                tcp: Arc::new(vec![AtomicBool::new(false), AtomicBool::new(false)]),
+                index: vec![0, 1],
+            };
+            let hosts = scan_blocking(&[a, b], &[closed], &cfg, syn, Some(&done)).unwrap();
+            assert_eq!(hosts[0].ports[0].reason, reason::NO_RESPONSE);
+            assert_eq!(hosts[1].ports[0].state, PortState::Closed);
+        }
+
+        /// Hosts A and B both have a probe out; ICMP proves A up, then A's
+        /// delayed TCP reply arrives. That reply must not use up B's count.
+        #[test]
+        fn late_reply_from_done_host_keeps_waiting_for_others() {
+            let pending = [(0, 80), (1, 80)];
+            let mut results = HashMap::new();
+            let sent_at = HashMap::new();
+            let a_up = std::cell::Cell::new(false);
+            let is_done = |h: usize| h == 0 && a_up.get();
+            assert_eq!(outstanding(&pending, &results, is_done), 2);
+            a_up.set(true);
+            assert_eq!(outstanding(&pending, &results, is_done), 1);
+            let now = Instant::now();
+            assert!(record(
+                &mut results,
+                &sent_at,
+                (0, 80, PortState::Closed, reason::RESET, now)
+            ));
+            assert_eq!(outstanding(&pending, &results, is_done), 1);
+            record(
+                &mut results,
+                &sent_at,
+                (1, 80, PortState::Closed, reason::RESET, now),
+            );
+            assert_eq!(outstanding(&pending, &results, is_done), 0);
+        }
+
+        #[test]
         fn syn_scan_localhost() {
             if !privileged() {
                 return;
@@ -698,6 +880,7 @@ mod imp {
                 &[open, closed],
                 &cfg,
                 RawTcpScan::new(TcpScanKind::Syn),
+                None,
             )
             .unwrap();
             let state_of = |p| hosts[0].ports.iter().find(|r| r.port == p).unwrap().clone();
@@ -722,6 +905,7 @@ mod imp {
                 &[1, 2, 3],
                 &cfg,
                 RawTcpScan::new(TcpScanKind::Syn),
+                None,
             )
             .unwrap_err();
             assert_eq!(err.kind(), io::ErrorKind::TimedOut);
@@ -763,6 +947,7 @@ mod imp {
                     &[open, closed],
                     &cfg,
                     RawTcpScan::new(kind),
+                    None,
                 )
                 .unwrap();
                 let got = |p| {
@@ -778,7 +963,7 @@ mod imp {
                 kind: TcpScanKind::Syn,
                 flags: TCP_SYN | TCP_PSH,
             };
-            let hosts = scan_blocking(&[target], &[open, closed], &cfg, custom).unwrap();
+            let hosts = scan_blocking(&[target], &[open, closed], &cfg, custom, None).unwrap();
             let state_of = |p| hosts[0].ports.iter().find(|r| r.port == p).unwrap().state;
             assert_eq!(state_of(open), PortState::Open);
             assert_eq!(state_of(closed), PortState::Closed);
@@ -815,6 +1000,7 @@ mod imp {
                 &[open6, open4, closed],
                 &cfg,
                 RawTcpScan::new(TcpScanKind::Syn),
+                None,
             )
             .unwrap();
             for host in &hosts {
