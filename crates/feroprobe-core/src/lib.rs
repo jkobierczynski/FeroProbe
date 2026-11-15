@@ -20,6 +20,7 @@ mod capture;
 pub mod connect;
 pub mod discovery;
 pub mod dns;
+pub mod dryrun;
 pub mod evasion;
 pub mod ipproto;
 pub mod model;

@@ -5,8 +5,9 @@ with nmap. **Update it in the same pull request that adds, changes or drops a
 feature**, so it stays the one place to see where the project stands.
 
 The goal is nmap parity: FeroProbe behaves like nmap unless nmap's behaviour is
-clearly wrong. Two deliberate exceptions are listed under
-[Not planned](#not-planned) and [Anti-abuse safeguards](#anti-abuse-safeguards).
+clearly wrong. The deliberate exceptions are listed under
+[Not planned](#not-planned), [Anti-abuse safeguards](#anti-abuse-safeguards)
+and [Deliberate differences from nmap](#deliberate-differences-from-nmap).
 
 Last audited against the source: 2026-11-15 (main at `34559fb`, v0.2.0 plus
 the SCTP, IP protocol, IPv6 OS detection and probe-signature work).
@@ -97,8 +98,9 @@ the SCTP, IP protocol, IPv6 OS detection and probe-signature work).
 | All formats at once | `-oA` | `.nmap`, `.xml`, `.gnmap` |
 | Port state reasons | `--reason` | |
 | Open ports only | `--open` | Keeps `open`, `open\|filtered` and `unfiltered` ports, like nmap |
-| Packet trace | `--packet-trace` | `SENT`/`RCVD`/`CONN` lines like nmap's |
+| Packet trace | `--packet-trace` | `SENT`/`RCVD`/`CONN` lines like nmap's; with `-f`/`--mtu` it shows each fragment actually sent (see [Deliberate differences](#deliberate-differences-from-nmap)) |
 | Plan explanation | `--explain` | FeroProbe's own: the plan with a reason for each step |
+| Dry run | `--dry-run` | FeroProbe's own: prints every probe the scan would send (discovery and port scan, with `-f`/`--mtu`, `-D`, `-S` expanded) as `NOT SENT (dry run)` lines in the `--packet-trace` layout, then stops. Sends nothing, needs no root, writes no report (`dryrun.rs`) |
 | nmap-style help and warnings | `-h`, `--help` | Help page laid out like nmap's; nmap's warnings for names, down hosts, option values |
 
 ### Anti-abuse safeguards
@@ -107,6 +109,7 @@ the SCTP, IP protocol, IPv6 OS detection and probe-signature work).
 | --- | --- |
 | Recognizable probe signature | Raw TCP scans use window 65109 (`0xFE55`); generic UDP probes carry `FeroProbeScan/1\n`. Documented in `docs/responsible-use.md` |
 | IDS rules | Suricata (`rules/feroprobe.rules`) and Snort (`rules/feroprobe.snort.rules`) |
+| Evasion options behind an authorization flag | `-f`, `--mtu`, `-D`, `-S` (raw IPv4 TCP scans). Private ranges (RFC 1918, loopback, link-local, CGNAT, IPv6 ULA) work as is; a public target, decoy or spoofed source needs `--allow-public-evasion` (`scope.rs`, `evasion.rs`) |
 
 ### Platform and project
 
@@ -118,13 +121,13 @@ the SCTP, IP protocol, IPv6 OS detection and probe-signature work).
 | Releases | `release.yml` builds binaries on `v*` tags |
 | Live test scripts | `scripts/test-sctp.sh`, `scripts/test-os6.sh` |
 
-## In review
+## Deliberate differences from nmap
 
-| Feature | Options | Pull request |
-| --- | --- | --- |
-| Fragmentation, decoys, spoofed source | `-f`, `--mtu`, `-D`, `-S` | #23. Refused unless every target is in a private range (RFC 1918, loopback, link-local, CGNAT, IPv6 ULA) and the scan is a raw IPv4 TCP scan |
-
-Move these to [Implemented](#implemented) when the pull request merges.
+| Behaviour | nmap | FeroProbe | Why |
+| --- | --- | --- | --- |
+| `--packet-trace` with `-f`/`--mtu` | Prints one `SENT` line for the whole, unfragmented probe, although the fragments are what goes on the wire | Prints one `SENT` line per fragment actually sent (`TCP ... (frag)`, then `IP ... frag offset=N`) | The trace should show what is sent; nmap's display is treated as a bug and not copied (Jurgen, 2026-11-15). `--dry-run` shows fragments the same way |
+| Evasion against public addresses | Allowed | Needs `--allow-public-evasion` | Anti-abuse safeguard, see `docs/responsible-use.md` |
+| Dry run | No equivalent. The closest is the list scan `-sL`, which only lists (and reverse-resolves) the targets | `--dry-run` lists every probe, per target and port, without sending any, and does no reverse DNS | A safe way to check exactly what a command would put on the wire |
 
 ## Remaining gap to nmap parity
 
@@ -142,7 +145,7 @@ Move these to [Implemented](#implemented) when the pull request merges.
 | --- | --- | --- |
 | Resume an aborted scan | `--resume` | Planned (phase 4, step 6) |
 | Compare two reports | `ndiff` | Planned (phase 4, step 7) |
-| List scan | `-sL` | List targets (and names) without sending probes |
+| List scan | `-sL` | List targets (and names) without sending probes. `--dry-run` covers the "send nothing" part and lists the probes too, but is not nmap's option and does no reverse DNS |
 | More ping types | `-PR`, `-PO`, `-PY` | ARP happens automatically, but can't be asked for alone; IP protocol and SCTP ping are missing |
 | RTT-based timeouts | `--min-rtt-timeout`, `--max-rtt-timeout`, `--initial-rtt-timeout` | We use a fixed `--timeout` |
 | Host groups and parallelism | `--min-hostgroup`, `--max-hostgroup`, `--min-parallelism`, `--max-parallelism`, `--max-retries` | We have `-c` and `--retries` under our own names |
@@ -169,3 +172,12 @@ Move these to [Implemented](#implemented) when the pull request merges.
 | --- | --- |
 | Idle scan `-sI` | Dropped: little use beyond teaching, and nmap already covers that |
 | nmap's probe, service and OS databases | Their licence does not allow redistributing them; FeroProbe writes its own |
+
+## Development notes
+
+- 2026-11-15: while this project was being built with an AI coding
+  assistant, one of the assistant's status updates about the evasion
+  options (`-f`, `--mtu`, `-D`, `-S`; branch `claude/project-thread-qatskg`,
+  PR #23) was incorrectly flagged by the assistant's safety safeguards, and
+  the session was switched to another model to continue. The work itself
+  was the authorization-gated evasion feature described above.
