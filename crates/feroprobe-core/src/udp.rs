@@ -93,9 +93,14 @@ fn is_truncated_reply(e: &io::Error) -> bool {
 /// get their own peer's answers, so `-g` does not apply to UDP there (the
 /// command line warns).
 pub(crate) fn effective_sport(sport: Option<u16>, addr: SocketAddr) -> Option<u16> {
-    sport.filter(|&p| {
-        !cfg!(windows) && !(p == addr.port() && crate::discovery::is_localhost(addr.ip()))
-    })
+    sport.filter(|&p| !cfg!(windows) && !(p == addr.port() && is_this_machine(addr.ip())))
+}
+
+/// Whether `ip` is one of this machine's own addresses: loopback, or an
+/// address the system would send from to reach it (so a probe to it
+/// comes straight back here).
+fn is_this_machine(ip: IpAddr) -> bool {
+    crate::discovery::is_localhost(ip) || crate::netif::route_source(ip).is_ok_and(|src| src == ip)
 }
 
 /// A UDP socket connected to `addr`. On Linux it also asks for all ICMP
