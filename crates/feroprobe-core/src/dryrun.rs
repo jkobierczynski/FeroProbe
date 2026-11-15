@@ -554,6 +554,16 @@ fn discovery(
             };
             for &port in ports {
                 for (t, src) in &rest {
+                    // The raw SYN/ACK pings go through the same raw TCP
+                    // scanner, so -f/--mtu, -D and -S apply to them too.
+                    if run.evasion.is_active()
+                        && let (Some(s @ IpAddr::V4(_)), IpAddr::V4(dst4)) = (src, t.addr)
+                    {
+                        for line in evasion_lines(run.evasion, *s, dst4, port, v, ack, flags) {
+                            out.probe(&line)?;
+                        }
+                        continue;
+                    }
                     let line = match src {
                         Some(s) => {
                             let seg = tcp_segment(*s, t.addr, port, v, ack, flags);
@@ -804,6 +814,41 @@ mod tests {
             assert!(text.contains("192.0.2.9:443 S"), "{text}");
             assert!(text.contains("192.0.2.9:80 A"), "{text}");
         }
+    }
+
+    #[test]
+    fn evasion_applies_to_raw_discovery_pings() {
+        if !cfg!(target_os = "linux") {
+            return;
+        }
+        let targets = [target("10.255.0.9")];
+        let ev = Evasion {
+            decoys: vec!["10.0.0.5".parse().unwrap()],
+            spoof_source: None,
+            fragment: Some(Fragment::Eight),
+        };
+        let probes = PingProbes {
+            ack: vec![80],
+            ..PingProbes::none()
+        };
+        let run = DryRun {
+            discovery: Some(DryDiscovery {
+                probes,
+                privileged: true,
+                icmp: true,
+                arp_ping: false,
+            }),
+            ..base(&targets, &ev)
+        };
+        let (text, summary) = run_to_string(&run);
+        if !text.contains("10.255.0.9 from") {
+            // No route to the test address here: nothing to expand.
+            return;
+        }
+        // A 20-byte ACK in 8-byte fragments is 3 pieces, from 2 sources.
+        assert_eq!(summary.discovery, 6, "{text}");
+        assert!(text.contains("TCP 10.0.0.5:"), "{text}");
+        assert!(text.contains("frag offset=8"), "{text}");
     }
 
     #[test]

@@ -129,7 +129,9 @@ This matters most on operational-technology and industrial-control (OT/ICS)
 networks, where an unexpected packet can hang or reset a fragile device such
 as a PLC or RTU. With `--dry-run`, an operator can check every target,
 port, flag and fragment a command would send, and confirm that it stays
-within the approved scope, before anything touches the network. Then run
+within the approved scope, before any scan probe is sent. Hostname targets
+are still resolved through the system resolver, even with `-n`, so give
+numeric addresses when no DNS traffic is allowed. Then run
 the same command without `--dry-run`, ideally with a gentle timing template
 (`-T0`/`-T1`), a low `--max-rate` and a short, explicit port list.
 

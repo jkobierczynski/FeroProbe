@@ -101,13 +101,18 @@ Suricata and `rules/feroprobe.snort.rules` for Snort, with setup notes in
 
 ## Checking a scan before running it
 
-`--dry-run` prints every probe a command would send, one `NOT SENT (dry run)`
-line per probe in the `--packet-trace` layout, and sends nothing: no host
-discovery, no port scan, no reverse DNS. It needs no root, so you can review
+`--dry-run` prints the host-discovery and port-scan probes a command would
+send, one `NOT SENT (dry run)` line per probe in the `--packet-trace` layout,
+and sends nothing: no host discovery, no port scan, no reverse DNS. It does
+not list the probes of steps that depend on replies: service detection
+(`-sV`), OS detection (`-O`) and `--traceroute` run on the hosts and open
+ports a real scan finds, so the dry run only names them. Retransmissions of
+unanswered probes are not listed either. It needs no root, so you can review
 a scan (its targets, ports, flags, fragments, decoys and spoofed source)
 before running it for real, or show a network owner exactly what you will
-send. Only target hostnames are resolved, through the system resolver, so
-the addresses shown are the real ones. The same safeguards apply: evasion
+send. Only target hostnames are resolved, through the system resolver (even
+with `-n`), so the addresses shown are the real ones; give numeric addresses
+when no DNS traffic is allowed. The same safeguards apply: evasion
 options against a public address are refused in a dry run too, unless
 `--allow-public-evasion` is given.
 
