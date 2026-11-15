@@ -310,8 +310,13 @@ async fn discover_with(
         .iter()
         .flat_map(|&probe| (0..targets.len()).map(move |h| (h, probe)));
     let mut probes = stream::iter(jobs)
-        // Checked when a probe is about to start: skip hosts already pinged.
-        .filter(|&(h, _)| std::future::ready(!pinged[h].load(Ordering::Relaxed)))
+        // Checked when a probe is about to start: skip hosts already proven
+        // up by ICMP (pinged) or by a raw TCP answer (done.tcp).
+        .filter(|&(h, _)| {
+            std::future::ready(
+                !pinged[h].load(Ordering::Relaxed) && !done.tcp[h].load(Ordering::Relaxed),
+            )
+        })
         .map(|(h, probe)| async move {
             let r = match probe {
                 PortProbe::Tcp(port) => {
