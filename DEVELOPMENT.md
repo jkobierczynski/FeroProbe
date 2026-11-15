@@ -32,9 +32,10 @@ the SCTP, IP protocol, IPv6 OS detection and probe-signature work).
 
 | Feature | Options | Notes |
 | --- | --- | --- |
-| Default discovery | (none) | ICMP/ICMPv6 echo plus TCP 443 and 80 |
+| Default discovery | (none) | nmap's defaults: as root, raw ICMP echo, SYN to 443, ACK to 80 and ICMP timestamp (IPv4); unprivileged, TCP connects to 80 and 443 (plus an ICMP echo over an unprivileged ping socket where the OS has one, which nmap lacks) |
+| Localhost shortcut | default as root | This machine (loopback or one of its own addresses) is up without a probe, reason `localhost-response`, like nmap |
 | Skip discovery | `-Pn` | |
-| Ping probe types | `-PS`, `-PA`, `-PU`, `-PE`, `-PP`, `-PM` | With port lists, repeatable |
+| Ping probe types | `-PS`, `-PA`, `-PU`, `-PE`, `-PP`, `-PM` | With port lists, repeatable. `-PS`/`-PA` are raw SYN/ACK as root on Linux, connects otherwise |
 | ARP on the local network (IPv4) | default as root, `--disable-arp-ping` / `--send-ip` | MAC address and vendor |
 | Neighbour discovery (IPv6) | default as root | MAC address and vendor (`ndp.rs`) |
 | MAC vendor names | `--oui-file` | Full IEEE OUI list from the system or a file, small built-in fallback |
@@ -90,7 +91,7 @@ the SCTP, IP protocol, IPv6 OS detection and probe-signature work).
 
 | Feature | Options | Notes |
 | --- | --- | --- |
-| Normal (table) output | default, `-oN` | |
+| Normal (table) output | default, `-oN` | Like nmap, a non-open state is folded into "Not shown" only above 25 ports (×(1 + `-v` count); `open\|filtered` never above `-vv`); smaller groups are listed |
 | nmap-style XML | `-o xml`, `-oX`, `--nmap-label` | nmap's `-oX` layout incl. `<trace>`; `scanner="feroprobe"` unless `--nmap-label` (`xml.rs`) |
 | Grepable output | `-o grepable`, `-oG` | One line per host, like nmap's (`grep.rs`) |
 | JSON output | `-o json`, `-oJ` | FeroProbe's own format |

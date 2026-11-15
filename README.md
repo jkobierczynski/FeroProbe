@@ -15,7 +15,7 @@ no external binaries.
 | UDP scan, `-sU`, with DNS, NTP, SNMP and SSDP payloads | ✅ |
 | SCTP scans `-sY` (INIT) and `-sZ` (COOKIE ECHO), IPv4 and IPv6 (raw sockets, Linux, root) | ✅ |
 | IP protocol scan `-sO` (which protocols a host runs), IPv4 and IPv6 (raw sockets, Linux, root) | ✅ |
-| Host discovery: ICMP/ICMPv6 echo + TCP 443/80 probes, `-sn`, `-Pn` | ✅ |
+| Host discovery with nmap's default probes (raw ICMP echo/timestamp, SYN 443, ACK 80 as root; connects otherwise), localhost skipped as root, `-sn`, `-Pn` | ✅ |
 | Ping types `-PS`, `-PA`, `-PU`, `-PE`, `-PP`, `-PM` | ✅ |
 | Reverse DNS names, `-n`, `-R`, `--dns-servers`; `--randomize-hosts` | ✅ |
 | ARP (IPv4) and neighbour discovery (IPv6) on the local network, with MAC address and vendor (Linux, root; `--disable-arp-ping` to turn off) | ✅ |
@@ -97,9 +97,12 @@ To see what FeroProbe actually sends, add `--packet-trace`. Like nmap's, it
 prints one line per probe and per answer on standard output:
 
 ```
-SENT (0.0005s) ICMP [10.0.0.2 > 10.0.0.5 Echo request (type=8/code=0) id=7996 seq=0]
-RCVD (0.0007s) ICMP [10.0.0.5 > 10.0.0.2 Echo reply (type=0/code=0) id=7996 seq=0] ttl=64
-CONN (0.0006s) TCP localhost > 10.0.0.5:443 => Connection refused
+SENT (0.0008s) ICMP [10.0.0.2 > 10.0.0.5 Echo request (type=8/code=0) id=5387 seq=0]
+SENT (0.0011s) ICMP [10.0.0.2 > 10.0.0.5 Timestamp request (type=13/code=0) id=5387 seq=0]
+RCVD (0.0015s) ICMP [10.0.0.5 > 10.0.0.2 Echo reply (type=0/code=0) id=5387 seq=0] ttl=64
+SENT (0.0016s) TCP 10.0.0.2:51453 > 10.0.0.5:80 A seq=1834164010 win=65109
+SENT (0.0016s) TCP 10.0.0.2:41696 > 10.0.0.5:443 S seq=1795275464 win=65109
+RCVD (0.0017s) TCP 10.0.0.5:443 > 10.0.0.2:41696 AR seq=0 win=0 ttl=64
 SENT (0.0543s) TCP 10.0.0.2:48100 > 10.0.0.5:22 S seq=2448842408 win=1024
 RCVD (0.0545s) TCP 10.0.0.5:22 > 10.0.0.2:48100 SA seq=1290442 win=64240 ttl=64
 ```
@@ -133,10 +136,10 @@ the same command without `--dry-run`, ideally with a gentle timing template
 Example output:
 
 ```
-Starting FeroProbe 0.2.0
+Starting FeroProbe 0.3.0-dev
 
 Scan report for 127.0.0.1
-Host is up, echo-reply (0.06 ms latency).
+Host is up, localhost-response.
 Not shown: 9998 closed ports
 PORT       STATE          SERVICE        REASON
 2024/tcp   open           unknown        syn-ack
@@ -144,6 +147,11 @@ PORT       STATE          SERVICE        REASON
 
 FeroProbe done: 1 host(s), 1 up, 10000 port(s) each, in 2.11s
 ```
+
+As in nmap, a non-open state is folded into the "Not shown" line only when
+it has more than 25 ports (50 with `-v`, 75 with `-vv`, ...); smaller groups
+are listed port by port, so `-p 80` on a closed port shows
+`80/tcp closed http`. Open ports are always listed.
 
 With `-sV`:
 
@@ -311,8 +319,8 @@ sudo setcap cap_net_raw+ep ./target/release/feroprobe
 ```
 
 Without it, a scan with no `-s` option uses a connect scan instead, and
-discovery uses TCP probes (plus unprivileged ping sockets where the OS allows
-them). An explicit `-sS` still needs the privileges; use `-sT` to ask for an
+discovery connects to TCP ports 80 and 443 (plus an ICMP echo through an
+unprivileged ping socket where the OS allows one, which nmap doesn't do). An explicit `-sS` still needs the privileges; use `-sT` to ask for an
 unprivileged TCP scan. With IPv6 targets on a system without IPv6, the default
 is also a connect scan.
 
@@ -373,7 +381,7 @@ feroprobe -v -oG - 192.168.1.0/24 | grep '/open/'
 | `-p 22,U:53,161,T:80` | `T:` and `U:` apply to the ports after them; ports before any prefix are both TCP and UDP. Here TCP gets 22 and 80, UDP gets 22, 53 and 161 |
 | `--top-ports N` | The N most common ports (by default 100 for TCP and 20 for UDP) |
 | `-F` | Fast: the 100 most common TCP and UDP ports |
-| `--exclude-ports SPEC` | Leave these out, written like `-p`. As in nmap, this also removes them from the discovery probes (`-PS`, `-PA`, `-PU` and the default TCP ping to 443 and 80) |
+| `--exclude-ports SPEC` | Leave these out, written like `-p`. As in nmap, this also removes them from the discovery probes (`-PS`, `-PA`, `-PU` and the default TCP pings to 443 and 80) |
 | `-r` | Probe ports in order; by default the order is shuffled, like nmap's (reports are always sorted) |
 
 FeroProbe warns like nmap does when ports and scan types don't match:
@@ -383,15 +391,18 @@ type left without any ports is skipped with a warning, as in
 
 ### Host discovery and names
 
-Before scanning, FeroProbe checks which targets are up. By default it sends
-an ICMP echo request and connects to TCP ports 443 and 80; any answer counts.
-Hosts on the local Ethernet network are asked with ARP or neighbour discovery
-instead (Linux, root). The `-P` options pick other probes, as in nmap; given
-any of them, only those run:
+Before scanning, FeroProbe checks which targets are up, with nmap's default
+probes; any answer counts. As root on Linux these are raw packets: an ICMP
+echo request, a TCP SYN to port 443, a TCP ACK to port 80 and an ICMP
+timestamp request (IPv4 only), the same as `-PE -PS443 -PA80 -PP`. Without
+privileges it connects to TCP ports 80 and 443 instead. Hosts on the local
+Ethernet network are asked with ARP or neighbour discovery instead (Linux,
+root). The `-P` options pick other probes, as in nmap; given any of them,
+only those run:
 
 | Option | Probe | A live host answers with |
 | --- | --- | --- |
-| `-PS[ports]` | TCP connect (default port 80) | a handshake or a reset |
+| `-PS[ports]` | TCP SYN (default port 80; raw sockets on Linux, else a connect) | a SYN/ACK or a reset |
 | `-PA[ports]` | bare TCP ACK (default port 80; raw sockets on Linux, else a connect like `-PS`) | a reset |
 | `-PU[ports]` | UDP datagram (default port 40125) | a reply, or ICMP port unreachable |
 | `-PE` | ICMP or ICMPv6 echo request | an echo reply |
@@ -408,8 +419,12 @@ As root on Linux, hosts on a directly connected Ethernet network are asked
 with ARP (IPv4) or neighbour discovery (IPv6) first, like nmap does, and the
 answer settles them: the `-P` probes then go only to the other hosts. To
 send the `-P` probes to local hosts too, add `--disable-arp-ping` (or its
-nmap name `--send-ip`). Your own address is probed over the loopback
-interface, so a capture on the Ethernet interface won't show those packets.
+nmap name `--send-ip`).
+
+As root, a target that is this machine (`127.0.0.1`, `::1` or one of its own
+addresses, all routed over the loopback interface) is not probed at all: like
+nmap, FeroProbe reports it up with the reason `localhost-response` and goes
+straight to the port scan. Without privileges it gets the usual probes.
 
 Hosts that are up get a reverse DNS lookup, shown as `Scan report for name
 (address)`, as `type="PTR"` hostnames in XML, and in grepable and JSON output.
