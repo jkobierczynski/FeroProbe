@@ -63,7 +63,7 @@ line asks for any of these options:
 | Option | What it sends |
 | --- | --- |
 | `-sV` | Application-protocol probes (HTTP requests, TLS handshakes, banner prompts and more) to every open port |
-| `-O` | A raw TCP SYN carrying every common TCP option to one open TCP port per host. Lighter than nmap's `-O`, which also sends odd flag combinations and probes a closed port, but still a packet a minimal stack may not expect |
+| `-O` | Raw TCP SYNs carrying every common TCP option (one, plus retries if unanswered) to one open TCP port per host. Lighter than nmap's `-O`, which also sends odd flag combinations and probes a closed port, but still a packet a minimal stack may not expect |
 | `-A` | Both of the above, plus traceroute |
 
 Script scanning will join this list if FeroProbe ever gets it.
