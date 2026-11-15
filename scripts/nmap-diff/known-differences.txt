@@ -1,0 +1,6 @@
+# Known, documented differences. Format: case-glob | regex on the finding text | note
+# Matching findings are still reported, marked "documented". Add a line only when
+# DEVELOPMENT.md or docs/responsible-use.md documents the divergence.
+
+* | ^tcp/\d+ \[[A-Z]+\] win: nmap \[[^]]*\] vs FeroProbe \[65109( x\d+)?\]$ | probe signature: raw TCP window 65109 (docs/responsible-use.md)
+* | ^udp/\d+ payload: .*FeroProbeScan/1 | probe signature: generic UDP payload FeroProbeScan/1 (docs/responsible-use.md)

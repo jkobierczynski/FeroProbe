@@ -21,6 +21,7 @@ the SCTP, IP protocol, IPv6 OS detection and probe-signature work).
 | [docs/feroprobe.1](docs/feroprobe.1) | The man page, generated from `docs/manual.md` | Rebuild with `scripts/build-manpage.sh` (needs pandoc) whenever the manual changes, and commit both |
 | `--help` (`crates/feroprobe-cli/src/help.rs`) | One-page option summary, laid out like nmap's | A test fails when an option is missing |
 | [docs/responsible-use.md](docs/responsible-use.md) | The anti-abuse safeguards and why they exist | When a safeguard changes |
+| [scripts/nmap-diff/README.md](scripts/nmap-diff/README.md) | The nmap differential test harness, its lab and its severities | When a case or the lab changes. Add a `known-differences.txt` line when a divergence below is documented |
 | [rules/README.md](rules/README.md) | The Suricata and Snort rules for the probe signature | When the signature changes |
 | This file | Implemented features and the gap to nmap | With every feature change |
 
@@ -132,6 +133,7 @@ the SCTP, IP protocol, IPv6 OS detection and probe-signature work).
 | CI | ubuntu, macOS, Windows, plus a root job for raw sockets |
 | Releases | `release.yml` builds binaries on `v*` tags |
 | Live test scripts | `scripts/test-sctp.sh`, `scripts/test-os6.sh` |
+| nmap differential test | `scripts/nmap-diff/`: runs nmap and FeroProbe with the same options in a namespace lab, captures both, and reports every difference in what they send (out-of-scope ports, probe contents, counts, results). Report only; CI runs it in the `nmap diff` workflow against the pinned nmap (`NMAP_VERSION`) |
 
 ## Deliberate differences from nmap
 
