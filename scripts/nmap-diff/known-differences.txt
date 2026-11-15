@@ -9,7 +9,7 @@
 # DEVELOPMENT.md, "Deliberate differences from nmap" (Jurgen, 2026-11-15)
 * | ^udp/(53|123|161|1900|5353) payload: | own UDP service payloads, one per port (UDP service payloads)
 * | ^udp/(53|123|161|1900|5353) df: | own UDP service payloads, one per port (UDP service payloads)
-* | udp/1434 | nmap's ms-sql-info script probe; FeroProbe has no scripts (Probes outside the requested ports)
+*aggressive* | ^(udp/1434 was not asked for, but nmap only sent to it|only nmap sent to udp/1434:) | nmap's ms-sql-info script probe; FeroProbe has no scripts (Probes outside the requested ports)
 *version* | ^tcp/\d+ \[(PA|A|FA|RA|R)\]( payload)?: | own service probes (Service and OS signatures)
 *aggressive* | ^tcp/\d+ \[(PA|A|FA|RA|R)\]( payload)?: | own service probes (Service and OS signatures)
 os | ^only nmap sent to udp/\d+: .*300B 'C | nmap's OS detection UDP probe to an unscanned port (Probes outside the requested ports)
@@ -23,5 +23,3 @@ os | ^tcp/\d+ \[[A-Za-z]+\]: only nmap sent these | nmap's OS detection TCP prob
 os | ^tcp/\d+ \[S\] (opts|win|df): nmap \[.*(M265|M1400|M536|M640|31337) | nmap's OS detection TCP probes (OS detection probes)
 *aggressive* | ^tcp/\d+ \[S\] (opts|win|df): nmap \[.*(M265|M1400|M536|M640|31337) | nmap's OS detection TCP probes (OS detection probes)
 
-# Not a difference in behaviour: both tools pick a random SCTP initiate tag
-* | ^sctp/\d+ payload: nmap \[20B hex:01000014[^]]*\] vs FeroProbe \[20B hex:01000014[^]]*\]$ | random SCTP initiate tag in both tools (INIT chunk otherwise identical in length and type)

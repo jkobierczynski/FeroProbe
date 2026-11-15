@@ -57,6 +57,14 @@ class Parsing(unittest.TestCase):
         self.assertEqual(p.fields["opts"], "M1460,N,W7")
         self.assertEqual(p.fields["payload"], "-")
 
+    def test_sctp_init_random_fields_ignored(self):
+        def init(tag, tsn, streams):
+            chunk = struct.pack("!BBHIIHHI", 1, 0, 20, tag, 106496, streams, streams, tsn)
+            l4 = struct.pack("!HHII", 4000, 80, 0, 0) + chunk
+            return nd.decode_frame(1, eth(SCAN_MAC, ip4("10.77.0.1", "10.77.0.2", 132, l4)))
+        self.assertEqual(init(1, 2, 10).fields, init(3, 4, 10).fields)
+        self.assertNotEqual(init(1, 2, 10).fields, init(1, 2, 11).fields)
+
     def test_payload_labels(self):
         self.assertEqual(nd.payload_label(b""), "-")
         self.assertIn("'FeroProbeScan/1\\\\n'", nd.payload_label(b"FeroProbeScan/1\n"))
@@ -129,7 +137,9 @@ class Scope(unittest.TestCase):
         self.assertFalse(nd.in_scope(dest, nd.scope_of(["-sO", "-p", "6"], "lan", True)))
         self.assertTrue(nd.in_scope(dest, nd.scope_of(["-sO", "-p", "1,6"], "lan", True)))
         # routed: host discovery sends ICMP echo itself
-        self.assertIsNone(nd.in_scope(dest, nd.scope_of(["-sO", "-p", "6"], "routed", True)))
+        self.assertTrue(nd.in_scope(dest, nd.scope_of(["-sO", "-p", "6"], "routed", True)))
+        # ... but not when only TCP discovery was asked for
+        self.assertFalse(nd.in_scope(dest, nd.scope_of(["-sO", "-p", "6", "-PS22"], "routed", True)))
 
     def test_macros(self):
         self.assertEqual(nd.expand_macros("-p @TCP"), "-p " + ",".join(map(str, nd.TCP_PORTS)))

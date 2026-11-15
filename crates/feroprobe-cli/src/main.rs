@@ -1809,11 +1809,6 @@ async fn main() -> Result<()> {
         bail!("-sn with -Pn would do nothing (add --traceroute to only trace the route)");
     }
     let trace_fallback = trace_fallback_port(&args, &plan, &tcp_ports, &probes);
-    if trace && plan.ping_only && trace_fallback.is_none() {
-        // With -sn no host can have a scanned TCP port, so nothing would
-        // be traced: say so up front rather than after discovery.
-        bail!("--traceroute with -sn: {TRACE_NO_PORT_SN}");
-    }
     if trace && !raw_sockets_available() && !args.dry_run {
         bail!("--traceroute sends raw packets: run as root or grant CAP_NET_RAW");
     }
@@ -2051,8 +2046,15 @@ async fn main() -> Result<()> {
             .await
             .context("traceroute failed")?;
         if untraced > 0 {
+            // A directly connected host needs no port (it gets no probes),
+            // so only the hosts further away are left untraced.
+            let why = if plan.ping_only {
+                TRACE_NO_PORT_SN
+            } else {
+                TRACE_NO_PORT
+            };
             eprintln!(
-                "Warning: {untraced} host{} not traced: {TRACE_NO_PORT}",
+                "Warning: {untraced} host{} not traced: {why}",
                 if untraced == 1 { "" } else { "s" }
             );
         }

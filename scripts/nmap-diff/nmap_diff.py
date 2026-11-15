@@ -387,7 +387,13 @@ def decode_l4(p, proto, l4):
             if clen < 4:
                 break
             i += (clen + 3) & ~3
-        p.fields = {"chunks": "+".join(chunks) or "-", "payload": payload_label(l4[12:])}
+        body = bytearray(l4[12:])
+        if chunks[:1] == ["INIT"] and len(body) >= 20:
+            # The initiate tag and initial TSN are random in both tools;
+            # blank them so only the stable INIT fields are compared.
+            body[4:8] = bytes(4)
+            body[16:20] = bytes(4)
+        p.fields = {"chunks": "+".join(chunks) or "-", "payload": payload_label(bytes(body))}
         return
     if proto == 1 and len(l4) >= 4:
         t, c = l4[0], l4[1]
@@ -617,6 +623,7 @@ def scope_of(argv, target_kind, privileged):
     pn = sn = False
     ping = collections.defaultdict(set)
     explicit_ping = False
+    icmp_types = set()
     i = 0
     while i < len(argv):
         a = argv[i]
@@ -646,6 +653,7 @@ def scope_of(argv, target_kind, privileged):
             ping[proto] |= expand_ports(m.group(2) or default)
         if re.match(r"^-P[EPM]$", a):
             explicit_ping = True
+            icmp_types.add({"E": "echo-request", "P": "timestamp-request", "M": "mask-request"}[a[2]])
         i += 1
     if "n" in scans:
         sn = True
@@ -677,8 +685,11 @@ def scope_of(argv, target_kind, privileged):
             scope[proto] |= ps
         ip_discovery = target_kind in ("routed", "local") or not privileged or \
             "--send-ip" in argv or "--disable-arp-ping" in argv
-        if "ip" in scope and (ip_discovery or explicit_ping):
-            scope["icmp-discovery"] = {1}
+        if not explicit_ping and ip_discovery:
+            # nmap's default IP discovery as root: echo and timestamp
+            icmp_types |= {"echo-request", "timestamp-request"} if privileged else {"echo-request"}
+        if "ip" in scope and icmp_types:
+            scope["icmp-discovery"] = icmp_types
         if not explicit_ping and ip_discovery:
             scope["tcp"] |= {80, 443}
     return dict(scope)
@@ -830,8 +841,10 @@ def in_scope(dest, scope):
         return int(m.group(1)) in scope["ip"]
     # -sO: ICMP probes are protocol 1 (58 for ICMPv6), unless host
     # discovery sends them
-    m = re.match(r"^(icmp6?) [a-z-]+$", dest)
-    if m and "ip" in scope and not scope.get("icmp-discovery"):
+    m = re.match(r"^(icmp6?) ([a-z-]+)$", dest)
+    if m and "ip" in scope:
+        if m.group(2) in scope.get("icmp-discovery", set()):
+            return True
         return (58 if m.group(1) == "icmp6" else 1) in scope["ip"]
     return None
 

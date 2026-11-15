@@ -565,8 +565,9 @@ scan; with `-sn`, the first TCP port given with `-p`; else the first TCP
 port of host discovery (`-PS`, `-PA`, or the default 443 as root). Traceroute
 never probes a port outside the scan: when the command probes no TCP port
 at all (for example `-sU -Pn`), hosts without an open or closed TCP port
-are not traced and a warning says why, and `-sn -Pn --traceroute` without
-`-p` is refused. Routers answer the
+are not traced and a warning says why (with `-sn`, name the port with
+`-p`). A directly connected host needs no port, since it gets no probes
+(see below). Routers answer the
 probes that expire with ICMP time exceeded, and the first probe that
 reaches the host ends the route. A hop that never answers is shown as
 `...`. Needs raw sockets. With `-Pn` every target is traced, even one that
@@ -1117,9 +1118,9 @@ safeguard calls for a difference. The deliberate differences are:
 | JSON output (`-oJ`) | No equivalent | FeroProbe's own format |
 | XML `scanner` attribute | `nmap` | `feroprobe`, unless `--nmap-label` |
 | Service and OS signatures | nmap's databases | FeroProbe's own (nmap's cannot be redistributed); OS detection names the family, not the version |
-| UDP service payloads (`-sU`) | nmap's payload database: several probes per port (two DNS queries to 53, two NTP versions to 123, SNMPv1 and v3 to 161, three NetBIOS queries to 137), up to dozens with `-sV` | FeroProbe's own, one per port: DNS (53, 5353), NTP (123), SNMP (161) and SSDP (1900); every other port gets `FeroProbeScan/1\n` | nmap's payloads cannot be redistributed; one payload per service is enough to make it answer |
-| OS detection probes (`-O`) | About 16 probes per host (6 SYNs with varied options, ECN, T2-T7 to open and closed ports, 2 ICMP echoes, a UDP probe to a closed port), sent several times: about 150 packets | One TCP SYN to an open port, offering every common option, plus the scan's own probes: a handful of packets | Lighter on the target, and no probes outside the scanned ports; the price is a family rather than an exact version |
-| Port names | nmap-services | The same names for the common ports, from the IANA registry, and `unknown` for the rest | nmap-services cannot be redistributed |
+| UDP service payloads (`-sU`) | nmap's payload database: several probes per port (two DNS queries to 53, two NTP versions to 123, SNMPv1 and v3 to 161, three NetBIOS queries to 137), up to dozens with `-sV` | FeroProbe's own, one per port: DNS (53, 5353), NTP (123), SNMP (161) and SSDP (1900); every other port gets `FeroProbeScan/1\n`. nmap's payloads cannot be redistributed; one payload per service is enough to make it answer |
+| OS detection probes (`-O`) | About 16 probes per host (6 SYNs with varied options, ECN, T2-T7 to open and closed ports, 2 ICMP echoes, a UDP probe to a closed port), sent several times: about 150 packets | One TCP SYN to an open port, offering every common option, plus the scan's own probes: a handful of packets. Lighter on the target, and no probes outside the scanned ports; the price is a family rather than an exact version |
+| Port names | nmap-services | The same names for the common ports, from the IANA registry, and `unknown` for the rest. nmap-services cannot be redistributed |
 | Timeouts | Adapt to measured round-trip times | A fixed `--timeout` per probe, set by the template |
 | Old-style IPv4 numbers as targets (`2222`, `10.1.2`, `010.0.0.1`) | Passed to the resolver | Refused with an explanation |
 | Probes outside the requested ports | `-A`'s scripts can probe other ports (`ms-sql-info`: UDP 1434 on every host); `-O` picks a random UDP port (and for IPv4 also TCP), regardless of `-p`, when the scan found no closed or unfiltered one | Never beyond the command's own ports (`-p` plus the host-discovery ports): `-sV` and `-O` probe only open ports the scan found, traceroute only a scanned port, a discovery port, or (with `-sn`) the `-p` port, and FeroProbe has no scripts |

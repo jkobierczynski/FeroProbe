@@ -865,8 +865,10 @@ TCP scan; with \f[V]-sn\f[R], the first TCP port given with
 \f[V]-PA\f[R], or the default 443 as root).
 Traceroute never probes a port outside the scan: when the command probes
 no TCP port at all (for example \f[V]-sU -Pn\f[R]), hosts without an
-open or closed TCP port are not traced and a warning says why, and
-\f[V]-sn -Pn --traceroute\f[R] without \f[V]-p\f[R] is refused.
+open or closed TCP port are not traced and a warning says why (with
+\f[V]-sn\f[R], name the port with \f[V]-p\f[R]).
+A directly connected host needs no port, since it gets no probes (see
+below).
 Routers answer the probes that expire with ICMP time exceeded, and the
 first probe that reaches the host ends the route.
 A hop that never answers is shown as \f[V]...\f[R].
@@ -1741,7 +1743,9 @@ nmap\[aq]s payload database: several probes per port (two DNS queries to
 to 137), up to dozens with \f[V]-sV\f[R]
 T}@T{
 FeroProbe\[aq]s own, one per port: DNS (53, 5353), NTP (123), SNMP (161)
-and SSDP (1900); every other port gets \f[V]FeroProbeScan/1\[rs]n\f[R]
+and SSDP (1900); every other port gets \f[V]FeroProbeScan/1\[rs]n\f[R].
+nmap\[aq]s payloads cannot be redistributed; one payload per service is
+enough to make it answer
 T}
 T{
 OS detection probes (\f[V]-O\f[R])
@@ -1751,7 +1755,9 @@ and closed ports, 2 ICMP echoes, a UDP probe to a closed port), sent
 several times: about 150 packets
 T}@T{
 One TCP SYN to an open port, offering every common option, plus the
-scan\[aq]s own probes: a handful of packets
+scan\[aq]s own probes: a handful of packets.
+Lighter on the target, and no probes outside the scanned ports; the
+price is a family rather than an exact version
 T}
 T{
 Port names
@@ -1759,7 +1765,8 @@ T}@T{
 nmap-services
 T}@T{
 The same names for the common ports, from the IANA registry, and
-\f[V]unknown\f[R] for the rest
+\f[V]unknown\f[R] for the rest.
+nmap-services cannot be redistributed
 T}
 T{
 Timeouts
