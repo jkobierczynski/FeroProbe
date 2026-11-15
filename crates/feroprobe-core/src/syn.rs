@@ -368,6 +368,14 @@ mod imp {
                 && a.2 != PortState::Filtered
             {
                 d.mark(a.0);
+                // As a discovery probe, a TCP answer is proof of life, so it
+                // replaces an ICMP error stored earlier for the same probe.
+                if results
+                    .get(&(a.0, a.1))
+                    .is_some_and(|r| r.state == PortState::Filtered)
+                {
+                    results.remove(&(a.0, a.1));
+                }
             }
             record(results, sent_at, a)
         };
