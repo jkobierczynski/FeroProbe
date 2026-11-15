@@ -1740,8 +1740,10 @@ T}@T{
 UDP 1434 on every host); \f[V]-O\f[R] picks a random closed UDP port
 (and for IPv4 also TCP) when the scan found none
 T}@T{
-Never: \f[V]-sV\f[R] and \f[V]-O\f[R] probe only open ports the scan
-found, and FeroProbe has no scripts
+Never beyond the command\[aq]s own ports (\f[V]-p\f[R] plus the
+host-discovery ports): \f[V]-sV\f[R] and \f[V]-O\f[R] probe only open
+ports the scan found, traceroute only a scanned or discovery port, and
+FeroProbe has no scripts
 T}
 T{
 Traceroute port
