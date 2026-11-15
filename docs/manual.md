@@ -27,7 +27,7 @@ every such case in one place.
 - [OS detection](#os-detection)
 - [Traceroute and aggressive mode](#traceroute-and-aggressive-mode)
 - [Timing and performance](#timing-and-performance)
-- [Firewall/IDS evasion](#firewallids-evasion)
+- [Firewall/IDS evasion and spoofing](#firewallids-evasion-and-spoofing)
 - [Output](#output)
 - [Checking a scan before and while it runs](#checking-a-scan-before-and-while-it-runs)
 - [Miscellaneous options](#miscellaneous-options)
@@ -87,7 +87,9 @@ as a separate word followed by their value.
 Durations (`<time>`) are in seconds unless they end in `ms`, `s`, `m` or
 `h`: `500ms`, `30s`, `5m`, `1.5h`. A bare number means seconds, as in nmap.
 Options documented as taking milliseconds (`--timeout`, `--version-timeout`)
-take a plain number of milliseconds instead.
+take a plain number of milliseconds instead. For the RTT timeout options a
+bare number of 50000 or more is refused with a hint, as in nmap, since it
+was almost surely meant as milliseconds.
 
 ## Target specification
 
@@ -342,9 +344,8 @@ port's connection is closed at once with a reset, as nmap does, rather
 than with a FIN. This is the
 default scan without raw sockets. It carries no FeroProbe signature, since
 it is an ordinary connection. On Windows, a refused connection is reported
-only about 2 seconds after the reset arrives, which is why the default
-timeout there is 3000 ms; with a lower `--timeout`, closed ports show as
-filtered.
+only about 2 seconds after the reset arrives, so there a connect try never
+waits less than 3 s, whatever the timeout options say.
 
 ### FIN, NULL, Xmas and Maimon scans (`-sF`, `-sN`, `-sX`, `-sM`)
 
@@ -745,57 +746,150 @@ scripts. Cannot be combined with `-sn`.
 
 `-T0` to `-T5`, or `-T` with a name (`-T paranoid` ... `-T insane`), pick a
 bundle of timing settings, as in nmap. `-T3` (normal) is the default. Any of
-`--timeout`, `--retries`, `-c`/`--concurrency`, `--max-rate` and
-`--scan-delay` given explicitly overrides the template's value for that
-setting, so `-T4 --max-rate 2000` is aggressive with a lower packet rate.
-Given more than once, the last `-T` wins, as in nmap.
+`--timeout`, the RTT timeout options, `--retries`, `-c`/`--concurrency`,
+`--min-parallelism`, `--max-rate` and `--scan-delay` given explicitly
+overrides the template's value for that setting, so `-T4 --max-rate 2000`
+is aggressive with a lower packet rate. Given more than once, the last
+`-T` wins, as in nmap.
 
-| Template | Timeout | Retries | Parallel connect/UDP probes | Max rate (packets/s) | Scan delay |
+| Template | RTT timeouts (initial / min / max) | Retries | Most probes waiting at once | Max rate (packets/s) | Scan delay |
 | --- | --- | --- | --- | --- | --- |
-| `-T0` paranoid | 5 s | 2 | 1 | 1 | 5 min |
-| `-T1` sneaky | 5 s | 2 | 1 | 1 | 15 s |
-| `-T2` polite | 3 s | 2 | 10 | 100 | 0.4 s |
-| `-T3` normal (default) | 1.5 s | 1 | 500 | 5000 | none |
-| `-T4` aggressive | 1 s | 1 | 1000 | 10000 | none |
-| `-T5` insane | 0.3 s | 0 | 2000 | 50000 | none |
+| `-T0` paranoid | 5 min / 100 ms / 5 min | 2 | 1 | 1 | 5 min |
+| `-T1` sneaky | 15 s / 100 ms / 15 s | 2 | 1 | 1 | 15 s |
+| `-T2` polite | 1 s / 100 ms / 10 s | 2 | 10 | 100 | 0.4 s |
+| `-T3` normal (default) | 1 s / 100 ms / 10 s | 1 | 500 | 5000 | none |
+| `-T4` aggressive | 500 ms / 100 ms / 1.25 s | 1 | 1000 | 10000 | none |
+| `-T5` insane | 250 ms / 50 ms / 300 ms | 0 | 2000 | 50000 | none |
 
-On Windows no template goes below a 3 s timeout (see the connect scan).
+The RTT timeouts are nmap's for each template. The scan delay also sets a
+floor under every measured timeout, so `-T0` and `-T1` probes wait at least
+their delay.
+
+### How long a probe waits
+
+Like nmap, FeroProbe adapts its timeouts to the network. Every answer
+(a SYN-ACK, a reset, an ICMP error, a UDP reply, an echo reply) gives a
+round-trip time, and each host keeps a smoothed round-trip time and its
+variance, the way TCP does (RFC 6298). A probe to that host waits the
+smoothed time plus four times the variance, kept between
+`--min-rtt-timeout` and `--max-rtt-timeout` and never below the scan delay.
+A host that has not answered yet waits as long as the scan's hosts do
+together, and before any answer at all a probe waits
+`--initial-rtt-timeout`. The estimates carry over from host discovery to
+the port scan, OS detection, version detection's connections and
+traceroute. Round trips far outside the estimate (over 8 s, or a sudden
+jump of more than 1.5 s) are ignored, as in nmap.
+
+So on a fast local network a closed or filtered port costs about 100 ms
+instead of a second, and on a slow link the timeout grows to fit.
+`--timeout` turns this off: it fixes all three limits to one value.
+
+ARP and neighbour discovery answers come from the link, not the host, so
+they do not feed the estimates; their sweep waits as long as a host that
+has not answered yet. Reverse DNS through `--dns-servers` waits the initial
+timeout, at most 5 s, since the name servers are not scan targets; the
+system resolver keeps its own timeouts.
+
+### Congestion control
+
+Also like nmap, the scans hold back how many probes may wait for an answer
+at once, with congestion windows like TCP's: one per host and one for all
+hosts together. Each starts at 10 probes. Every answer widens it (by one
+probe per answer up to 75, then about one probe per window's worth of
+answers; faster when many probes go unanswered, and with `-T4` and `-T5`).
+An answer to a resent probe means the first one was lost: the host's
+window then drops to one probe (or `--min-parallelism`) and the group's
+halves, but no lower. A probe that only
+times out moves no window. ICMP errors to resent probes are left out in the
+scans where silence means `filtered`, since routers rate-limit them. The
+group window only applies while two or more hosts are still being scanned.
+
+`-c`/`--concurrency` caps both windows, and `--min-parallelism` is their
+floor. The windows only ever hold probes
+back: `--max-rate` and `--scan-delay` still apply on top, so gentle timing
+stays gentle. Only `--min-rate` lets a probe through a full window, to keep
+up its rate, as in nmap.
+
+This applies to the raw TCP, SCTP, IP protocol, connect and UDP scans,
+including the TCP and UDP probes of host discovery. Because only answers
+widen the windows, a host that answers nothing is scanned slowly: about 10
+probes per timeout. A thousand filtered ports with one retry take a few
+minutes at the defaults, as with nmap; `-T4`, `--min-rate`, or `-Pn`
+avoided on dead hosts speed this up.
 
 ### Timing options
 
+#### `--initial-rtt-timeout <time>`
+
+How long a probe waits before any round trip has been measured (`500ms`,
+`2s`; a bare number is seconds). Default from the template: 1 s. Must be
+positive. If it is above the maximum, the maximum rises to it; below the
+minimum, the minimum falls to it, as in nmap.
+
+#### `--min-rtt-timeout <time>`
+
+The shortest a probe's adaptive timeout may get. Default from the
+template: 100 ms (50 ms with `-T5`). The maximum and the initial timeout
+rise to it where they are lower. Raise it on a network that drops answers
+under load, where short timeouts lose them.
+
+#### `--max-rtt-timeout <time>`
+
+The longest a probe's adaptive timeout may get. Default from the template:
+10 s. The minimum and the initial timeout fall to it where they are higher.
+It must be at least 5 ms, and below 20 ms it warns that accuracy may
+suffer, as in nmap.
+
+When more than one of the three is given, they are applied in nmap's order:
+initial, then minimum, then maximum.
+
 #### `--timeout <ms>`
 
-How long to wait for an answer to each probe, in milliseconds. Default
-from the template: 1500 (3000 on Windows). nmap adapts its timeouts to
-measured round-trip times (`--min-rtt-timeout` and friends); FeroProbe
-uses this fixed value. Below 20 ms it warns that accuracy may suffer.
+A fixed timeout for every probe, in milliseconds: it sets the minimum,
+maximum and initial RTT timeouts all to this value, so measured round
+trips no longer change it. FeroProbe's own option, kept from before the
+timeouts adapted; the RTT options given with it still apply on top. Below
+20 ms it warns that accuracy may suffer.
 
-#### `--retries <tries>`
+#### `--retries <tries>`, `--max-retries <tries>`
 
 How many more times to send a probe that got no answer. Default from the
-template: 1. This is nmap's `--max-retries` under FeroProbe's own name.
+template: 1. `--max-retries` is nmap's name for it and works the same.
+nmap treats the number as a cap and may retry less on a network that
+loses nothing; FeroProbe always sends the retries a silent port needs.
 
 #### `-c <number>`, `--concurrency <number>`
 
-The most connect and UDP probes in flight at once. Default from the
-template: 500. It warns above 900, and when the number is above the
-system's open-file limit (`ulimit -n`). Raw-socket probes are paced by
-`--max-rate` instead.
+The most probes waiting for an answer at once: the cap on the congestion
+windows (see [Congestion control](#congestion-control)), and for connect
+and UDP scans also the number of sockets open at once. Default from the
+template: 500. nmap's names `--max-parallelism <number>` and `-M <number>`
+work too. It must be at least 1, warns above 900, and warns when the number
+is above the system's open-file limit (`ulimit -n`).
+
+#### `--min-parallelism <number>`
+
+Keep at least this many probes waiting at once: the congestion windows
+never shrink below it, as in nmap, and it raises the template's `-c` (or
+the one `--min-rate` picked) to this number if that is lower. It must be
+at least 1, warns above 100, and is an error above an explicit
+`-c`/`--max-parallelism`, with nmap's message.
 
 #### `--max-rate <number>`
 
 Send at most this many raw-socket packets per second (SYN and other raw
 TCP probes, SCTP, IP protocol, ICMP, ARP and NDP). Default from the
 template: 5000. One rate holds for the whole run, across all scans and
-hosts. Connect and UDP probes are bounded by `--concurrency` and
-`--scan-delay` instead.
+hosts. Connect and UDP probes are bounded by the congestion windows,
+`--concurrency` and `--scan-delay` instead.
 
 #### `--min-rate <number>`
 
 Send at least this many probes per second. It raises `--max-rate` to at
-least this number, shortens a template's scan delay to fit, and lets
-enough connect and UDP probes be in flight to keep up the rate even when
-every probe waits out its timeout (up to the open-file limit, with a
+least this number, shortens a template's scan delay to fit, lets probes
+through a full congestion window whenever the scan falls behind the rate,
+and lets enough connect and UDP probes be in flight to keep up the rate
+even when every probe waits out its initial timeout (up to the open-file limit, with a
 warning when that limit, or an explicit `--concurrency`, may hold the rate
 down). It is an error when it is 0, above an explicit `--max-rate`, or
 when an explicit `--scan-delay` is too long for it.
@@ -815,17 +909,70 @@ without port or OS results: `Skipping host <addr> due to host timeout` in
 normal output, `Status: Timeout` in grepable output and `timedout="true"`
 in XML. It is not traced. `0` means no limit, as in nmap.
 
-nmap's `--max-scan-delay`, `--min-rtt-timeout`, `--max-rtt-timeout`,
-`--initial-rtt-timeout`, `--min-hostgroup`, `--max-hostgroup`,
-`--min-parallelism` and `--max-parallelism` are not available.
+nmap's `--max-scan-delay`, `--min-hostgroup` and `--max-hostgroup` are
+not available. FeroProbe also does not raise its scan delay on its own
+when many probes are lost, as nmap does for rate-limited UDP and ICMP; set
+`--scan-delay` for that.
 
-## Firewall/IDS evasion
+## Firewall/IDS evasion and spoofing
+
+### Interface and source port
+
+These two work against any target, like in nmap; they do not need
+`--allow-public-evasion`.
+
+#### `-e <interface>`
+
+Send and receive on this network interface (`eth0`, `wlan0`, `tun0`, as
+`ip link` names them), as nmap's `-e` does. Every socket of the scan is
+bound to it: raw probes, the packet capture of IPv6 OS detection, ARP and
+neighbour discovery, connect scans, UDP probes, version detection and the
+reverse DNS queries of `--dns-servers`. The interface's own address is the
+source of the probes (unless `-S` gives another), and only its networks
+count as local for ARP and neighbour discovery: a target on another
+interface's network is reached through `-e`'s interface, as if it were on
+that link. Forward lookups of target names use the system resolver, which
+is not bound.
+
+It is an error when there is no such interface. Linux and macOS only.
+Binding a socket to an interface needs root (or `CAP_NET_RAW`) on Linux
+kernels older than 5.7; newer kernels allow it to any user. With `-v`,
+FeroProbe prints the interface it uses.
+
+#### `-g <portnum>`, `--source-port <portnum>`
+
+Send probes from this source port, as nmap's `-g` does: some firewalls let
+in anything from port 53 (DNS) or 20 (FTP data). It applies to:
+
+- the raw TCP scans (`-sS`, `-sA`, `-sF`, ..., `--scanflags`), SCTP scans
+  (`-sY`, `-sZ`) and the TCP, UDP and SCTP probes of the IP protocol scan
+  (`-sO`);
+- the raw TCP pings (`-PS`, `-PA` as root) and UDP pings (`-PU`);
+- the UDP scan (`-sU`);
+- OS detection (`-O`).
+
+As in nmap, it does not apply to the connect scan (`-sT`; FeroProbe warns,
+with nmap's message, and keeps the system's ports), to unprivileged TCP
+pings (connects), to version detection, to traceroute (whose source port
+tells its probes apart) or to DNS. `-g 0` warns that port 0 may not work;
+the UDP probes, which go through the system's sockets, cannot be sent from
+port 0 and keep a random port (the warning says so).
+
+FeroProbe already sends every raw probe of a scan from one source port
+(random, from 40000-59999), so `-g` only fixes which one; the probe
+signature (`docs/responsible-use.md`) is unchanged. UDP probes from a fixed
+port share it between sockets (`SO_REUSEADDR`), each connected to a
+different target port. If another program holds the port, the UDP scan
+fails with an error naming it. On Windows, sockets cannot share a UDP port
+that way, so `-g` does not apply to UDP probes there (FeroProbe warns).
+
+### Fragmentation, decoys and spoofed source
 
 FeroProbe has nmap's fragmentation, decoy and spoofed-source options for
 testing your own firewalls and intrusion detection, and for authorized
 penetration tests. Unlike nmap, they are gated by an authorization model.
 
-### Authorization model
+#### Authorization model
 
 - The options work only with a raw TCP scan (`-sS`, `-sF`, `-sN`, `-sX`,
   `-sA`, `-sW`, `-sM`, or `--scanflags`), on IPv4 targets. Anything else is
@@ -845,8 +992,6 @@ penetration tests. Unlike nmap, they are gated by an authorization model.
   check.
 
 The reasons are in [docs/responsible-use.md](responsible-use.md).
-
-### Options
 
 #### `-f` (fragment packets)
 
@@ -1028,7 +1173,7 @@ RCVD (0.0545s) TCP 10.0.0.5:22 > 10.0.0.2:48100 SA seq=1290442 win=64240 ttl=64
 ```
 
 With `-f`/`--mtu` every fragment gets its own line (see
-[Firewall/IDS evasion](#firewallids-evasion)).
+[Firewall/IDS evasion and spoofing](#firewallids-evasion-and-spoofing)).
 
 #### `--dry-run`
 
@@ -1087,8 +1232,10 @@ per option:
 | `-sU` | Payloads for many more ports, empty datagrams elsewhere (FeroProbe: `FeroProbeScan/1`) |
 | `-f`, `--mtu` | Sends fragments too, but its `--packet-trace` shows the unfragmented packet |
 | `-D` with `ME` | Sends the real probe at `ME`'s place, not last |
+| `-g` with `-O` | Sends its OS detection probes from a run of source ports starting at the `-g` port, not all from it |
+| `-g 0` with `-sU` or `-PU` | Sends the UDP probes from port 0 (FeroProbe cannot, and uses a random port, with a warning) |
 | Default discovery without root | Only TCP connects to 80 and 443, no ICMP echo |
-| Any scan | Adaptive timeouts and up to 10 resends, instead of a fixed `--timeout` and `--retries` |
+| Any scan | Up to 10 resends as losses show up, instead of a fixed `--retries`; raises its scan delay on its own when many probes are lost |
 
 These come from nmap 7.99's source.
 
@@ -1258,7 +1405,9 @@ safeguard calls for a difference. The deliberate differences are:
 | UDP service payloads (`-sU`) | nmap's payload database: several probes per port (two DNS queries to 53, two NTP versions to 123, SNMPv1 and v3 to 161, three NetBIOS queries to 137), up to dozens with `-sV` | FeroProbe's own, one per port: DNS (53, 5353), NTP (123), SNMP (161) and SSDP (1900); every other port gets `FeroProbeScan/1\n`. nmap's payloads cannot be redistributed; one payload per service is enough to make it answer |
 | OS detection probes (`-O`) | About 16 probes per host (6 SYNs with varied options, ECN, T2-T7 to open and closed ports, 2 ICMP echoes, a UDP probe to a closed port), sent several times: about 150 packets | One TCP SYN to an open port, offering every common option, plus the scan's own probes: a handful of packets. Lighter on the target, and no probes outside the scanned ports; the price is a family rather than an exact version |
 | Port names | nmap-services | The same names for the common ports, from the IANA registry, and `unknown` for the rest. nmap-services cannot be redistributed |
-| Timeouts | Adapt to measured round-trip times | A fixed `--timeout` per probe, set by the template |
+| Timeouts | Adapt to measured round-trip times | The same (nmap's formula, limits and template values); `--timeout` fixes them, an option nmap does not have |
+| Congestion control and `--max-retries` | Windows per host and group between `--min-parallelism` and `--max-parallelism`; resends up to `--max-retries` times, fewer on a network that loses nothing; raises the scan delay when many probes are lost | The same windows and limits; a fixed number of resends (`--retries`), and the scan delay only changes when asked |
+| `-g` with UDP scans | Raw UDP packets from the port, any port including 0 | UDP probes go through the system's sockets, which share the port between them; port 0 cannot be used and falls back to a random port, with a warning |
 | Old-style IPv4 numbers as targets (`2222`, `10.1.2`, `010.0.0.1`) | Passed to the resolver | Refused with an explanation |
 | Probes outside the requested ports | `-A`'s scripts can probe other ports (`ms-sql-info`: UDP 1434 on every host); `-O` picks a random UDP port (and for IPv4 also TCP), regardless of `-p`, when the scan found no closed or unfiltered one | Never beyond the command's own ports (`-p` plus the host-discovery ports): `-sV` and `-O` probe only open ports the scan found, traceroute only a scanned port, a discovery port, or (with `-sn`) the `-p` port, and FeroProbe has no scripts |
 | Traceroute port | The probe that got the best answer during discovery or the scan, else ICMP echo | TCP SYNs to an open or closed scanned port, else a TCP port the command names (`-p` with `-sn`, or a discovery port), else the host is not traced (FeroProbe used to fall back to port 80) |
@@ -1282,12 +1431,9 @@ with an error naming the supported alternatives:
   be shipped under their licence).
 - OS detection tuning: `--osscan-limit`, `--osscan-guess`,
   `--max-os-tries`.
-- Timing: `--min-rtt-timeout`, `--max-rtt-timeout`, `--initial-rtt-timeout`,
-  `--max-retries` (use `--retries`), `--min-hostgroup`, `--max-hostgroup`,
-  `--min-parallelism`, `--max-parallelism` (use `-c`), `--max-scan-delay`,
+- Timing: `--min-hostgroup`, `--max-hostgroup`, `--max-scan-delay`,
   `--defeat-rst-ratelimit`.
-- Evasion and packet options: `--spoof-mac`, `-g`/`--source-port`, `-e`,
-  `--data`, `--data-string`, `--data-length`, `--ip-options`, `--ttl`,
+- Evasion and packet options: `--spoof-mac`, `--data`, `--data-string`, `--data-length`, `--ip-options`, `--ttl`,
   `--badsum`.
 - Output and misc: `-oS`, `--append-output`, `--resume`, `--stylesheet`,
   `--webxml`, `--no-stylesheet`, `-d`, `--iflist`, `--privileged`,

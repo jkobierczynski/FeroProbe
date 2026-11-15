@@ -55,6 +55,19 @@ aggressive-local | local  | root | -T2 -A --max-rate 10 -p 502,102
 fragment         | lan    | root | -sS -f -p @TCP
 mtu16            | lan    | root | -sS --mtu 16 -p @TCP
 
+# --- Interface and source port, root ----------------------------------------
+source-port      | lan    | root | -sS -g 53 -p @TCP
+source-port-udp  | lan    | root | -sU -g 53 -p @UDP
+source-port-ping | routed | root | -sn -PS22,80 -PU -g 53
+source-port-os   | lan    | root | -O -g 53 -p @TCP
+source-port-conn | lan    | user | -sT -g 53 -p @TCP
+interface-lan    | lan    | root | -e fpd-a0 -sS -p @TCP
+interface-routed | routed | root | -e fpd-b0 -sS -p @TCP
+
+# --- Tuning names --------------------------------------------------------------
+max-retries      | routed | root | -sS --max-retries 0 -p @TCP
+parallelism      | lan    | user | --max-parallelism 1 --min-parallelism 1 -p @TCP
+
 # --- Host discovery, root ----------------------------------------------------
 ping-lan         | lan    | root | -sn
 ping-routed      | routed | root | -sn

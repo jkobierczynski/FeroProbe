@@ -131,7 +131,7 @@ mod imp {
         };
 
         let mut rng = Rng::new();
-        let sport = 40000 + (rng.next_u32() % 20000) as u16;
+        let sport = crate::raw::probe_sport(cfg, &mut rng);
         // Our INIT's initiate tag, and the tag of our COOKIE ECHO: answers
         // carry it as their verification tag.
         let tag = rng.next_u32() | 1;
@@ -381,7 +381,7 @@ mod imp {
             let stop = Arc::new(AtomicBool::new(false));
             let stack = fake_stack(2905, Arc::clone(&stop));
             let cfg = ScanConfig {
-                timeout: Duration::from_millis(400),
+                rtt: crate::rtt::RttTimeouts::fixed(Duration::from_millis(400)),
                 retries: 0,
                 ..Default::default()
             };

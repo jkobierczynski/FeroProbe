@@ -462,7 +462,7 @@ mod imp {
         recv_sock.set_read_timeout(Some(Duration::from_millis(50)))?;
 
         let mut rng = Rng::new();
-        let sport = 40000 + (rng.next_u32() % 20000) as u16;
+        let sport = crate::raw::probe_sport(cfg, &mut rng);
         let seq = rng.next_u32();
         let tsval = rng.next_u32();
         let mut found: Vec<Option<TcpTraits>> = vec![None; jobs.len()];
@@ -554,7 +554,15 @@ mod imp {
                 }
             }
             recv_sock.set_nonblocking(false)?;
-            let mut deadline = Instant::now() + cfg.timeout;
+            // The longest adaptive timeout among the hosts still waited for.
+            let wait = jobs
+                .iter()
+                .enumerate()
+                .filter(|&(j, _)| found[j].is_none() && sources[j].is_some())
+                .map(|(_, &(_, addr, _))| cfg.probe_timeout(addr.into()))
+                .max()
+                .unwrap_or(cfg.rtt.initial);
+            let mut deadline = Instant::now() + wait;
             if let Some(limit) = cfg.deadline {
                 deadline = deadline.min(limit);
             }
@@ -634,7 +642,7 @@ mod imp {
 
         let mut found = found;
         let mut rng = Rng::new();
-        let sport = 40000 + (rng.next_u32() % 20000) as u16;
+        let sport = crate::raw::probe_sport(cfg, &mut rng);
         let seq = rng.next_u32();
         let tsval = rng.next_u32();
         let sources: Vec<Option<Ipv6Addr>> = jobs
@@ -711,9 +719,17 @@ mod imp {
                 if !unanswered(&found) {
                     break;
                 }
-                // Wait for stragglers, up to the per-round timeout or the
-                // host deadline, whichever is sooner.
-                let mut deadline = Instant::now() + cfg.timeout;
+                // Wait for stragglers, up to the longest adaptive timeout
+                // among the hosts still waited for, or the host deadline,
+                // whichever is sooner.
+                let wait = jobs
+                    .iter()
+                    .enumerate()
+                    .filter(|&(j, _)| found[j].is_none() && sources[j].is_some())
+                    .map(|(_, &(_, addr, _))| cfg.probe_timeout(addr.into()))
+                    .max()
+                    .unwrap_or(cfg.rtt.initial);
+                let mut deadline = Instant::now() + wait;
                 if let Some(limit) = cfg.deadline {
                     deadline = deadline.min(limit);
                 }

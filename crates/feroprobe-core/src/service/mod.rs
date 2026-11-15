@@ -32,7 +32,6 @@ use std::time::{Duration, Instant};
 use futures::stream::{self, StreamExt};
 use serde::Serialize;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::net::TcpStream;
 
 use crate::model::{HostResult, PortState, Protocol, ScanConfig};
 use crate::ports::service_name;
@@ -403,6 +402,13 @@ fn finish(round: Round, protocol: Protocol, port: u16, vs: &VersionScan) -> Opti
     }
 }
 
+/// How long to wait for a connection to a port the scan found open: the
+/// host's adaptive probe timeout, but never less than the initial one, since
+/// a refused or lost connect here costs the service's identification.
+fn connect_wait(addr: SocketAddr, cfg: &ScanConfig) -> Duration {
+    crate::connect::connect_wait(addr, cfg).max(cfg.rtt.initial)
+}
+
 /// Send `probe` over a new plain TCP connection and read the reply.
 /// `None` if the connection failed, which means the port is no longer
 /// reachable.
@@ -413,7 +419,7 @@ async fn plain_probe(
     wait: Duration,
 ) -> Option<Vec<u8>> {
     pace(cfg.scan_delay).await;
-    let mut stream = tokio::time::timeout(cfg.timeout, TcpStream::connect(addr))
+    let mut stream = tokio::time::timeout(connect_wait(addr, cfg), crate::netif::connect_tcp(addr))
         .await
         .ok()?
         .ok()?;
@@ -434,7 +440,9 @@ async fn tls_probe(
         Some(s) => s,
         None => {
             pace(cfg.scan_delay).await;
-            tls::connect(addr, host, cfg.timeout, wait).await?.0
+            tls::connect(addr, host, connect_wait(addr, cfg), wait)
+                .await?
+                .0
         }
     };
     Some(exchange(&mut stream, probe.payload(), wait).await)
@@ -505,7 +513,8 @@ async fn detect_tls(
         )
     });
     pace(cfg.scan_delay).await;
-    let Some((stream, cn)) = tls::connect(addr, host, cfg.timeout, vs.wait).await else {
+    let Some((stream, cn)) = tls::connect(addr, host, connect_wait(addr, cfg), vs.wait).await
+    else {
         vs.trace(|| {
             format!(
                 "Service scan no TLS handshake with {} (tcp)",
@@ -589,7 +598,7 @@ pub async fn detect_udp(
         }
         // A socket (so a source port) per probe: a late reply to an earlier
         // probe cannot be read as the answer to this one.
-        let Ok(sock) = crate::udp::connected_socket(addr).await else {
+        let Ok(sock) = crate::udp::connected_socket(addr, None).await else {
             break;
         };
         let mut data = Vec::new();

@@ -18,15 +18,17 @@
 //! them into open|filtered. Lower `--concurrency` for more accurate results.
 
 use std::io::{self, ErrorKind};
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, SocketAddr, SocketAddrV6};
 use std::time::Instant;
 
 use futures::stream::{self, StreamExt};
-use socket2::{Domain, Protocol as SockProtocol, Socket, Type};
+#[cfg(target_os = "linux")]
+use socket2::Socket;
 use tokio::net::UdpSocket;
 
 use crate::connect::is_network_error;
 use crate::model::{HostResult, PortResult, PortState, Protocol, ScanConfig, elapsed_ms, reason};
+use crate::rtt::{AsyncWindow, Outcome};
 use crate::target::Target;
 use crate::timing::pace;
 
@@ -85,22 +87,76 @@ fn is_truncated_reply(e: &io::Error) -> bool {
     cfg!(windows) && e.raw_os_error() == Some(10040)
 }
 
+/// The source port a UDP probe to `addr` really uses with `-g` (`None`:
+/// a random one). Probing this machine's own `-g` port from that port
+/// would send the probe to the probing socket itself, so that one probe
+/// uses a random port. On Windows, sockets sharing a UDP port do not each
+/// get their own peer's answers, so `-g` does not apply to UDP there (the
+/// command line warns).
+pub(crate) fn effective_sport(sport: Option<u16>, addr: SocketAddr) -> Option<u16> {
+    sport.filter(|&p| !cfg!(windows) && !(p == addr.port() && is_this_machine(addr.ip())))
+}
+
+/// Whether `ip` is one of this machine's own addresses: loopback, or an
+/// address the system would send from to reach it (so a probe to it
+/// comes straight back here).
+fn is_this_machine(ip: IpAddr) -> bool {
+    crate::discovery::is_localhost(ip) || crate::netif::route_source(ip).is_ok_and(|src| src == ip)
+}
+
 /// A UDP socket connected to `addr`. On Linux it also asks for all ICMP
 /// errors (`IP_RECVERR`): by default Linux drops "soft" ones such as host
 /// unreachable on UDP sockets, which would turn filtered ports into
 /// open|filtered.
-pub(crate) async fn connected_socket(addr: SocketAddr) -> io::Result<UdpSocket> {
-    let (domain, bind): (Domain, SocketAddr) = match addr.ip() {
-        IpAddr::V4(_) => (Domain::IPV4, (Ipv4Addr::UNSPECIFIED, 0).into()),
-        IpAddr::V6(_) => (Domain::IPV6, (Ipv6Addr::UNSPECIFIED, 0).into()),
-    };
-    let sock = Socket::new(domain, Type::DGRAM, Some(SockProtocol::UDP))?;
+///
+/// `sport` is the local port (`-g`); `None` lets the system pick one.
+/// Sockets sharing a fixed port are told to allow it: each is connected to
+/// a different target port, so answers still reach the right one.
+pub(crate) async fn connected_socket(
+    addr: SocketAddr,
+    sport: Option<u16>,
+) -> io::Result<UdpSocket> {
+    let sock = crate::netif::udp_socket(addr.is_ipv6())?;
     #[cfg(target_os = "linux")]
     enable_recverr(&sock, addr.is_ipv4())?;
     // nmap's raw UDP probes: no "don't fragment", random TTL.
     crate::raw::nmap_ip_header(&sock, addr.is_ipv6());
-    sock.set_nonblocking(true)?;
-    sock.bind(&bind.into())?;
+    if sport.is_some() {
+        sock.set_reuse_address(true)?;
+        // BSD and macOS share a UDP port only with SO_REUSEPORT.
+        #[cfg(all(unix, not(target_os = "linux"), not(target_os = "android")))]
+        sock.set_reuse_port(true)?;
+    }
+    // A fixed port is bound on the address the probe leaves from, like a
+    // raw probe's source, so a service holding the port on another local
+    // address (a DNS stub on 127.0.0.53:53, say) does not get in the way.
+    let bind = match sport {
+        Some(p) => match crate::netif::route_source(addr.ip()) {
+            // A link-local source needs the target's interface (scope).
+            Ok(IpAddr::V6(src)) if crate::target::is_link_local(src) => {
+                let scope = match addr {
+                    SocketAddr::V6(v6) => v6.scope_id(),
+                    SocketAddr::V4(_) => 0,
+                };
+                SocketAddr::V6(SocketAddrV6::new(src, p, 0, scope))
+            }
+            Ok(ip) => SocketAddr::new(ip, p),
+            Err(_) => crate::netif::any_addr(addr.ip(), p),
+        },
+        None => crate::netif::any_addr(addr.ip(), 0),
+    };
+    sock.bind(&bind.into()).map_err(|e| match sport {
+        // Kind Other, so the probe reports a local failure rather than
+        // classifying it as a network answer (EACCES reads as filtered).
+        Some(p) if e.kind() == io::ErrorKind::AddrInUse => {
+            io::Error::other(format!("source port {p} (-g) is in use by another program"))
+        }
+        Some(p) if e.kind() == io::ErrorKind::PermissionDenied => io::Error::other(format!(
+            "source port {p} (-g): ports below 1024 need root on this system"
+        )),
+        Some(p) => io::Error::other(format!("binding source port {p} (-g): {e}")),
+        None => e,
+    })?;
     let sock = UdpSocket::from_std(sock.into())?;
     sock.connect(addr).await?;
     Ok(sock)
@@ -132,8 +188,32 @@ fn enable_recverr(sock: &Socket, ipv4: bool) -> io::Result<()> {
     }
 }
 
-/// Probe a single UDP port.
+/// Probe a single UDP port. Each try waits for the host's current adaptive
+/// timeout (see [`crate::rtt`]), and every answer's round-trip time feeds
+/// that estimate.
 pub async fn probe_udp(addr: SocketAddr, cfg: &ScanConfig) -> io::Result<PortResult> {
+    probe_udp_in(addr, cfg, None).await
+}
+
+/// [`probe_udp`] as one probe of a scan: each try takes a place in the
+/// scan's congestion windows (host `h`) first.
+pub(crate) async fn probe_udp_in(
+    addr: SocketAddr,
+    cfg: &ScanConfig,
+    window: Option<(&AsyncWindow, usize)>,
+) -> io::Result<PortResult> {
+    let result = probe_udp_tries(addr, cfg, window).await;
+    if let Some((w, h)) = window {
+        w.settled(h);
+    }
+    result
+}
+
+async fn probe_udp_tries(
+    addr: SocketAddr,
+    cfg: &ScanConfig,
+    window: Option<(&AsyncWindow, usize)>,
+) -> io::Result<PortResult> {
     let result = |state, reason, rtt_ms| PortResult {
         port: addr.port(),
         protocol: Protocol::Udp,
@@ -156,14 +236,23 @@ pub async fn probe_udp(addr: SocketAddr, cfg: &ScanConfig) -> io::Result<PortRes
     };
     // Creating, binding and connecting the socket can already fail for
     // network reasons (no route, IPv6 disabled); classify those too.
-    let sock = match connected_socket(addr).await {
+    let sport = effective_sport(cfg.source_port, addr);
+    let sock = match connected_socket(addr, sport).await {
         Ok(s) => s,
         Err(e) => return classify(e, None),
     };
 
     let payload = payload_for(addr.port());
     let mut buf = [0u8; 2048];
-    for _ in 0..=cfg.retries {
+    for tryno in 0..=cfg.retries {
+        let slot = match window {
+            Some((w, h)) => match w.acquire(h).await {
+                Some(slot) => Some(slot),
+                // The host needs no more probes (proven up in discovery).
+                None => break,
+            },
+            None => None,
+        };
         pace(cfg.scan_delay).await;
         let start = Instant::now();
         if let Err(e) = sock.send(payload).await {
@@ -172,7 +261,26 @@ pub async fn probe_udp(addr: SocketAddr, cfg: &ScanConfig) -> io::Result<PortRes
         crate::packet_trace::log("SENT", || {
             format!("UDP localhost > {addr} len={}", payload.len())
         });
-        match tokio::time::timeout(cfg.timeout, sock.recv(&mut buf)).await {
+        let outcome = tokio::time::timeout(cfg.probe_timeout(addr.ip()), sock.recv(&mut buf)).await;
+        // Data or an ICMP error both answer the probe and time the round
+        // trip. As in nmap's UDP scan, where silence means open|filtered,
+        // an ICMP error counts like any other answer for the windows.
+        let answered = outcome.is_ok();
+        // Every try uses the same socket and payload, so an answer after a
+        // resend may belong to the earlier copy: only first tries are timed
+        // (Karn's rule).
+        if answered && tryno == 0 {
+            cfg.observe_rtt(addr.ip(), start.elapsed());
+        }
+        if let Some(slot) = slot {
+            let how = if answered {
+                Outcome::Answered
+            } else {
+                Outcome::TimedOut
+            };
+            slot.finish(start, tryno, how);
+        }
+        match outcome {
             Ok(Ok(n)) => {
                 crate::packet_trace::log("RCVD", || format!("UDP {addr} > localhost len={n}"));
                 return Ok(result(
@@ -216,10 +324,12 @@ pub async fn udp_scan(
     let jobs = ports
         .iter()
         .flat_map(|&port| (0..targets.len()).map(move |h| (h, port)));
+    let window = AsyncWindow::new(cfg, vec![ports.len(); targets.len()]);
+    let window = &window;
     let mut results = stream::iter(jobs)
         .map(|(h, port)| {
             let addr = crate::target::socket_addr(targets[h].addr, port);
-            async move { (h, probe_udp(addr, cfg).await) }
+            async move { (h, probe_udp_in(addr, cfg, Some((window, h))).await) }
         })
         .buffer_unordered(cfg.concurrency.max(1));
     while let Some((h, r)) = results.next().await {
@@ -258,7 +368,7 @@ mod tests {
         };
 
         let cfg = ScanConfig {
-            timeout: Duration::from_millis(300),
+            rtt: crate::rtt::RttTimeouts::fixed(Duration::from_millis(300)),
             retries: 0,
             ..Default::default()
         };
@@ -280,5 +390,50 @@ mod tests {
         assert!(payload_for(53).len() > 12);
         // Ports with no service-specific probe carry the FeroProbe marker.
         assert_eq!(payload_for(9999), crate::packet::UDP_MARKER);
+    }
+
+    /// -g: every UDP probe leaves from the one source port, and each
+    /// socket still gets its own port's answer. Not on Windows, where -g
+    /// does not apply to UDP.
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn fixed_source_port_is_shared() {
+        // Echo servers that report the sender's port back.
+        let mut ports = Vec::new();
+        for _ in 0..3 {
+            let echo = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            ports.push(echo.local_addr().unwrap().port());
+            tokio::spawn(async move {
+                let mut buf = [0u8; 2048];
+                while let Ok((_, from)) = echo.recv_from(&mut buf).await {
+                    let _ = echo.send_to(&from.port().to_be_bytes(), from).await;
+                }
+            });
+        }
+        // A free port to send from.
+        let sport = UdpSocket::bind("127.0.0.1:0")
+            .await
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let mut socks = Vec::new();
+        for &p in &ports {
+            let addr = SocketAddr::from(([127, 0, 0, 1], p));
+            socks.push(connected_socket(addr, Some(sport)).await.unwrap());
+        }
+        for s in &socks {
+            assert_eq!(s.local_addr().unwrap().port(), sport);
+            s.send(b"x").await.unwrap();
+        }
+        for (s, &p) in socks.iter().zip(&ports) {
+            let mut buf = [0u8; 16];
+            let n = tokio::time::timeout(Duration::from_secs(2), s.recv(&mut buf))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(&buf[..n], &sport.to_be_bytes(), "answer from {p}");
+            assert_eq!(s.peer_addr().unwrap().port(), p);
+        }
     }
 }

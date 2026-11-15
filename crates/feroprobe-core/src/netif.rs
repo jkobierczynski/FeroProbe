@@ -1,7 +1,173 @@
 //! Local network interfaces: names, indexes, IPv6 addresses and Ethernet
-//! hardware addresses, as the OS reports them.
+//! hardware addresses, as the OS reports them; and the interface chosen
+//! with `-e`, which every socket of the scan is bound to.
 
-use std::net::Ipv6Addr;
+use std::io;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::sync::OnceLock;
+
+use socket2::{Domain, Protocol, Socket, Type};
+
+/// The interface the scan sends and receives on (nmap's `-e`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Interface {
+    pub name: String,
+    pub index: u32,
+}
+
+static INTERFACE: OnceLock<Interface> = OnceLock::new();
+
+/// Send and receive every probe of this run on the interface `name`
+/// (nmap's `-e`): raw, capture, ARP/NDP, connect, UDP and DNS sockets are
+/// all bound to it, and only its networks count as local. Fails if there is
+/// no such interface, if this system cannot bind sockets to one, or if a
+/// different interface was already chosen.
+pub fn use_interface(name: &str) -> io::Result<&'static Interface> {
+    if !cfg!(any(
+        target_os = "linux",
+        target_os = "android",
+        target_vendor = "apple"
+    )) {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "-e is only supported on Linux and macOS for now",
+        ));
+    }
+    let index = index_of(name).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("no interface called {name:?} (see `ip link` for the names)"),
+        )
+    })?;
+    let chosen = INTERFACE.get_or_init(|| Interface {
+        name: name.to_string(),
+        index,
+    });
+    if chosen.name != name {
+        return Err(io::Error::other(format!(
+            "interface {} was already chosen",
+            chosen.name
+        )));
+    }
+    // Bind one socket now, so a refusal (no privileges, say) stops the run
+    // up front instead of turning every probe into a failed one.
+    let (probe, ipv6) = match Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP)) {
+        Ok(s) => (s, false),
+        Err(_) => (
+            Socket::new(Domain::IPV6, Type::DGRAM, Some(Protocol::UDP))?,
+            true,
+        ),
+    };
+    bind_socket(&probe, ipv6)?;
+    Ok(chosen)
+}
+
+/// The interface chosen with [`use_interface`], if any.
+pub fn interface() -> Option<&'static Interface> {
+    INTERFACE.get()
+}
+
+/// Whether the interface with index `index` may be used: always, unless
+/// `-e` chose another one.
+// ARP and neighbour discovery, its only users, are Linux only.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) fn allowed(index: u32) -> bool {
+    interface().is_none_or(|i| i.index == index)
+}
+
+/// Bind `sock` to the `-e` interface, if one was chosen, so that what it
+/// sends leaves through that interface and it only receives what arrives
+/// there. `ipv6` names the socket's family (macOS binds per family).
+pub(crate) fn bind_socket(sock: &Socket, ipv6: bool) -> io::Result<()> {
+    let Some(ifc) = interface() else {
+        return Ok(());
+    };
+    let result = bind_to(sock, ifc, ipv6);
+    result.map_err(|e| {
+        let why = if e.kind() == io::ErrorKind::PermissionDenied {
+            "this system only lets root (or CAP_NET_RAW) bind a socket to an interface".to_string()
+        } else {
+            e.to_string()
+        };
+        // Kind Other: a local failure, never read as a network answer
+        // (a refused connect probe's EACCES means "filtered").
+        io::Error::other(format!("binding to interface {} (-e): {why}", ifc.name))
+    })
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn bind_to(sock: &Socket, ifc: &Interface, _ipv6: bool) -> io::Result<()> {
+    sock.bind_device(Some(ifc.name.as_bytes()))
+}
+
+#[cfg(target_vendor = "apple")]
+fn bind_to(sock: &Socket, ifc: &Interface, ipv6: bool) -> io::Result<()> {
+    let index = std::num::NonZeroU32::new(ifc.index);
+    if ipv6 {
+        sock.bind_device_by_index_v6(index)
+    } else {
+        sock.bind_device_by_index_v4(index)
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "android", target_vendor = "apple")))]
+fn bind_to(_sock: &Socket, _ifc: &Interface, _ipv6: bool) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "binding to an interface is not supported on this system",
+    ))
+}
+
+/// A non-blocking UDP socket of `addr`'s family, bound to the `-e`
+/// interface (if any), not yet bound to a local address.
+pub(crate) fn udp_socket(ipv6: bool) -> io::Result<Socket> {
+    let domain = if ipv6 { Domain::IPV6 } else { Domain::IPV4 };
+    let sock = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))?;
+    bind_socket(&sock, ipv6)?;
+    sock.set_nonblocking(true)?;
+    Ok(sock)
+}
+
+/// The unspecified local address of `dst`'s family, with `port`.
+pub(crate) fn any_addr(dst: IpAddr, port: u16) -> SocketAddr {
+    match dst {
+        IpAddr::V4(_) => (Ipv4Addr::UNSPECIFIED, port).into(),
+        IpAddr::V6(_) => (Ipv6Addr::UNSPECIFIED, port).into(),
+    }
+}
+
+/// The local address the OS would use to reach `dst` (through the `-e`
+/// interface, if one was chosen), found by "connecting" a UDP socket,
+/// which sends nothing.
+pub fn route_source(dst: IpAddr) -> io::Result<IpAddr> {
+    let sock = udp_socket(dst.is_ipv6())?;
+    sock.bind(&any_addr(dst, 0).into())?;
+    sock.connect(&crate::target::socket_addr(dst, 53).into())?;
+    sock.local_addr()?
+        .as_socket()
+        .map(|a| a.ip())
+        .ok_or_else(|| io::Error::other("no local address"))
+}
+
+/// Open a TCP connection to `addr`, from the `-e` interface if one was
+/// chosen.
+pub(crate) async fn connect_tcp(addr: SocketAddr) -> io::Result<tokio::net::TcpStream> {
+    if interface().is_none() {
+        return tokio::net::TcpStream::connect(addr).await;
+    }
+    let domain = if addr.is_ipv6() {
+        Domain::IPV6
+    } else {
+        Domain::IPV4
+    };
+    let sock = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
+    bind_socket(&sock, addr.is_ipv6())?;
+    sock.set_nonblocking(true)?;
+    let std: std::net::TcpStream = sock.into();
+    tokio::net::TcpSocket::from_std_stream(std)
+        .connect(addr)
+        .await
+}
 
 /// An IPv6 address configured on an up, non-loopback interface.
 #[derive(Debug, Clone, PartialEq, Eq)]

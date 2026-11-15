@@ -147,21 +147,34 @@ fn first_ptr(buf: &[u8]) -> Option<PtrAnswer> {
     Some(PtrAnswer::NoName)
 }
 
-/// Ask one server for the PTR record `name`, waiting up to `cfg.timeout`.
+/// How long to wait for a DNS server: the initial probe timeout, which
+/// `--timeout`, `--initial-rtt-timeout` and the templates set, but at most
+/// [`DNS_MAX_WAIT`]. The servers are not scan targets, so their answers do
+/// not feed the adaptive timeouts.
+fn dns_wait(cfg: &ScanConfig) -> std::time::Duration {
+    cfg.rtt.initial.min(DNS_MAX_WAIT)
+}
+
+/// The longest wait for one DNS answer, so that `-T0` and `-T1` (whose
+/// initial probe timeout is minutes) do not stall name lookups.
+const DNS_MAX_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Ask one server for the PTR record `name`, waiting up to [`dns_wait`].
 async fn ask(server: SocketAddr, name: &str, id: u16, cfg: &ScanConfig) -> PtrAnswer {
-    let bind: SocketAddr = if server.is_ipv4() {
-        (std::net::Ipv4Addr::UNSPECIFIED, 0).into()
-    } else {
-        (std::net::Ipv6Addr::UNSPECIFIED, 0).into()
+    // From the -e interface, if one was chosen, like nmap's own resolver.
+    let open = || -> std::io::Result<UdpSocket> {
+        let sock = crate::netif::udp_socket(server.is_ipv6())?;
+        sock.bind(&crate::netif::any_addr(server.ip(), 0).into())?;
+        UdpSocket::from_std(sock.into())
     };
-    let Ok(sock) = UdpSocket::bind(bind).await else {
+    let Ok(sock) = open() else {
         return PtrAnswer::Retry;
     };
     if sock.connect(server).await.is_err() || sock.send(&ptr_query(id, name)).await.is_err() {
         return PtrAnswer::Retry;
     }
     let mut buf = [0u8; 1500];
-    let deadline = tokio::time::Instant::now() + cfg.timeout;
+    let deadline = tokio::time::Instant::now() + dns_wait(cfg);
     // Skip stray datagrams until the matching answer or the timeout.
     while let Ok(Ok(n)) = tokio::time::timeout_at(deadline, sock.recv(&mut buf)).await {
         if n >= 2 && u16::from_be_bytes([buf[0], buf[1]]) == id {
@@ -347,7 +360,7 @@ mod tests {
 
     fn cfg(timeout_ms: u64, retries: u32) -> ScanConfig {
         ScanConfig {
-            timeout: std::time::Duration::from_millis(timeout_ms),
+            rtt: crate::rtt::RttTimeouts::fixed(std::time::Duration::from_millis(timeout_ms)),
             retries,
             ..Default::default()
         }

@@ -35,6 +35,7 @@ pub mod progress;
 pub mod raw;
 #[cfg(target_os = "linux")]
 mod rawscan;
+pub mod rtt;
 pub mod scope;
 pub mod sctp;
 pub mod service;
@@ -57,6 +58,7 @@ pub use ports::{
     top_ports, top_sctp_ports, top_udp_ports,
 };
 pub use raw::{raw_ipv6_available, raw_sockets_available};
+pub use rtt::{RttState, RttTimeouts};
 pub use sctp::{SctpScanKind, sctp_scan};
 pub use service::{ServiceDb, ServiceInfo, VersionScan, detect_services};
 pub use syn::{RawTcpScan, TcpScanKind, parse_scanflags, raw_tcp_scan, syn_scan};

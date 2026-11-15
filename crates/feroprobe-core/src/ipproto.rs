@@ -153,7 +153,7 @@ mod imp {
         };
         let mut rng = Rng::new();
         let probe = Probe {
-            sport: 40000 + (rng.next_u32() % 20000) as u16,
+            sport: crate::raw::probe_sport(cfg, &mut rng),
             seq: rng.next_u32(),
             ipid: (rng.next_u32() as u16) | 1,
             icmp_id: (rng.next_u32() as u16) | 1,
@@ -454,7 +454,7 @@ mod imp {
                 return;
             }
             let cfg = ScanConfig {
-                timeout: Duration::from_millis(400),
+                rtt: crate::rtt::RttTimeouts::fixed(Duration::from_millis(400)),
                 retries: 0,
                 ..Default::default()
             };
