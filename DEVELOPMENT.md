@@ -169,7 +169,7 @@ the scope rule (no probes outside the command's ports and protocols, see
 | Step | Feature | nmap options | Plan |
 | --- | --- | --- | --- |
 | 5.1 | Deeper version detection | `--version-intensity`, `--version-light`, `--version-all`, `--version-trace` | Move the rules in `service/rules.rs` into a data file in our own format (probe, ports, rarity 1-9, match and soft-match patterns, version and CPE fields), compiled into the binary and overridable with a file, like `--oui-file`. Intensity picks probes by rarity, as nmap does. `--version-trace` prints each probe and reply. Then grow the rule set protocol by protocol from public protocol documentation and our own captures (never from `nmap-service-probes`). Several pull requests: the format and options first, then batches of protocols |
-| 5.2 | Full OS fingerprinting | `--osscan-limit`, `--osscan-guess`, `--max-os-tries` | A multi-probe fingerprint of our own design (TCP option and window tests to the open port, IP ID sequence, ICMP echo), sent only to ports the scan already probed, with our own signature file naming OS versions where the probes can tell them apart. Keeps the [lighter-than-nmap difference](#deliberate-differences-from-nmap) as far as possible: the probe count is documented and stays well under nmap's. `--osscan-limit` skips hosts without an open and a closed port, `--osscan-guess` prints near matches, `--max-os-tries` sets the retries |
+| 5.2 | Full OS fingerprinting | `--osscan-limit`, `--osscan-guess`, `--max-os-tries` | A multi-probe fingerprint of our own design (TCP option and window tests to the open port and, where the scan found one, a closed port; IP ID sequence), sent only to ports and protocols the scan already probed (an ICMP test only when the command already sends ICMP, such as default discovery or `-PE`), with our own signature file naming OS versions where the probes can tell them apart. Keeps the [lighter-than-nmap difference](#deliberate-differences-from-nmap) as far as possible: the probe count is documented and stays well under nmap's. `--osscan-limit` skips hosts without an open and a closed port, `--osscan-guess` prints near matches, `--max-os-tries` sets the retries |
 | 5.3 | Adaptive RTT timeouts | `--min-rtt-timeout`, `--max-rtt-timeout`, `--initial-rtt-timeout` | Per-host smoothed RTT and variance (nmap's and TCP's RFC 6298 formula), timeout = srtt + 4·rttvar clamped to the min and max; the `-T` templates set the three values as nmap's do. `--timeout` stays as FeroProbe's fixed-timeout option and sets all three |
 | 5.4 | Interface and source port | `-e`, `-g` / `--source-port` | `-e` binds raw, capture, ARP/NDP and connect sockets to the interface (`netif.rs`). `-g` sets the source port on raw TCP/UDP/SCTP probes and binds UDP sockets to it, with nmap's caveats (DNS lookups and some OS detection probes keep their own ports; connect scans cannot reuse one port for parallel connections) |
 | 5.5 | nmap's names for tuning options | `--max-retries`, `--min-hostgroup`, `--max-hostgroup`, `--min-parallelism`, `--max-parallelism` | `--max-retries` as an alias of `--retries`, `--max-parallelism` of `-c`; host groups become real (scan hosts in groups and report each group as it finishes, as nmap does). Our own names stay |
@@ -232,8 +232,11 @@ and `--script-timeout`.
 trust in the script: by default a script may connect only to the host it runs
 on and only to the ports the scan probed, like nmap's
 `mssql.scanned-ports-only` but for everything. A wider scope needs an explicit
-option (name to be settled, e.g. `--script-scope=host`), and `--dry-run` lists
-which scripts would run against which host and port, without running them.
+option (name to be settled, e.g. `--script-scope=host`). `--dry-run` lists
+which scripts would run against which host and port, and the scope each one
+is allowed, without running them. It cannot list a script's individual
+requests, because a script picks them from the replies it gets; the dry-run
+section of the manual says so.
 Discovery-style `prerule` scripts that broadcast are off unless named
 explicitly.
 
