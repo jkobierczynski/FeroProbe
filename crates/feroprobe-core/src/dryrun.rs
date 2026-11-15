@@ -269,7 +269,11 @@ pub fn write(run: &DryRun<'_>, w: &mut dyn Write) -> io::Result<Summary> {
         && let Some((_, ports)) = run.tcp
     {
         let before = out.count;
-        os_probes(&mut out, run, opts, ports.len(), &sources, &v)?;
+        let distinct = ports
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len();
+        os_probes(&mut out, run, opts, distinct, &sources, &v)?;
         summary.os = out.count - before;
     }
     let retry = if run.retries > 0 {
@@ -788,7 +792,8 @@ mod tests {
 
         // One scanned port cannot be both open and closed: no <closed> probes,
         // and --osscan-limit fingerprints nothing.
-        let one = [22];
+        // The same port twice is still one port.
+        let one = [22, 22];
         let run = DryRun {
             tcp: Some((DryTcp::Raw(RawTcpScan::new(TcpScanKind::Syn)), &one)),
             os: Some(crate::os::OsOptions::default()),
