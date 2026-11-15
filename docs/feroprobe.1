@@ -851,9 +851,14 @@ look like a real operating system\[aq]s.
 After the port scan, trace the route to each host that is up.
 FeroProbe sends TCP SYN probes with TTL (IPv6: hop limit) 1 to 30 all at
 once, to a TCP port the scan found open on that host, else one it found
-closed, else a fallback port: the first TCP port given with
-\f[V]-p\f[R], or 80 without \f[V]-p\f[R] (this is the case with
-\f[V]-sn\f[R], or when no TCP scan ran).
+closed, else a fallback port the command names: the first port of the
+TCP scan; with \f[V]-sn\f[R], the first TCP port given with
+\f[V]-p\f[R]; else the first TCP port of host discovery (\f[V]-PS\f[R],
+\f[V]-PA\f[R], or the default 443 as root).
+Traceroute never probes a port outside the scan: when the command probes
+no TCP port at all (for example \f[V]-sU -Pn\f[R]), hosts without an
+open or closed TCP port are not traced and a warning says why, and
+\f[V]-sn -Pn --traceroute\f[R] without \f[V]-p\f[R] is refused.
 Routers answer the probes that expire with ICMP time exceeded, and the
 first probe that reaches the host ends the route.
 A hop that never answers is shown as \f[V]...\f[R].
@@ -883,8 +888,19 @@ sudo feroprobe -sn -Pn --traceroute -p 443 example.org
 .SS \f[V]-A\f[R] (aggressive detection)
 .PP
 The same as \f[V]-sV -O --traceroute\f[R].
-Without raw sockets only \f[V]-sV\f[R] runs, with a warning, rather than
-failing.
+Without raw sockets only \f[V]-sV\f[R] runs, rather than failing, as in
+nmap.
+Unlike nmap, which drops the other parts silently, FeroProbe prints a
+warning naming them:
+.IP
+.nf
+\f[C]
+Warning: -A without root or CAP_NET_RAW skips OS detection (-O) and traceroute (--traceroute), which send raw packets; only version detection (-sV) runs. Run as root, or grant CAP_NET_RAW, to include them
+\f[R]
+.fi
+.PP
+nmap\[aq]s \f[V]-A\f[R] also runs its default scripts (\f[V]-sC\f[R]);
+FeroProbe has no scripts.
 Cannot be combined with \f[V]-sn\f[R].
 .SH TIMING AND PERFORMANCE
 .SS Timing templates (\f[V]-T<0-5>\f[R])
@@ -1318,6 +1334,106 @@ with \f[V]-n\f[R] (give numeric addresses when no DNS traffic is
 allowed), so the addresses shown are the real ones, and the routing
 table is consulted (without sending) for the source address.
 No reverse DNS query is made.
+With \f[V]--traceroute\f[R], a note names the TCP port traceroute would
+fall back to (or says hosts would not be traced).
+.PP
+\f[B]A dry run is not a preview of nmap.\f[R] It lists FeroProbe\[aq]s
+probes.
+nmap run with the same options sends different packets, and some of its
+features probe outside \f[V]-p\f[R], so a dry run must not be used to
+check an nmap command before running it.
+What nmap sends in addition or instead, per option:
+.PP
+.TS
+tab(@);
+l l.
+T{
+Options
+T}@T{
+What nmap does differently
+T}
+_
+T{
+\f[V]-A\f[R]
+T}@T{
+Also runs its default scripts (\f[V]-sC\f[R]).
+Some probe outside \f[V]-p\f[R]: \f[V]ms-sql-info\f[R] sends a 1-byte
+UDP datagram to port 1434 of every host; others connect to the open
+ports and talk to the services
+T}
+T{
+\f[V]-A\f[R] without root
+T}@T{
+Silently skips OS detection and traceroute (FeroProbe skips them with a
+warning)
+T}
+T{
+\f[V]-sV\f[R]
+T}@T{
+Sends probes from its own database (dozens to an unrecognized port),
+also probes UDP ports left \f[V]open|filtered\f[R], and runs its version
+scripts on open ports
+T}
+T{
+\f[V]-O\f[R], IPv4
+T}@T{
+Sends 16 probes per host to an open TCP port, a closed TCP port and a
+closed UDP port.
+A closed port is one the scan found closed, else unfiltered; without one
+it picks a random TCP or UDP port between 30000 and 44780, regardless of
+\f[V]-p\f[R]
+T}
+T{
+\f[V]-O\f[R], IPv6
+T}@T{
+Sends up to 17 probes per host, including a neighbour solicitation to
+on-link targets.
+Without a closed (or unfiltered) TCP port it skips the closed-port TCP
+probes; without a closed (or unfiltered) UDP port it picks a random one
+between 30000 and 44780, regardless of \f[V]-p\f[R]
+T}
+T{
+\f[V]--traceroute\f[R]
+T}@T{
+Traces with the probe that got the best answer (TCP, UDP, SCTP or ICMP),
+else an ICMP echo
+T}
+T{
+Raw TCP scans
+T}@T{
+TCP window 1024 instead of FeroProbe\[aq]s signature 65109
+T}
+T{
+\f[V]-sU\f[R]
+T}@T{
+Payloads for many more ports, empty datagrams elsewhere (FeroProbe:
+\f[V]FeroProbeScan/1\f[R])
+T}
+T{
+\f[V]-f\f[R], \f[V]--mtu\f[R]
+T}@T{
+Sends fragments too, but its \f[V]--packet-trace\f[R] shows the
+unfragmented packet
+T}
+T{
+\f[V]-D\f[R] with \f[V]ME\f[R]
+T}@T{
+Sends the real probe at \f[V]ME\f[R]\[aq]s place, not last
+T}
+T{
+Default discovery without root
+T}@T{
+Only TCP connects to 80 and 443, no ICMP echo
+T}
+T{
+Any scan
+T}@T{
+Adaptive timeouts and up to 10 resends, instead of a fixed
+\f[V]--timeout\f[R] and \f[V]--retries\f[R]
+T}
+.TE
+.PP
+These come from nmap 7.99\[aq]s source.
 .PP
 A dry run needs no root, writes no report files (it warns if
 \f[V]-oN\f[R], \f[V]-oX\f[R], \f[V]-oG\f[R], \f[V]-oJ\f[R] or
@@ -1335,7 +1451,8 @@ and fragment a command would send, and confirm it stays within the
 approved scope, before any scan probe is sent.
 Then run the same command without \f[V]--dry-run\f[R], ideally with a
 gentle timing template (\f[V]-T0\f[R] or \f[V]-T1\f[R]), a low
-\f[V]--max-rate\f[R] and a short, explicit port list.
+\f[V]--max-rate\f[R] and a short, explicit port list, with FeroProbe:
+the same command run with nmap sends other probes.
 The closest nmap option, the list scan \f[V]-sL\f[R], only lists the
 targets.
 .SH MISCELLANEOUS OPTIONS
@@ -1483,7 +1600,8 @@ Without raw sockets, a scan with no \f[V]-s\f[R] option runs a connect
 scan, and discovery uses its unprivileged probes; an explicit raw scan
 type, \f[V]-O\f[R] or \f[V]--traceroute\f[R] is an error that says what
 is needed.
-\f[V]-A\f[R] degrades to \f[V]-sV\f[R] with a warning.
+\f[V]-A\f[R] degrades to \f[V]-sV\f[R] with a warning naming what it
+skipped (nmap degrades silently).
 .PP
 Linux has every feature.
 On macOS and Windows FeroProbe runs the connect and UDP scans, discovery
@@ -1614,6 +1732,37 @@ T}@T{
 Passed to the resolver
 T}@T{
 Refused with an explanation
+T}
+T{
+Probes outside the requested ports
+T}@T{
+\f[V]-A\f[R]\[aq]s scripts can probe other ports (\f[V]ms-sql-info\f[R]:
+UDP 1434 on every host); \f[V]-O\f[R] picks a random UDP port (and for
+IPv4 also TCP), regardless of \f[V]-p\f[R], when the scan found no
+closed or unfiltered one
+T}@T{
+Never beyond the command\[aq]s own ports (\f[V]-p\f[R] plus the
+host-discovery ports): \f[V]-sV\f[R] and \f[V]-O\f[R] probe only open
+ports the scan found, traceroute only a scanned port, a discovery port,
+or (with \f[V]-sn\f[R]) the \f[V]-p\f[R] port, and FeroProbe has no
+scripts
+T}
+T{
+Traceroute port
+T}@T{
+The probe that got the best answer during discovery or the scan, else
+ICMP echo
+T}@T{
+TCP SYNs to an open or closed scanned port, else a TCP port the command
+names (\f[V]-p\f[R] with \f[V]-sn\f[R], or a discovery port), else the
+host is not traced (FeroProbe used to fall back to port 80)
+T}
+T{
+\f[V]-A\f[R] without root
+T}@T{
+Silently drops \f[V]-O\f[R] and traceroute
+T}@T{
+Drops them with a warning naming them
 T}
 .TE
 .PP

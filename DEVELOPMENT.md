@@ -53,7 +53,7 @@ the SCTP, IP protocol, IPv6 OS detection and probe-signature work).
 | MAC vendor names | `--oui-file` | Full IEEE OUI list from the system or a file, small built-in fallback |
 | Reverse DNS | `-n`, `-R`, `--dns-servers` | Own resolver for `--dns-servers` (`dns.rs`) |
 | Random host order | `--randomize-hosts` | |
-| Traceroute | `--traceroute` | TCP SYN probes, IPv4 and IPv6 (`trace.rs`) |
+| Traceroute | `--traceroute` | TCP SYN probes, IPv4 and IPv6 (`trace.rs`); only through a TCP port the command names (scanned, `-p` with `-sn`, or discovery) (see [Deliberate differences](#deliberate-differences-from-nmap)) |
 
 ### Targets and ports
 
@@ -84,7 +84,7 @@ the SCTP, IP protocol, IPv6 OS detection and probe-signature work).
 | --- | --- | --- |
 | OS guess | `-O` | One SYN to an open port; TTL / hop limit, TCP option order, DF bit, window. Our own family-level signatures (`os.rs`). IPv4 and IPv6 (IPv6 read off an `AF_PACKET` capture) |
 | Network distance | | From the TTL |
-| Aggressive mode | `-A` | `-sV -O --traceroute`; only `-sV` without raw-socket privileges |
+| Aggressive mode | `-A` | `-sV -O --traceroute`; only `-sV` without raw-socket privileges, with a warning naming what was skipped |
 
 ### Timing and performance
 
@@ -141,7 +141,9 @@ the SCTP, IP protocol, IPv6 OS detection and probe-signature work).
 | --- | --- | --- | --- |
 | `--packet-trace` with `-f`/`--mtu` | Prints one `SENT` line for the whole, unfragmented probe, although the fragments are what goes on the wire | Prints one `SENT` line per fragment actually sent (`TCP ... (frag)`, then `IP ... frag offset=N`) | The trace should show what is sent; nmap's display is treated as a bug and not copied (Jurgen, 2026-11-15). `--dry-run` shows fragments the same way |
 | Evasion against public addresses | Allowed | Needs `--allow-public-evasion` | Anti-abuse safeguard, see `docs/responsible-use.md` |
-| Dry run | No equivalent. The closest is the list scan `-sL`, which only lists (and reverse-resolves) the targets | `--dry-run` lists every probe, per target and port, without sending any, and does no reverse DNS | A safe way to check exactly what a command would put on the wire |
+| Probes outside the requested ports | `-A`'s scripts probe other ports (`ms-sql-info` sends a 1-byte UDP datagram to 1434 on every host, seen in Jurgen's tcpdump of `nmap -A -p 502,102`); `-O` picks a random UDP port, and for IPv4 also TCP (30000-44780, regardless of `-p`), when the scan found no closed or unfiltered one | Never. `-sV` and `-O` probe only open ports the scan found; there are no scripts. Traceroute falls back to a TCP port of the command: a scanned port, the `-p` port with `-sn` (even with `-Pn`, where nothing else probes it), or a discovery port, else skips the host with a warning (it used to fall back to port 80) | An OT operator must be able to rely on the command's ports (`-p` plus the documented host-discovery ports, which `-Pn` or `-P*` control) being the whole scope (Jurgen, 2026-11-15). When script scanning is added, scripts must default to the scanned ports (like nmap's `mssql.scanned-ports-only`) |
+| `-A` without root | Silently drops `-O` and traceroute | Drops them too, with a warning naming them and why | No silent downgrade (Jurgen, 2026-11-15) |
+| Dry run | No equivalent. The closest is the list scan `-sL`, which only lists (and reverse-resolves) the targets | `--dry-run` lists every probe, per target and port, without sending any, and does no reverse DNS | A safe way to check exactly what a command would put on the wire. It lists FeroProbe's probes only. The manual's `--dry-run` section documents what nmap sends differently per option; an in-output "not nmap" box was tried and dropped (Jurgen, 2026-11-15) |
 
 ## Remaining gap to nmap parity
 

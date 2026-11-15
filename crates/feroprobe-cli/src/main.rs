@@ -1141,9 +1141,7 @@ fn aggressive(plan: &mut Plan, args: &Args, privileged: bool) -> Result<(bool, b
     if privileged {
         return Ok((true, true));
     }
-    eprintln!(
-        "Warning: -A without root runs only -sV; OS detection and traceroute need raw sockets"
-    );
+    eprintln!("Warning: {}", AGGRESSIVE_UNPRIVILEGED);
     Ok((args.os, args.traceroute))
 }
 
@@ -1268,6 +1266,49 @@ fn tcp_scan_label(kind: TcpScanKind) -> &'static str {
         TcpScanKind::Maimon => "tcp-maimon",
     }
 }
+
+/// What `-A` drops without raw sockets. nmap drops the same parts but says
+/// nothing; FeroProbe names them, so the downgrade is never a surprise.
+const AGGRESSIVE_UNPRIVILEGED: &str = "-A without root or CAP_NET_RAW skips OS detection (-O) \
+     and traceroute (--traceroute), which send raw packets; only version detection (-sV) runs. \
+     Run as root, or grant CAP_NET_RAW, to include them";
+
+/// The TCP port traceroute falls back to for a host where the scan found
+/// no open or closed TCP port: always one the command names (-p, the scan or discovery), so
+/// traceroute never reaches outside the scan. In order: the first TCP port
+/// of the TCP scan; with `-sn`, the first TCP port given with `-p`; else
+/// the first TCP port of host discovery (`-PS`, `-PA`, or the defaults).
+/// `None` when the command probes no TCP port at all: such hosts are not
+/// traced. (FeroProbe used to fall back to port 80 whatever the scope.)
+fn trace_fallback_port(
+    args: &Args,
+    plan: &Plan,
+    tcp_ports: &[u16],
+    probes: &PingProbes,
+) -> Option<u16> {
+    let scan_port = if plan.ping_only {
+        args.ports.as_ref().and_then(|_| tcp_ports.first().copied())
+    } else if plan.tcp.is_some() {
+        tcp_ports.first().copied()
+    } else {
+        None
+    };
+    scan_port.or_else(|| {
+        plan.discovery
+            .then(|| probes.syn.first().or(probes.ack.first()).copied())
+            .flatten()
+    })
+}
+
+/// Why a host with no open or closed TCP port is not traced.
+const TRACE_NO_PORT: &str = "traceroute sends TCP SYN probes, and this command probes no TCP \
+     port to send them to; FeroProbe does not trace through a port outside the scan. Scan a TCP \
+     port too to trace (for example -sS -sU -p U:53,T:443)";
+
+/// The same for `-sn`, where `-p` names the port to trace through.
+const TRACE_NO_PORT_SN: &str = "traceroute sends TCP SYN probes, and this command probes no TCP \
+     port to send them to; FeroProbe does not trace through a port outside the scan. Name one \
+     with -p (for example -p 443)";
 
 /// Add each scan's port results to the matching host in `hosts`.
 fn merge(hosts: &mut [HostResult], results: Vec<HostResult>) {
@@ -1512,6 +1553,8 @@ struct DryOrder<'a> {
     protocols: &'a [u8],
     os: bool,
     trace: bool,
+    /// See [`trace_fallback_port`].
+    trace_fallback: Option<u16>,
 }
 
 /// The notes a dry run prints above its probes: what it cannot show (steps
@@ -1534,6 +1577,18 @@ fn dry_run_notes(args: &Args, plan: &Plan, d: &DryOrder, privileged: bool) -> Ve
              depend on replies a dry run does not get",
             follow.join(", ")
         ));
+    }
+    if d.trace {
+        notes.push(match d.trace_fallback {
+            Some(port) => format!(
+                "Traceroute would send TCP SYNs to an open or closed TCP port the scan finds on \
+                 each host, else to TCP port {port}, which this command names"
+            ),
+            None => format!(
+                "Traceroute would use an open or closed TCP port the scan finds; hosts without \
+                 one are not traced: {TRACE_NO_PORT}"
+            ),
+        });
     }
     if !args.no_resolve {
         notes.push("Not shown: reverse DNS of the hosts found up (no DNS query is made)".into());
@@ -1752,6 +1807,12 @@ async fn main() -> Result<()> {
     if plan.ping_only && !plan.discovery && !trace {
         bail!("-sn with -Pn would do nothing (add --traceroute to only trace the route)");
     }
+    let trace_fallback = trace_fallback_port(&args, &plan, &tcp_ports, &probes);
+    if trace && plan.ping_only && trace_fallback.is_none() {
+        // With -sn no host can have a scanned TCP port, so nothing would
+        // be traced: say so up front rather than after discovery.
+        bail!("--traceroute with -sn: {TRACE_NO_PORT_SN}");
+    }
     if trace && !raw_sockets_available() && !args.dry_run {
         bail!("--traceroute sends raw packets: run as root or grant CAP_NET_RAW");
     }
@@ -1885,6 +1946,7 @@ async fn main() -> Result<()> {
                 protocols: &protocols,
                 os,
                 trace,
+                trace_fallback,
             },
         );
     }
@@ -1978,19 +2040,21 @@ async fn main() -> Result<()> {
     }
     if trace {
         scan_types.push("traceroute");
-        // Hosts without a scanned port are traced with the first -p port.
-        let fallback = if args.ports.is_some() {
-            tcp_ports.first().copied().unwrap_or(80)
-        } else {
-            80
-        };
+        // Hosts without an open or closed TCP port are traced through a
+        // TCP port the command names, or not at all.
         // Hosts given up on by --host-timeout are not traced either.
         let keep: Vec<usize> = (0..hosts.len()).filter(|&i| !hosts[i].timed_out).collect();
         let mut traced: Vec<HostResult> = keep.iter().map(|&i| hosts[i].clone()).collect();
         let done = progress.phase("traceroute", traced.len());
-        traceroute(&mut traced, &cfg, !plan.discovery, fallback)
+        let untraced = traceroute(&mut traced, &cfg, !plan.discovery, trace_fallback)
             .await
             .context("traceroute failed")?;
+        if untraced > 0 {
+            eprintln!(
+                "Warning: {untraced} host{} not traced: {TRACE_NO_PORT}",
+                if untraced == 1 { "" } else { "s" }
+            );
+        }
         done(&progress);
         for (&i, h) in keep.iter().zip(traced) {
             hosts[i] = h;
@@ -2622,7 +2686,67 @@ mod tests {
             protocols: &[],
             os: false,
             trace: false,
+            trace_fallback: Some(80),
         }
+    }
+
+    #[test]
+    fn traceroute_never_falls_back_outside_the_scan() {
+        let root = PingProbes::nmap_default(true);
+        let tcp = plan_with_tcp(Some(ScanType::Syn));
+        // A TCP scan: its first port, never a port it does not scan.
+        let a = args(&["--traceroute", "-p", "502,102"]);
+        assert_eq!(trace_fallback_port(&a, &tcp, &[102, 502], &root), Some(102));
+        // A UDP-only scan: the discovery SYN port (443 as root), which the
+        // command probes anyway.
+        let mut udp = plan_with_tcp(None);
+        udp.udp = true;
+        let a = args(&["-sU", "-p", "53", "--traceroute"]);
+        assert_eq!(trace_fallback_port(&a, &udp, &[53], &root), Some(443));
+        // ... and with -Pn, no TCP port at all: not traced (was port 80).
+        udp.discovery = false;
+        assert_eq!(trace_fallback_port(&a, &udp, &[53], &root), None);
+        // ICMP-only discovery probes no TCP port either.
+        udp.discovery = true;
+        let icmp = PingProbes {
+            echo: true,
+            ..PingProbes::none()
+        };
+        assert_eq!(trace_fallback_port(&a, &udp, &[53], &icmp), None);
+        // -sn: -p names the port, else the discovery ports.
+        let mut sn = plan_with_tcp(None);
+        sn.ping_only = true;
+        let a = args(&["-sn", "--traceroute", "-p", "443"]);
+        assert_eq!(trace_fallback_port(&a, &sn, &[443], &root), Some(443));
+        let a = args(&["-sn", "--traceroute", "-PA22"]);
+        let ack = PingProbes {
+            ack: vec![22],
+            ..PingProbes::none()
+        };
+        assert_eq!(trace_fallback_port(&a, &sn, &[1, 2, 3], &ack), Some(22));
+        // -sn -Pn without -p: nothing to trace through.
+        sn.discovery = false;
+        let a = args(&["-sn", "-Pn", "--traceroute"]);
+        assert_eq!(trace_fallback_port(&a, &sn, &[80], &root), None);
+    }
+
+    #[test]
+    fn dry_run_says_where_traceroute_goes() {
+        let plan = plan_with_tcp(Some(ScanType::Syn));
+        let d = DryOrder {
+            trace: true,
+            trace_fallback: Some(102),
+            ..dry_order()
+        };
+        let notes = dry_run_notes(&args(&["-n"]), &plan, &d, true).join("\n");
+        assert!(notes.contains("TCP port 102"), "{notes}");
+        let d = DryOrder {
+            trace: true,
+            trace_fallback: None,
+            ..dry_order()
+        };
+        let notes = dry_run_notes(&args(&["-n"]), &plan, &d, true).join("\n");
+        assert!(notes.contains("not traced"), "{notes}");
     }
 
     #[test]

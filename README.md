@@ -129,6 +129,18 @@ NOT SENT (dry run) TCP 10.0.0.2:43970 > 10.0.0.5:22 S seq=1654920040 win=65109
 
 nmap has no such option; its list scan (`-sL`) only lists the targets.
 
+**A dry run shows FeroProbe's probes, not nmap's.** Do not use it to check
+an nmap command before running it with nmap: with the same options nmap
+sends different packets, and some of its features probe outside `-p` (for
+example `-A` runs nmap's scripts, one of which sends a UDP datagram to port
+1434 of every host, and `-O` may pick random closed ports). The manual's
+`--dry-run` section lists these differences per option.
+
+FeroProbe itself never probes outside the scan: `-sV` and `-O` only probe
+the open ports the scan found, and `--traceroute` only uses a TCP port the
+command names (a scanned port, the `-p` port with `-sn`, or a discovery port). When `-A` runs without root, the parts it skips are
+named in a warning instead of being dropped silently as nmap does.
+
 This matters most on operational-technology and industrial-control (OT/ICS)
 networks, where an unexpected packet can hang or reset a fragile device such
 as a PLC or RTU. With `--dry-run`, an operator can check every target,
