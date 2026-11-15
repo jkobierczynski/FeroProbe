@@ -1165,6 +1165,8 @@ UDP probes from a fixed port share it between sockets
 (\f[V]SO_REUSEADDR\f[R]), each connected to a different target port.
 If another program holds the port, the UDP scan fails with an error
 naming it.
+On Windows, sockets cannot share a UDP port that way, so \f[V]-g\f[R]
+does not apply to UDP probes there (FeroProbe warns).
 .SS Fragmentation, decoys and spoofed source
 .PP
 FeroProbe has nmap\[aq]s fragmentation, decoy and spoofed-source options

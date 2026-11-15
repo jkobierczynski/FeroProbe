@@ -188,9 +188,12 @@ pub async fn probe_udp(addr: SocketAddr, cfg: &ScanConfig) -> io::Result<PortRes
     // Probing this machine's own -g port from that port would send the
     // probe to the probing socket itself; that one probe uses a random
     // port instead.
-    let sport = cfg
-        .source_port
-        .filter(|&p| !(p == addr.port() && crate::discovery::is_localhost(addr.ip())));
+    // On Windows, sockets sharing a UDP port do not each get their own
+    // peer's answers, so -g does not apply to UDP there (the command line
+    // warns).
+    let sport = cfg.source_port.filter(|&p| {
+        !cfg!(windows) && !(p == addr.port() && crate::discovery::is_localhost(addr.ip()))
+    });
     let sock = match connected_socket(addr, sport).await {
         Ok(s) => s,
         Err(e) => return classify(e, None),
@@ -318,7 +321,9 @@ mod tests {
     }
 
     /// -g: every UDP probe leaves from the one source port, and each
-    /// socket still gets its own port's answer.
+    /// socket still gets its own port's answer. Not on Windows, where -g
+    /// does not apply to UDP.
+    #[cfg(not(windows))]
     #[tokio::test]
     async fn fixed_source_port_is_shared() {
         // Echo servers that report the sender's port back.

@@ -749,7 +749,8 @@ FeroProbe already sends every raw probe of a scan from one source port
 signature (`docs/responsible-use.md`) is unchanged. UDP probes from a fixed
 port share it between sockets (`SO_REUSEADDR`), each connected to a
 different target port. If another program holds the port, the UDP scan
-fails with an error naming it.
+fails with an error naming it. On Windows, sockets cannot share a UDP port
+that way, so `-g` does not apply to UDP probes there (FeroProbe warns).
 
 ### Fragmentation, decoys and spoofed source
 

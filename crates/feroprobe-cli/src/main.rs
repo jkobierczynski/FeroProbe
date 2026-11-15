@@ -902,7 +902,13 @@ fn source_port_warnings(port: u16, connect_scan: bool, udp: bool) -> Vec<String>
                 .to_string(),
         );
     }
-    if port == 0 {
+    if udp && cfg!(windows) {
+        w.push(
+            "-g does not apply to UDP probes on Windows, which cannot share a source port \
+             between them; they use random ports"
+                .to_string(),
+        );
+    } else if port == 0 {
         let udp = if udp {
             "; UDP probes cannot be sent from port 0 and use a random port instead"
         } else {
@@ -2351,11 +2357,15 @@ mod tests {
             None
         );
 
-        assert!(source_port_warnings(53, false, true).is_empty());
         let w = source_port_warnings(53, true, false);
         assert!(w.len() == 1 && w[0].contains("connect scan"), "{w:?}");
         let w = source_port_warnings(0, false, true);
         assert!(w.len() == 1 && w[0].contains("UDP"), "{w:?}");
+        if cfg!(windows) {
+            assert_eq!(source_port_warnings(53, false, true).len(), 1);
+            return;
+        }
+        assert!(source_port_warnings(53, false, true).is_empty());
         let w = source_port_warnings(0, false, false);
         assert!(w.len() == 1 && !w[0].contains("UDP"), "{w:?}");
     }
