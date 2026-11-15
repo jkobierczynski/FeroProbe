@@ -1282,8 +1282,8 @@ Firewall/IDS evasion).
 .SS \f[V]--dry-run\f[R]
 .PP
 Send nothing.
-Print every probe the scan would send, one line per probe in the
-\f[V]--packet-trace\f[R] layout with the prefix
+Print the host-discovery and port-scan probes the scan would send, one
+line per probe in the \f[V]--packet-trace\f[R] layout with the prefix
 \f[V]NOT SENT (dry run)\f[R], then stop.
 It covers host discovery and every port scan, with
 \f[V]-f\f[R]/\f[V]--mtu\f[R], \f[V]-D\f[R] and \f[V]-S\f[R] applied, so
@@ -1313,9 +1313,10 @@ finds), lists only the first attempt of each probe (a real run resends
 unanswered ones up to \f[V]--retries\f[R] times), and only names the
 steps that depend on answers (\f[V]-sV\f[R], \f[V]-O\f[R],
 \f[V]--traceroute\f[R], reverse DNS) instead of listing their probes.
-Target hostnames are still resolved through the system resolver, so the
-addresses shown are the real ones, and the routing table is consulted
-(without sending) for the source address.
+Target hostnames are still resolved through the system resolver, even
+with \f[V]-n\f[R] (give numeric addresses when no DNS traffic is
+allowed), so the addresses shown are the real ones, and the routing
+table is consulted (without sending) for the source address.
 No reverse DNS query is made.
 .PP
 A dry run needs no root, writes no report files (it warns if
@@ -1331,7 +1332,7 @@ This matters most on operational-technology and industrial-control
 fragile device such as a PLC or RTU.
 With \f[V]--dry-run\f[R], an operator can check every target, port, flag
 and fragment a command would send, and confirm it stays within the
-approved scope, before anything touches the network.
+approved scope, before any scan probe is sent.
 Then run the same command without \f[V]--dry-run\f[R], ideally with a
 gentle timing template (\f[V]-T0\f[R] or \f[V]-T1\f[R]), a low
 \f[V]--max-rate\f[R] and a short, explicit port list.

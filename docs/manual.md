@@ -872,9 +872,9 @@ With `-f`/`--mtu` every fragment gets its own line (see
 
 #### `--dry-run`
 
-Send nothing. Print every probe the scan would send, one line per probe
-in the `--packet-trace` layout with the prefix `NOT SENT (dry run)`, then
-stop. It covers host discovery and every port scan, with `-f`/`--mtu`,
+Send nothing. Print the host-discovery and port-scan probes the scan would
+send, one line per probe in the `--packet-trace` layout with the prefix
+`NOT SENT (dry run)`, then stop. It covers host discovery and every port scan, with `-f`/`--mtu`,
 `-D` and `-S` applied, so the lines show the real flags, sequence
 numbers, window, payload sizes, fragments and source addresses. Comment
 lines starting with `#` group the probes by target and phase and end with
@@ -898,7 +898,8 @@ discovery finds), lists only the first attempt of each probe (a real run
 resends unanswered ones up to `--retries` times), and only names the
 steps that depend on answers (`-sV`, `-O`, `--traceroute`, reverse DNS)
 instead of listing their probes. Target hostnames are still resolved
-through the system resolver, so the addresses shown are the real ones,
+through the system resolver, even with `-n` (give numeric addresses when no
+DNS traffic is allowed), so the addresses shown are the real ones,
 and the routing table is consulted (without sending) for the source
 address. No reverse DNS query is made.
 
@@ -912,7 +913,7 @@ This matters most on operational-technology and industrial-control
 (OT/ICS) networks, where an unexpected packet can hang or reset a fragile
 device such as a PLC or RTU. With `--dry-run`, an operator can check
 every target, port, flag and fragment a command would send, and confirm it
-stays within the approved scope, before anything touches the network.
+stays within the approved scope, before any scan probe is sent.
 Then run the same command without `--dry-run`, ideally with a gentle
 timing template (`-T0` or `-T1`), a low `--max-rate` and a short, explicit
 port list. The closest nmap option, the list scan `-sL`, only lists the
