@@ -209,9 +209,7 @@ fn windows_and_unanswered() {
     t.replies[5] = reply(5, &[], packet::TCP_RST, 0, true);
     t.replies[6] = reply(6, &[], RA, 0, false);
     t.replies[7] = reply(7, &[], packet::TCP_RST, 0, false);
-    for i in 0..=7 {
-        t.sent[i] = true;
-    }
+    t.sent[..=probes::C2].fill(true);
     let fp = fingerprint(&t);
     assert_eq!(fp.get("ts"), Some("U"));
     assert_eq!(fp.get("ipid"), Some("I"));
