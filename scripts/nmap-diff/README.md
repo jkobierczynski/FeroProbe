@@ -46,6 +46,7 @@ Options:
 | `--nmap` | `nmap` on the `PATH` | nmap binary |
 | `--timeout` | 300 | Seconds per tool run |
 | `--fail-on` | none | Severities that make the exit status 1, e.g. `out-of-scope`. Documented findings never fail |
+| `--from-json` | | Rebuild `report.md` from an earlier `report.json` without scanning (no root needed), e.g. after adding a line to `known-differences.txt` |
 | `--keep-lab` | off | Leave the namespaces up for poking around (`ip netns exec fpd-scan ...`) |
 
 The unit tests need no root: `python3 -m unittest discover -s scripts/nmap-diff`.

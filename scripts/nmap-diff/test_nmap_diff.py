@@ -116,6 +116,12 @@ class Scope(unittest.TestCase):
         self.assertIsNone(nd.scope_of(["-F"], "lan", True))
         self.assertIsNone(nd.scope_of(["-sS"], "lan", True))
 
+    def test_ip_protocol_scan_scope(self):
+        scope = nd.scope_of(["-sO", "-p", "1,6"], "lan", True)
+        self.assertTrue(nd.in_scope("tcp/80", scope))
+        self.assertTrue(nd.in_scope("ip proto 1", scope))
+        self.assertFalse(nd.in_scope("udp/40125", scope))
+
     def test_macros(self):
         self.assertEqual(nd.expand_macros("-p @TCP"), "-p " + ",".join(map(str, nd.TCP_PORTS)))
 

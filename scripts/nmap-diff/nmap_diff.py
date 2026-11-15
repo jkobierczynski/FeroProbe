@@ -592,6 +592,9 @@ def expand_macros(opts):
     return opts.replace("@ALL", f"T:{tcp},U:{udp}").replace("@TCP", tcp).replace("@UDP", udp)
 
 
+ANY_PORT = -1
+
+
 def scope_of(argv, target_kind, privileged):
     """Which (proto, port) a scan with these options is asked to touch.
 
@@ -651,6 +654,13 @@ def scope_of(argv, target_kind, privileged):
         for proto, ps in parse_port_spec(ports, protos).items():
             if proto in protos or (proto == "ip" and "O" in scans):
                 scope[proto] |= ps
+        if "O" in scans:
+            # A protocol probe for TCP, UDP or SCTP has to pick some port
+            # (nmap: TCP/SCTP 80, UDP 40125); any port of an asked-for
+            # protocol is fine.
+            for num, proto in ((6, "tcp"), (17, "udp"), (132, "sctp")):
+                if num in scope.get("ip", set()):
+                    scope[proto].add(ANY_PORT)
     if not pn:
         for proto, ps in ping.items():
             scope[proto] |= ps
@@ -779,7 +789,8 @@ def in_scope(dest, scope):
         return None
     m = re.match(r"^(tcp|udp|sctp)/(\d+)$", dest)
     if m:
-        return int(m.group(2)) in scope.get(m.group(1), set())
+        ports = scope.get(m.group(1), set())
+        return ANY_PORT in ports or int(m.group(2)) in ports
     m = re.match(r"^ip proto (\d+)$", dest)
     if m and "ip" in scope:
         return int(m.group(1)) in scope["ip"]
@@ -1022,6 +1033,49 @@ def load_matrix(path):
     return cases
 
 
+def build_argv(base_opts, opts):
+    base = shlex.split(base_opts)
+    case_argv = shlex.split(opts)
+    if any(re.match(r"^-T[0-5a-z]", a) for a in case_argv):
+        # the case sets its own timing; do not pass -T twice
+        base = [a for a in base if not re.match(r"^-T[0-5a-z]", a)]
+    return base + case_argv
+
+
+def scope_text(scope):
+    if scope is None:
+        return "not checked (port list not explicit)"
+    return "; ".join(f"{p} {','.join('any' if x == ANY_PORT else str(x) for x in sorted(v))}"
+                     for p, v in sorted(scope.items())) or "none"
+
+
+def analyse(r, argv, known):
+    """Scope, findings and annotations for one case from its two summaries."""
+    def counters(d):
+        return {k: {"count": v["count"], "fields": {f: collections.Counter(x) for f, x in v["fields"].items()}}
+                for k, v in d.items()}
+    scope = scope_of(argv, r["target"], r["priv"] == "root")
+    r["scope_text"] = scope_text(scope)
+    r["findings"] = compare(r["case"], counters(r["nmap"]["dests"]), counters(r["fero"]["dests"]), scope,
+                            dict(r["nmap"]["ports"]), dict(r["fero"]["ports"]))
+    annotate(r["findings"], known)
+
+
+def reanalyse(path, out, known):
+    """Rebuild the report from an earlier report.json (after editing the
+    known differences or the comparison), without running anything."""
+    with open(path) as fh:
+        data = json.load(fh)
+    for r in data["results"]:
+        if r.get("skipped"):
+            continue
+        analyse(r, build_argv(data["meta"]["base_opts"], r["opts"]), known)
+    write_report(os.path.join(out, "report.md"), data["meta"], data["results"])
+    with open(os.path.join(out, "report.json"), "w") as fh:
+        json.dump(data, fh, indent=1, default=str)
+    print(f"report: {os.path.join(out, 'report.md')}")
+
+
 def ttl_text(c):
     if not c:
         return "-"
@@ -1045,7 +1099,14 @@ def main():
     ap.add_argument("--keep-lab", action="store_true", help="leave the namespaces up afterwards")
     ap.add_argument("--fail-on", default="", help="comma-separated severities that make the exit status 1 "
                     "(e.g. out-of-scope); documented findings never fail")
+    ap.add_argument("--from-json", metavar="REPORT_JSON",
+                    help="rebuild report.md from an earlier report.json without scanning (no root needed)")
     args = ap.parse_args()
+
+    if args.from_json:
+        os.makedirs(args.out, exist_ok=True)
+        reanalyse(args.from_json, args.out, load_known(args.known))
+        return 0
 
     if os.geteuid() != 0:
         raise SystemExit("nmap-diff needs root (network namespaces, raw sockets, tcpdump). Run it with sudo.")
@@ -1103,12 +1164,7 @@ def main():
         macs = lab.scanner_macs()
         for c in cases:
             opts = expand_macros(c["opts"])
-            base = shlex.split(args.base_opts)
-            case_argv = shlex.split(opts)
-            if any(re.match(r"^-T[0-5a-z]", a) for a in case_argv):
-                # the case sets its own timing; do not pass -T twice
-                base = [a for a in base if not re.match(r"^-T[0-5a-z]", a)]
-            argv = base + case_argv
+            argv = build_argv(args.base_opts, opts)
             target = TARGETS[c["target"]]
             priv = c["priv"] == "root"
             if c["target"] == "lan6" and not lab.ipv6:
@@ -1118,7 +1174,6 @@ def main():
                 continue
             print(f"[{c['case']}] {' '.join(argv)} {target} ({c['priv']})", flush=True)
             r = {"case": c["case"], "opts": opts, "target": c["target"], "target_ip": target, "priv": c["priv"]}
-            sums = {}
             for tool, binary in (("nmap", args.nmap), ("fero", args.feroprobe)):
                 lab.flush_neighbours()
                 time.sleep(0.2)
@@ -1133,17 +1188,12 @@ def main():
                 ports, host = parse_xml_ports(run["xml"])
                 ports["host"] = host
                 ports["_exit"] = run["exit"]
-                sums[tool] = (summary, ports)
                 r[tool] = {"cmd": run["cmd"], "exit": run["exit"], "seconds": run["seconds"],
                            "output": run["output"], "packets": len(sent), "ttl": ttl_text(ttl),
                            "dests": {k: {"count": v["count"], "fields": {f: dict(x) for f, x in v["fields"].items()}}
                                      for k, v in summary.items()},
                            "ports": ports}
-            scope = scope_of(argv, c["target"], priv)
-            r["scope_text"] = ("not checked (port list not explicit)" if scope is None else
-                               "; ".join(f"{p} {','.join(map(str, sorted(v)))}" for p, v in sorted(scope.items())) or "none")
-            r["findings"] = compare(c["case"], sums["nmap"][0], sums["fero"][0], scope, sums["nmap"][1], sums["fero"][1])
-            annotate(r["findings"], known)
+            analyse(r, argv, known)
             results.append(r)
             sev = collections.Counter()
             for sv in SEV_ORDER:
