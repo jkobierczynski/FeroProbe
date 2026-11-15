@@ -270,7 +270,7 @@ impl Pacer {
 /// the next answer it reads, `Ok(None)` when its read timed out or the
 /// packet was not an answer, or an error that ends the sweep. Rounds repeat
 /// for unanswered targets up to `cfg.retries`; after each round, answers
-/// are awaited for `cfg.timeout`. `on_reply` gets each target's first
+/// are awaited for the run's current probe timeout (see [`crate::rtt`]). `on_reply` gets each target's first
 /// answer and its round-trip time in ms. Stops early when `cancel` is set.
 ///
 /// A receive error is returned even after a full sweep, since silence then
@@ -347,7 +347,10 @@ where
                     record(r, &sent_at, &mut answered);
                 }
             }
-            let deadline = Instant::now() + cfg.timeout;
+            // ARP and NDP answers come from the link layer, so they do not
+            // feed the IP round-trip estimates; the wait is the run's
+            // current timeout for a host that has not answered yet.
+            let deadline = Instant::now() + cfg.rtt_state.group_timeout(&cfg.rtt);
             while answered.len() < wanted.len()
                 && !cancel.load(Ordering::Relaxed)
                 && let Some(left) = deadline.checked_duration_since(Instant::now())

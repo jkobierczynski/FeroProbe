@@ -57,6 +57,20 @@ fn duration(d: Duration) -> String {
     }
 }
 
+/// How long probes wait, for the timing step.
+fn wait_text(rtt: &feroprobe_core::RttTimeouts) -> String {
+    if rtt.min == rtt.max {
+        format!("wait a fixed {} for each answer", duration(rtt.min))
+    } else {
+        format!(
+            "wait {} for each answer at first, then adapt to each host's measured round-trip time (between {} and {})",
+            duration(rtt.initial),
+            duration(rtt.min),
+            duration(rtt.max)
+        )
+    }
+}
+
 /// The plan, one line per decision, numbered by phase as nmap runs them.
 pub(crate) fn explain(args: &Args, f: &Facts) -> Vec<String> {
     let mut out = vec!["FeroProbe plan (--explain), before anything is sent:".to_string()];
@@ -355,8 +369,8 @@ pub(crate) fn explain(args: &Args, f: &Facts) -> Vec<String> {
     say(
         &mut out,
         format!(
-            "wait {} for each answer and retry {} more time{}; at most {} connect/UDP probes at once and {} packets per second",
-            duration(c.timeout),
+            "{} and retry {} more time{}; at most {} probes waiting for an answer at once and {} packets per second",
+            wait_text(&c.rtt),
             c.retries,
             if c.retries == 1 { "" } else { "s" },
             c.concurrency,

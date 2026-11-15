@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 use futures::stream::{self, StreamExt};
 
 use crate::model::{HostResult, PortResult, PortState, Protocol, ScanConfig, elapsed_ms, reason};
+use crate::rtt::{AsyncWindow, Outcome};
 use crate::target::Target;
 use crate::timing::pace;
 
@@ -44,7 +45,47 @@ pub(crate) fn is_network_error(e: &io::Error) -> bool {
 ///
 /// Returns an error only for local failures (see [`is_network_error`]); every
 /// answer, or lack of one, from the network becomes a [`PortResult`].
+///
+/// Each try waits for the host's current adaptive timeout (see
+/// [`crate::rtt`]), and every answer's round-trip time feeds that estimate.
 pub async fn probe_port(addr: SocketAddr, cfg: &ScanConfig) -> io::Result<PortResult> {
+    probe_port_in(addr, cfg, None).await
+}
+
+/// On Windows a refused connection is reported only about two seconds
+/// after the reset arrives (the system retries the SYN first), so a connect
+/// try never waits less than this there.
+const WINDOWS_MIN_CONNECT_WAIT: Duration = Duration::from_millis(3000);
+
+/// How long a connect try to `addr` may wait now.
+pub(crate) fn connect_wait(addr: SocketAddr, cfg: &ScanConfig) -> Duration {
+    let wait = cfg.probe_timeout(addr.ip());
+    if cfg!(windows) {
+        wait.max(WINDOWS_MIN_CONNECT_WAIT)
+    } else {
+        wait
+    }
+}
+
+/// [`probe_port`] as one probe of a scan: each try takes a place in the
+/// scan's congestion windows (host `h`) first.
+pub(crate) async fn probe_port_in(
+    addr: SocketAddr,
+    cfg: &ScanConfig,
+    window: Option<(&AsyncWindow, usize)>,
+) -> io::Result<PortResult> {
+    let result = probe_port_tries(addr, cfg, window).await;
+    if let Some((w, h)) = window {
+        w.settled(h);
+    }
+    result
+}
+
+async fn probe_port_tries(
+    addr: SocketAddr,
+    cfg: &ScanConfig,
+    window: Option<(&AsyncWindow, usize)>,
+) -> io::Result<PortResult> {
     let result = |state, reason, rtt_ms| PortResult {
         port: addr.port(),
         protocol: Protocol::Tcp,
@@ -53,11 +94,35 @@ pub async fn probe_port(addr: SocketAddr, cfg: &ScanConfig) -> io::Result<PortRe
         rtt_ms,
         service: None,
     };
-    for _ in 0..=cfg.retries {
+    for tryno in 0..=cfg.retries {
+        let slot = match window {
+            Some((w, h)) => Some(w.acquire(h).await),
+            None => None,
+        };
         pace(cfg.scan_delay).await;
         let start = Instant::now();
-        let outcome = tokio::time::timeout(cfg.timeout, crate::netif::connect_tcp(addr)).await;
+        let outcome =
+            tokio::time::timeout(connect_wait(addr, cfg), crate::netif::connect_tcp(addr)).await;
         let rtt = Some(elapsed_ms(start));
+        // An answer (handshake or reset) times the round trip.
+        let answered = match &outcome {
+            Ok(Ok(_)) => true,
+            Ok(Err(e)) => e.kind() == ErrorKind::ConnectionRefused,
+            Err(_) => false,
+        };
+        if answered {
+            cfg.observe_rtt(addr.ip(), start.elapsed());
+        }
+        if let Some(slot) = slot {
+            let how = match &outcome {
+                _ if answered => Outcome::Answered,
+                Ok(Err(e)) if e.kind() != ErrorKind::TimedOut && is_network_error(e) => {
+                    Outcome::FilteredError
+                }
+                _ => Outcome::TimedOut,
+            };
+            slot.finish(start, tryno, how);
+        }
         crate::packet_trace::conn(
             addr,
             &match &outcome {
@@ -144,10 +209,19 @@ pub async fn connect_scan(
         .iter()
         .flat_map(|&port| (0..targets.len()).map(move |host_idx| (host_idx, port)));
 
+    // Congestion control, as in nmap: how many probes may wait for an
+    // answer at once grows with the answers and shrinks on losses.
+    let window = AsyncWindow::new(cfg, vec![ports.len(); targets.len()]);
+    let window = &window;
     let mut results = stream::iter(jobs)
         .map(|(host_idx, port)| {
             let addr = crate::target::socket_addr(targets[host_idx].addr, port);
-            async move { (host_idx, probe_port(addr, cfg).await) }
+            async move {
+                (
+                    host_idx,
+                    probe_port_in(addr, cfg, Some((window, host_idx))).await,
+                )
+            }
         })
         .buffer_unordered(cfg.concurrency.max(1));
 
@@ -188,7 +262,7 @@ mod tests {
         // reporting "connection refused", so the timeout must be longer than
         // that for a closed port to be seen as closed rather than filtered.
         let cfg = ScanConfig {
-            timeout: Duration::from_secs(5),
+            rtt: crate::rtt::RttTimeouts::fixed(Duration::from_secs(5)),
             ..Default::default()
         };
         let hosts = connect_scan(&[localhost()], &[open, closed], &cfg)

@@ -668,7 +668,9 @@ mod icmp {
                 return;
             };
             if src == dst && !replies.contains_key(&dst) {
-                let rtt = (at.saturating_duration_since(sent).as_secs_f64() * 1e6).round() / 1000.0;
+                let rtt = at.saturating_duration_since(sent);
+                cfg.observe_rtt(dst, rtt);
+                let rtt = (rtt.as_secs_f64() * 1e6).round() / 1000.0;
                 replies.insert(dst, rtt);
                 on_reply(dst, rtt);
             }
@@ -693,16 +695,31 @@ mod icmp {
                         record(r, &sent_at, &mut replies);
                     }
                 }
-                // Wait for late replies, but stop once every host has answered.
-                let deadline = Instant::now() + cfg.timeout;
+                // Wait for late replies, but stop once every host has
+                // answered, or each unanswered request has waited out its
+                // host's adaptive timeout (see `crate::rtt`).
+                let last_expiry =
+                    |sent_at: &HashMap<u16, (IpAddr, Instant)>, replies: &HashMap<IpAddr, f64>| {
+                        pending
+                            .iter()
+                            .filter(|(_, a)| !replies.contains_key(a))
+                            .filter_map(|(seq, _)| sent_at.get(seq))
+                            .map(|&(a, at)| at + cfg.probe_timeout(a))
+                            .max()
+                    };
+                let mut deadline = last_expiry(&sent_at, &replies);
                 while replies.len() < targets.len()
                     && !cancel.load(Ordering::Relaxed)
-                    && let Some(left) = deadline.checked_duration_since(Instant::now())
+                    && let Some(left) =
+                        deadline.and_then(|d| d.checked_duration_since(Instant::now()))
                 {
                     // Wake up regularly to notice cancellation.
                     match rx.recv_timeout(left.min(Duration::from_millis(100))) {
                         Ok(r) => record(r, &sent_at, &mut replies),
-                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                        // Timeouts move with each reply: look again.
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                            deadline = last_expiry(&sent_at, &replies);
+                        }
                         Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
                     }
                 }
@@ -731,7 +748,7 @@ mod tests {
     #[tokio::test]
     async fn localhost_is_up() {
         let cfg = ScanConfig {
-            timeout: Duration::from_secs(5),
+            rtt: crate::rtt::RttTimeouts::fixed(Duration::from_secs(5)),
             ..Default::default()
         };
         // Long enough for Windows, which reports a refused connect only ~2s
@@ -791,7 +808,7 @@ mod tests {
     #[tokio::test]
     async fn chosen_ping_probes() {
         let cfg = ScanConfig {
-            timeout: Duration::from_secs(5),
+            rtt: crate::rtt::RttTimeouts::fixed(Duration::from_secs(5)),
             ..Default::default()
         };
         let targets = [Target::new("127.0.0.1".parse().unwrap())];
@@ -866,7 +883,7 @@ mod tests {
             return;
         }
         let cfg = ScanConfig {
-            timeout: Duration::from_secs(5),
+            rtt: crate::rtt::RttTimeouts::fixed(Duration::from_secs(5)),
             ..Default::default()
         };
         let targets = [

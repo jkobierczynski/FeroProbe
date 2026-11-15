@@ -196,9 +196,24 @@ impl HostResult {
 /// Tunables shared by the scan techniques.
 #[derive(Debug, Clone)]
 pub struct ScanConfig {
-    /// How long to wait for an answer to each probe.
-    pub timeout: Duration,
-    /// Maximum number of connect/UDP probes in flight at once.
+    /// The limits on how long a probe waits for its answer (nmap's
+    /// `--min-rtt-timeout`, `--max-rtt-timeout`, `--initial-rtt-timeout`).
+    /// Within them, each host's timeout follows its measured round-trip
+    /// times; see [`crate::rtt`].
+    pub rtt: crate::rtt::RttTimeouts,
+    /// The run's round-trip time estimates, shared by clones.
+    pub rtt_state: crate::rtt::RttState,
+    /// The timing template's number, 0 to 5, which tunes how fast the
+    /// congestion window grows and how far a loss cuts it, as in nmap.
+    pub timing_level: u8,
+    /// `--min-rate`: probes per second to keep up, even past a full
+    /// congestion window. Zero means none.
+    pub min_rate: u32,
+    /// `--min-parallelism`: the congestion windows never shrink below this
+    /// many probes, as in nmap. Zero or one means the usual floor of one.
+    pub min_parallelism: usize,
+    /// Maximum number of probes waiting for an answer at once; caps the
+    /// congestion window.
     pub concurrency: usize,
     /// Extra attempts for probes that got no answer.
     pub retries: u32,
@@ -229,6 +244,18 @@ pub struct ScanConfig {
 }
 
 impl ScanConfig {
+    /// How long a probe to `addr` waits for its answer now, from the
+    /// host's measured round-trip times (see [`crate::rtt`]).
+    pub fn probe_timeout(&self, addr: std::net::IpAddr) -> Duration {
+        self.rtt_state.timeout(addr, &self.rtt)
+    }
+
+    /// Record a round-trip time measured to `addr`.
+    pub fn observe_rtt(&self, addr: std::net::IpAddr, rtt: Duration) {
+        self.rtt_state
+            .observe(addr, rtt, &self.rtt, self.scan_delay);
+    }
+
     /// Whether the [`deadline`](Self::deadline) has passed.
     pub fn expired(&self) -> bool {
         self.deadline.is_some_and(|d| Instant::now() >= d)
@@ -245,8 +272,11 @@ impl ScanConfig {
 impl Default for ScanConfig {
     fn default() -> Self {
         Self {
-            // Windows reports "connection refused" only ~2s after the reset.
-            timeout: Duration::from_millis(if cfg!(windows) { 3000 } else { 1500 }),
+            rtt: crate::rtt::RttTimeouts::default(),
+            rtt_state: crate::rtt::RttState::new(),
+            timing_level: 3,
+            min_rate: 0,
+            min_parallelism: 0,
             concurrency: 500,
             retries: 1,
             max_rate: 5000,

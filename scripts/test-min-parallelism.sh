@@ -4,16 +4,17 @@
 #
 # Builds a private two-namespace lab (see scripts/lib/lab.sh) whose target
 # silently drops probes to 30 ports, so each connect probe stays in flight
-# for the full --timeout and the first probes go out in bursts as large as
-# the parallelism. The script measures the largest burst on the wire (first
-# probes within half a timeout). -T2 starts from a parallelism of 10;
-# --scan-delay 0 removes its delay between probes so the bursts show:
+# for the full --timeout and the first probes go out in a burst as large as
+# the congestion window, which starts at 10, or at --min-parallelism when
+# that is higher (nmap's low_cwnd), and never above the parallelism. The
+# script measures the largest burst on the wire (first probes within half a
+# timeout). -T2 has a parallelism of 10; --scan-delay 0 removes its delay
+# between probes so the bursts show:
 #
 #   -T2                              10 (sanity: the template's value)
-#   -T2 --min-parallelism 20         20: raised to the minimum
-#   --min-parallelism 5              30: a minimum never lowers the
-#                                    default of 500
-#   -M 4 --min-parallelism 2         4: nor an explicit maximum
+#   -T2 --min-parallelism 20         20: the window starts at the minimum
+#   --min-parallelism 5              10: a minimum below 10 changes nothing
+#   -M 4 --min-parallelism 2         4: nor does it raise an explicit maximum
 #   -M 2 --min-parallelism 5         an error, with nmap's message
 #   --min-parallelism 0              rejected (must be at least 1)
 #   --min-parallelism 200            warns that it is pretty high (above 100)
@@ -43,7 +44,7 @@ run() {   # args: label expected-burst feroprobe-options...
 
 run "-T2" 10 -T2
 run "-T2 --min-parallelism 20" 20 -T2 --min-parallelism 20
-run "--min-parallelism 5" 30 --min-parallelism 5
+run "--min-parallelism 5" 10 --min-parallelism 5
 run "-M 4 --min-parallelism 2" 4 -M 4 --min-parallelism 2
 
 echo "== -M 2 --min-parallelism 5 =="

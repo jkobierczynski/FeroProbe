@@ -9,7 +9,7 @@
 # then go out in bursts of N, one burst per timeout. The script measures the
 # largest burst on the wire (first probes within half a timeout):
 #
-#   -sT (default)               12: all ports at once (the default is 500)
+#   -sT (default)               10: the congestion window's start (-c is 500)
 #   -sT -M 3                    3
 #   -sT --max-parallelism 3     3
 #   -sT -c 3, --concurrency 3   3 (FeroProbe's names)
@@ -18,8 +18,8 @@
 #   -M 0                        rejected (must be at least 1)
 #   -M 1000                     warns that it is above 900
 #
-# Raw-socket scans (-sS and friends) are paced by --max-rate instead, so
-# they are not covered here.
+# Raw-socket scans (-sS and friends) share the same congestion windows but
+# are not covered here.
 #
 # Needs root and Linux. Prints PASS/FAIL per check, exits non-zero on failure.
 #
@@ -42,7 +42,7 @@ udp_burst() { cap_burst "\$3==\"out\" && \$4==\"udp\" && \$7==\"$TGT_A\"" "$WIND
 echo "== -sT without -M (default parallelism) =="
 fero_captured -Pn -sT "${T[@]}" -p "$PORTS" "$TGT_A"
 check "exit status" "$RC" 0
-check "largest burst of probes" "$(tcp_burst)" "$NPORTS"
+check "largest burst of probes" "$(tcp_burst)" 10
 
 for opt in -M --max-parallelism -c --concurrency; do
     echo "== -sT $opt 3 =="

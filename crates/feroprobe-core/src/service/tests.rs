@@ -12,7 +12,7 @@ const WAIT: Duration = Duration::from_millis(400);
 
 fn cfg() -> ScanConfig {
     ScanConfig {
-        timeout: Duration::from_secs(5),
+        rtt: crate::rtt::RttTimeouts::fixed(Duration::from_secs(5)),
         ..Default::default()
     }
 }

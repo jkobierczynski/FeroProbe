@@ -412,7 +412,14 @@ mod imp {
                 if !sent_any {
                     break;
                 }
-                let deadline = Instant::now() + cfg.timeout;
+                // The longest adaptive timeout among the targets: routers on
+                // the way answer sooner than the target itself.
+                let wait = jobs
+                    .iter()
+                    .map(|&(_, addr, _)| cfg.probe_timeout(addr))
+                    .max()
+                    .unwrap_or(cfg.rtt.initial);
+                let deadline = Instant::now() + wait;
                 while let Some(left) = deadline.checked_duration_since(Instant::now()) {
                     match rx.recv_timeout(left) {
                         Ok(a) => record(&mut first, a),
@@ -473,7 +480,7 @@ mod imp {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             let port = listener.local_addr().unwrap().port();
             let cfg = ScanConfig {
-                timeout: Duration::from_millis(300),
+                rtt: crate::rtt::RttTimeouts::fixed(Duration::from_millis(300)),
                 retries: 0,
                 ..Default::default()
             };

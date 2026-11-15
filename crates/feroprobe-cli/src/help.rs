@@ -52,10 +52,13 @@ OS DETECTION:
 TIMING AND PERFORMANCE:
   A <time> is in seconds unless it ends in ms, s, m or h (e.g. 500ms, 30m).
   -T<0-5>: Timing template, from paranoid (0) to insane (5)
-  --timeout <ms>: How long to wait for an answer to each probe
+  --initial-rtt-timeout <time>: How long a probe waits before any round trip
+      is measured; after that, each host's wait follows its round-trip times
+  --min-rtt-timeout, --max-rtt-timeout <time>: Limits on that adaptive wait
+  --timeout <ms>: A fixed wait for each probe (sets all three of the above)
   --retries, --max-retries <tries>: Extra attempts for probes without an answer
-  -c, -M, --concurrency, --max-parallelism <number>: Connect/UDP probes in flight
-  --min-parallelism <number>: At least <number> connect/UDP probes in flight
+  -c, -M, --concurrency, --max-parallelism <number>: Most probes waiting at once
+  --min-parallelism <number>: At least <number> probes allowed to wait at once
   --min-rate <number>: Send at least <number> packets per second
   --max-rate <number>: Send at most <number> packets per second
   --scan-delay <time>: Wait at least <time> between probes

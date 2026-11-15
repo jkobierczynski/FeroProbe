@@ -454,7 +454,7 @@ mod imp {
                 return;
             }
             let cfg = ScanConfig {
-                timeout: Duration::from_millis(400),
+                rtt: crate::rtt::RttTimeouts::fixed(Duration::from_millis(400)),
                 retries: 0,
                 ..Default::default()
             };
