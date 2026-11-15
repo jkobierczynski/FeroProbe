@@ -3196,14 +3196,21 @@ mod tests {
             let mut cfg = scan_config(&a);
             apply_min_rate(&mut cfg, &a, files).map(|w| (cfg, w))
         };
-        // 1000 probes/s with 1.5 s timeouts needs 1500 in flight.
+        // 1000 probes/s with 1.5 s timeouts needs 1500 in flight (on
+        // Windows, whose connect tries wait at least 3 s, 3000).
         let (cfg, w) = tuned(&["--min-rate", "1000", "--timeout", "1500"], None).unwrap();
-        assert_eq!(cfg.concurrency, 1500);
+        assert_eq!(cfg.concurrency, if cfg!(windows) { 3000 } else { 1500 });
         assert_eq!(cfg.max_rate, 5000);
         assert!(w.is_empty());
         let (cfg, w) = tuned(&["--min-rate", "9000", "--timeout", "100"], Some(1024)).unwrap();
-        assert_eq!((cfg.max_rate, cfg.concurrency), (9000, 900));
-        assert!(w.is_empty());
+        if cfg!(windows) {
+            // 27000 needed: capped by the open-file limit, with a warning.
+            assert_eq!((cfg.max_rate, cfg.concurrency), (9000, 960));
+            assert_eq!(w.len(), 1, "{w:?}");
+        } else {
+            assert_eq!((cfg.max_rate, cfg.concurrency), (9000, 900));
+            assert!(w.is_empty());
+        }
         // The open-file limit caps the parallelism, with a warning.
         let (cfg, w) = tuned(&["--min-rate", "2000", "--timeout", "1000"], Some(1024)).unwrap();
         assert_eq!(cfg.concurrency, 960);
