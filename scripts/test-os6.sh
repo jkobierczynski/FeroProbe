@@ -132,7 +132,8 @@ PY
 }
 
 # --- run -O and read one host's OS guess from JSON -----------------------
-# Prints "<family>|<distance>" for a guess, or "none" when the host has none.
+# Prints "<family>|<distance>" of the best match, or "none" when the host has
+# no OS result or no match.
 os_of() {   # args: json-file
     python3 - "$1" <<'PY'
 import json, sys
@@ -141,10 +142,10 @@ hosts = data.get("hosts") or []
 if not hosts:
     print("none"); sys.exit(0)
 os = hosts[0].get("os")
-if not os:
+if not os or not os.get("matches"):
     print("none")
 else:
-    print("%s|%s" % (os.get("family"), os.get("distance")))
+    print("%s|%s" % (os["matches"][0].get("family"), os.get("distance")))
 PY
 }
 

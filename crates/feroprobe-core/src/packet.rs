@@ -86,7 +86,7 @@ pub fn checksum(data: &[u8]) -> u16 {
 
 /// Sum of the IPv4 or IPv6 pseudo-header used by TCP, UDP and ICMPv6
 /// checksums. Both addresses must be of the same family.
-fn pseudo_header_sum(src: IpAddr, dst: IpAddr, proto: u8, len: usize) -> u32 {
+pub(crate) fn pseudo_header_sum(src: IpAddr, dst: IpAddr, proto: u8, len: usize) -> u32 {
     let words = |ip: IpAddr| -> u32 {
         let bytes: Vec<u8> = match ip {
             IpAddr::V4(a) => a.octets().to_vec(),

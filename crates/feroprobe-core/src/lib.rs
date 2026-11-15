@@ -51,7 +51,7 @@ pub use dns::reverse_lookup;
 pub use evasion::{Evasion, Fragment};
 pub use ipproto::ip_protocol_scan;
 pub use model::{HostResult, PortResult, PortState, Protocol, ScanConfig};
-pub use os::{OsMatch, TcpTraits, os_detect};
+pub use os::{OsMatch, OsOptions, OsResult, os_detect};
 pub use ports::{
     PortLists, ip_protocol_name, parse_port_lists, parse_ports, parse_protocols, service_name,
     top_ports, top_sctp_ports, top_udp_ports,

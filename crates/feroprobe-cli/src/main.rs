@@ -15,11 +15,12 @@ use clap::{Parser, ValueEnum};
 use feroprobe_core::discovery::{DEFAULT_TCP_PING_PORT, DEFAULT_UDP_PING_PORT};
 use feroprobe_core::timing::parse_duration;
 use feroprobe_core::{
-    Evasion, Exclusions, Fragment, HostResult, IpVersion, PingProbes, PortLists, RawTcpScan,
-    ScanConfig, SctpScanKind, Target, TcpScanKind, Timing, connect_scan, detect_services, discover,
-    ip_protocol_scan, os_detect, parse_port_lists, parse_ports, parse_scanflags,
-    raw_ipv6_available, raw_sockets_available, raw_tcp_scan, resolve_targets_lenient,
-    reverse_lookup, sctp_scan, top_ports, top_sctp_ports, top_udp_ports, traceroute, udp_scan,
+    Evasion, Exclusions, Fragment, HostResult, IpVersion, OsOptions, PingProbes, PortLists,
+    RawTcpScan, ScanConfig, SctpScanKind, Target, TcpScanKind, Timing, connect_scan,
+    detect_services, discover, ip_protocol_scan, os_detect, parse_port_lists, parse_ports,
+    parse_scanflags, raw_ipv6_available, raw_sockets_available, raw_tcp_scan,
+    resolve_targets_lenient, reverse_lookup, sctp_scan, top_ports, top_sctp_ports, top_udp_ports,
+    traceroute, udp_scan,
 };
 use futures::StreamExt;
 
@@ -375,6 +376,18 @@ struct Args {
     /// -O: guess each host's operating system (raw sockets: Linux, root or CAP_NET_RAW)
     #[arg(short = 'O')]
     os: bool,
+
+    /// Limit OS detection to hosts with at least one open and one closed TCP port
+    #[arg(long)]
+    osscan_limit: bool,
+
+    /// Report near OS matches too ("aggressive guesses"); --fuzzy is the same
+    #[arg(long, alias = "fuzzy")]
+    osscan_guess: bool,
+
+    /// OS detection tries for a host without a perfect match (default 5)
+    #[arg(long, value_name = "tries", value_parser = clap::value_parser!(u32).range(1..))]
+    max_os_tries: Option<u32>,
 
     /// Trace the route to each host that is up, after the port scan
     /// (raw sockets: Linux, root or CAP_NET_RAW)
@@ -1146,6 +1159,35 @@ fn aggressive(plan: &mut Plan, args: &Args, privileged: bool) -> Result<(bool, b
     Ok((args.os, args.traceroute))
 }
 
+/// The `-O` options. The echo probe is in scope only when the command's
+/// host discovery sends ICMP echo requests (the default as root, or `-PE`).
+fn os_options(args: &Args, plan: &Plan, probes: &PingProbes) -> OsOptions {
+    OsOptions {
+        limit: args.osscan_limit,
+        guess: args.osscan_guess,
+        max_tries: args
+            .max_os_tries
+            .unwrap_or(feroprobe_core::os::DEFAULT_TRIES),
+        icmp_echo: plan.discovery && probes.echo,
+    }
+}
+
+/// Warnings for `-O` options given without `-O`, which do nothing then.
+fn os_option_warnings(args: &Args, os: bool) -> Vec<String> {
+    if os {
+        return Vec::new();
+    }
+    [
+        (args.osscan_limit, "--osscan-limit"),
+        (args.osscan_guess, "--osscan-guess"),
+        (args.max_os_tries.is_some(), "--max-os-tries"),
+    ]
+    .iter()
+    .filter(|(given, _)| *given)
+    .map(|(_, name)| format!("{name} has no effect without OS detection (-O or -A)"))
+    .collect()
+}
+
 /// The options that send probes able to upset fragile OT/ICS devices
 /// (PLCs, RTUs, protocol gateways), in the order they appear in the help.
 /// Version detection talks application protocols (HTTP, TLS, ...) to
@@ -1331,6 +1373,7 @@ struct ScanJob<'a> {
     scanflags: Option<u8>,
     version_wait: Duration,
     os: bool,
+    os_opts: OsOptions,
 }
 
 /// How many hosts `--host-timeout` scans at once, each on its own clock.
@@ -1441,8 +1484,28 @@ impl ScanJob<'_> {
             done(&progress);
         }
         if self.os {
+            if self.os_opts.limit {
+                let all = OsOptions {
+                    limit: false,
+                    ..self.os_opts
+                };
+                for (i, h) in hosts.iter().enumerate() {
+                    if feroprobe_core::os::job_for(i, h, &self.os_opts).is_none()
+                        && feroprobe_core::os::job_for(i, h, &all).is_some()
+                    {
+                        progress.say(1, || {
+                            format!(
+                                "Skipping OS Scan against {} due to absence of open (or perhaps closed) ports",
+                                h.addr
+                            )
+                        });
+                    }
+                }
+            }
             let done = progress.phase("OS detection", live.len());
-            os_detect(hosts, cfg).await.context("OS detection failed")?;
+            os_detect(hosts, cfg, &self.os_opts)
+                .await
+                .context("OS detection failed")?;
             done(&progress);
         }
         Ok(())
@@ -1566,9 +1629,6 @@ fn dry_run_notes(args: &Args, plan: &Plan, d: &DryOrder, privileged: bool) -> Ve
     if plan.version && !plan.ping_only {
         follow.push("service detection (-sV)");
     }
-    if d.os {
-        follow.push("OS detection (-O)");
-    }
     if d.trace {
         follow.push("traceroute (--traceroute)");
     }
@@ -1674,6 +1734,7 @@ fn dry_run(
         },
         evasion: &cfg.evasion,
         retries: cfg.retries,
+        os: (d.os && scan).then(|| os_options(args, plan, probes)),
         notes: dry_run_notes(args, plan, d, privileged),
     };
     let stdout = std::io::stdout();
@@ -1783,6 +1844,9 @@ async fn main() -> Result<()> {
     let skip_discovery = args.ping.contains(&PingArg::Skip);
     let mut plan = plan(&args.scan, skip_discovery, syn_ok, args.scanflags.is_some())?;
     let (mut os, trace) = aggressive(&mut plan, &args, raw_sockets_available())?;
+    for w in os_option_warnings(&args, os) {
+        eprintln!("Warning: {w}");
+    }
     if os {
         if plan.ping_only {
             bail!("-O needs a port scan, so it cannot be combined with -sn");
@@ -2018,6 +2082,7 @@ async fn main() -> Result<()> {
             scanflags: args.scanflags,
             version_wait: Duration::from_millis(args.version_timeout),
             os,
+            os_opts: os_options(&args, &plan, &probes),
         };
         scan_types = job.scan_types();
         // Only scan hosts that discovery found (all of them with -Pn).
@@ -2103,6 +2168,7 @@ async fn main() -> Result<()> {
         show_reason: args.reason,
         show_version: plan.version,
         show_os: os,
+        os_guess: args.osscan_guess,
         show_trace: trace,
         assume_up: !plan.discovery,
         ping_only: plan.ping_only,
@@ -2776,7 +2842,8 @@ mod tests {
         let notes = dry_run_notes(&a, &plan, &d, false).join("\n");
         // Steps that need replies are named, not listed probe by probe.
         assert!(notes.contains("service detection (-sV)"), "{notes}");
-        assert!(notes.contains("OS detection (-O)"), "{notes}");
+        // OS detection is listed probe by probe (with port placeholders).
+        assert!(!notes.contains("OS detection (-O)"), "{notes}");
         assert!(notes.contains("traceroute"), "{notes}");
         // -n: no reverse DNS to mention.
         assert!(!notes.contains("reverse DNS"), "{notes}");
@@ -2954,6 +3021,7 @@ mod tests {
             scanflags: None,
             version_wait: Duration::from_secs(1),
             os: false,
+            os_opts: OsOptions::default(),
         };
         let target = Target {
             addr: "127.0.0.1".parse().unwrap(),

@@ -26,7 +26,7 @@ no external binaries.
 | Table, JSON, nmap-style XML and grepable output, `--reason`, `--open`, `--packet-trace` | ✅ |
 | Report files `-oN`, `-oX`, `-oG`, `-oJ`, `-oA`; target lists `-iL`; `--exclude`, `--excludefile`; progress with `-v` | ✅ |
 | Service and version detection, `-sV`, with our own probes and rules | ✅ |
-| OS detection, `-O`, from SYN-ACK traits with our own signatures, IPv4 and IPv6 (Linux, root) | ✅ |
+| OS detection, `-O`, a multi-probe fingerprint matched against our own OS database, with `--osscan-limit`, `--osscan-guess`, `--max-os-tries`, IPv4 and IPv6 (Linux, root) | ✅ |
 | Traceroute, `--traceroute`, IPv4 and IPv6 (Linux, root), and `-A` (`-sV -O --traceroute`) | ✅ |
 
 **[The FeroProbe manual](docs/manual.md)** documents every option, its
@@ -204,24 +204,29 @@ SNMP query. `--version-timeout` sets how long to wait for each reply (default
 
 ### OS detection
 
-`-O` sends one SYN that offers every common TCP option to an open port and
-reads the SYN-ACK. The initial TTL (64, 128 or 255), the order of the TCP
-options that come back and the "don't fragment" bit tell operating system
-families apart, and the TTL also gives the number of hops:
+`-O` sends each host with an open TCP port at most 9 probes per try: four
+SYNs with different TCP options, an ECN SYN and an ACK to the open port, a SYN
+and an ACK to a closed port the scan found, and an ICMP echo only when host
+discovery sends echo requests anyway. The answers (option layouts, windows,
+flags, IP ID and timestamp sequences, initial TTL) form a fingerprint that is
+matched against FeroProbe's own OS database, which names versions where the
+probes tell them apart:
 
 ```
-OS guess: Linux 3.x - 6.x (90%), from 22/tcp
-OS fingerprint: ttl=64 df=1 win=65483 opts=M,S,T,N,W mss=65495 ws=7
-Network distance: 1 hop
+Device type: general purpose
+Running: Linux 4.X|5.X|6.X
+OS CPE: cpe:/o:linux:linux_kernel:4 cpe:/o:linux:linux_kernel:5 cpe:/o:linux:linux_kernel:6
+OS details: Linux 4.19 - 6.x
+Network Distance: 1 hop
 ```
 
-The signatures are FeroProbe's own (in `crates/feroprobe-core/src/os.rs`), not
-nmap's database, so the guess is per family (Linux, Windows, macOS, FreeBSD,
-OpenBSD, network devices) rather than an exact version. Linux is still
-recognized when SACK, timestamps or window scaling are turned off. The fingerprint line
-shows the raw traits, which is what a new signature is written from. It needs
-raw sockets, so Linux with root or `CAP_NET_RAW`, and at least one open TCP port.
-IPv6 hosts are covered too: the hop limit stands in for the TTL.
+The database is FeroProbe's own ([docs/os-fingerprints.md](docs/os-fingerprints.md)),
+not nmap's, and much smaller: a host it does not know gets `No exact OS
+matches` and its fingerprint, which is what a new signature is written from.
+`--osscan-guess` shows near matches, `--osscan-limit` skips hosts without both
+an open and a closed TCP port, `--max-os-tries` caps the tries (default 5). It
+needs raw sockets, so Linux with root or `CAP_NET_RAW`. IPv6 hosts are covered
+too.
 
 ### Traceroute and -A
 

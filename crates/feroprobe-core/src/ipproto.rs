@@ -304,6 +304,7 @@ mod imp {
                 protocol,
                 ttl: 64,
                 ipid: Some(7),
+                df: false,
                 payload,
             }
         }
@@ -408,6 +409,7 @@ mod imp {
                 protocol: 47,
                 ttl: 64,
                 ipid: Some(PROBE.ipid),
+                df: false,
                 payload: &[],
             };
             assert!(answers(&mine, &idx, &PROBE).is_empty());

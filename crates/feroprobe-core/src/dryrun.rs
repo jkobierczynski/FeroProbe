@@ -77,6 +77,8 @@ pub struct DryRun<'a> {
     pub evasion: &'a Evasion,
     /// Unanswered probes are sent this many more times in a real run.
     pub retries: u32,
+    /// OS detection (`-O`), if it runs.
+    pub os: Option<crate::os::OsOptions>,
     /// Extra lines for the header: steps the dry run cannot show, what a
     /// real run would need, and so on.
     pub notes: Vec<String>,
@@ -90,6 +92,8 @@ pub struct Summary {
     /// Port-scan probes; with `-f`/`--mtu` each fragment counts, with `-D`
     /// each decoy copy counts.
     pub scan: u64,
+    /// OS-detection probes of one try, for every target.
+    pub os: u64,
 }
 
 /// Fixed per-run values (source port, sequence cookie, ...) that a real
@@ -261,6 +265,13 @@ pub fn write(run: &DryRun<'_>, w: &mut dyn Write) -> io::Result<Summary> {
         }
     }
     summary.scan = out.count - before;
+    if let Some(opts) = &run.os
+        && run.tcp.is_some()
+    {
+        let before = out.count;
+        os_probes(&mut out, run, opts, &sources, &v)?;
+        summary.os = out.count - before;
+    }
     let retry = if run.retries > 0 {
         format!(
             "; a real run resends unanswered probes up to {} more time{}",
@@ -270,8 +281,13 @@ pub fn write(run: &DryRun<'_>, w: &mut dyn Write) -> io::Result<Summary> {
     } else {
         String::new()
     };
+    let os = if run.os.is_some() && run.tcp.is_some() {
+        format!(", {} OS-detection probes (one try)", summary.os)
+    } else {
+        String::new()
+    };
     out.note(&format!(
-        "Dry run done: {} discovery and {} port-scan probe{} for {} host{} listed, nothing sent{retry}",
+        "Dry run done: {} discovery and {} port-scan probe{}{os} for {} host{} listed, nothing sent{retry}",
         summary.discovery,
         summary.scan,
         if summary.scan == 1 { "" } else { "s" },
@@ -280,6 +296,85 @@ pub fn write(run: &DryRun<'_>, w: &mut dyn Write) -> io::Result<Summary> {
     ))?;
     Ok(summary)
 }
+
+/// The OS-detection probes of one try, per target. The ports are the ones
+/// the scan finds, so they show as `<open>` and `<closed>`.
+fn os_probes(
+    out: &mut Out<'_>,
+    run: &DryRun<'_>,
+    opts: &crate::os::OsOptions,
+    sources: &[Option<IpAddr>],
+    v: &Values,
+) -> io::Result<()> {
+    use crate::os::probes::{self, Target};
+    out.note(&format!(
+        "OS detection (-O): only for hosts where the scan finds an open TCP port{}. <open> and \
+         <closed> stand for an open and a closed TCP port the scan finds among the ports \
+         above; the probes to <closed> go only if it finds one. The four SYNs to <open> go \
+         100 ms apart. A host without a perfect match is tried again, up to {} tr{} in all \
+         (two when the scan finds no closed port)",
+        if opts.limit {
+            " and a closed (or unfiltered) one (--osscan-limit)"
+        } else {
+            ""
+        },
+        opts.max_tries.max(1),
+        if opts.max_tries.max(1) == 1 {
+            "y"
+        } else {
+            "ies"
+        },
+    ))?;
+    if opts.icmp_echo {
+        out.note("The echo request is sent because this command's host discovery sends ICMP echo requests")?;
+    }
+    let keys = probes::Keys {
+        sport: v.sport,
+        seq: v.cookie,
+        ack: v.cookie.rotate_left(16),
+        tsval: v.cookie.rotate_left(8),
+        icmp_id: v.icmp_id,
+    };
+    for (t, src) in run.targets.iter().zip(sources) {
+        for i in probes::plan(true, opts.icmp_echo) {
+            let v6 = t.addr.is_ipv6();
+            let Some(src) = src.filter(|s| s.is_ipv6() == v6) else {
+                out.probe(&format!("{} * > {} (no route)", NAMES_UPPER[i], t.addr))?;
+                continue;
+            };
+            let line = match probes::target_of(i) {
+                Target::Icmp => {
+                    let proto = if v6 {
+                        packet::IPPROTO_ICMPV6
+                    } else {
+                        packet::IPPROTO_ICMP
+                    };
+                    probes::describe(proto, &probes::echo(v6, &keys), Some(src), t.addr)
+                }
+                target => {
+                    let seg = probes::tcp_segment(i, src, t.addr, 0, &keys);
+                    let placeholder = if target == Target::Open {
+                        "<open>"
+                    } else {
+                        "<closed>"
+                    };
+                    probes::describe(packet::IPPROTO_TCP, &seg, Some(src), t.addr).replacen(
+                        &host_port(Some(t.addr), Some(0)),
+                        &host_port(Some(t.addr), None).replace('*', placeholder),
+                        1,
+                    )
+                }
+            };
+            out.probe(&line)?;
+        }
+    }
+    Ok(())
+}
+
+/// The protocol of each OS probe, for a line without a route.
+const NAMES_UPPER: [&str; crate::os::probes::PROBES] = [
+    "TCP", "TCP", "TCP", "TCP", "TCP", "TCP", "TCP", "TCP", "ICMP",
+];
 
 /// The UDP datagram a UDP probe sends; the kernel picks the source port.
 fn udp_line(src: Option<IpAddr>, dst: IpAddr, port: u16) -> String {
@@ -630,8 +725,45 @@ mod tests {
             protocols: &[],
             evasion: ev,
             retries: 1,
+            os: None,
             notes: Vec::new(),
         }
+    }
+
+    #[test]
+    fn os_detection_probes_use_placeholders() {
+        let targets = [target("127.0.0.1")];
+        let ev = Evasion::default();
+        let ports = [22];
+        let run = DryRun {
+            tcp: Some((DryTcp::Raw(RawTcpScan::new(TcpScanKind::Syn)), &ports)),
+            os: Some(crate::os::OsOptions::default()),
+            ..base(&targets, &ev)
+        };
+        let (text, summary) = run_to_string(&run);
+        // Eight TCP probes, no echo (discovery sends none).
+        assert_eq!(summary.os, 8, "{text}");
+        assert!(text.contains("> 127.0.0.1:<open> S seq="), "{text}");
+        assert!(text.contains("> 127.0.0.1:<open> SEC seq="), "{text}");
+        assert!(text.contains("> 127.0.0.1:<closed> A seq="), "{text}");
+        assert!(text.contains("<mss 1460,sackOK,timestamp"), "{text}");
+        assert!(!text.contains("ICMP"), "{text}");
+        assert!(text.contains("up to 5 tries"), "{text}");
+        assert!(text.contains("8 OS-detection probes"), "{text}");
+
+        let echo = crate::os::OsOptions {
+            icmp_echo: true,
+            max_tries: 1,
+            ..Default::default()
+        };
+        let run = DryRun {
+            os: Some(echo),
+            ..run
+        };
+        let (text, summary) = run_to_string(&run);
+        assert_eq!(summary.os, 9, "{text}");
+        assert!(text.contains("echo request"), "{text}");
+        assert!(text.contains("up to 1 try in all"), "{text}");
     }
 
     #[test]
@@ -648,7 +780,8 @@ mod tests {
             summary,
             Summary {
                 discovery: 0,
-                scan: 2
+                scan: 2,
+                os: 0
             }
         );
         let probes: Vec<&str> = text.lines().filter(|l| l.starts_with(PREFIX)).collect();

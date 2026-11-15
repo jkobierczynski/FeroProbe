@@ -243,6 +243,7 @@ mod imp {
                 protocol,
                 ttl: 64,
                 ipid: Some(1),
+                df: false,
                 payload,
             }
         }
