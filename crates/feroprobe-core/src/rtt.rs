@@ -188,26 +188,37 @@ impl RttState {
 
     /// How long a probe to `addr` waits for its answer now: the host's own
     /// timeout once it has answered, else the group's once any host has,
-    /// else the initial timeout. nmap's `probeTimeout()`.
-    pub fn timeout(&self, addr: IpAddr, limits: &RttTimeouts) -> Duration {
-        Self::timeout_in(&self.lock(), addr, limits)
-    }
-
-    fn timeout_in(est: &Estimates, addr: IpAddr, limits: &RttTimeouts) -> Duration {
-        if let Some(host) = est.hosts.get(&addr).filter(|t| t.measured()) {
-            limits.clamp(host.timeout())
-        } else if let Some(group) = est.group.filter(|t| t.measured()) {
-            limits.clamp(group.timeout())
-        } else {
-            limits.initial
-        }
+    /// else the initial timeout. nmap's `probeTimeout()`. A measured
+    /// timeout is boxed into the current limits, then raised to the scan
+    /// delay, as nmap's `adjust_timeouts2` does.
+    pub fn timeout(&self, addr: IpAddr, limits: &RttTimeouts, scan_delay: Duration) -> Duration {
+        let est = self.lock();
+        let measured = est
+            .hosts
+            .get(&addr)
+            .filter(|t| t.measured())
+            .or(est.group.as_ref().filter(|t| t.measured()));
+        Self::limited(measured, limits, scan_delay)
     }
 
     /// The timeout for a host that has not answered yet: the group's once
     /// any host has, else the initial timeout.
-    pub fn group_timeout(&self, limits: &RttTimeouts) -> Duration {
-        match self.lock().group.filter(|t| t.measured()) {
-            Some(group) => limits.clamp(group.timeout()),
+    pub fn group_timeout(&self, limits: &RttTimeouts, scan_delay: Duration) -> Duration {
+        let est = self.lock();
+        Self::limited(
+            est.group.as_ref().filter(|t| t.measured()),
+            limits,
+            scan_delay,
+        )
+    }
+
+    fn limited(
+        measured: Option<&TimeoutInfo>,
+        limits: &RttTimeouts,
+        scan_delay: Duration,
+    ) -> Duration {
+        match measured {
+            Some(t) => limits.clamp(t.timeout()).max(scan_delay),
             None => limits.initial,
         }
     }
@@ -252,10 +263,12 @@ pub(crate) struct Perf {
 
 impl Perf {
     pub(crate) fn for_config(cfg: &ScanConfig) -> Self {
-        // nmap's low_cwnd is --min-parallelism, at least one probe.
-        let low_cwnd = cfg.min_parallelism.max(1) as f64;
         // -c is FeroProbe's (and, as an alias, nmap's --max-parallelism).
-        let max_cwnd = (cfg.concurrency.max(1) as f64).max(low_cwnd);
+        let max_cwnd = cfg.concurrency.max(1);
+        // nmap's low_cwnd is --min-parallelism, at least one probe, and
+        // never above the maximum.
+        let low_cwnd = cfg.min_parallelism.clamp(1, max_cwnd) as f64;
+        let max_cwnd = max_cwnd as f64;
         Self {
             low_cwnd,
             max_cwnd,
@@ -570,7 +583,8 @@ impl<K: Copy + Eq + Hash> Flight<K> {
 
     /// The timeout for a probe to host `h` now.
     pub(crate) fn timeout(&self, h: usize) -> Duration {
-        self.state.timeout(self.addrs[h], &self.limits)
+        self.state
+            .timeout(self.addrs[h], &self.limits, self.scan_delay)
     }
 
     /// Time out the waiting probes whose time is up.
@@ -776,7 +790,12 @@ impl<K: Copy + Eq + Hash> Flight<K> {
 pub(crate) struct AsyncWindow {
     cc: Mutex<Congestion>,
     changed: tokio::sync::Notify,
+    /// Hosts whose probes need not go any more (proven up during host
+    /// discovery): checked whenever a probe gets its turn.
+    skip: Option<SkipHost>,
 }
+
+type SkipHost = Box<dyn Fn(usize) -> bool + Send + Sync>;
 
 impl AsyncWindow {
     /// `per_host[h]` is how many probes host `h` has.
@@ -784,16 +803,32 @@ impl AsyncWindow {
         Self {
             cc: Mutex::new(Congestion::new(cfg, per_host)),
             changed: tokio::sync::Notify::new(),
+            skip: None,
         }
+    }
+
+    /// Skip the probes of every host `h` for which `skip(h)` holds by the
+    /// time they get their turn: [`acquire`](Self::acquire) then returns
+    /// `None` and nothing is sent.
+    pub(crate) fn with_skip(
+        mut self,
+        skip: impl Fn(usize) -> bool + Send + Sync + 'static,
+    ) -> Self {
+        self.skip = Some(Box::new(skip));
+        self
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Congestion> {
         self.cc.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Wait until a probe to host `h` may go, and count it as sent.
-    pub(crate) async fn acquire(&self, h: usize) -> Slot<'_> {
+    /// Wait until a probe to host `h` may go, and count it as sent. `None`
+    /// when the host's probes are to be skipped (see [`with_skip`](Self::with_skip)).
+    pub(crate) async fn acquire(&self, h: usize) -> Option<Slot<'_>> {
         loop {
+            if self.skip.as_ref().is_some_and(|skip| skip(h)) {
+                return None;
+            }
             let notified = self.changed.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
@@ -802,11 +837,11 @@ impl AsyncWindow {
                 let now = Instant::now();
                 if cc.may_send(h, now) {
                     cc.sent(h);
-                    return Slot {
+                    return Some(Slot {
                         window: self,
                         h,
                         done: false,
-                    };
+                    });
                 }
                 cc.min_rate_due()
             };
@@ -932,19 +967,19 @@ mod tests {
         let limits = RttTimeouts::default();
         let state = RttState::new();
         let (a, b): (IpAddr, IpAddr) = ("10.0.0.1".parse().unwrap(), "10.0.0.2".parse().unwrap());
-        assert_eq!(state.timeout(a, &limits), ms(1000));
-        assert_eq!(state.group_timeout(&limits), ms(1000));
+        assert_eq!(state.timeout(a, &limits, Duration::ZERO), ms(1000));
+        assert_eq!(state.group_timeout(&limits, Duration::ZERO), ms(1000));
         state.observe(a, ms(40), &limits, Duration::ZERO);
-        assert_eq!(state.timeout(a, &limits), ms(200));
+        assert_eq!(state.timeout(a, &limits, Duration::ZERO), ms(200));
         // b has not answered: it gets the group's timeout.
-        assert_eq!(state.timeout(b, &limits), ms(200));
-        assert_eq!(state.group_timeout(&limits), ms(200));
+        assert_eq!(state.timeout(b, &limits, Duration::ZERO), ms(200));
+        assert_eq!(state.group_timeout(&limits, Duration::ZERO), ms(200));
         assert_eq!(state.srtt(a), Some(ms(40)));
         assert_eq!(state.srtt(b), None);
         // Clones share the estimates.
         let other = state.clone();
         other.observe(b, ms(1), &limits, Duration::ZERO);
-        assert_eq!(state.timeout(b, &limits), ms(100));
+        assert_eq!(state.timeout(b, &limits, Duration::ZERO), ms(100));
     }
 
     #[test]
@@ -952,10 +987,13 @@ mod tests {
         let state = RttState::new();
         let a: IpAddr = "10.0.0.1".parse().unwrap();
         state.observe(a, ms(40), &RttTimeouts::default(), Duration::ZERO);
-        assert_eq!(state.timeout(a, &RttTimeouts::default()), ms(200));
+        assert_eq!(
+            state.timeout(a, &RttTimeouts::default(), Duration::ZERO),
+            ms(200)
+        );
         let fixed = RttTimeouts::fixed(ms(800));
-        assert_eq!(state.timeout(a, &fixed), ms(800));
-        assert_eq!(state.group_timeout(&fixed), ms(800));
+        assert_eq!(state.timeout(a, &fixed, Duration::ZERO), ms(800));
+        assert_eq!(state.group_timeout(&fixed, Duration::ZERO), ms(800));
     }
 
     #[test]
@@ -993,6 +1031,15 @@ mod tests {
         let mut w = Window::new(&perf);
         w.drop_host(10, &perf, Instant::now());
         assert_eq!(w.cwnd(), 20.0);
+        // A floor above the maximum (a host job's share) stays within it.
+        let perf = Perf::for_config(&ScanConfig {
+            min_parallelism: 32,
+            ..cfg(1, 3)
+        });
+        assert_eq!(
+            (perf.low_cwnd, perf.max_cwnd, perf.initial_cwnd),
+            (1.0, 1.0, 1.0)
+        );
     }
 
     #[test]
@@ -1131,8 +1178,8 @@ mod tests {
     async fn async_window_waits_for_a_free_place() {
         let cfg = cfg(2, 3);
         let w = AsyncWindow::new(&cfg, vec![3]);
-        let a = w.acquire(0).await;
-        let _b = w.acquire(0).await;
+        let a = w.acquire(0).await.unwrap();
+        let _b = w.acquire(0).await.unwrap();
         // The third waits until one finishes.
         let third = w.acquire(0);
         tokio::pin!(third);
@@ -1144,5 +1191,45 @@ mod tests {
         tokio::time::timeout(ms(500), third)
             .await
             .expect("a finished probe frees its place");
+    }
+
+    #[tokio::test]
+    async fn async_window_skips_finished_hosts() {
+        let cfg = cfg(1, 3);
+        let up = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = up.clone();
+        let w = AsyncWindow::new(&cfg, vec![3])
+            .with_skip(move |_| flag.load(std::sync::atomic::Ordering::Relaxed));
+        let a = w.acquire(0).await.unwrap();
+        // The second waits for the full window; meanwhile the host is
+        // proven up, so when a place frees it is not sent.
+        let second = w.acquire(0);
+        tokio::pin!(second);
+        assert!(tokio::time::timeout(ms(50), second.as_mut()).await.is_err());
+        up.store(true, std::sync::atomic::Ordering::Relaxed);
+        a.finish(Instant::now(), 0, Outcome::Answered);
+        let got = tokio::time::timeout(ms(500), second).await.unwrap();
+        assert!(got.is_none(), "a probe went to a host already up");
+    }
+
+    #[test]
+    fn scan_delay_floors_a_measured_timeout() {
+        let state = RttState::new();
+        let a: IpAddr = "10.0.0.1".parse().unwrap();
+        let limits = RttTimeouts {
+            min: ms(100),
+            max: ms(1250),
+            initial: ms(500),
+        };
+        state.observe(a, ms(40), &limits, ms(2000));
+        assert_eq!(state.timeout(a, &limits, ms(2000)), ms(2000));
+        assert_eq!(state.group_timeout(&limits, ms(2000)), ms(2000));
+        let cfg = ScanConfig {
+            rtt: limits,
+            rtt_state: state,
+            scan_delay: ms(2000),
+            ..ScanConfig::default()
+        };
+        assert_eq!(cfg.probe_timeout(a), ms(2000));
     }
 }

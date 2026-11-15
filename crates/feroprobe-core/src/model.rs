@@ -247,7 +247,7 @@ impl ScanConfig {
     /// How long a probe to `addr` waits for its answer now, from the
     /// host's measured round-trip times (see [`crate::rtt`]).
     pub fn probe_timeout(&self, addr: std::net::IpAddr) -> Duration {
-        self.rtt_state.timeout(addr, &self.rtt)
+        self.rtt_state.timeout(addr, &self.rtt, self.scan_delay)
     }
 
     /// Record a round-trip time measured to `addr`.

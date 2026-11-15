@@ -350,7 +350,7 @@ where
             // ARP and NDP answers come from the link layer, so they do not
             // feed the IP round-trip estimates; the wait is the run's
             // current timeout for a host that has not answered yet.
-            let deadline = Instant::now() + cfg.rtt_state.group_timeout(&cfg.rtt);
+            let deadline = Instant::now() + cfg.rtt_state.group_timeout(&cfg.rtt, cfg.scan_delay);
             while answered.len() < wanted.len()
                 && !cancel.load(Ordering::Relaxed)
                 && let Some(left) = deadline.checked_duration_since(Instant::now())

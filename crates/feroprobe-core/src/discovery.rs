@@ -311,7 +311,13 @@ async fn discover_with(
         .iter()
         .flat_map(|&probe| (0..targets.len()).map(move |h| (h, probe)));
     // The probes share congestion windows, as in the port scans.
-    let window = AsyncWindow::new(cfg, vec![port_probes.len(); targets.len()]);
+    // A probe waiting for its place is dropped once its host is proven up
+    // meanwhile, by ICMP or a raw TCP answer, as well as before it starts.
+    let (up_icmp, up_tcp) = (pinged.clone(), done.tcp.clone());
+    let window =
+        AsyncWindow::new(cfg, vec![port_probes.len(); targets.len()]).with_skip(move |h| {
+            up_icmp[h].load(Ordering::Relaxed) || up_tcp[h].load(Ordering::Relaxed)
+        });
     let window = &window;
     let mut probes = stream::iter(jobs)
         // Checked when a probe is about to start: skip hosts already proven

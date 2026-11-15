@@ -1152,7 +1152,16 @@ fn apply_min_rate(
         cfg.scan_delay = gap;
     }
     let mut warnings = Vec::new();
-    let needed = (f64::from(min) * cfg.rtt.initial.as_secs_f64()).ceil() as usize;
+    // A silent port holds its place for a whole wait: the initial timeout,
+    // and on Windows at least the connect scan's longer floor.
+    let wait = if cfg!(windows) {
+        cfg.rtt
+            .initial
+            .max(feroprobe_core::connect::WINDOWS_MIN_CONNECT_WAIT)
+    } else {
+        cfg.rtt.initial
+    };
+    let needed = (f64::from(min) * wait.as_secs_f64()).ceil() as usize;
     if needed > cfg.concurrency {
         if let Some(c) = args.concurrency {
             warnings.push(format!(
@@ -1649,6 +1658,9 @@ impl ScanJob<'_> {
         let group = host_group(live.len(), cfg);
         let mut shared = cfg.clone();
         shared.concurrency = (cfg.concurrency / group).max(1);
+        // Likewise the --min-parallelism floor, which must stay within
+        // each job's share.
+        shared.min_parallelism = cfg.min_parallelism.min(shared.concurrency);
         // The hosts share one --max-rate schedule (set in scan_config), so
         // each may use the whole rate.
         let probes = self.plan.tcp.map_or(0, |_| self.tcp.len())

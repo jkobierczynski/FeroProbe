@@ -246,7 +246,11 @@ async fn probe_udp_tries(
     let mut buf = [0u8; 2048];
     for tryno in 0..=cfg.retries {
         let slot = match window {
-            Some((w, h)) => Some(w.acquire(h).await),
+            Some((w, h)) => match w.acquire(h).await {
+                Some(slot) => Some(slot),
+                // The host needs no more probes (proven up in discovery).
+                None => break,
+            },
             None => None,
         };
         pace(cfg.scan_delay).await;

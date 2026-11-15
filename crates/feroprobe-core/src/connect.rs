@@ -55,7 +55,7 @@ pub async fn probe_port(addr: SocketAddr, cfg: &ScanConfig) -> io::Result<PortRe
 /// On Windows a refused connection is reported only about two seconds
 /// after the reset arrives (the system retries the SYN first), so a connect
 /// try never waits less than this there.
-const WINDOWS_MIN_CONNECT_WAIT: Duration = Duration::from_millis(3000);
+pub const WINDOWS_MIN_CONNECT_WAIT: Duration = Duration::from_millis(3000);
 
 /// How long a connect try to `addr` may wait now.
 pub(crate) fn connect_wait(addr: SocketAddr, cfg: &ScanConfig) -> Duration {
@@ -96,7 +96,11 @@ async fn probe_port_tries(
     };
     for tryno in 0..=cfg.retries {
         let slot = match window {
-            Some((w, h)) => Some(w.acquire(h).await),
+            Some((w, h)) => match w.acquire(h).await {
+                Some(slot) => Some(slot),
+                // The host needs no more probes (proven up in discovery).
+                None => break,
+            },
             None => None,
         };
         pace(cfg.scan_delay).await;
