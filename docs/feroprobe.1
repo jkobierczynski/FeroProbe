@@ -1473,6 +1473,12 @@ Use the IPv6 address of hostname targets; see Target specification.
 .PP
 Version detection, OS detection and traceroute; see Traceroute and
 aggressive mode.
+.SS \f[V]--override-ics-protection\f[R]
+.PP
+Run once despite ICS protection, allowing \f[V]-sV\f[R], \f[V]-O\f[R]
+and \f[V]-A\f[R], with a prominent warning naming what it allowed.
+Changes no settings file.
+See Settings files and ICS protection.
 .SS \f[V]--oui-file <file>\f[R]
 .PP
 The IEEE OUI list used to name the vendor of MAC addresses found by ARP
@@ -1494,6 +1500,77 @@ Print the version and exit.
 .PP
 Print the help page and exit.
 Running \f[V]feroprobe\f[R] with no arguments does the same.
+.SH SETTINGS FILES AND ICS PROTECTION
+.PP
+FeroProbe reads optional settings from TOML files when it starts, lowest
+precedence first:
+.IP "1." 3
+\f[V]$XDG_CONFIG_HOME/feroprobe/config.toml\f[R]
+(\f[V]\[ti]/.config/feroprobe/config.toml\f[R] when
+\f[V]XDG_CONFIG_HOME\f[R] is unset or not absolute;
+\f[V]%APPDATA%\[rs]feroprobe\[rs]config.toml\f[R] on Windows without
+\f[V]HOME\f[R]);
+.IP "2." 3
+under \f[V]sudo\f[R], the same file in the invoking user\[aq]s home
+(from \f[V]SUDO_USER\f[R]), since sudo points \f[V]HOME\f[R] at
+root\[aq]s (skipped when sudo kept an absolute
+\f[V]XDG_CONFIG_HOME\f[R], which already names your file);
+.IP "3." 3
+\f[V].feroproberc\f[R] in the current directory.
+.PP
+A key in a later file replaces the same key from an earlier one, and
+command-line options win over all of them.
+A missing file is skipped; one that cannot be read, is not valid TOML or
+gives a value of the wrong type stops the run.
+Unknown keys only warn.
+\f[V]-v\f[R] prints which files were read and whether ICS protection is
+on.
+nmap has no such files.
+.PP
+The one setting is \f[V]ics_protection\f[R], \f[B]off by default\f[R]:
+FeroProbe is a general scanner and behaves like nmap unless you ask
+otherwise.
+.IP
+.nf
+\f[C]
+ics_protection = true
+\f[R]
+.fi
+.PP
+With it on:
+.IP \[bu] 2
+\f[V]-sV\f[R], \f[V]-O\f[R] and \f[V]-A\f[R] are refused before any name
+is resolved or packet sent, with a message naming the option and where
+protection was turned on.
+Version detection sends application-protocol probes (HTTP, TLS, ...)
+to every open port, and fragile PLCs and RTUs can fault or hang when,
+for example, their Modbus handler on port 502 receives an HTTP request.
+.IP \[bu] 2
+\f[V]--override-ics-protection\f[R] lets a single run through with a
+warning.
+.IP \[bu] 2
+\f[V]--dry-run\f[R] is not refused, since it sends no probes, but warns
+that the real run would be.
+.IP \[bu] 2
+A scan that includes a well-known OT port (102/tcp S7comm, 502/tcp
+Modbus, 20000/tcp+udp DNP3, 44818/tcp+udp EtherNet/IP, 47808/udp BACnet)
+prints a warning.
+Ports are never refused.
+.SS Hardened build
+.PP
+Building with the \f[V]ics-protection-default\f[R] Cargo feature makes
+protection always on in that binary: settings files cannot switch it off
+(a \f[V]ics_protection = false\f[R] is ignored with a warning), and only
+\f[V]--override-ics-protection\f[R] allows a single run.
+For teams that hand out a FeroProbe binary for use on control networks:
+.IP
+.nf
+\f[C]
+cargo build --release -p feroprobe --features ics-protection-default
+\f[R]
+.fi
+.PP
+See docs/ics-protection.md for the full rationale.
 .SH PRIVILEGES AND PLATFORMS
 .PP
 .TS
@@ -1620,6 +1697,14 @@ T}@T{
 No equivalent
 T}@T{
 FeroProbe\[aq]s own planning and checking options
+T}
+T{
+Settings files, \f[V]ics_protection\f[R],
+\f[V]--override-ics-protection\f[R]
+T}@T{
+No equivalent
+T}@T{
+FeroProbe\[aq]s own; off by default, so default behaviour is unchanged
 T}
 T{
 JSON output (\f[V]-oJ\f[R])
@@ -1790,6 +1875,13 @@ T{
 \f[V]/usr/share/ieee-data/oui.txt\f[R] and similar
 T}@T{
 MAC vendor names, unless \f[V]--oui-file\f[R] is given
+T}
+T{
+\f[V]\[ti]/.config/feroprobe/config.toml\f[R]
+(\f[V]$XDG_CONFIG_HOME\f[R]), the invoking user\[aq]s under
+\f[V]sudo\f[R], and \f[V]./.feroproberc\f[R]
+T}@T{
+Settings; see Settings files and ICS protection
 T}
 T{
 The system resolver\[aq]s configuration (\f[V]/etc/resolv.conf\f[R] on
