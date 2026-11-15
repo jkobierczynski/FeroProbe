@@ -851,8 +851,8 @@ look like a real operating system\[aq]s.
 After the port scan, trace the route to each host that is up.
 FeroProbe sends TCP SYN probes with TTL (IPv6: hop limit) 1 to 30 all at
 once, to a TCP port the scan found open on that host, else one it found
-closed, else a fallback port the command already probes: the first port
-of the TCP scan; with \f[V]-sn\f[R], the first TCP port given with
+closed, else a fallback port the command names: the first port of the
+TCP scan; with \f[V]-sn\f[R], the first TCP port given with
 \f[V]-p\f[R]; else the first TCP port of host discovery (\f[V]-PS\f[R],
 \f[V]-PA\f[R], or the default 443 as root).
 Traceroute never probes a port outside the scan: when the command probes
@@ -1753,8 +1753,8 @@ The probe that got the best answer during discovery or the scan, else
 ICMP echo
 T}@T{
 TCP SYNs to an open or closed scanned port, else a TCP port the command
-already probes, else the host is not traced (FeroProbe used to fall back
-to port 80)
+names (\f[V]-p\f[R] with \f[V]-sn\f[R], or a discovery port), else the
+host is not traced (FeroProbe used to fall back to port 80)
 T}
 T{
 \f[V]-A\f[R] without root

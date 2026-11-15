@@ -138,7 +138,7 @@ example `-A` runs nmap's scripts, one of which sends a UDP datagram to port
 
 FeroProbe itself never probes outside the scan: `-sV` and `-O` only probe
 the open ports the scan found, and `--traceroute` only uses a TCP port the
-command already probes. When `-A` runs without root, the parts it skips are
+command names (a scanned port, the `-p` port with `-sn`, or a discovery port). When `-A` runs without root, the parts it skips are
 named in a warning instead of being dropped silently as nmap does.
 
 This matters most on operational-technology and industrial-control (OT/ICS)

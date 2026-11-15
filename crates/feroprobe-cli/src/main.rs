@@ -1274,7 +1274,7 @@ const AGGRESSIVE_UNPRIVILEGED: &str = "-A without root or CAP_NET_RAW skips OS d
      Run as root, or grant CAP_NET_RAW, to include them";
 
 /// The TCP port traceroute falls back to for a host where the scan found
-/// no open or closed TCP port: always one the command already probes, so
+/// no open or closed TCP port: always one the command names (-p, the scan or discovery), so
 /// traceroute never reaches outside the scan. In order: the first TCP port
 /// of the TCP scan; with `-sn`, the first TCP port given with `-p`; else
 /// the first TCP port of host discovery (`-PS`, `-PA`, or the defaults).
@@ -1582,7 +1582,7 @@ fn dry_run_notes(args: &Args, plan: &Plan, d: &DryOrder, privileged: bool) -> Ve
         notes.push(match d.trace_fallback {
             Some(port) => format!(
                 "Traceroute would send TCP SYNs to an open or closed TCP port the scan finds on \
-                 each host, else to TCP port {port}, which this command already probes"
+                 each host, else to TCP port {port}, which this command names"
             ),
             None => format!(
                 "Traceroute would use an open or closed TCP port the scan finds; hosts without \
@@ -2041,7 +2041,7 @@ async fn main() -> Result<()> {
     if trace {
         scan_types.push("traceroute");
         // Hosts without an open or closed TCP port are traced through a
-        // TCP port the command already probes, or not at all.
+        // TCP port the command names, or not at all.
         // Hosts given up on by --host-timeout are not traced either.
         let keep: Vec<usize> = (0..hosts.len()).filter(|&i| !hosts[i].timed_out).collect();
         let mut traced: Vec<HostResult> = keep.iter().map(|&i| hosts[i].clone()).collect();

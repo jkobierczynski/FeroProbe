@@ -10,7 +10,7 @@
 //!
 //! The probe goes to a port the scan found open, else one it found closed
 //! (both make the host answer), else a fallback port the caller picks from
-//! the ports the command already probes. With no such port the host is not
+//! the ports the command names (in -p, the scan or discovery). With no such port the host is not
 //! traced: traceroute never probes a port outside the scan. Hops that never answer are
 //! listed without an address, like nmap's `...`. Raw sockets: Linux, root
 //! or `CAP_NET_RAW`.
@@ -109,7 +109,7 @@ fn build_trace(port: u16, answers: &[HopAnswer]) -> Trace {
 /// With `assume_up` (`-Pn`), every host is traced, even one that never
 /// answered the scan: routers on the way may still answer. Hosts with no
 /// open or closed TCP port (as after `-sn`) are traced with `fallback_port`,
-/// which should be a TCP port the command already probes; with `None` they
+/// which should be a TCP port the command names (in -p, the scan or discovery); with `None` they
 /// are not traced. Returns how many hosts were left untraced for that reason.
 pub async fn traceroute(
     hosts: &mut [HostResult],

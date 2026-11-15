@@ -553,7 +553,7 @@ operating system's.
 After the port scan, trace the route to each host that is up. FeroProbe
 sends TCP SYN probes with TTL (IPv6: hop limit) 1 to 30 all at once, to a
 TCP port the scan found open on that host, else one it found closed, else
-a fallback port the command already probes: the first port of the TCP
+a fallback port the command names: the first port of the TCP
 scan; with `-sn`, the first TCP port given with `-p`; else the first TCP
 port of host discovery (`-PS`, `-PA`, or the default 443 as root). Traceroute
 never probes a port outside the scan: when the command probes no TCP port
@@ -1106,7 +1106,7 @@ safeguard calls for a difference. The deliberate differences are:
 | Timeouts | Adapt to measured round-trip times | A fixed `--timeout` per probe, set by the template |
 | Old-style IPv4 numbers as targets (`2222`, `10.1.2`, `010.0.0.1`) | Passed to the resolver | Refused with an explanation |
 | Probes outside the requested ports | `-A`'s scripts can probe other ports (`ms-sql-info`: UDP 1434 on every host); `-O` picks a random closed UDP port (and for IPv4 also TCP) when the scan found none | Never beyond the command's own ports (`-p` plus the host-discovery ports): `-sV` and `-O` probe only open ports the scan found, traceroute only a scanned port, a discovery port, or (with `-sn`) the `-p` port, and FeroProbe has no scripts |
-| Traceroute port | The probe that got the best answer during discovery or the scan, else ICMP echo | TCP SYNs to an open or closed scanned port, else a TCP port the command already probes, else the host is not traced (FeroProbe used to fall back to port 80) |
+| Traceroute port | The probe that got the best answer during discovery or the scan, else ICMP echo | TCP SYNs to an open or closed scanned port, else a TCP port the command names (`-p` with `-sn`, or a discovery port), else the host is not traced (FeroProbe used to fall back to port 80) |
 | `-A` without root | Silently drops `-O` and traceroute | Drops them with a warning naming them |
 
 Behaviour that looks unusual but matches nmap includes: skipping discovery

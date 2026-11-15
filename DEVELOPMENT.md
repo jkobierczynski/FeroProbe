@@ -53,7 +53,7 @@ the SCTP, IP protocol, IPv6 OS detection and probe-signature work).
 | MAC vendor names | `--oui-file` | Full IEEE OUI list from the system or a file, small built-in fallback |
 | Reverse DNS | `-n`, `-R`, `--dns-servers` | Own resolver for `--dns-servers` (`dns.rs`) |
 | Random host order | `--randomize-hosts` | |
-| Traceroute | `--traceroute` | TCP SYN probes, IPv4 and IPv6 (`trace.rs`); only through a TCP port the command already probes (see [Deliberate differences](#deliberate-differences-from-nmap)) |
+| Traceroute | `--traceroute` | TCP SYN probes, IPv4 and IPv6 (`trace.rs`); only through a TCP port the command names (scanned, `-p` with `-sn`, or discovery) (see [Deliberate differences](#deliberate-differences-from-nmap)) |
 
 ### Targets and ports
 
