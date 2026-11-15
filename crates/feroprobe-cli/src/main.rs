@@ -1150,7 +1150,7 @@ fn aggressive(plan: &mut Plan, args: &Args, privileged: bool) -> Result<(bool, b
 /// The options that send probes able to upset fragile OT/ICS devices
 /// (PLCs, RTUs, protocol gateways), in the order they appear in the help.
 /// Version detection talks application protocols (HTTP, TLS, ...) to
-/// whatever answers; OS detection sends deliberately odd TCP/IP packets.
+/// whatever answers; OS detection sends a raw SYN loaded with TCP options.
 /// Script scanning belongs here too once it exists.
 fn device_hostile_options(args: &Args) -> Vec<&'static str> {
     let mut found = Vec::new();

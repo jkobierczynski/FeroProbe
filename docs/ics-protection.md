@@ -63,7 +63,7 @@ line asks for any of these options:
 | Option | What it sends |
 | --- | --- |
 | `-sV` | Application-protocol probes (HTTP requests, TLS handshakes, banner prompts and more) to every open port |
-| `-O` | Deliberately unusual TCP/IP packets (odd flag combinations, options and window sizes) to an open and a closed port |
+| `-O` | A raw TCP SYN carrying every common TCP option to one open TCP port per host. Lighter than nmap's `-O`, which also sends odd flag combinations and probes a closed port, but still a packet a minimal stack may not expect |
 | `-A` | Both of the above, plus traceroute |
 
 Script scanning will join this list if FeroProbe ever gets it.
@@ -86,7 +86,9 @@ choose gentle timing (`-T2` or slower) there anyway.
 
 ### Dry runs
 
-`--dry-run` sends nothing, so it is never refused. With protection on and
+`--dry-run` sends no scan probes, so it is never refused. (Hostname
+targets are still resolved through the system resolver, which can send DNS
+queries; use numeric targets where no DNS traffic is allowed.) With protection on and
 `-sV`, `-O` or `-A` on the command line, it prints the preview as usual plus
 a warning that a real run would be refused, so the habit is learned before
 it matters:
@@ -147,8 +149,9 @@ out a banner: an HTTP `GET`, a TLS ClientHello, a SIP `OPTIONS`, and so on.
 A Modbus handler on port 502 that receives an HTTP request may read it as
 a malformed Modbus frame, and some devices respond by faulting, dropping
 into a stop state, or hanging until someone power-cycles them. OS detection
-sends packets that are unusual on purpose, which is exactly what such
-stacks handle worst.
+sends a raw SYN loaded with TCP options that such stacks may never have
+been tested against; nmap's `-O`, which people often run on the same
+networks, goes much further with deliberately malformed probes.
 
 This is a long-documented class of incident, not a theory: published
 reports on penetration testing of control systems (for example Sandia
