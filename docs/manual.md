@@ -930,8 +930,8 @@ per option:
 | `-A` | Also runs its default scripts (`-sC`). Some probe outside `-p`: `ms-sql-info` sends a 1-byte UDP datagram to port 1434 of every host; others connect to the open ports and talk to the services |
 | `-A` without root | Silently skips OS detection and traceroute (FeroProbe skips them with a warning) |
 | `-sV` | Sends probes from its own database (dozens to an unrecognized port), also probes UDP ports left `open\|filtered`, and runs its version scripts on open ports |
-| `-O`, IPv4 | Sends 16 probes per host to an open TCP port, a closed TCP port and a closed UDP port. A closed port is one the scan found closed, else unfiltered; without one it picks a random TCP or UDP port between 30000 and 44780, outside `-p` |
-| `-O`, IPv6 | Sends up to 17 probes per host, including a neighbour solicitation to on-link targets. Without a closed (or unfiltered) TCP port it skips the closed-port TCP probes; without a closed (or unfiltered) UDP port it picks a random one between 30000 and 44780, outside `-p` |
+| `-O`, IPv4 | Sends 16 probes per host to an open TCP port, a closed TCP port and a closed UDP port. A closed port is one the scan found closed, else unfiltered; without one it picks a random TCP or UDP port between 30000 and 44780, regardless of `-p` |
+| `-O`, IPv6 | Sends up to 17 probes per host, including a neighbour solicitation to on-link targets. Without a closed (or unfiltered) TCP port it skips the closed-port TCP probes; without a closed (or unfiltered) UDP port it picks a random one between 30000 and 44780, regardless of `-p` |
 | `--traceroute` | Traces with the probe that got the best answer (TCP, UDP, SCTP or ICMP), else an ICMP echo |
 | Raw TCP scans | TCP window 1024 instead of FeroProbe's signature 65109 |
 | `-sU` | Payloads for many more ports, empty datagrams elsewhere (FeroProbe: `FeroProbeScan/1`) |
@@ -1105,7 +1105,7 @@ safeguard calls for a difference. The deliberate differences are:
 | Service and OS signatures | nmap's databases | FeroProbe's own (nmap's cannot be redistributed); OS detection names the family, not the version |
 | Timeouts | Adapt to measured round-trip times | A fixed `--timeout` per probe, set by the template |
 | Old-style IPv4 numbers as targets (`2222`, `10.1.2`, `010.0.0.1`) | Passed to the resolver | Refused with an explanation |
-| Probes outside the requested ports | `-A`'s scripts can probe other ports (`ms-sql-info`: UDP 1434 on every host); `-O` picks a random closed UDP port (and for IPv4 also TCP) when the scan found none | Never beyond the command's own ports (`-p` plus the host-discovery ports): `-sV` and `-O` probe only open ports the scan found, traceroute only a scanned port, a discovery port, or (with `-sn`) the `-p` port, and FeroProbe has no scripts |
+| Probes outside the requested ports | `-A`'s scripts can probe other ports (`ms-sql-info`: UDP 1434 on every host); `-O` picks a random UDP port (and for IPv4 also TCP), regardless of `-p`, when the scan found no closed or unfiltered one | Never beyond the command's own ports (`-p` plus the host-discovery ports): `-sV` and `-O` probe only open ports the scan found, traceroute only a scanned port, a discovery port, or (with `-sn`) the `-p` port, and FeroProbe has no scripts |
 | Traceroute port | The probe that got the best answer during discovery or the scan, else ICMP echo | TCP SYNs to an open or closed scanned port, else a TCP port the command names (`-p` with `-sn`, or a discovery port), else the host is not traced (FeroProbe used to fall back to port 80) |
 | `-A` without root | Silently drops `-O` and traceroute | Drops them with a warning naming them |
 

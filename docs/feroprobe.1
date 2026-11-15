@@ -1380,7 +1380,7 @@ T}@T{
 Sends 16 probes per host to an open TCP port, a closed TCP port and a
 closed UDP port.
 A closed port is one the scan found closed, else unfiltered; without one
-it picks a random TCP or UDP port between 30000 and 44780, outside
+it picks a random TCP or UDP port between 30000 and 44780, regardless of
 \f[V]-p\f[R]
 T}
 T{
@@ -1390,7 +1390,7 @@ Sends up to 17 probes per host, including a neighbour solicitation to
 on-link targets.
 Without a closed (or unfiltered) TCP port it skips the closed-port TCP
 probes; without a closed (or unfiltered) UDP port it picks a random one
-between 30000 and 44780, outside \f[V]-p\f[R]
+between 30000 and 44780, regardless of \f[V]-p\f[R]
 T}
 T{
 \f[V]--traceroute\f[R]
@@ -1737,8 +1737,9 @@ T{
 Probes outside the requested ports
 T}@T{
 \f[V]-A\f[R]\[aq]s scripts can probe other ports (\f[V]ms-sql-info\f[R]:
-UDP 1434 on every host); \f[V]-O\f[R] picks a random closed UDP port
-(and for IPv4 also TCP) when the scan found none
+UDP 1434 on every host); \f[V]-O\f[R] picks a random UDP port (and for
+IPv4 also TCP), regardless of \f[V]-p\f[R], when the scan found no
+closed or unfiltered one
 T}@T{
 Never beyond the command\[aq]s own ports (\f[V]-p\f[R] plus the
 host-discovery ports): \f[V]-sV\f[R] and \f[V]-O\f[R] probe only open
