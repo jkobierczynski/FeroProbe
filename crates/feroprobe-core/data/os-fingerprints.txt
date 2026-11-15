@@ -93,6 +93,7 @@ s1.o = M,N,N,S,N,W
 s4.o = M,N,W
 ts = U
 
+# Verified against a TP-Link home router (kernel 3.x, HZ 100).
 Fingerprint Linux 3.x - 4.18
 Like Linux common
 Class Linux, Linux, 3.X|4.X, general purpose

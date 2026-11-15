@@ -500,3 +500,27 @@ fn a_far_host_found_by_a_try_gets_two_tries() {
     );
     assert_eq!(tries_after(&j, 1, &far, &fp, &cfg), 1);
 }
+
+/// A real device: a TP-Link home router (Linux 3.x kernel; nmap 7.95 says
+/// Linux 2.6.32 - 3.10), fingerprinted over the LAN with `-O -vv`.
+#[test]
+fn matches_a_tp_link_router() {
+    let line = "ttl=64 s1=Y s1.f=SA s1.w=14480 s1.m=1460 s1.o=M,S,T,N,W s1.df=Y s2=Y \
+        s2.f=SA s2.w=14600 s2.m=1460 s2.o=M s2.df=Y s3=Y s3.f=SA s3.w=14600 \
+        s3.m=1460 s3.o=M,N,N,S s3.df=Y s4=Y s4.f=SA s4.m=1460 s4.o=M,N,N,T,N,W \
+        s4.df=Y e=Y e.f=SA e.w=14600 e.m=1460 e.o=M,N,N,S,N,W e.df=Y a=Y a.f=R \
+        a.w=0 a.df=Y a.seq=A c1=Y c1.f=AR c1.w=0 c1.df=Y c1.ack=S+ c2=Y c2.f=R \
+        c2.w=0 c2.df=Y c2.seq=A ie=Y ie.df=N ws=6 ipid=Z ipid.rst=Z ts=100";
+    let fp = Fingerprint {
+        tests: line
+            .split_whitespace()
+            .map(|t| {
+                let (k, v) = t.split_once('=').unwrap();
+                (k.to_string(), v.to_string())
+            })
+            .collect(),
+    };
+    let (m, perfect) = classify(db::built_in(), &fp);
+    assert_eq!(perfect, 1, "{m:?}");
+    assert_eq!(m[0].name, "Linux 3.x - 4.18");
+}
