@@ -36,6 +36,8 @@ const SCTP_PORT: u16 = 80;
 pub(crate) struct Probe {
     pub sport: u16,
     pub seq: u32,
+    // Only the Linux scanner builds whole packets (the dry run shows bodies).
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub ipid: u16,
     pub icmp_id: u16,
 }
@@ -66,6 +68,7 @@ impl Probe {
     }
 
     /// The whole packet, IP header included.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) fn packet(&self, proto: u8, src: IpAddr, dst: IpAddr) -> Vec<u8> {
         let body = self.body(proto, src, dst);
         match (src, dst) {
