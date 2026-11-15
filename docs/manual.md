@@ -1045,15 +1045,16 @@ safeguard calls for a difference. The deliberate differences are:
 | Decoy order (`-D ...,ME,...`) | `ME` places the real probe | `ME` is accepted, but the real probe always goes last |
 | Probe signature | None | Raw TCP probes use window 65109; generic UDP probes carry `FeroProbeScan/1\n` |
 | Unprivileged discovery | TCP connects to 80 and 443 only | The same, plus an ICMP echo through an unprivileged ping socket where the OS offers one |
-| Probes outside the requested ports | `-A`'s scripts can probe other ports (`ms-sql-info`: UDP 1434 on every host); `-O` picks random closed TCP and UDP ports when the scan found none | Never: `-sV` and `-O` probe only open ports the scan found, and FeroProbe has no scripts |
-| Traceroute port | The probe that got the best answer during discovery or the scan, else ICMP echo | TCP SYNs to an open or closed scanned port, else a TCP port the command already probes, else the host is not traced (FeroProbe used to fall back to port 80) |
-| `-A` without root | Silently drops `-O` and traceroute | Drops them with a warning naming them |
-| `--explain`, `--dry-run` | No equivalent | FeroProbe's own planning and checking options. A dry run is no preview of nmap and says so, listing what nmap would send differently |
+| `--explain`, `--dry-run` | No equivalent | FeroProbe's own planning and checking options |
 | JSON output (`-oJ`) | No equivalent | FeroProbe's own format |
 | XML `scanner` attribute | `nmap` | `feroprobe`, unless `--nmap-label` |
 | Service and OS signatures | nmap's databases | FeroProbe's own (nmap's cannot be redistributed); OS detection names the family, not the version |
 | Timeouts | Adapt to measured round-trip times | A fixed `--timeout` per probe, set by the template |
 | Old-style IPv4 numbers as targets (`2222`, `10.1.2`, `010.0.0.1`) | Passed to the resolver | Refused with an explanation |
+| Probes outside the requested ports | `-A`'s scripts can probe other ports (`ms-sql-info`: UDP 1434 on every host); `-O` picks random closed TCP and UDP ports when the scan found none | Never: `-sV` and `-O` probe only open ports the scan found, and FeroProbe has no scripts |
+| Traceroute port | The probe that got the best answer during discovery or the scan, else ICMP echo | TCP SYNs to an open or closed scanned port, else a TCP port the command already probes, else the host is not traced (FeroProbe used to fall back to port 80) |
+| `-A` without root | Silently drops `-O` and traceroute | Drops them with a warning naming them |
+| `--dry-run` output | No equivalent | Opens with a "NOT A PREVIEW OF NMAP" box listing what nmap would send differently with the options given |
 
 Behaviour that looks unusual but matches nmap includes: skipping discovery
 for this machine as root (`localhost-response`), ARP or neighbour discovery

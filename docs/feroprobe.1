@@ -1604,40 +1604,11 @@ The same, plus an ICMP echo through an unprivileged ping socket where
 the OS offers one
 T}
 T{
-Probes outside the requested ports
-T}@T{
-\f[V]-A\f[R]\[aq]s scripts can probe other ports (\f[V]ms-sql-info\f[R]:
-UDP 1434 on every host); \f[V]-O\f[R] picks random closed TCP and UDP
-ports when the scan found none
-T}@T{
-Never: \f[V]-sV\f[R] and \f[V]-O\f[R] probe only open ports the scan
-found, and FeroProbe has no scripts
-T}
-T{
-Traceroute port
-T}@T{
-The probe that got the best answer during discovery or the scan, else
-ICMP echo
-T}@T{
-TCP SYNs to an open or closed scanned port, else a TCP port the command
-already probes, else the host is not traced (FeroProbe used to fall back
-to port 80)
-T}
-T{
-\f[V]-A\f[R] without root
-T}@T{
-Silently drops \f[V]-O\f[R] and traceroute
-T}@T{
-Drops them with a warning naming them
-T}
-T{
 \f[V]--explain\f[R], \f[V]--dry-run\f[R]
 T}@T{
 No equivalent
 T}@T{
-FeroProbe\[aq]s own planning and checking options.
-A dry run is no preview of nmap and says so, listing what nmap would
-send differently
+FeroProbe\[aq]s own planning and checking options
 T}
 T{
 JSON output (\f[V]-oJ\f[R])
@@ -1675,6 +1646,41 @@ T}@T{
 Passed to the resolver
 T}@T{
 Refused with an explanation
+T}
+T{
+Probes outside the requested ports
+T}@T{
+\f[V]-A\f[R]\[aq]s scripts can probe other ports (\f[V]ms-sql-info\f[R]:
+UDP 1434 on every host); \f[V]-O\f[R] picks random closed TCP and UDP
+ports when the scan found none
+T}@T{
+Never: \f[V]-sV\f[R] and \f[V]-O\f[R] probe only open ports the scan
+found, and FeroProbe has no scripts
+T}
+T{
+Traceroute port
+T}@T{
+The probe that got the best answer during discovery or the scan, else
+ICMP echo
+T}@T{
+TCP SYNs to an open or closed scanned port, else a TCP port the command
+already probes, else the host is not traced (FeroProbe used to fall back
+to port 80)
+T}
+T{
+\f[V]-A\f[R] without root
+T}@T{
+Silently drops \f[V]-O\f[R] and traceroute
+T}@T{
+Drops them with a warning naming them
+T}
+T{
+\f[V]--dry-run\f[R] output
+T}@T{
+No equivalent
+T}@T{
+Opens with a \[dq]NOT A PREVIEW OF NMAP\[dq] box listing what nmap would
+send differently with the options given
 T}
 .TE
 .PP
