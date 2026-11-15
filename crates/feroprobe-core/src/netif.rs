@@ -89,10 +89,9 @@ pub(crate) fn bind_socket(sock: &Socket, ipv6: bool) -> io::Result<()> {
         } else {
             e.to_string()
         };
-        io::Error::new(
-            e.kind(),
-            format!("binding to interface {} (-e): {why}", ifc.name),
-        )
+        // Kind Other: a local failure, never read as a network answer
+        // (a refused connect probe's EACCES means "filtered").
+        io::Error::other(format!("binding to interface {} (-e): {why}", ifc.name))
     })
 }
 
