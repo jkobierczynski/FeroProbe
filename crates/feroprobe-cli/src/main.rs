@@ -291,30 +291,39 @@ struct Args {
     scanflags: Option<u8>,
 
     /// Evasion: fragment raw IPv4 probe packets into 8-byte pieces (nmap's
-    /// -f). For testing your own firewall or IDS, so FeroProbe only allows
-    /// it against private address ranges. Needs a raw TCP scan (-sS/-sF/-sN/
-    /// -sX/-sA/-sW/-sM). Conflicts with --mtu
+    /// -f). For testing your own firewall or IDS. Refused against public
+    /// targets unless --allow-public-evasion is given. Needs a raw TCP scan
+    /// (-sS/-sF/-sN/-sX/-sA/-sW/-sM). Conflicts with --mtu
     #[arg(short = 'f', conflicts_with = "mtu")]
     fragment: bool,
 
     /// Evasion: fragment raw IPv4 probe packets to this payload size per
-    /// fragment, a positive multiple of 8 (nmap's --mtu). Private targets
-    /// only, like -f
+    /// fragment, a positive multiple of 8 (nmap's --mtu). Public targets need
+    /// --allow-public-evasion, like -f
     #[arg(long, value_name = "N")]
     mtu: Option<u16>,
 
     /// Evasion: decoy source addresses, comma-separated, so the target sees
     /// probes from these alongside the real scan (nmap's -D). The token ME
     /// marks where the real probe sits; it is added at the end if omitted.
-    /// Private targets only
+    /// Public targets need --allow-public-evasion
     #[arg(short = 'D', long = "decoys", value_name = "a,b,ME,c")]
     decoys: Option<String>,
 
     /// Evasion: send raw IPv4 probes from this forged source address (nmap's
     /// -S). Replies go to it, not to you, so the scan is blind unless
-    /// FeroProbe is on the path back. Private targets only
+    /// FeroProbe is on the path back. Public targets need
+    /// --allow-public-evasion
     #[arg(short = 'S', long = "source", value_name = "ADDR")]
     spoof_source: Option<String>,
+
+    /// Evasion: authorize the evasion options (-f/--mtu, -D, -S) against
+    /// public addresses. Without it, FeroProbe refuses them for any public
+    /// target, decoy or spoofed source, as an anti-abuse safeguard. Pass it
+    /// only for targets you have permission to test. Private ranges never
+    /// need it
+    #[arg(long = "allow-public-evasion")]
+    allow_public_evasion: bool,
 
     /// Host discovery, nmap style. -Pn: skip it and scan every target as if
     /// it were up. Otherwise pick the probes (default: ICMP echo plus TCP
@@ -870,10 +879,12 @@ fn evasion_from_args(args: &Args) -> Result<Evasion> {
 }
 
 /// Refuse evasion options unless they are allowed: a raw TCP scan, raw
-/// sockets available, IPv4-only targets, and every target in a private
-/// range. The private-range limit is a deliberate anti-abuse safeguard and
-/// a departure from nmap, which allows these options against any target.
-fn gate_evasion(ev: &Evasion, targets: &[Target], plan: &Plan) -> Result<()> {
+/// sockets available, and IPv4-only targets. A public target, decoy or
+/// spoofed source is refused unless `allow_public` is set (the
+/// `--allow-public-evasion` flag). The default public-target refusal is a
+/// deliberate anti-abuse safeguard and a departure from nmap, which allows
+/// these options against any target.
+fn gate_evasion(ev: &Evasion, targets: &[Target], plan: &Plan, allow_public: bool) -> Result<()> {
     if !ev.is_active() {
         return Ok(());
     }
@@ -893,20 +904,24 @@ fn gate_evasion(ev: &Evasion, targets: &[Target], plan: &Plan) -> Result<()> {
     // public address is refused whether or not raw sockets are available.
     // The decoy (-D) and spoofed-source (-S) addresses count too: a public
     // one there would make the target answer a public host, which is the
-    // same abuse the safeguard is meant to stop.
-    let addrs: Vec<IpAddr> = targets
-        .iter()
-        .map(|t| t.addr)
-        .chain(ev.decoys.iter().copied())
-        .chain(ev.spoof_source)
-        .collect();
-    if let Some(public) = feroprobe_core::scope::first_public(&addrs) {
-        bail!(
-            "evasion options (fragmentation, decoys, spoofed source) are only allowed \
-             against private address ranges, but {public} is a public address (a target, \
-             a decoy, or the spoofed source). This is a deliberate FeroProbe safeguard: \
-             see docs/responsible-use.md."
-        );
+    // same abuse the safeguard is meant to stop. --allow-public-evasion
+    // (allow_public) is the deliberate opt-in for authorized public tests.
+    if !allow_public {
+        let addrs: Vec<IpAddr> = targets
+            .iter()
+            .map(|t| t.addr)
+            .chain(ev.decoys.iter().copied())
+            .chain(ev.spoof_source)
+            .collect();
+        if let Some(public) = feroprobe_core::scope::first_public(&addrs) {
+            bail!(
+                "evasion options (fragmentation, decoys, spoofed source) are refused \
+                 against public addresses, but {public} is a public address (a target, \
+                 a decoy, or the spoofed source). Pass --allow-public-evasion to authorize \
+                 this against targets you have permission to test. This is a deliberate \
+                 FeroProbe safeguard: see docs/responsible-use.md."
+            );
+        }
     }
     if !raw_sockets_available() {
         bail!("evasion options send raw packets: run as root or grant CAP_NET_RAW");
@@ -1525,7 +1540,7 @@ async fn main() -> Result<()> {
     // Evasion options are refused unless every target is private; see
     // gate_evasion. Parsed and checked before the scan sends anything.
     let evasion = evasion_from_args(&args)?;
-    gate_evasion(&evasion, &targets, &plan)?;
+    gate_evasion(&evasion, &targets, &plan, args.allow_public_evasion)?;
     cfg.evasion = evasion;
     // The warnings are about connect and UDP probes.
     let sockets = !plan.ping_only && (plan.udp || plan.tcp.is_some_and(|t| t.raw_kind().is_none()));
@@ -2225,40 +2240,63 @@ mod tests {
         let ev = evasion_from_args(&args(&["-f"])).unwrap();
         let syn = plan_with_tcp(Some(ScanType::Syn));
 
-        // A public target is refused by the safeguard, whatever the privileges.
+        // A public target is refused by the safeguard without the opt-in,
+        // whatever the privileges, and the message points to the flag.
         let public = [Target::new("8.8.8.8".parse().unwrap())];
-        let err = gate_evasion(&ev, &public, &syn).unwrap_err().to_string();
-        assert!(err.contains("private address"), "{err}");
+        let err = gate_evasion(&ev, &public, &syn, false)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("public address"), "{err}");
+        assert!(err.contains("--allow-public-evasion"), "{err}");
 
         // A public decoy or spoofed source is refused too, even when the
         // target itself is private: it would make the target answer a
         // public host.
         let private = [Target::new("10.0.0.1".parse().unwrap())];
         let public_decoy = evasion_from_args(&args(&["-D", "8.8.8.8"])).unwrap();
-        let err = gate_evasion(&public_decoy, &private, &syn)
+        let err = gate_evasion(&public_decoy, &private, &syn, false)
             .unwrap_err()
             .to_string();
-        assert!(err.contains("private address"), "{err}");
+        assert!(err.contains("public address"), "{err}");
         let public_source = evasion_from_args(&args(&["-S", "8.8.8.8"])).unwrap();
-        let err = gate_evasion(&public_source, &private, &syn)
+        let err = gate_evasion(&public_source, &private, &syn, false)
             .unwrap_err()
             .to_string();
-        assert!(err.contains("private address"), "{err}");
+        assert!(err.contains("public address"), "{err}");
 
-        // An IPv6 target is refused as IPv4-only.
+        // An IPv6 target is refused as IPv4-only, flag or no flag.
         let v6 = [Target::new("fd00::1".parse().unwrap())];
-        let err = gate_evasion(&ev, &v6, &syn).unwrap_err().to_string();
+        let err = gate_evasion(&ev, &v6, &syn, true).unwrap_err().to_string();
         assert!(err.contains("IPv4 only"), "{err}");
 
-        // A connect scan cannot carry evasion.
+        // A connect scan cannot carry evasion, flag or no flag.
         let connect = plan_with_tcp(Some(ScanType::Connect));
-        let err = gate_evasion(&ev, &private, &connect)
+        let err = gate_evasion(&ev, &private, &connect, true)
             .unwrap_err()
             .to_string();
         assert!(err.contains("raw TCP scan"), "{err}");
 
         // No evasion flags: the gate is a no-op even for a public target.
-        assert!(gate_evasion(&Evasion::default(), &public, &syn).is_ok());
+        assert!(gate_evasion(&Evasion::default(), &public, &syn, false).is_ok());
+    }
+
+    #[test]
+    fn evasion_gate_public_needs_authorization_flag() {
+        let ev = evasion_from_args(&args(&["-f"])).unwrap();
+        let syn = plan_with_tcp(Some(ScanType::Syn));
+        let public = [Target::new("8.8.8.8".parse().unwrap())];
+
+        // With --allow-public-evasion the scope safeguard no longer refuses a
+        // public target; the gate then stops only on the privilege check
+        // (CI has no raw sockets), never on scope.
+        if let Err(e) = gate_evasion(&ev, &public, &syn, true) {
+            let e = e.to_string();
+            assert!(!e.contains("public address"), "{e}");
+            assert!(
+                e.contains("raw packets") || e.contains("CAP_NET_RAW"),
+                "{e}"
+            );
+        }
     }
 
     #[test]
@@ -2269,11 +2307,12 @@ mod tests {
             Target::new("10.0.0.1".parse().unwrap()),
             Target::new("192.168.1.5".parse().unwrap()),
         ];
-        // A private target clears the safeguard. Without raw sockets (CI) the
-        // gate then stops on the privilege check instead, never on scope.
-        if let Err(e) = gate_evasion(&ev, &private, &syn) {
+        // A private target clears the safeguard without the opt-in flag.
+        // Without raw sockets (CI) the gate then stops on the privilege check
+        // instead, never on scope.
+        if let Err(e) = gate_evasion(&ev, &private, &syn, false) {
             let e = e.to_string();
-            assert!(!e.contains("private address"), "{e}");
+            assert!(!e.contains("public address"), "{e}");
             assert!(
                 e.contains("raw packets") || e.contains("CAP_NET_RAW"),
                 "{e}"
