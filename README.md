@@ -26,8 +26,11 @@ no external binaries.
 | Table, JSON, nmap-style XML and grepable output, `--reason`, `--open`, `--packet-trace` | ✅ |
 | Report files `-oN`, `-oX`, `-oG`, `-oJ`, `-oA`; target lists `-iL`; `--exclude`, `--excludefile`; progress with `-v` | ✅ |
 | Service and version detection, `-sV`, with our own probes and rules | ✅ |
-| OS detection, `-O`, from SYN-ACK traits with our own signatures (Linux, root; IPv4 only) | ✅ |
+| OS detection, `-O`, from SYN-ACK traits with our own signatures, IPv4 and IPv6 (Linux, root) | ✅ |
 | Traceroute, `--traceroute`, IPv4 and IPv6 (Linux, root), and `-A` (`-sV -O --traceroute`) | ✅ |
+
+See [DEVELOPMENT.md](DEVELOPMENT.md) for the full feature list and the
+remaining gap to nmap parity.
 
 ## Install
 
@@ -166,7 +169,7 @@ OpenBSD, network devices) rather than an exact version. Linux is still
 recognized when SACK, timestamps or window scaling are turned off. The fingerprint line
 shows the raw traits, which is what a new signature is written from. It needs
 raw sockets, so Linux with root or `CAP_NET_RAW`, and at least one open TCP port.
-IPv6 hosts are skipped for now: the signatures rely on IPv4 header fields.
+IPv6 hosts are covered too: the hop limit stands in for the TTL.
 
 ### Traceroute and -A
 
