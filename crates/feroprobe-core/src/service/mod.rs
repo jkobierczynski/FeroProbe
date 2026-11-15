@@ -580,6 +580,9 @@ pub async fn detect_udp(
 ) -> Option<ServiceInfo> {
     let mut buf = vec![0u8; 8192];
     let mut round = Round::default();
+    // Sockets of earlier probes stay open until the round ends, so the OS
+    // cannot hand their source port to a later probe.
+    let mut used = Vec::new();
     'probes: for (probe, hinted) in probe_order(&vs.db, Protocol::Udp, addr.port(), Listen::Never) {
         if !allowed(&vs.db, probe, hinted, round.soft.as_deref(), vs.intensity) {
             continue;
@@ -613,11 +616,13 @@ pub async fn detect_udp(
                 Err(_) => {}
             }
         }
+        used.push(sock);
         take_reply(vs, &mut round, probe, addr, Protocol::Udp, false, data);
         if let Some(info) = round.hard {
             return Some(info);
         }
     }
+    drop(used);
     finish(round, Protocol::Udp, addr.port(), vs)
 }
 
