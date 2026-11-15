@@ -135,10 +135,20 @@ mod tests {
 
     /// A fresh directory under the system temp directory.
     fn temp_dir(name: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("feroprobe-config-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "feroprobe-config-{name}-{}-{nanos}",
+            std::process::id()
+        ));
+        // Create it exclusively (fails if it exists) and private, so no
+        // other user can plant files or symlinks in it first.
+        let mut builder = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+        builder.create(&dir).unwrap();
         dir
     }
 
