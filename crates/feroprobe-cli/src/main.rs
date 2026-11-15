@@ -1543,19 +1543,20 @@ fn nmap_differences(
         v.push(
             "-O (IPv4): nmap sends 16 probes per host: 6 SYNs, an ECN SYN and 3 more TCP probes \
              to an open port, 3 TCP probes to a closed port, 2 ICMP echoes, and a UDP datagram \
-             to a closed port. With no closed port from the scan it picks random TCP and UDP \
-             ports between 30000 and 44780, outside -p. FeroProbe sends one SYN to an open port \
-             the scan found"
+             to a closed port. Each closed port is one the scan found closed (else unfiltered); \
+             without one, nmap picks a random TCP or UDP port between 30000 and 44780, outside \
+             -p. FeroProbe sends one SYN to an open port the scan found"
                 .into(),
         );
     }
     if d.os && v6 {
         v.push(
             "-O (IPv6): nmap sends up to 17 probes per host: 6 SYNs, an ECN SYN and 3 more TCP \
-             probes to an open port, 3 TCP probes to a closed port (skipped when the scan found \
-             none), 2 ICMPv6 echoes, a neighbour solicitation to on-link targets, and a UDP \
-             datagram to a closed port, picked at random between 30000 and 44780 (outside -p) \
-             when the scan found none. FeroProbe sends one SYN to an open port the scan found"
+             probes to an open port, 3 TCP probes to a closed (else unfiltered) port, skipped \
+             when the scan found neither, 2 ICMPv6 echoes, a neighbour solicitation to on-link \
+             targets, and a UDP datagram to a closed (else unfiltered) UDP port, or without one \
+             to a random port between 30000 and 44780, outside -p. FeroProbe sends one SYN to \
+             an open port the scan found"
                 .into(),
         );
     }

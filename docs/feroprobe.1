@@ -1387,16 +1387,19 @@ T{
 \f[V]-O\f[R], IPv4
 T}@T{
 Sends 16 probes per host to an open TCP port, a closed TCP port and a
-closed UDP port; without a closed port from the scan it picks random TCP
-and UDP ports between 30000 and 44780, outside \f[V]-p\f[R]
+closed UDP port.
+A closed port is one the scan found closed, else unfiltered; without one
+it picks a random TCP or UDP port between 30000 and 44780, outside
+\f[V]-p\f[R]
 T}
 T{
 \f[V]-O\f[R], IPv6
 T}@T{
 Sends up to 17 probes per host, including a neighbour solicitation to
-on-link targets; without a closed TCP port it skips the closed-port TCP
-probes, but still picks a random closed UDP port between 30000 and
-44780, outside \f[V]-p\f[R]
+on-link targets.
+Without a closed (or unfiltered) TCP port it skips the closed-port TCP
+probes; without a closed (or unfiltered) UDP port it picks a random one
+between 30000 and 44780, outside \f[V]-p\f[R]
 T}
 T{
 \f[V]--traceroute\f[R]
