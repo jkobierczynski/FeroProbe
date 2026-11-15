@@ -1,0 +1,31 @@
+# FeroProbe scan detection rules — Suricata
+#
+# These rules match FeroProbe's documented probe signature. FeroProbe marks
+# its own scan traffic on purpose so the owner of a scanned network can tell
+# a FeroProbe scan apart from other traffic. The signature is documented in
+# docs/responsible-use.md.
+#
+# The marks:
+#   * Raw-socket TCP scan probes (SYN, FIN, NULL, Xmas, ACK, Window, Maimon)
+#     carry a fixed TCP window of 65109 (0xFE55). The window of a scan probe
+#     is otherwise meaningless, so this does not change how the probe behaves.
+#   * UDP probes to ports with no service-specific payload carry the ASCII
+#     marker "FeroProbeScan/1".
+#
+# Note: the TCP *connect* scan (-sT) uses the operating system's own TCP
+# stack and completes a normal handshake, so it carries no window marker and
+# is indistinguishable from an ordinary connection by design. OS-detection
+# probes (-O) deliberately mimic a real OS stack and are the other exception.
+#
+# SIDs use the local 9100000+ range. Adjust to fit your own numbering.
+
+# SYN ("half-open") scan probe: lone SYN, no payload, marker window.
+alert tcp any any -> $HOME_NET any (msg:"FeroProbe SYN scan probe (window marker 0xFE55)"; flow:not_established; flags:S,CE; dsize:0; window:65109; classtype:attempted-recon; metadata:tool FeroProbe; sid:9100001; rev:1;)
+
+# Other raw-socket TCP scan probes: FIN, NULL, Xmas, ACK, Window, Maimon.
+# Same marker window, SYN not set (so this does not double-alert on the SYN
+# scan rule above).
+alert tcp any any -> $HOME_NET any (msg:"FeroProbe stateless TCP scan probe (window marker 0xFE55)"; flags:!S; window:65109; classtype:attempted-recon; metadata:tool FeroProbe; sid:9100002; rev:1;)
+
+# UDP scan probe carrying FeroProbe's payload marker.
+alert udp any any -> $HOME_NET any (msg:"FeroProbe UDP scan probe (payload marker)"; content:"FeroProbeScan/1"; depth:16; classtype:attempted-recon; metadata:tool FeroProbe; sid:9100003; rev:1;)

@@ -39,17 +39,36 @@ supports. When they are added, FeroProbe will only allow them against
 private address ranges (RFC 1918, carrier-grade NAT, loopback, link-local
 and IPv6 unique-local addresses) and will refuse them for public targets.
 
-### Recognizable traffic (planned)
+### Recognizable traffic
 
-FeroProbe's probes will carry a stable, documented signature, so a network
-owner can tell FeroProbe traffic apart from other traffic. The exact
-signature will be listed here once it is in place.
+FeroProbe's probes carry a stable, documented signature, so a network owner
+can tell FeroProbe traffic apart from other traffic. The marks are:
 
-### Detection rules for defenders (planned)
+- **Raw-socket TCP scans** (SYN, FIN, NULL, Xmas, ACK, Window and Maimon)
+  set the TCP window to `65109` (`0xFE55`). The window of a scan probe is
+  otherwise meaningless, because the scan never completes a handshake, so
+  the fixed value is a reliable marker that does not change how the probe
+  behaves or how the target answers it.
+- **UDP scans** to ports with no service-specific probe carry the ASCII
+  payload `FeroProbeScan/1` instead of an empty datagram. Service probes
+  (DNS, NTP, SNMP, SSDP and so on) keep their own payloads, which are
+  already identifiable as the standard probe for that service.
 
-The repository will ship Suricata and Snort rules that match the probe
+Two scans carry no marker, on purpose:
+
+- The TCP **connect** scan (`-sT`) completes a normal handshake through the
+  operating system's own TCP stack, so it is indistinguishable from an
+  ordinary connection.
+- **OS-detection** probes (`-O`) deliberately mimic a real OS stack so the
+  target's response can be read, so they do not carry the window marker.
+
+### Detection rules for defenders
+
+The repository ships Suricata and Snort rules that match the probe
 signature, so blue teams can flag FeroProbe scans without writing their
-own rules.
+own. They are in [`rules/`](../rules/): `rules/feroprobe.rules` for
+Suricata and `rules/feroprobe.snort.rules` for Snort, with setup notes in
+`rules/README.md`.
 
 ## Limits of these safeguards
 
