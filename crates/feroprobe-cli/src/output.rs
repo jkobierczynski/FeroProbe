@@ -98,6 +98,8 @@ pub(crate) fn port_rows<'a>(
         PortState::ClosedFiltered,
     ]
     .into_iter()
+    // nmap never folds open|filtered ports above -vv: they may be open.
+    .filter(|&s| !(s == PortState::OpenFiltered && info.verbosity > 2))
     .map(|s| (host.count(s), s))
     .filter(|&(n, _)| n > limit)
     .collect();
@@ -518,6 +520,18 @@ pub(crate) mod tests {
             table.contains("All 70 scanned ports are in ignored states."),
             "{table}"
         );
+
+        // Above -vv, open|filtered ports are always listed, as in nmap.
+        host.ports = (1..=200).map(|p| tcp(p, PortState::Closed)).collect();
+        host.ports
+            .extend((1000..=1100).map(|p| tcp(p, PortState::OpenFiltered)));
+        let vvv = RunInfo {
+            verbosity: 3,
+            ..info()
+        };
+        let table = render_table(std::slice::from_ref(&host), &vvv);
+        assert!(table.contains("Not shown: 200 closed ports"), "{table}");
+        assert!(table.contains("1100/tcp   open|filtered"), "{table}");
     }
 
     #[test]

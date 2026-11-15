@@ -551,24 +551,39 @@ mod imp {
                     }
                 }
                 // Wait for stragglers, but stop as soon as every probe is answered.
-                let mut unanswered = pending
-                    .iter()
-                    .filter(|&&(h, p)| !results.contains_key(&(h, p)) && !is_done(h))
-                    .count();
+                let outstanding = |results: &HashMap<(usize, u16), PortResult>| {
+                    pending
+                        .iter()
+                        .filter(|&&(h, p)| !results.contains_key(&(h, p)) && !is_done(h))
+                        .count()
+                };
+                let mut unanswered = outstanding(&results);
                 let mut deadline = Instant::now() + cfg.timeout;
                 if let Some(limit) = cfg.deadline {
                     deadline = deadline.min(limit);
                 }
+                // As a discovery probe, hosts can be proven up by other
+                // probes while we wait: wake up regularly and count again,
+                // so a reply from such a host never stands in for another's.
+                let slice = if done.is_some() {
+                    Duration::from_millis(100)
+                } else {
+                    Duration::MAX
+                };
                 while unanswered > 0
                     && let Some(left) = deadline.checked_duration_since(Instant::now())
                 {
-                    match rx.recv_timeout(left) {
+                    match rx.recv_timeout(left.min(slice)) {
                         Ok(a) => {
-                            if record(&mut results, &sent_at, a) {
+                            if record(&mut results, &sent_at, a) && done.is_none() {
                                 unanswered -= 1;
                             }
                         }
+                        Err(mpsc::RecvTimeoutError::Timeout) if done.is_some() => {}
                         Err(_) => break,
+                    }
+                    if done.is_some() {
+                        unanswered = outstanding(&results);
                     }
                 }
                 pending.retain(|&(h, p)| !results.contains_key(&(h, p)) && !is_done(h));
@@ -715,6 +730,19 @@ mod imp {
             let hosts = scan_blocking(&[target], &[closed], &cfg, syn, Some(&done)).unwrap();
             assert_eq!(hosts[0].ports[0].state, PortState::Closed);
             assert!(done.is_done(0));
+
+            // Two hosts, one already up: the other still gets its answer
+            // counted, with no retry to fall back on.
+            let cfg = ScanConfig { retries: 0, ..cfg };
+            let a = Target::new("127.0.0.1".parse().unwrap());
+            let b = Target::new("127.0.0.2".parse().unwrap());
+            let done = HostsDone {
+                flags: Arc::new(vec![AtomicBool::new(true), AtomicBool::new(false)]),
+                index: vec![0, 1],
+            };
+            let hosts = scan_blocking(&[a, b], &[closed], &cfg, syn, Some(&done)).unwrap();
+            assert_eq!(hosts[0].ports[0].reason, reason::NO_RESPONSE);
+            assert_eq!(hosts[1].ports[0].state, PortState::Closed);
         }
 
         #[test]
