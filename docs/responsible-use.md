@@ -25,19 +25,36 @@ who run the network being scanned.
 ## Where FeroProbe differs from nmap on purpose
 
 FeroProbe aims to behave like nmap. The safeguards below are the
-deliberate exceptions. They are being built as part of the current
-development phase; this page says what is in place and what is planned.
+deliberate exceptions.
 
-### Evasion options only on private networks (planned)
+### Evasion options only on private networks
 
 nmap has options whose main use is getting past intrusion detection or
 hiding who is scanning: packet fragmentation (`-f`, `--mtu`), decoys
-(`-D`), spoofed source addresses (`-S`), the idle scan (`-sI`), which
-bounces probes off a third "zombie" host, and similar. These are useful when
-you test your own firewall or IDS, and that is the only use FeroProbe
-supports. When they are added, FeroProbe will only allow them against
-private address ranges (RFC 1918, carrier-grade NAT, loopback, link-local
-and IPv6 unique-local addresses) and will refuse them for public targets.
+(`-D`), and spoofed source addresses (`-S`). These are useful when you test
+your own firewall or IDS, and that is the only use FeroProbe supports.
+
+FeroProbe only allows them against private address ranges (RFC 1918,
+carrier-grade NAT per RFC 6598, loopback, link-local, and IPv6 loopback,
+unique-local and link-local addresses) and refuses them for any public
+target, with a message naming the address that is out of scope. They also
+need a raw TCP scan (`-sS`, `-sF`, `-sN`, `-sX`, `-sA`, `-sW` or `-sM`) on
+IPv4 targets, since that is the only path they are wired into.
+
+- `-f` fragments raw IPv4 probes into 8-byte pieces; `--mtu <n>` sets the
+  fragment payload size (a multiple of 8).
+- `-D <a,b,ME,c>` sends the probe from each decoy source address as well as
+  the real one, so the real scanner is harder to pick out. `ME` marks the
+  real scanner's slot and is accepted for nmap compatibility; FeroProbe
+  sends the real probe last.
+- `-S <addr>` forges the source address of the probes. Replies go to that
+  address, not to FeroProbe, so the scan is blind unless FeroProbe sits on
+  the path back — this matches nmap and is mainly for watching what your IDS
+  makes of the traffic.
+
+The idle scan (`-sI`), which bounces probes off a third "zombie" host, is
+**not** implemented: its only real use is educational, and nmap already
+serves that.
 
 ### Recognizable traffic
 

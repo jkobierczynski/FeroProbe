@@ -6,7 +6,7 @@ mod help;
 mod output;
 mod xml;
 
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result, bail};
@@ -14,11 +14,11 @@ use clap::{Parser, ValueEnum};
 use feroprobe_core::discovery::{DEFAULT_TCP_PING_PORT, DEFAULT_UDP_PING_PORT};
 use feroprobe_core::timing::parse_duration;
 use feroprobe_core::{
-    Exclusions, HostResult, IpVersion, PingProbes, PortLists, RawTcpScan, ScanConfig, SctpScanKind,
-    Target, TcpScanKind, Timing, connect_scan, detect_services, discover, ip_protocol_scan,
-    os_detect, parse_port_lists, parse_ports, parse_scanflags, raw_ipv6_available,
-    raw_sockets_available, raw_tcp_scan, resolve_targets_lenient, reverse_lookup, sctp_scan,
-    top_ports, top_sctp_ports, top_udp_ports, traceroute, udp_scan,
+    Evasion, Exclusions, Fragment, HostResult, IpVersion, PingProbes, PortLists, RawTcpScan,
+    ScanConfig, SctpScanKind, Target, TcpScanKind, Timing, connect_scan, detect_services, discover,
+    ip_protocol_scan, os_detect, parse_port_lists, parse_ports, parse_scanflags,
+    raw_ipv6_available, raw_sockets_available, raw_tcp_scan, resolve_targets_lenient,
+    reverse_lookup, sctp_scan, top_ports, top_sctp_ports, top_udp_ports, traceroute, udp_scan,
 };
 use futures::StreamExt;
 
@@ -289,6 +289,32 @@ struct Args {
     /// scan's when none is chosen
     #[arg(long, value_name = "FLAGS", value_parser = parse_scanflags)]
     scanflags: Option<u8>,
+
+    /// Evasion: fragment raw IPv4 probe packets into 8-byte pieces (nmap's
+    /// -f). For testing your own firewall or IDS, so FeroProbe only allows
+    /// it against private address ranges. Needs a raw TCP scan (-sS/-sF/-sN/
+    /// -sX/-sA/-sW/-sM). Conflicts with --mtu
+    #[arg(short = 'f', conflicts_with = "mtu")]
+    fragment: bool,
+
+    /// Evasion: fragment raw IPv4 probe packets to this payload size per
+    /// fragment, a positive multiple of 8 (nmap's --mtu). Private targets
+    /// only, like -f
+    #[arg(long, value_name = "N")]
+    mtu: Option<u16>,
+
+    /// Evasion: decoy source addresses, comma-separated, so the target sees
+    /// probes from these alongside the real scan (nmap's -D). The token ME
+    /// marks where the real probe sits; it is added at the end if omitted.
+    /// Private targets only
+    #[arg(short = 'D', long = "decoys", value_name = "a,b,ME,c")]
+    decoys: Option<String>,
+
+    /// Evasion: send raw IPv4 probes from this forged source address (nmap's
+    /// -S). Replies go to it, not to you, so the scan is blind unless
+    /// FeroProbe is on the path back. Private targets only
+    #[arg(short = 'S', long = "source", value_name = "ADDR")]
+    spoof_source: Option<String>,
 
     /// Host discovery, nmap style. -Pn: skip it and scan every target as if
     /// it were up. Otherwise pick the probes (default: ICMP echo plus TCP
@@ -794,7 +820,89 @@ fn scan_config(args: &Args) -> ScanConfig {
         // One --max-rate for the whole run, like nmap's, however many scans
         // and host jobs send side by side or one after another.
         rate_schedule: Some(feroprobe_core::timing::RateSchedule::new()),
+        // Set later by configure_evasion once the targets are known.
+        evasion: Evasion::default(),
     }
+}
+
+/// Build the evasion options from the command-line flags, failing on
+/// malformed input. Does not check whether they are allowed for the
+/// targets; [`gate_evasion`] does that.
+fn evasion_from_args(args: &Args) -> Result<Evasion> {
+    let mut ev = Evasion::default();
+    if args.fragment {
+        ev.fragment = Some(Fragment::Eight);
+    }
+    if let Some(n) = args.mtu {
+        if n == 0 || n % 8 != 0 {
+            bail!("--mtu must be a positive multiple of 8");
+        }
+        ev.fragment = Some(Fragment::Mtu(n));
+    }
+    if let Some(list) = &args.decoys {
+        for tok in list.split(',') {
+            let tok = tok.trim();
+            // ME marks the real scanner's slot among the decoys. FeroProbe
+            // always sends the real probe last, so ME is accepted but has no
+            // effect on ordering.
+            if tok.eq_ignore_ascii_case("ME") {
+                continue;
+            }
+            if tok.is_empty() {
+                bail!("-D has an empty decoy in its list");
+            }
+            let ip: Ipv4Addr = tok
+                .parse()
+                .map_err(|_| anyhow::anyhow!("decoy '{tok}' is not an IPv4 address"))?;
+            ev.decoys.push(IpAddr::V4(ip));
+        }
+        if ev.decoys.is_empty() {
+            bail!("-D needs at least one decoy address");
+        }
+    }
+    if let Some(s) = &args.spoof_source {
+        let ip: Ipv4Addr = s
+            .parse()
+            .map_err(|_| anyhow::anyhow!("--source '{s}' is not an IPv4 address"))?;
+        ev.spoof_source = Some(IpAddr::V4(ip));
+    }
+    Ok(ev)
+}
+
+/// Refuse evasion options unless they are allowed: a raw TCP scan, raw
+/// sockets available, IPv4-only targets, and every target in a private
+/// range. The private-range limit is a deliberate anti-abuse safeguard and
+/// a departure from nmap, which allows these options against any target.
+fn gate_evasion(ev: &Evasion, targets: &[Target], plan: &Plan) -> Result<()> {
+    if !ev.is_active() {
+        return Ok(());
+    }
+    if plan.tcp.and_then(ScanType::raw_kind).is_none() {
+        bail!(
+            "evasion options (-f/--mtu, -D, -S) need a raw TCP scan: \
+             -sS, -sF, -sN, -sX, -sA, -sW or -sM"
+        );
+    }
+    if let Some(t) = targets.iter().find(|t| t.addr.is_ipv6()) {
+        bail!(
+            "evasion options are IPv4 only, but target {} is IPv6",
+            t.addr
+        );
+    }
+    // The anti-abuse safeguard. Checked before the privilege check so a
+    // public target is refused whether or not raw sockets are available.
+    let addrs: Vec<IpAddr> = targets.iter().map(|t| t.addr).collect();
+    if let Some(public) = feroprobe_core::scope::first_public(&addrs) {
+        bail!(
+            "evasion options (fragmentation, decoys, spoofed source) are only allowed \
+             against private address ranges, but {public} is a public address. This is a \
+             deliberate FeroProbe safeguard: see docs/responsible-use.md."
+        );
+    }
+    if !raw_sockets_available() {
+        bail!("evasion options send raw packets: run as root or grant CAP_NET_RAW");
+    }
+    Ok(())
 }
 
 /// Apply `--min-rate` on top of the timing settings. Raw-socket scans send
@@ -1405,6 +1513,11 @@ async fn main() -> Result<()> {
 
     let mut cfg = scan_config(&args);
     let warnings = apply_min_rate(&mut cfg, &args, feroprobe_core::connect::open_file_limit())?;
+    // Evasion options are refused unless every target is private; see
+    // gate_evasion. Parsed and checked before the scan sends anything.
+    let evasion = evasion_from_args(&args)?;
+    gate_evasion(&evasion, &targets, &plan)?;
+    cfg.evasion = evasion;
     // The warnings are about connect and UDP probes.
     let sockets = !plan.ping_only && (plan.udp || plan.tcp.is_some_and(|t| t.raw_kind().is_none()));
     for w in warnings.iter().filter(|_| sockets) {
@@ -2059,6 +2172,90 @@ mod tests {
         all.extend_from_slice(argv);
         all.push("10.0.0.1");
         Args::try_parse_from(nmap_style_args(all.iter().map(|s| s.to_string()))).unwrap()
+    }
+
+    fn plan_with_tcp(tcp: Option<ScanType>) -> Plan {
+        Plan {
+            tcp,
+            udp: false,
+            sctp: None,
+            ip_proto: false,
+            version: false,
+            ping_only: false,
+            discovery: true,
+        }
+    }
+
+    #[test]
+    fn evasion_parsing() {
+        assert!(!evasion_from_args(&args(&[])).unwrap().is_active());
+        assert_eq!(
+            evasion_from_args(&args(&["-f"])).unwrap().fragment,
+            Some(Fragment::Eight)
+        );
+        assert_eq!(
+            evasion_from_args(&args(&["--mtu", "16"])).unwrap().fragment,
+            Some(Fragment::Mtu(16))
+        );
+        assert!(evasion_from_args(&args(&["--mtu", "15"])).is_err());
+        assert!(evasion_from_args(&args(&["--mtu", "0"])).is_err());
+        let ev = evasion_from_args(&args(&["-D", "10.0.0.5,ME,10.0.0.6"])).unwrap();
+        assert_eq!(ev.decoys.len(), 2); // ME is a position marker, not a decoy
+        assert!(evasion_from_args(&args(&["-D", "not-an-ip"])).is_err());
+        assert_eq!(
+            evasion_from_args(&args(&["-S", "10.1.2.3"]))
+                .unwrap()
+                .spoof_source,
+            Some("10.1.2.3".parse().unwrap())
+        );
+        assert!(evasion_from_args(&args(&["-S", "nope"])).is_err());
+    }
+
+    #[test]
+    fn evasion_gate_refuses_out_of_scope() {
+        let ev = evasion_from_args(&args(&["-f"])).unwrap();
+        let syn = plan_with_tcp(Some(ScanType::Syn));
+
+        // A public target is refused by the safeguard, whatever the privileges.
+        let public = [Target::new("8.8.8.8".parse().unwrap())];
+        let err = gate_evasion(&ev, &public, &syn).unwrap_err().to_string();
+        assert!(err.contains("private address"), "{err}");
+
+        // An IPv6 target is refused as IPv4-only.
+        let v6 = [Target::new("fd00::1".parse().unwrap())];
+        let err = gate_evasion(&ev, &v6, &syn).unwrap_err().to_string();
+        assert!(err.contains("IPv4 only"), "{err}");
+
+        // A connect scan cannot carry evasion.
+        let private = [Target::new("10.0.0.1".parse().unwrap())];
+        let connect = plan_with_tcp(Some(ScanType::Connect));
+        let err = gate_evasion(&ev, &private, &connect)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("raw TCP scan"), "{err}");
+
+        // No evasion flags: the gate is a no-op even for a public target.
+        assert!(gate_evasion(&Evasion::default(), &public, &syn).is_ok());
+    }
+
+    #[test]
+    fn evasion_gate_allows_private_targets() {
+        let ev = evasion_from_args(&args(&["-f"])).unwrap();
+        let syn = plan_with_tcp(Some(ScanType::Syn));
+        let private = [
+            Target::new("10.0.0.1".parse().unwrap()),
+            Target::new("192.168.1.5".parse().unwrap()),
+        ];
+        // A private target clears the safeguard. Without raw sockets (CI) the
+        // gate then stops on the privilege check instead, never on scope.
+        if let Err(e) = gate_evasion(&ev, &private, &syn) {
+            let e = e.to_string();
+            assert!(!e.contains("private address"), "{e}");
+            assert!(
+                e.contains("raw packets") || e.contains("CAP_NET_RAW"),
+                "{e}"
+            );
+        }
     }
 
     #[test]
