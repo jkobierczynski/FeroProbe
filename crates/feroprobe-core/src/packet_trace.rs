@@ -215,7 +215,7 @@ mod tests {
             Some("192.0.2.1".parse().unwrap()),
             Some("192.0.2.9".parse().unwrap()),
         );
-        assert_eq!(line, "TCP 192.0.2.1:40000 > 192.0.2.9:80 S seq=7 win=1024");
+        assert_eq!(line, "TCP 192.0.2.1:40000 > 192.0.2.9:80 S seq=7 win=65109");
         let echo = packet::icmp_echo(5, 1, &[]);
         let line = describe(
             packet::IPPROTO_ICMP,

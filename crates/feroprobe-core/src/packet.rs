@@ -22,6 +22,27 @@ pub const TCP_URG: u8 = 0x20;
 pub const TCP_ECE: u8 = 0x40;
 pub const TCP_CWR: u8 = 0x80;
 
+// --- Recognizable probe signature ------------------------------------------
+//
+// FeroProbe deliberately marks its own scan traffic so the owner of a
+// scanned network can tell a FeroProbe scan apart from other traffic. This
+// is a deliberate exception to nmap parity. The marks are documented in
+// `docs/responsible-use.md`, and the repository ships Suricata and Snort
+// rules (`rules/`) that match them.
+
+/// The TCP window value FeroProbe writes on its raw-socket TCP scan probes
+/// (SYN, FIN, NULL, Xmas, ACK, Window, Maimon). The window of a scan probe
+/// is otherwise meaningless — the scan never completes a handshake — so a
+/// fixed, unusual value is a reliable marker that does not change how the
+/// probe behaves or how the target answers it.
+pub const PROBE_WINDOW: u16 = 0xFE55;
+
+/// The payload FeroProbe puts in UDP probes that have no protocol-specific
+/// payload of their own, as a recognizable marker. Protocol probes (DNS,
+/// NTP, SNMP, SSDP, …) keep their own payloads, which are already
+/// identifiable as the standard probe for that service.
+pub const UDP_MARKER: &[u8] = b"FeroProbeScan/1\n";
+
 pub const ICMP_ECHO_REPLY: u8 = 0;
 pub const ICMP_DEST_UNREACH: u8 = 3;
 pub const ICMP_TIME_EXCEEDED: u8 = 11;
@@ -94,7 +115,7 @@ pub fn tcp_syn(
     // ack = 0
     p[12] = ((SYN_LEN / 4) as u8) << 4; // data offset in 32-bit words
     p[13] = TCP_SYN;
-    p[14..16].copy_from_slice(&1024u16.to_be_bytes()); // window
+    p[14..16].copy_from_slice(&PROBE_WINDOW.to_be_bytes()); // window: FeroProbe marker
     // checksum at 16..18, urgent pointer 18..20 = 0
     p[20..24].copy_from_slice(&[2, 4, 0x05, 0xb4]); // MSS = 1460
     let sum = checksum_with(
@@ -126,7 +147,7 @@ pub fn tcp_probe(
     p[8..12].copy_from_slice(&ack.to_be_bytes());
     p[12] = ((TCP_PROBE_LEN / 4) as u8) << 4;
     p[13] = flags;
-    p[14..16].copy_from_slice(&1024u16.to_be_bytes());
+    p[14..16].copy_from_slice(&PROBE_WINDOW.to_be_bytes()); // FeroProbe marker
     let sum = checksum_with(
         pseudo_header_sum(src.into(), dst.into(), IPPROTO_TCP, TCP_PROBE_LEN),
         &p,
@@ -759,7 +780,7 @@ mod tests {
                 seq: 0xdead_beef,
                 ack: 0,
                 flags: TCP_SYN,
-                window: 1024,
+                window: PROBE_WINDOW,
             }
         );
         // A correct checksum makes the sum over pseudo-header + segment zero.
@@ -780,6 +801,7 @@ mod tests {
         let seg = tcp_probe(src, dst, 40001, 80, 11, 22, flags);
         let tcp = parse_tcp(&seg).unwrap();
         assert_eq!((tcp.seq, tcp.ack, tcp.flags), (11, 22, flags));
+        assert_eq!(tcp.window, PROBE_WINDOW);
         assert!(tcp_options(&seg).is_empty());
         assert_eq!(
             checksum_with(

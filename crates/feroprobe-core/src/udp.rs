@@ -48,7 +48,10 @@ pub fn payload_for(port: u16) -> &'static [u8] {
         ],
         // SSDP (UPnP) discovery.
         1900 => b"M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nMAN: \"ssdp:discover\"\r\nMX: 1\r\nST: ssdp:all\r\n\r\n",
-        _ => &[],
+        // Ports with no service-specific probe carry FeroProbe's
+        // recognizable marker instead of an empty datagram, so the scan is
+        // easy for the network owner to identify. See `packet::UDP_MARKER`.
+        _ => crate::packet::UDP_MARKER,
     }
 }
 
@@ -273,6 +276,7 @@ mod tests {
     fn payloads() {
         assert_eq!(payload_for(123).len(), 48);
         assert!(payload_for(53).len() > 12);
-        assert!(payload_for(9999).is_empty());
+        // Ports with no service-specific probe carry the FeroProbe marker.
+        assert_eq!(payload_for(9999), crate::packet::UDP_MARKER);
     }
 }

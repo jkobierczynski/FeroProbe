@@ -1,0 +1,21 @@
+# FeroProbe scan detection rules — Snort (2.9.x and 3.x)
+#
+# Same signature as rules/feroprobe.rules (Suricata); see that file and
+# docs/responsible-use.md for the full description. FeroProbe marks its own
+# scan traffic so the owner of a scanned network can recognize it:
+#   * Raw-socket TCP scan probes carry TCP window 65109 (0xFE55).
+#   * UDP probes without a service-specific payload carry "FeroProbeScan/1".
+#
+# The TCP connect scan (-sT) and OS-detection probes (-O) are the documented
+# exceptions and carry no marker.
+#
+# SIDs use the local 9100000+ range. Adjust to fit your own numbering.
+
+# SYN scan probe: lone SYN, no payload, marker window.
+alert tcp any any -> $HOME_NET any (msg:"FeroProbe SYN scan probe (window marker 0xFE55)"; flags:S; dsize:0; window:65109; classtype:attempted-recon; sid:9100001; rev:1;)
+
+# Other raw-socket TCP scan probes: FIN, NULL, Xmas, ACK, Window, Maimon.
+alert tcp any any -> $HOME_NET any (msg:"FeroProbe stateless TCP scan probe (window marker 0xFE55)"; flags:!S; window:65109; classtype:attempted-recon; sid:9100002; rev:1;)
+
+# UDP scan probe carrying FeroProbe's payload marker.
+alert udp any any -> $HOME_NET any (msg:"FeroProbe UDP scan probe (payload marker)"; content:"FeroProbeScan/1"; depth:16; classtype:attempted-recon; sid:9100003; rev:1;)
