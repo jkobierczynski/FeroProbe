@@ -266,10 +266,10 @@ pub fn write(run: &DryRun<'_>, w: &mut dyn Write) -> io::Result<Summary> {
     }
     summary.scan = out.count - before;
     if let Some(opts) = &run.os
-        && run.tcp.is_some()
+        && let Some((_, ports)) = run.tcp
     {
         let before = out.count;
-        os_probes(&mut out, run, opts, &sources, &v)?;
+        os_probes(&mut out, run, opts, ports.len(), &sources, &v)?;
         summary.os = out.count - before;
     }
     let retry = if run.retries > 0 {
@@ -303,26 +303,47 @@ fn os_probes(
     out: &mut Out<'_>,
     run: &DryRun<'_>,
     opts: &crate::os::OsOptions,
+    ports: usize,
     sources: &[Option<IpAddr>],
     v: &Values,
 ) -> io::Result<()> {
     use crate::os::probes::{self, Target};
+    // One scanned port can be open or closed, never both: there is no
+    // closed port to probe, and --osscan-limit skips every host.
+    let closed = ports >= 2;
+    if opts.limit && !closed {
+        return out.note(
+            "OS detection (-O --osscan-limit): no host is fingerprinted, because the scan \
+             covers only one TCP port and so cannot find both an open and a closed one",
+        );
+    }
+    let max = opts.max_tries.max(1);
+    let tries = if closed {
+        max
+    } else {
+        max.min(crate::os::UNIDEAL_TRIES)
+    };
     out.note(&format!(
-        "OS detection (-O): only for hosts where the scan finds an open TCP port{}. <open> and \
-         <closed> stand for an open and a closed TCP port the scan finds among the ports \
-         above; the probes to <closed> go only if it finds one. The four SYNs to <open> go \
-         100 ms apart. A host without a perfect match is tried again, up to {} tr{} in all \
-         (two when the scan finds no closed port)",
+        "OS detection (-O): only for hosts where the scan finds an open TCP port{}. {} \
+         The four SYNs to <open> go 100 ms apart. A host without a perfect match is tried \
+         again, up to {tries} tr{} in all{}",
         if opts.limit {
             " and a closed (or unfiltered) one (--osscan-limit)"
         } else {
             ""
         },
-        opts.max_tries.max(1),
-        if opts.max_tries.max(1) == 1 {
-            "y"
+        if closed {
+            "<open> and <closed> stand for an open and a closed TCP port the scan finds among \
+             the ports above; the probes to <closed> go only if it finds one."
         } else {
-            "ies"
+            "<open> stands for the scanned port when the scan finds it open. With one TCP \
+             port there is no closed port to probe."
+        },
+        if tries == 1 { "y" } else { "ies" },
+        if closed && max > crate::os::UNIDEAL_TRIES {
+            " (two when the scan finds no closed port)"
+        } else {
+            ""
         },
     ))?;
     if opts.icmp_echo {
@@ -336,7 +357,7 @@ fn os_probes(
         icmp_id: v.icmp_id,
     };
     for (t, src) in run.targets.iter().zip(sources) {
-        for i in probes::plan(true, opts.icmp_echo) {
+        for i in probes::plan(closed, opts.icmp_echo) {
             let v6 = t.addr.is_ipv6();
             let Some(src) = src.filter(|s| s.is_ipv6() == v6) else {
                 out.probe(&format!("{} * > {} (no route)", NAMES_UPPER[i], t.addr))?;
@@ -734,7 +755,7 @@ mod tests {
     fn os_detection_probes_use_placeholders() {
         let targets = [target("127.0.0.1")];
         let ev = Evasion::default();
-        let ports = [22];
+        let ports = [22, 80];
         let run = DryRun {
             tcp: Some((DryTcp::Raw(RawTcpScan::new(TcpScanKind::Syn)), &ports)),
             os: Some(crate::os::OsOptions::default()),
@@ -764,6 +785,28 @@ mod tests {
         assert_eq!(summary.os, 9, "{text}");
         assert!(text.contains("echo request"), "{text}");
         assert!(text.contains("up to 1 try in all"), "{text}");
+
+        // One scanned port cannot be both open and closed: no <closed> probes,
+        // and --osscan-limit fingerprints nothing.
+        let one = [22];
+        let run = DryRun {
+            tcp: Some((DryTcp::Raw(RawTcpScan::new(TcpScanKind::Syn)), &one)),
+            os: Some(crate::os::OsOptions::default()),
+            ..base(&targets, &ev)
+        };
+        let (text, summary) = run_to_string(&run);
+        assert_eq!(summary.os, 6, "{text}");
+        assert!(!text.contains("<closed>"), "{text}");
+        let run = DryRun {
+            os: Some(crate::os::OsOptions {
+                limit: true,
+                ..Default::default()
+            }),
+            ..run
+        };
+        let (text, summary) = run_to_string(&run);
+        assert_eq!(summary.os, 0, "{text}");
+        assert!(text.contains("no host is fingerprinted"), "{text}");
     }
 
     #[test]

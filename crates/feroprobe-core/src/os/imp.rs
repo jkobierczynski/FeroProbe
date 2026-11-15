@@ -113,6 +113,21 @@ impl Sockets {
     }
 }
 
+/// A socket, or `None` when the system has no such address family (no
+/// IPv6 stack); any other error, such as missing privileges, stays one.
+fn unless_unsupported(r: io::Result<Socket>) -> io::Result<Option<Socket>> {
+    match r {
+        Ok(s) => Ok(Some(s)),
+        Err(e)
+            if e.raw_os_error() == Some(libc::EAFNOSUPPORT)
+                || e.kind() == io::ErrorKind::Unsupported =>
+        {
+            Ok(None)
+        }
+        Err(e) => Err(e),
+    }
+}
+
 /// One host in one try.
 struct Slot {
     job: usize,
@@ -133,19 +148,21 @@ pub(super) fn probe_blocking(
     opts: &OsOptions,
 ) -> io::Result<Vec<Vec<Try>>> {
     let any = |v6: bool| jobs.iter().any(|j| j.addr.is_ipv6() == v6);
-    // IPv4 needs raw sockets, and failing that is an error, as for the
-    // other raw scans. IPv6 may be missing altogether (no IPv6 stack): its
+    // Raw sockets are needed, and failing to open one is an error, as for
+    // the other raw scans. Only a missing IPv6 stack is let through: its
     // hosts then get no result rather than sinking the IPv4 ones.
     let socks = Sockets {
         tcp4: any(false).then(|| raw_socket(SockProto::TCP)).transpose()?,
         tcp6: any(true)
-            .then(|| raw_socket_in(Domain::IPV6, SockProto::TCP).ok())
+            .then(|| unless_unsupported(raw_socket_in(Domain::IPV6, SockProto::TCP)))
+            .transpose()?
             .flatten(),
         icmp4: (opts.icmp_echo && any(false))
-            .then(|| raw_socket(SockProto::ICMPV4).ok())
-            .flatten(),
+            .then(|| raw_socket(SockProto::ICMPV4))
+            .transpose()?,
         icmp6: (opts.icmp_echo && any(true))
-            .then(|| raw_socket_in(Domain::IPV6, SockProto::ICMPV6).ok())
+            .then(|| unless_unsupported(raw_socket_in(Domain::IPV6, SockProto::ICMPV6)))
+            .transpose()?
             .flatten(),
     };
     let sources: Vec<Option<IpAddr>> = jobs
@@ -156,7 +173,7 @@ pub(super) fn probe_blocking(
                 .then_some(src)
         })
         .collect();
-    let limits: Vec<u32> = jobs.iter().map(|j| tries_for(j, opts, cfg)).collect();
+    let mut limits: Vec<u32> = jobs.iter().map(|j| tries_for(j, opts, cfg)).collect();
     let mut tries: Vec<Vec<Try>> = vec![Vec::new(); jobs.len()];
     let mut done = vec![false; jobs.len()];
     let mut rng = Rng::new();
@@ -193,6 +210,7 @@ pub(super) fn probe_blocking(
             if classify(db, &fp).1 > 0 {
                 done[s.job] = true;
             }
+            limits[s.job] = super::tries_after(&jobs[s.job], limits[s.job], &s.t, &fp, cfg);
             tries[s.job].push(s.t);
         }
     }
@@ -230,6 +248,13 @@ fn run_try(
             s.t.replies[i] = Some(r);
         }
     };
+    // Move what has arrived out of the channel, so a large host group
+    // cannot fill it while probes are still going out.
+    let drain = |slots: &mut [Slot]| {
+        while let Ok(a) = rx.try_recv() {
+            take(slots, a);
+        }
+    };
     // Read answers until `until` (or the host deadline), or until every
     // probe sent so far is answered when `early` is set.
     let wait = |slots: &mut [Slot], until: Instant, early: bool| {
@@ -260,14 +285,16 @@ fn run_try(
         // The sequence SYNs, one round per probe, 100 ms apart.
         for i in 0..probes::SEQ_PROBES {
             let start = Instant::now();
-            for s in slots.iter_mut() {
-                send(s, i, keys, socks, pacer, cfg)?;
+            for n in 0..slots.len() {
+                send(&mut slots[n], i, keys, socks, pacer, cfg)?;
+                drain(slots);
             }
             wait(slots, start + probes::SEQ_GAP, false);
         }
         for i in probes::E..PROBES {
-            for s in slots.iter_mut() {
-                send(s, i, keys, socks, pacer, cfg)?;
+            for n in 0..slots.len() {
+                send(&mut slots[n], i, keys, socks, pacer, cfg)?;
+                drain(slots);
             }
         }
         wait(slots, Instant::now() + cfg.timeout, true);
@@ -278,9 +305,7 @@ fn run_try(
     })();
     stop.store(true, Ordering::Relaxed);
     let _ = receiver.join();
-    while let Ok(a) = rx.try_recv() {
-        take(slots, a);
-    }
+    drain(slots);
     outcome
 }
 

@@ -413,7 +413,9 @@ async fn detect_local(addr: &str) -> Option<OsResult> {
     os_detect(&mut hosts, &ScanConfig::default(), &opts)
         .await
         .unwrap();
-    hosts.pop().unwrap().os
+    let os = hosts.pop().unwrap().os;
+    assert!(os.is_some(), "no OS result for {addr}");
+    os
 }
 
 #[cfg(target_os = "linux")]
@@ -473,4 +475,28 @@ async fn stops_at_the_host_deadline() {
         .await
         .unwrap_err();
     assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+}
+
+#[test]
+fn a_far_host_found_by_a_try_gets_two_tries() {
+    let cfg = ScanConfig::default();
+    let j = job(Some(81));
+    let near = linux_try(false, true);
+    let fp = fingerprint(&near);
+    // TTL 61 from 64: four hops, the limit stands.
+    assert_eq!(
+        tries_after(&j, DEFAULT_TRIES, &near, &fp, &cfg),
+        DEFAULT_TRIES
+    );
+    let mut far = linux_try(false, true);
+    for r in far.replies.iter_mut().flatten() {
+        r.ttl = 50;
+    }
+    let fp = fingerprint(&far);
+    // Fifteen hops: cut to two, as nmap does for a distant host.
+    assert_eq!(
+        tries_after(&j, DEFAULT_TRIES, &far, &fp, &cfg),
+        UNIDEAL_TRIES
+    );
+    assert_eq!(tries_after(&j, 1, &far, &fp, &cfg), 1);
 }

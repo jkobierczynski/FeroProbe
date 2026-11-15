@@ -200,6 +200,30 @@ fn distance_of(job: &Job, fp: &Fingerprint, ttl: Option<u8>) -> Option<u8> {
     })
 }
 
+/// The host's distance as one try (with fingerprint `fp`) shows it.
+fn try_distance(job: &Job, t: &fingerprint::Try, fp: &Fingerprint) -> Option<u8> {
+    let ttl = t.replies.iter().flatten().map(|r| r.ttl).max();
+    distance_of(job, fp, ttl)
+}
+
+/// The tries a host gets after a try (with fingerprint `fp`): `limit`, cut
+/// to two when that try shows the host more than five hops away, which the
+/// first count could not know.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(super) fn tries_after(
+    job: &Job,
+    limit: u32,
+    t: &fingerprint::Try,
+    fp: &Fingerprint,
+    cfg: &ScanConfig,
+) -> u32 {
+    if not_ideal(job, try_distance(job, t, fp), cfg).is_some() {
+        limit.min(UNIDEAL_TRIES)
+    } else {
+        limit
+    }
+}
+
 /// Score one fingerprint: the matches to report and how many are perfect.
 pub fn classify(db: &[db::Signature], fp: &Fingerprint) -> (Vec<OsMatch>, usize) {
     let found = db::matches(db, fp);
@@ -254,8 +278,7 @@ pub fn result_for(job: &Job, tries: &[fingerprint::Try], cfg: &ScanConfig) -> Os
     }
     let (n, matches, perfect, fp) = best.unwrap_or_default();
     let t = tries.get(n);
-    let ttl = t.and_then(|t| t.replies.iter().flatten().map(|r| r.ttl).max());
-    let distance = distance_of(job, &fp, ttl);
+    let distance = t.and_then(|t| try_distance(job, t, &fp));
     let ipids = t.map(fingerprint::seq_ipids).unwrap_or_default();
     OsResult {
         matches,

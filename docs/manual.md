@@ -995,7 +995,10 @@ resends unanswered ones up to `--retries` times), and only names the
 steps that depend on answers (`-sV`, `--traceroute`, reverse DNS)
 instead of listing their probes. OS detection (`-O`) is listed probe by
 probe for one try, with `<open>` and `<closed>` in place of the ports the
-scan would find, and a count of its own in the last line. Target hostnames are still resolved
+scan would find, and a count of its own in the last line. When the scan
+covers a single TCP port it cannot find both an open and a closed one, so
+the `<closed>` probes are left out (and with `--osscan-limit` no OS probes
+are listed at all). Target hostnames are still resolved
 through the system resolver, even with `-n` (give numeric addresses when no
 DNS traffic is allowed), so the addresses shown are the real ones,
 and the routing table is consulted (without sending) for the source

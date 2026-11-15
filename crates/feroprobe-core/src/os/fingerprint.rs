@@ -240,10 +240,16 @@ pub fn ipid_class(ids: &[u16]) -> Option<&'static str> {
     if ids.windows(2).all(|w| w[0] == w[1]) {
         return Some("C");
     }
-    let diffs: Vec<u16> = ids.windows(2).map(|w| w[1].wrapping_sub(w[0])).collect();
-    if diffs.iter().all(|&d| d != 0 && d % 256 == 0 && d <= 5120) {
+    // A stack that writes its counter in host order on a little-endian CPU
+    // counts in the high byte: its IDs, byte-swapped back, go up by small
+    // steps, also when the low byte carries over.
+    if ids
+        .windows(2)
+        .all(|w| (1..=20).contains(&w[1].swap_bytes().wrapping_sub(w[0].swap_bytes())))
+    {
         return Some("BI");
     }
+    let diffs: Vec<u16> = ids.windows(2).map(|w| w[1].wrapping_sub(w[0])).collect();
     if diffs.iter().all(|&d| (1..=1000).contains(&d)) {
         return Some("I");
     }
@@ -437,6 +443,8 @@ mod tests {
         assert_eq!(ipid_class(&[100, 101, 105, 110]), Some("I"));
         assert_eq!(ipid_class(&[65534, 2, 9]), Some("I"));
         assert_eq!(ipid_class(&[0x0100, 0x0200, 0x0400]), Some("BI"));
+        // The low byte carries over between the second and third ID.
+        assert_eq!(ipid_class(&[0xfe00, 0xff00, 0x0001, 0x0101]), Some("BI"));
         assert_eq!(ipid_class(&[100, 5000, 9000]), Some("RI"));
         assert_eq!(ipid_class(&[40000, 1000, 30000]), Some("RD"));
         assert_eq!(ipid_class(&[1]), None);
