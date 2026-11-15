@@ -81,7 +81,9 @@ pub fn render(hosts: &[HostResult], info: &RunInfo) -> String {
             let ports: Vec<String> = rows.iter().map(|p| port_entry(p)).collect();
             let _ = write!(line, "\tPorts: {}", ports.join(", "));
         }
-        if let (false, Some((n, state))) = (info.only_open, hidden) {
+        // Like nmap, grepable output names an ignored state only when
+        // there is exactly one.
+        if let [(n, state)] = hidden.as_slice() {
             let _ = write!(line, "\tIgnored State: {state} ({n})");
         }
         if let Some(os) = &host.os {
@@ -134,9 +136,10 @@ mod tests {
                 }),
             ),
             port(80, PortState::Closed, None),
-            port(81, PortState::Filtered, None),
-            port(82, PortState::Filtered, None),
         ];
+        // More than 25 filtered ports collapse into "Ignored State".
+        host.ports
+            .extend((81..111).map(|p| port(p, PortState::Filtered, None)));
         let down = HostResult::new("10.0.0.6".parse().unwrap(), None);
         let g = render(&[host, down], &info());
         let lines: Vec<&str> = g.lines().collect();
@@ -144,7 +147,7 @@ mod tests {
         assert_eq!(lines[1], "Host: 10.0.0.5 (web)\tStatus: Up");
         assert_eq!(
             lines[2],
-            "Host: 10.0.0.5 (web)\tPorts: 22/open/tcp//ssh//Open|SSH; test 9.6/, 80/closed/tcp//http///\tIgnored State: filtered (2)"
+            "Host: 10.0.0.5 (web)\tPorts: 22/open/tcp//ssh//Open|SSH; test 9.6/, 80/closed/tcp//http///\tIgnored State: filtered (30)"
         );
         assert!(
             lines[3].contains("-- 2 IP addresses (1 host up) scanned in 1.50 seconds"),

@@ -160,17 +160,13 @@ pub fn raw_tcp_pings(targets: &[Target]) -> bool {
 /// that traffic over `lo`). nmap skips the ping for these targets when it
 /// runs privileged, since they route over the loopback interface.
 pub fn is_localhost(addr: IpAddr) -> bool {
-    if addr.is_loopback() {
-        return true;
-    }
     #[cfg(target_os = "linux")]
-    {
-        !addr.is_unspecified() && crate::raw::source_addr_for(addr).is_ok_and(|src| src == addr)
-    }
+    let own =
+        || !addr.is_unspecified() && crate::raw::source_addr_for(addr).is_ok_and(|src| src == addr);
+    // Elsewhere only loopback addresses count.
     #[cfg(not(target_os = "linux"))]
-    {
-        false
-    }
+    let own = || false;
+    addr.is_loopback() || own()
 }
 
 /// Probe every target and return one [`HostResult`] per target, in order,

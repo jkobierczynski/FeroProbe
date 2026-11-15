@@ -119,6 +119,11 @@ PORT       STATE          SERVICE        REASON
 FeroProbe done: 1 host(s), 1 up, 10000 port(s) each, in 2.11s
 ```
 
+As in nmap, a non-open state is folded into the "Not shown" line only when
+it has more than 25 ports (50 with `-v`, 75 with `-vv`, ...); smaller groups
+are listed port by port, so `-p 80` on a closed port shows
+`80/tcp closed http`. Open ports are always listed.
+
 With `-sV`:
 
 ```

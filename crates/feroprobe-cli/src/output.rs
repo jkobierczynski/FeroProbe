@@ -74,14 +74,23 @@ pub(crate) fn reported(host: &HostResult, info: &RunInfo) -> bool {
     info.assume_up || host.is_up()
 }
 
-/// Like nmap, collapse the most common non-open state into one summary
-/// instead of listing hundreds of closed ports. Returns that state with its
-/// count (none with `--open`) and the ports to list.
+/// The most ports of one non-open state nmap lists before it collapses
+/// them into a "Not shown" summary (`max_per_state` in nmap's
+/// `PortList::isIgnoredState`); each `-v` raises it by the same amount.
+pub(crate) const MAX_LISTED_PER_STATE: usize = 25;
+
+/// Like nmap, collapse each non-open state with more than
+/// [`MAX_LISTED_PER_STATE`] ports (times one plus the `-v` count) into a
+/// summary instead of listing hundreds of closed ports, and list every port
+/// of the other states. So `-p 80` on a closed port shows `80/tcp closed`.
+/// Returns the collapsed states with their counts, most ports first (none
+/// with `--open`), and the ports to list.
 pub(crate) fn port_rows<'a>(
     host: &'a HostResult,
     info: &RunInfo,
-) -> (Option<(usize, PortState)>, Vec<&'a PortResult>) {
-    let hidden = [
+) -> (Vec<(usize, PortState)>, Vec<&'a PortResult>) {
+    let limit = MAX_LISTED_PER_STATE * (usize::from(info.verbosity) + 1);
+    let mut hidden: Vec<(usize, PortState)> = [
         PortState::Closed,
         PortState::Filtered,
         PortState::OpenFiltered,
@@ -90,10 +99,16 @@ pub(crate) fn port_rows<'a>(
     ]
     .into_iter()
     .map(|s| (host.count(s), s))
-    .filter(|&(n, _)| n > 0)
-    .max_by_key(|&(n, _)| n);
+    .filter(|&(n, _)| n > limit)
+    .collect();
+    if info.only_open {
+        hidden.clear();
+    }
+    // Most ports first, as nmap orders its "Not shown" line (stable, so a
+    // tie keeps the order above).
+    hidden.sort_by_key(|&(n, _)| std::cmp::Reverse(n));
     let rows = visible(host, info.only_open)
-        .filter(|p| info.only_open || Some(p.state) != hidden.map(|(_, s)| s))
+        .filter(|p| !hidden.iter().any(|&(_, s)| s == p.state))
         .collect();
     (hidden, rows)
 }
@@ -160,19 +175,33 @@ pub fn render_table(hosts: &[HostResult], info: &RunInfo) -> String {
     s
 }
 
+/// nmap's "Not shown" list: `98 filtered ports, 30 closed ports`.
+fn not_shown(hidden: &[(usize, PortState)]) -> String {
+    let parts: Vec<String> = hidden
+        .iter()
+        .map(|(n, state)| format!("{n} {state} port{}", if *n == 1 { "" } else { "s" }))
+        .collect();
+    parts.join(", ")
+}
+
 /// The port table for one host.
 fn print_ports(out: &mut String, host: &HostResult, info: &RunInfo) {
     let (hidden, rows) = port_rows(host, info);
     if rows.is_empty() {
-        match hidden {
+        match hidden.as_slice() {
             _ if info.only_open => w!(out, "No open ports found"),
-            Some((n, state)) => w!(out, "All {n} scanned ports are {state}"),
-            None => {}
+            [(n, state)] => w!(out, "All {n} scanned ports are {state}"),
+            [] => {}
+            more => {
+                let n: usize = more.iter().map(|(n, _)| n).sum();
+                w!(out, "All {n} scanned ports are in ignored states.");
+                w!(out, "Not shown: {}", not_shown(more));
+            }
         }
         return;
     }
-    if let (false, Some((n, state))) = (info.only_open, hidden) {
-        w!(out, "Not shown: {n} {state} ports");
+    if !hidden.is_empty() {
+        w!(out, "Not shown: {}", not_shown(&hidden));
     }
     let mut header = vec![format!("{:<10} {:<14} {:<14}", "PORT", "STATE", "SERVICE")];
     if info.show_reason {
@@ -424,6 +453,71 @@ pub(crate) mod tests {
             "{table}"
         );
         assert!(!table.contains("rDNS record for 10.0.0.7"), "{table}");
+    }
+
+    fn tcp(port: u16, state: PortState) -> PortResult {
+        PortResult {
+            port,
+            protocol: feroprobe_core::Protocol::Tcp,
+            state,
+            reason: "reset",
+            rtt_ms: None,
+            service: None,
+        }
+    }
+
+    #[test]
+    fn few_closed_ports_are_listed_like_nmap() {
+        // `-p 80` on a closed port: nmap lists it rather than summarising.
+        let mut host = HostResult::new("127.0.0.1".parse().unwrap(), None);
+        host.up_reason = Some("localhost-response");
+        host.ports = vec![tcp(80, PortState::Closed)];
+        let table = render_table(std::slice::from_ref(&host), &info());
+        assert!(table.contains("PORT       STATE"), "{table}");
+        assert!(table.contains("80/tcp     closed         http"), "{table}");
+        assert!(
+            !table.contains("Not shown") && !table.contains("All 1"),
+            "{table}"
+        );
+
+        // 25 of a state are still listed; 26 collapse.
+        host.ports = (1..=25).map(|p| tcp(p, PortState::Closed)).collect();
+        let table = render_table(std::slice::from_ref(&host), &info());
+        assert!(
+            table.contains("25/tcp") && !table.contains("Not shown"),
+            "{table}"
+        );
+        host.ports.push(tcp(26, PortState::Closed));
+        let table = render_table(std::slice::from_ref(&host), &info());
+        assert!(table.contains("All 26 scanned ports are closed"), "{table}");
+        // -v raises the limit, as in nmap.
+        let v = RunInfo {
+            verbosity: 1,
+            ..info()
+        };
+        let table = render_table(std::slice::from_ref(&host), &v);
+        assert!(
+            table.contains("26/tcp") && !table.contains("All 26"),
+            "{table}"
+        );
+
+        // Several large states each collapse, most ports first.
+        host.ports = (1..=30).map(|p| tcp(p, PortState::Closed)).collect();
+        host.ports
+            .extend((100..=139).map(|p| tcp(p, PortState::Filtered)));
+        host.ports.push(tcp(22, PortState::Open));
+        let table = render_table(std::slice::from_ref(&host), &info());
+        assert!(
+            table.contains("Not shown: 40 filtered ports, 30 closed ports"),
+            "{table}"
+        );
+        assert!(table.contains("22/tcp"), "{table}");
+        host.ports.pop();
+        let table = render_table(std::slice::from_ref(&host), &info());
+        assert!(
+            table.contains("All 70 scanned ports are in ignored states."),
+            "{table}"
+        );
     }
 
     #[test]

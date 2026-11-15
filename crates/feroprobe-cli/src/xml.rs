@@ -198,11 +198,14 @@ fn write_host(x: &mut String, host: &HostResult, info: &RunInfo, start: u64, end
     if !info.ping_only && !host.timed_out {
         let (hidden, rows) = port_rows(host, info);
         x.push_str("<ports>");
-        if let (false, Some((n, state))) = (info.only_open, hidden) {
+        for (i, (n, state)) in hidden.iter().enumerate() {
+            if i > 0 {
+                x.push('\n');
+            }
             let _ = write!(
                 x,
                 "<extraports state=\"{}\" count=\"{n}\">\n</extraports>",
-                state_str(state)
+                state_str(*state)
             );
         }
         x.push('\n');
@@ -440,6 +443,9 @@ mod tests {
             port(81, PortState::Closed, None),
             port(443, PortState::Open, None),
         ];
+        // Over 25 closed ports: collapsed into <extraports>, as in nmap.
+        host.ports
+            .extend((1000..1030).map(|p| port(p, PortState::Closed, None)));
         let xml = render(&[host], &info());
         for want in [
             "args=\"feroprobe -sV &lt;x&gt; &amp; &quot;y&quot;\"",
@@ -447,7 +453,7 @@ mod tests {
             "<status state=\"up\" reason=\"echo-reply\" reason_ttl=\"0\"/>",
             "<address addr=\"10.0.0.5\" addrtype=\"ipv4\"/>\n<address addr=\"00:50:56:01:02:03\" addrtype=\"mac\" vendor=\"VMware\"/>",
             "<hostnames>\n<hostname name=\"box\" type=\"user\"/>\n<hostname name=\"box.example\" type=\"PTR\"/>\n</hostnames>",
-            "<extraports state=\"closed\" count=\"2\">",
+            "<extraports state=\"closed\" count=\"32\">",
             "<port protocol=\"tcp\" portid=\"22\"><state state=\"open\" reason=\"syn-ack\" reason_ttl=\"0\"/><service name=\"ssh\" product=\"OpenSSH\" version=\"9.6\" extrainfo=\"a &lt;b&gt; &amp; &quot;c&quot;\" method=\"probed\" conf=\"10\"/></port>",
             "<service name=\"https\" method=\"table\" conf=\"3\"/>",
             "<times srtt=\"250\"",
