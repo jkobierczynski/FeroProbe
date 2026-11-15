@@ -329,7 +329,9 @@ With it on, FeroProbe refuses `-sV`, `-O` and `-A`, whose probes can hang or
 crash fragile PLCs and other control devices, and warns when a scan
 includes a well-known OT port (502, 102, 20000, 44818, 47808).
 `--override-ics-protection` allows one run anyway, with a warning. FeroProbe
-is not an ICS-specific tool and does not switch this on for you. See
+is not an ICS-specific tool and does not switch this on for you. Under
+`sudo`, your own settings file is read too. For a binary with protection
+always on, build with `--features ics-protection-default`. See
 [docs/ics-protection.md](docs/ics-protection.md).
 
 ### Privileges

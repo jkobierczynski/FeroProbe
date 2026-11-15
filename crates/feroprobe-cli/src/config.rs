@@ -1,10 +1,12 @@
 //! Persistent settings, read from TOML files at startup.
 //!
-//! Two files are read, lowest precedence first:
+//! Files are read in this order, lowest precedence first:
 //!
 //! 1. the user's file, `$XDG_CONFIG_HOME/feroprobe/config.toml`
 //!    (`~/.config/feroprobe/config.toml` when `XDG_CONFIG_HOME` is unset;
 //!    `%APPDATA%\feroprobe\config.toml` on Windows when there is no `HOME`);
+//!    under `sudo`, the invoking user's file is read next, so a setting in
+//!    your own file still applies to `sudo feroprobe ...`;
 //! 2. `.feroproberc` in the current working directory.
 //!
 //! A key set in a later file overrides the same key in an earlier one, and
@@ -22,6 +24,11 @@ use anyhow::{Context, Result, bail};
 /// The name of the per-directory settings file.
 pub const DIR_FILE: &str = ".feroproberc";
 
+/// Whether this binary was built with ICS protection always on (the
+/// `ics-protection-default` Cargo feature). Settings files cannot switch
+/// it off then; only `--override-ics-protection`, for one run.
+pub const ICS_BUILT_IN: bool = cfg!(feature = "ics-protection-default");
+
 /// Settings after every file was applied over the built-in defaults.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Settings {
@@ -30,6 +37,9 @@ pub struct Settings {
     pub ics_protection: bool,
     /// The file that set `ics_protection`, for messages.
     pub ics_protection_source: Option<PathBuf>,
+    /// Protection is built into the binary and cannot be switched off by
+    /// a settings file ([`ICS_BUILT_IN`]).
+    pub ics_built_in: bool,
 }
 
 /// The keys one file sets. `None` leaves the setting as it was.
@@ -64,16 +74,69 @@ pub fn user_file(
 
 /// The files to read, lowest precedence first.
 pub fn default_files() -> Vec<PathBuf> {
-    let mut files = Vec::new();
-    if let Some(user) = user_file(
-        std::env::var_os("XDG_CONFIG_HOME"),
-        std::env::var_os("HOME"),
-        std::env::var_os("APPDATA"),
-    ) {
-        files.push(user);
+    files_for(
+        user_file(
+            std::env::var_os("XDG_CONFIG_HOME"),
+            std::env::var_os("HOME"),
+            std::env::var_os("APPDATA"),
+        ),
+        sudo_user_home().and_then(|h| user_file(None, Some(h.into_os_string()), None)),
+    )
+}
+
+/// The file list: this user's file, then (under sudo) the invoking user's
+/// file, then the working directory's. Raw scans need root, so FeroProbe
+/// often runs under `sudo`, which points `HOME` at root's home: without
+/// the invoking user's file, the protection they set would be skipped.
+fn files_for(own: Option<PathBuf>, invoking: Option<PathBuf>) -> Vec<PathBuf> {
+    let mut files: Vec<PathBuf> = own.into_iter().collect();
+    if let Some(f) = invoking
+        && !files.contains(&f)
+    {
+        files.push(f);
     }
     files.push(PathBuf::from(DIR_FILE));
     files
+}
+
+/// The home directory of the user who ran `sudo`, when this process runs
+/// as root under sudo (`SUDO_USER` names someone other than root).
+#[cfg(unix)]
+fn sudo_user_home() -> Option<PathBuf> {
+    use std::ffi::{CStr, CString};
+    use std::os::unix::ffi::OsStrExt;
+    // SAFETY: geteuid has no preconditions.
+    if unsafe { libc::geteuid() } != 0 {
+        return None;
+    }
+    let name = std::env::var_os("SUDO_USER").filter(|n| !n.is_empty() && n != "root")?;
+    let name = CString::new(name.as_bytes()).ok()?;
+    let mut pw: libc::passwd = unsafe { std::mem::zeroed() };
+    let mut result: *mut libc::passwd = std::ptr::null_mut();
+    let mut buf = vec![0 as libc::c_char; 16 * 1024];
+    // SAFETY: every pointer is valid for the call; buf outlives the use of
+    // pw's string fields below.
+    let rc = unsafe {
+        libc::getpwnam_r(
+            name.as_ptr(),
+            &mut pw,
+            buf.as_mut_ptr(),
+            buf.len(),
+            &mut result,
+        )
+    };
+    if rc != 0 || result.is_null() || pw.pw_dir.is_null() {
+        return None;
+    }
+    // SAFETY: getpwnam_r succeeded, so pw_dir points to a C string in buf.
+    let dir = unsafe { CStr::from_ptr(pw.pw_dir) };
+    let dir = PathBuf::from(std::ffi::OsStr::from_bytes(dir.to_bytes()));
+    dir.is_absolute().then_some(dir)
+}
+
+#[cfg(not(unix))]
+fn sudo_user_home() -> Option<PathBuf> {
+    None
 }
 
 /// Read the settings files in [`default_files`].
@@ -83,7 +146,15 @@ pub fn load() -> Result<Loaded> {
 
 /// Read `files`, lowest precedence first. Missing files are skipped.
 pub fn load_from(files: &[PathBuf]) -> Result<Loaded> {
+    load_with(files, ICS_BUILT_IN)
+}
+
+/// [`load_from`], with `built_in` standing for [`ICS_BUILT_IN`] so both
+/// builds can be tested.
+fn load_with(files: &[PathBuf], built_in: bool) -> Result<Loaded> {
     let mut loaded = Loaded::default();
+    loaded.settings.ics_protection = built_in;
+    loaded.settings.ics_built_in = built_in;
     for path in files {
         let text = match std::fs::read_to_string(path) {
             Ok(text) => text,
@@ -94,7 +165,13 @@ pub fn load_from(files: &[PathBuf]) -> Result<Loaded> {
         };
         let (layer, warnings) = parse_layer(&text, path)?;
         loaded.warnings.extend(warnings);
-        if let Some(on) = layer.ics_protection {
+        if built_in && layer.ics_protection == Some(false) {
+            loaded.warnings.push(format!(
+                "settings file {}: ics_protection = false ignored: this FeroProbe was built \
+                 with ICS protection always on; --override-ics-protection allows a single run",
+                path.display()
+            ));
+        } else if let Some(on) = layer.ics_protection {
             loaded.settings.ics_protection = on;
             loaded.settings.ics_protection_source = Some(path.clone());
         }
@@ -132,6 +209,11 @@ fn parse_layer(text: &str, path: &Path) -> Result<(Layer, Vec<String>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The default build's loading, whatever features this test build has.
+    fn load_from(files: &[PathBuf]) -> Result<Loaded> {
+        load_with(files, false)
+    }
 
     /// A fresh directory under the system temp directory.
     fn temp_dir(name: &str) -> PathBuf {
@@ -206,6 +288,39 @@ mod tests {
         assert!(loaded.settings.ics_protection);
         assert_eq!(loaded.settings.ics_protection_source, Some(user.clone()));
         assert_eq!(loaded.files, vec![user, rc]);
+    }
+
+    #[test]
+    fn sudo_adds_the_invoking_users_file() {
+        let root = PathBuf::from("/root/.config/feroprobe/config.toml");
+        let user = PathBuf::from("/home/u/.config/feroprobe/config.toml");
+        assert_eq!(
+            files_for(Some(root.clone()), Some(user.clone())),
+            vec![root.clone(), user.clone(), PathBuf::from(DIR_FILE)]
+        );
+        // sudo -E keeps HOME: the same file is read once.
+        assert_eq!(
+            files_for(Some(user.clone()), Some(user.clone())),
+            vec![user.clone(), PathBuf::from(DIR_FILE)]
+        );
+        assert_eq!(files_for(None, None), vec![PathBuf::from(DIR_FILE)]);
+    }
+
+    #[test]
+    fn built_in_protection_cannot_be_switched_off_by_a_file() {
+        let dir = temp_dir("builtin");
+        let loaded = load_with(&[dir.join(DIR_FILE)], true).unwrap();
+        assert!(loaded.settings.ics_protection);
+        assert!(loaded.settings.ics_built_in);
+        assert_eq!(loaded.settings.ics_protection_source, None);
+        let rc = write(&dir, DIR_FILE, "ics_protection = false\n");
+        let loaded = load_with(&[rc], true).unwrap();
+        assert!(loaded.settings.ics_protection);
+        assert_eq!(loaded.warnings.len(), 1);
+        assert!(loaded.warnings[0].contains("built with ICS protection always on"));
+        // The default build: off, and a file can turn it on and off.
+        let loaded = load_with(&[dir.join("none.toml")], false).unwrap();
+        assert!(!loaded.settings.ics_protection && !loaded.settings.ics_built_in);
     }
 
     #[test]

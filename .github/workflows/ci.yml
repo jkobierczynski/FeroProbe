@@ -25,6 +25,8 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test --all
+      # The hardened build (ICS protection compiled in) must build and pass too.
+      - run: cargo test -p feroprobe --features ics-protection-default
 
   # The SYN scan and ICMP discovery need raw sockets, so run the whole test
   # suite again as root on Linux. FEROPROBE_REQUIRE_RAW makes the raw-socket

@@ -121,8 +121,8 @@ the SCTP, IP protocol, IPv6 OS detection and probe-signature work).
 | --- | --- |
 | Recognizable probe signature | Raw TCP scans use window 65109 (`0xFE55`); generic UDP probes carry `FeroProbeScan/1\n`. Documented in `docs/responsible-use.md` |
 | IDS rules | Suricata (`rules/feroprobe.rules`) and Snort (`rules/feroprobe.snort.rules`) |
-| Settings files | `~/.config/feroprobe/config.toml` (XDG), then `./.feroproberc`; CLI wins. FeroProbe's own, nmap has none. `crates/feroprobe-cli/src/config.rs` |
-| ICS protection | `ics_protection = true` refuses `-sV`, `-O`, `-A` (future script scanning too); `--override-ics-protection` allows one run with a warning; `--dry-run` is not refused but warns; warns on OT ports 102, 502, 20000, 44818, 47808. Off by default, so nmap behaviour is unchanged. `docs/ics-protection.md` |
+| Settings files | `~/.config/feroprobe/config.toml` (XDG), under sudo also the invoking user's (`SUDO_USER`), then `./.feroproberc`; CLI wins; `-v` shows what was read. FeroProbe's own, nmap has none. `crates/feroprobe-cli/src/config.rs` |
+| ICS protection | `ics_protection = true` refuses `-sV`, `-O`, `-A` (future script scanning too); `--override-ics-protection` allows one run with a warning; `--dry-run` is not refused but warns; warns on OT ports 102, 502, 20000, 44818, 47808. Off by default, so nmap behaviour is unchanged; Cargo feature `ics-protection-default` builds it always on (files cannot switch it off). `docs/ics-protection.md` |
 | Evasion options behind an authorization flag | `-f`, `--mtu`, `-D`, `-S` (raw IPv4 TCP scans). Private ranges (RFC 1918, loopback, link-local, CGNAT, IPv6 ULA) work as is; a public target, decoy or spoofed source needs `--allow-public-evasion` (`scope.rs`, `evasion.rs`) |
 
 ### Platform and project

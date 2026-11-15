@@ -16,6 +16,12 @@ FeroProbe reads two files, in this order:
 | 1 | `$XDG_CONFIG_HOME/feroprobe/config.toml` | Your user-wide settings |
 | 2 | `.feroproberc` in the current working directory | Per-project or per-engagement settings |
 
+When FeroProbe runs as root under `sudo` (which points `HOME` at root's
+home), it also reads the invoking user's `~/.config/feroprobe/config.toml`
+(found from `SUDO_USER`) right after root's own file, so a protection you
+set for yourself still applies to `sudo feroprobe ...`. Raw scans, `-O`
+and `-A` need root, so this is the usual way they run.
+
 `XDG_CONFIG_HOME` is used only when it is set to an absolute path, as the
 XDG base directory specification says; otherwise the user file is
 `~/.config/feroprobe/config.toml`. On Windows, where there is usually no
@@ -35,6 +41,13 @@ that a file leaves out keeps whatever the earlier layers said, so a
 `.feroproberc` that sets nothing does not switch off a protection from your
 user file. A `.feroproberc` that sets `ics_protection = false` does switch it
 off for runs started in that directory.
+
+Run with `-v` to see which files were read and whether ICS protection
+is on:
+
+```text
+ICS protection on (ics_protection = true in /home/me/.config/feroprobe/config.toml); settings read from /home/me/.config/feroprobe/config.toml
+```
 
 ### Format and errors
 
@@ -138,6 +151,22 @@ keep it gentle on control devices (e.g. -T2, -sT)
 The block is on the dangerous options, not on ports: plenty of control
 devices listen on ordinary ports such as 80 and 443, and a port list says
 nothing reliable about what is behind it.
+
+### Hardened build
+
+The `ics-protection-default` Cargo feature builds a FeroProbe with
+protection always on:
+
+```sh
+cargo build --release -p feroprobe --features ics-protection-default
+```
+
+In that binary no settings file is needed, and none can switch protection
+off: `ics_protection = false` is ignored with a warning. Only
+`--override-ics-protection` lets a single run through, as usual. This is
+for teams that hand a FeroProbe binary to people working on control
+networks and want the safety catch without relying on each machine's
+settings. The default build is unchanged.
 
 ### Why these options
 

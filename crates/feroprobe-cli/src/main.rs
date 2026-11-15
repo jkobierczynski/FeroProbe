@@ -1168,6 +1168,9 @@ fn device_hostile_options(args: &Args) -> Vec<&'static str> {
 
 /// Where `ics_protection` was switched on, for messages.
 fn ics_source(settings: &config::Settings) -> String {
+    if settings.ics_built_in && settings.ics_protection_source.is_none() {
+        return "built into this FeroProbe".to_string();
+    }
     settings.ics_protection_source.as_ref().map_or_else(
         || "ics_protection = true".to_string(),
         |p| format!("ics_protection = true in {}", p.display()),
@@ -1641,6 +1644,24 @@ async fn main() -> Result<()> {
         level: args.verbose,
         track: true,
     };
+    progress.say(1, || {
+        let files: Vec<String> = settings
+            .files
+            .iter()
+            .map(|f| f.display().to_string())
+            .collect();
+        let read = if files.is_empty() {
+            "no settings file found".to_string()
+        } else {
+            format!("settings read from {}", files.join(", "))
+        };
+        let ics = if settings.settings.ics_protection {
+            format!("on ({})", ics_source(&settings.settings))
+        } else {
+            "off".to_string()
+        };
+        format!("ICS protection {ics}; {read}")
+    });
     let version = if args.ipv6 {
         IpVersion::V6
     } else {
@@ -2874,6 +2895,7 @@ mod tests {
         config::Settings {
             ics_protection: on,
             ics_protection_source: on.then(|| std::path::PathBuf::from(".feroproberc")),
+            ics_built_in: false,
         }
     }
 
@@ -2966,6 +2988,21 @@ mod tests {
         let a = argv(&["--dry-run", "-A", "--override-ics-protection", "10.0.0.1"]);
         let lines = gate_ics(&ics(true), &a).unwrap();
         assert!(lines.iter().any(|l| l.contains("running -A although")));
+    }
+
+    #[test]
+    fn built_in_ics_protection_names_the_build() {
+        let built = config::Settings {
+            ics_protection: true,
+            ics_protection_source: None,
+            ics_built_in: true,
+        };
+        let err = gate_ics(&built, &argv(&["-sV", "10.0.0.1"]))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("(built into this FeroProbe)"), "{err}");
+        let a = argv(&["-sV", "--override-ics-protection", "10.0.0.1"]);
+        assert!(!gate_ics(&built, &a).unwrap().is_empty());
     }
 
     #[test]
