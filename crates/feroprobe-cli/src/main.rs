@@ -467,6 +467,13 @@ struct Args {
     #[arg(long)]
     packet_trace: bool,
 
+    /// Send nothing: print every probe the scan would send (host discovery
+    /// and port scan, with -f/--mtu, -D and -S applied) as NOT SENT lines in
+    /// the --packet-trace layout, then stop. No replies, so no port states,
+    /// and no root needed. Hostnames are still resolved
+    #[arg(long = "dry-run")]
+    dry_run: bool,
+
     /// Show why each port got its state (syn-ack, reset, port-unreach, ...)
     #[arg(long)]
     reason: bool,
@@ -922,9 +929,6 @@ fn gate_evasion(ev: &Evasion, targets: &[Target], plan: &Plan, allow_public: boo
                  FeroProbe safeguard: see docs/responsible-use.md."
             );
         }
-    }
-    if !raw_sockets_available() {
-        bail!("evasion options send raw packets: run as root or grant CAP_NET_RAW");
     }
     Ok(())
 }
@@ -1383,6 +1387,123 @@ fn is_host_timeout(e: &anyhow::Error) -> bool {
     })
 }
 
+/// The probe order and follow-up steps a dry run lays out.
+struct DryOrder<'a> {
+    tcp: &'a [u16],
+    udp: &'a [u16],
+    sctp: &'a [u16],
+    protocols: &'a [u8],
+    os: bool,
+    trace: bool,
+}
+
+/// The notes a dry run prints above its probes: what it cannot show (steps
+/// that depend on replies) and what a real run of the same command needs.
+fn dry_run_notes(args: &Args, plan: &Plan, d: &DryOrder, privileged: bool) -> Vec<String> {
+    let mut notes = Vec::new();
+    let mut follow = Vec::new();
+    if plan.version && !plan.ping_only {
+        follow.push("service detection (-sV)");
+    }
+    if d.os {
+        follow.push("OS detection (-O)");
+    }
+    if d.trace {
+        follow.push("traceroute (--traceroute)");
+    }
+    if !follow.is_empty() {
+        notes.push(format!(
+            "Not shown: {} would run on the hosts and open ports the scan finds, so its probes \
+             depend on replies a dry run does not get",
+            follow.join(", ")
+        ));
+    }
+    if !args.no_resolve {
+        notes.push("Not shown: reverse DNS of the hosts found up (no DNS query is made)".into());
+    }
+    let raw_scan = plan.tcp.is_some_and(|t| t.raw_kind().is_some())
+        || plan.sctp.is_some()
+        || plan.ip_proto
+        || d.os
+        || d.trace;
+    if raw_scan && !privileged {
+        notes.push(
+            "A real run of this scan sends raw packets: run it as root or grant CAP_NET_RAW".into(),
+        );
+    }
+    let explicit_tcp =
+        args.scan.iter().any(|s| ScanType::TCP.contains(s)) || args.scanflags.is_some();
+    if plan.tcp == Some(ScanType::Connect) && !explicit_tcp && !privileged {
+        notes.push(
+            "No raw sockets here, so the default TCP scan is a connect scan (-sT); as root it \
+             would be a SYN scan (-sS), as in nmap"
+                .into(),
+        );
+    }
+    notes
+}
+
+/// `--dry-run`: print the probes and stop. Nothing is sent and no report
+/// is written, since there are no results to report.
+#[allow(clippy::too_many_arguments)]
+fn dry_run(
+    args: &Args,
+    outputs: &Outputs,
+    targets: &[Target],
+    plan: &Plan,
+    probes: &PingProbes,
+    cfg: &ScanConfig,
+    d: &DryOrder,
+) -> Result<()> {
+    use feroprobe_core::dryrun::{self, DryDiscovery, DryRun, DryTcp};
+    use std::io::Write;
+    if outputs.files().next().is_some() {
+        eprintln!(
+            "Warning: --dry-run sends nothing, so no report is written (-oN/-oX/-oG/-oJ/-oA ignored)"
+        );
+    }
+    let privileged = raw_sockets_available();
+    let tcp = (!plan.ping_only)
+        .then_some(plan.tcp)
+        .flatten()
+        .map(|t| match t.raw_kind() {
+            None => DryTcp::Connect,
+            Some(kind) => {
+                let mut scan = RawTcpScan::new(kind);
+                if let Some(flags) = args.scanflags {
+                    scan.flags = flags;
+                }
+                DryTcp::Raw(scan)
+            }
+        });
+    let scan = !plan.ping_only;
+    let run = DryRun {
+        targets,
+        discovery: plan.discovery.then(|| DryDiscovery {
+            probes: probes.clone(),
+            privileged,
+            icmp: feroprobe_core::icmp_available(),
+            arp_ping: cfg.arp_ping,
+        }),
+        tcp: tcp.map(|t| (t, d.tcp)),
+        udp: if scan && plan.udp { d.udp } else { &[] },
+        sctp: plan.sctp.filter(|_| scan).map(|k| (k, d.sctp)),
+        protocols: if scan && plan.ip_proto {
+            d.protocols
+        } else {
+            &[]
+        },
+        evasion: &cfg.evasion,
+        retries: cfg.retries,
+        notes: dry_run_notes(args, plan, d, privileged),
+    };
+    let stdout = std::io::stdout();
+    let mut w = std::io::BufWriter::new(stdout.lock());
+    dryrun::write(&run, &mut w)?;
+    w.flush()?;
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse_from(nmap_style_args(std::env::args()));
@@ -1390,7 +1511,10 @@ async fn main() -> Result<()> {
     if args.packet_trace {
         feroprobe_core::packet_trace::enable();
     }
-    outputs.open_files()?;
+    // A dry run writes no report, so it does not create the files either.
+    if !args.dry_run {
+        outputs.open_files()?;
+    }
     let progress = Progress {
         level: args.verbose,
         track: true,
@@ -1454,7 +1578,7 @@ async fn main() -> Result<()> {
         if plan.ping_only {
             bail!("-O needs a port scan, so it cannot be combined with -sn");
         }
-        if !raw_sockets_available() {
+        if !raw_sockets_available() && !args.dry_run {
             bail!("-O sends raw packets: run as root or grant CAP_NET_RAW");
         }
     }
@@ -1481,7 +1605,7 @@ async fn main() -> Result<()> {
     if plan.ping_only && !plan.discovery && !trace {
         bail!("-sn with -Pn would do nothing (add --traceroute to only trace the route)");
     }
-    if trace && !raw_sockets_available() {
+    if trace && !raw_sockets_available() && !args.dry_run {
         bail!("--traceroute sends raw packets: run as root or grant CAP_NET_RAW");
     }
     if !plan.ping_only
@@ -1541,6 +1665,11 @@ async fn main() -> Result<()> {
     // gate_evasion. Parsed and checked before the scan sends anything.
     let evasion = evasion_from_args(&args)?;
     gate_evasion(&evasion, &targets, &plan, args.allow_public_evasion)?;
+    // Checked after the scope safeguard, so a public address is refused
+    // whatever the privileges. A dry run sends nothing and needs none.
+    if evasion.is_active() && !args.dry_run && !raw_sockets_available() {
+        bail!("evasion options send raw packets: run as root or grant CAP_NET_RAW");
+    }
     cfg.evasion = evasion;
     // The warnings are about connect and UDP probes.
     let sockets = !plan.ping_only && (plan.udp || plan.tcp.is_some_and(|t| t.raw_kind().is_none()));
@@ -1577,6 +1706,25 @@ async fn main() -> Result<()> {
         for line in explain::explain(&args, &facts) {
             eprintln!("{line}");
         }
+    }
+
+    if args.dry_run {
+        return dry_run(
+            &args,
+            &outputs,
+            &targets,
+            &plan,
+            &probes,
+            &cfg,
+            &DryOrder {
+                tcp: &tcp_order,
+                udp: &udp_order,
+                sctp: &sctp_order,
+                protocols: &protocols,
+                os,
+                trace,
+            },
+        );
     }
 
     if let Some(path) = &args.oui_file {
@@ -2287,16 +2435,9 @@ mod tests {
         let public = [Target::new("8.8.8.8".parse().unwrap())];
 
         // With --allow-public-evasion the scope safeguard no longer refuses a
-        // public target; the gate then stops only on the privilege check
-        // (CI has no raw sockets), never on scope.
-        if let Err(e) = gate_evasion(&ev, &public, &syn, true) {
-            let e = e.to_string();
-            assert!(!e.contains("public address"), "{e}");
-            assert!(
-                e.contains("raw packets") || e.contains("CAP_NET_RAW"),
-                "{e}"
-            );
-        }
+        // public target. (The privilege check is separate, in main, so a dry
+        // run can skip it.)
+        assert!(gate_evasion(&ev, &public, &syn, true).is_ok());
     }
 
     #[test]
@@ -2308,16 +2449,52 @@ mod tests {
             Target::new("192.168.1.5".parse().unwrap()),
         ];
         // A private target clears the safeguard without the opt-in flag.
-        // Without raw sockets (CI) the gate then stops on the privilege check
-        // instead, never on scope.
-        if let Err(e) = gate_evasion(&ev, &private, &syn, false) {
-            let e = e.to_string();
-            assert!(!e.contains("public address"), "{e}");
-            assert!(
-                e.contains("raw packets") || e.contains("CAP_NET_RAW"),
-                "{e}"
-            );
+        assert!(gate_evasion(&ev, &private, &syn, false).is_ok());
+    }
+
+    fn dry_order() -> DryOrder<'static> {
+        DryOrder {
+            tcp: &[80],
+            udp: &[],
+            sctp: &[],
+            protocols: &[],
+            os: false,
+            trace: false,
         }
+    }
+
+    #[test]
+    fn dry_run_flag_and_notes() {
+        let a = args(&["--dry-run", "-sV", "-n"]);
+        assert!(a.dry_run);
+        let syn = plan_with_tcp(Some(ScanType::Syn));
+        let mut plan = plan_with_tcp(Some(ScanType::Syn));
+        plan.version = true;
+        let d = DryOrder {
+            os: true,
+            trace: true,
+            ..dry_order()
+        };
+        let notes = dry_run_notes(&a, &plan, &d, false).join("\n");
+        // Steps that need replies are named, not listed probe by probe.
+        assert!(notes.contains("service detection (-sV)"), "{notes}");
+        assert!(notes.contains("OS detection (-O)"), "{notes}");
+        assert!(notes.contains("traceroute"), "{notes}");
+        // -n: no reverse DNS to mention.
+        assert!(!notes.contains("reverse DNS"), "{notes}");
+        // Unprivileged: the real run of a raw scan needs root.
+        assert!(notes.contains("CAP_NET_RAW"), "{notes}");
+        // Privileged: no such warning.
+        let notes = dry_run_notes(&args(&["--dry-run"]), &syn, &dry_order(), true).join("\n");
+        assert!(!notes.contains("CAP_NET_RAW"), "{notes}");
+        assert!(notes.contains("reverse DNS"), "{notes}");
+        // The unprivileged default is explained.
+        let connect = plan_with_tcp(Some(ScanType::Connect));
+        let notes = dry_run_notes(&args(&["--dry-run"]), &connect, &dry_order(), false).join("\n");
+        assert!(notes.contains("SYN scan (-sS)"), "{notes}");
+        let notes =
+            dry_run_notes(&args(&["--dry-run", "-sT"]), &connect, &dry_order(), false).join("\n");
+        assert!(!notes.contains("SYN scan (-sS)"), "{notes}");
     }
 
     #[test]

@@ -60,6 +60,10 @@ into. That requirement holds with or without `--allow-public-evasion`.
   the path back — this matches nmap and is mainly for watching what your IDS
   makes of the traffic.
 
+With `--packet-trace`, every fragment that `-f`/`--mtu` produces gets its
+own `SENT` line, so you see exactly what went on the wire. nmap prints only
+the unfragmented probe there; FeroProbe does not copy that.
+
 The idle scan (`-sI`), which bounces probes off a third "zombie" host, is
 **not** implemented: its only real use is educational, and nmap already
 serves that.
@@ -94,6 +98,18 @@ signature, so blue teams can flag FeroProbe scans without writing their
 own. They are in [`rules/`](../rules/): `rules/feroprobe.rules` for
 Suricata and `rules/feroprobe.snort.rules` for Snort, with setup notes in
 `rules/README.md`.
+
+## Checking a scan before running it
+
+`--dry-run` prints every probe a command would send, one `NOT SENT (dry run)`
+line per probe in the `--packet-trace` layout, and sends nothing: no host
+discovery, no port scan, no reverse DNS. It needs no root, so you can review
+a scan (its targets, ports, flags, fragments, decoys and spoofed source)
+before running it for real, or show a network owner exactly what you will
+send. Only target hostnames are resolved, through the system resolver, so
+the addresses shown are the real ones. The same safeguards apply: evasion
+options against a public address are refused in a dry run too, unless
+`--allow-public-evasion` is given.
 
 ## Limits of these safeguards
 

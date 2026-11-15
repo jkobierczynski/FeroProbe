@@ -171,7 +171,7 @@ pub(crate) fn sent(proto: u8, pkt: &[u8], to: SocketAddr) {
 }
 
 /// Trace line for a complete IPv4 packet sent on an `IPPROTO_RAW` socket.
-fn describe_raw_ipv4(pkt: &[u8], to: SocketAddr) -> String {
+pub(crate) fn describe_raw_ipv4(pkt: &[u8], to: SocketAddr) -> String {
     if pkt.len() < 20 || (pkt[0] >> 4) != 4 {
         return describe(IPPROTO_RAW, pkt, local_for(to.ip()), Some(to.ip()));
     }
