@@ -79,7 +79,7 @@ the SCTP, IP protocol, IPv6 OS detection and probe-signature work).
 | Timing templates | `-T0` … `-T5` (or names `paranoid` … `insane`) | Set timeout, retries, parallelism, rate and scan delay (`timing.rs`); explicit flags override |
 | Probe timeout and retries | `--timeout`, `--retries` | |
 | Parallelism | `-c`, `--concurrency` | Connect and UDP probes in flight |
-| Packet rate | `--min-rate`, `--max-rate` | One shared rate schedule for the whole run |
+| Packet rate | `--min-rate`, `--max-rate` | `--max-rate` caps raw-socket probes (SYN, ICMP, ARP, NDP) on one schedule shared across the run; connect and UDP probes are paced by `--scan-delay` and bounded by `--concurrency`. `--min-rate` raises `--max-rate` and the connect/UDP parallelism, and shortens a template's scan delay |
 | Delay between probes | `--scan-delay` | |
 | Per-host time limit | `--host-timeout` | |
 | Progress | `--stats-every`, `-v`, `-vv` | |
@@ -95,7 +95,7 @@ the SCTP, IP protocol, IPv6 OS detection and probe-signature work).
 | JSON output | `-o json`, `-oJ` | FeroProbe's own format |
 | All formats at once | `-oA` | `.nmap`, `.xml`, `.gnmap` |
 | Port state reasons | `--reason` | |
-| Open ports only | `--open` | |
+| Open ports only | `--open` | Keeps `open`, `open\|filtered` and `unfiltered` ports, like nmap |
 | Packet trace | `--packet-trace` | `SENT`/`RCVD`/`CONN` lines like nmap's |
 | Plan explanation | `--explain` | FeroProbe's own: the plan with a reason for each step |
 | nmap-style help and warnings | `-h`, `--help` | Help page laid out like nmap's; nmap's warnings for names, down hosts, option values |
