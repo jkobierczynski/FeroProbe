@@ -245,25 +245,30 @@ pub async fn raw_tcp_scan(
     raw_tcp_scan_until(targets, ports, cfg, scan, None).await
 }
 
-/// Hosts that something else already proved up, so a raw scan used as a
-/// discovery probe sends them nothing more: `flags[index[h]]` is set once
-/// target `h` of the scan is done.
+/// Hosts already proven up, so a raw scan used as a discovery probe sends
+/// them nothing more. Target `h` of the scan is done once `flags[index[h]]`
+/// (set by other probes, such as ICMP) or `tcp[index[h]]` (set when a raw
+/// TCP probe draws an answer) is set. The two are kept apart so a TCP
+/// answer does not stop an ICMP reply from being reported as the reason.
 #[derive(Clone)]
 pub(crate) struct HostsDone {
     pub flags: std::sync::Arc<Vec<std::sync::atomic::AtomicBool>>,
+    pub tcp: std::sync::Arc<Vec<std::sync::atomic::AtomicBool>>,
     pub index: Vec<usize>,
 }
 
 impl HostsDone {
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     fn is_done(&self, h: usize) -> bool {
-        self.flags[self.index[h]].load(std::sync::atomic::Ordering::Relaxed)
+        use std::sync::atomic::Ordering::Relaxed;
+        let i = self.index[h];
+        self.flags[i].load(Relaxed) || self.tcp[i].load(Relaxed)
     }
 
-    /// Mark target `h` of the scan done: it answered.
+    /// Mark target `h` of the scan done: it answered a raw TCP probe.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     fn mark(&self, h: usize) {
-        self.flags[self.index[h]].store(true, std::sync::atomic::Ordering::Relaxed);
+        self.tcp[self.index[h]].store(true, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -709,6 +714,7 @@ mod imp {
             // Already proven up: nothing is sent, and the scan does not wait.
             let done = HostsDone {
                 flags: Arc::new(vec![AtomicBool::new(false), AtomicBool::new(true)]),
+                tcp: Arc::new(vec![AtomicBool::new(false), AtomicBool::new(false)]),
                 index: vec![1],
             };
             let started = Instant::now();
@@ -725,6 +731,7 @@ mod imp {
             // Not yet up: probed, and the reset marks the host done.
             let done = HostsDone {
                 flags: Arc::new(vec![AtomicBool::new(false)]),
+                tcp: Arc::new(vec![AtomicBool::new(false)]),
                 index: vec![0],
             };
             let hosts = scan_blocking(&[target], &[closed], &cfg, syn, Some(&done)).unwrap();
@@ -738,6 +745,7 @@ mod imp {
             let b = Target::new("127.0.0.2".parse().unwrap());
             let done = HostsDone {
                 flags: Arc::new(vec![AtomicBool::new(true), AtomicBool::new(false)]),
+                tcp: Arc::new(vec![AtomicBool::new(false), AtomicBool::new(false)]),
                 index: vec![0, 1],
             };
             let hosts = scan_blocking(&[a, b], &[closed], &cfg, syn, Some(&done)).unwrap();

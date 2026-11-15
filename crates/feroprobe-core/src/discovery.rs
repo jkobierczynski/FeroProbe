@@ -276,6 +276,7 @@ async fn discover_with(
     let live: Vec<Target> = live_index.iter().map(|&h| targets[h].clone()).collect();
     let done = HostsDone {
         flags: Arc::clone(&pinged),
+        tcp: Arc::new(targets.iter().map(|_| AtomicBool::new(false)).collect()),
         index: live_index,
     };
     let raw_tcp = !live.is_empty() && raw_tcp_pings(&live);
