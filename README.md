@@ -186,20 +186,25 @@ PORT       STATE          SERVICE        VERSION
 
 1. On usual TLS ports (443, 993, 8443, ...) it tries TLS first and probes
    the service inside the tunnel. The certificate's subject name is shown.
-2. It sends the probes meant for that port: HTTP, Redis, memcached,
-   PostgreSQL, AMQP, MQTT, RDP (with its security mode), Microsoft SQL Server
-   (with its release, such as 2019), SMB (dialect and signing), LDAP (vendor,
-   host and naming context), MongoDB, ZooKeeper, RTSP and SIP.
-3. It listens, since SSH, FTP, SMTP, POP3, IMAP, MySQL, VNC, rsync, NNTP and
-   IRC talk first.
-4. If the service is still silent, it tries HTTP and then TLS.
+2. It sends the probes meant for that port: HTTP, Redis, SMB (dialect and
+   signing), RDP (security mode), Microsoft SQL Server (release), LDAP
+   (vendor, host and naming context), MongoDB, ONC RPC and many more.
+3. It listens, since SSH, FTP, SMTP, POP3, IMAP, MySQL, VNC and others talk
+   first.
+4. It tries the other probes, the most common first, up to the intensity
+   (`--version-intensity 0-9`, default 7; `--version-light` is 2,
+   `--version-all` is 9), as nmap does; then TLS if the port stayed silent.
 
-Replies are matched against FeroProbe's own rules in
-`crates/feroprobe-core/src/service/rules.rs`. nmap's probe database is not used,
-because its license does not allow redistributing it. Replies that no rule
-recognizes are printed under "Unrecognized service replies", which is the
-starting point for a new rule. Open UDP ports get a DNS `version.bind`, NTP or
-SNMP query. `--version-timeout` sets how long to wait for each reply (default
+The probes and rules are FeroProbe's own, in
+[`crates/feroprobe-core/data/service-rules.txt`](crates/feroprobe-core/data/service-rules.txt),
+built into the binary; `--service-rules FILE` replaces them. nmap's probe
+database is not used, because its license does not allow redistributing it.
+`--version-trace` prints every probe, reply and matching rule. Replies that
+no rule recognizes are printed under "Unrecognized service replies", which
+is the starting point for a new rule. A `Service Info` line shows the host
+name, OS and CPEs the services gave away. Open UDP ports, and UDP ports left
+`open|filtered`, get the UDP probes (DNS, SNMP, NetBIOS, NTP, SIP, IPMI and
+more). `--version-timeout` sets how long to wait for each reply (default
 3000 ms).
 
 ### OS detection

@@ -15,6 +15,9 @@ use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 use tokio_rustls::client::TlsStream;
 
+/// A TLS session over TCP.
+pub(super) type Stream = TlsStream<TcpStream>;
+
 #[derive(Debug)]
 struct AcceptAnyCert(Vec<SignatureScheme>);
 

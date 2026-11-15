@@ -429,7 +429,11 @@ pub(crate) fn explain(args: &Args, f: &Facts) -> Vec<String> {
     // 6. After the scan.
     let mut extras = Vec::new();
     if p.version {
-        extras.push("service and version detection on open ports (-sV)".to_string());
+        let intensity = crate::version_intensity(args);
+        extras.push(format!(
+            "service and version detection on open ports, and UDP ports left open|filtered \
+             (-sV, intensity {intensity})"
+        ));
     }
     if f.os {
         extras.push("OS detection from SYN-ACK traits (-O)".to_string());

@@ -495,34 +495,168 @@ port. It runs on the hosts found up, together with any TCP scan (the
 default one if none was given) and `-sU`. Cannot be combined with `-sn`.
 It works without privileges.
 
-For each open TCP port, FeroProbe:
+The probes and the rules that read the replies come from FeroProbe's
+[service rules file](#service-rules-file). nmap's probe database is not
+used, because its licence does not allow redistributing it. Each probe has
+a rarity from 0 to 9: the higher, the less likely it is to help. For each
+open TCP port, FeroProbe tries, until a rule matches:
 
-1. Tries TLS first on the usual TLS ports (443, 993, 8443 and similar), and
-   probes the service inside the tunnel. The certificate's subject name is
-   shown with the version (`cert CN: example.org`).
-2. Sends the probes meant for that port: HTTP, Redis, memcached, PostgreSQL,
-   AMQP, MQTT, RDP (with its security mode), Microsoft SQL Server (with its
-   release), SMB (dialect and signing), LDAP (vendor, host and naming
-   context), MongoDB, ZooKeeper, RTSP and SIP.
-3. Listens, since SSH, FTP, SMTP, POP3, IMAP, MySQL, VNC, rsync, NNTP and IRC
-   speak first.
-4. If the service stays silent, tries HTTP and then TLS.
+1. On the TLS probe's ports (443, 993, 8443 and similar), a TLS handshake
+   first, then the probes inside the tunnel. The certificate's subject
+   name is shown with the version (`cert CN: example.org`).
+2. The probes meant for that port, whatever the intensity: HTTP on 80 and
+   8080, Redis on 6379, SMB on 445, and so on.
+3. The `null` probe: connect and listen, since SSH, FTP, SMTP, POP3, IMAP,
+   MySQL, VNC and others speak first.
+4. Every other probe whose rarity is at most the
+   [intensity](#--version-intensity-level), the most common first, as nmap
+   does.
+5. A TLS handshake, when the port stayed silent or answered with a TLS
+   alert.
 
-Open UDP ports get a DNS `version.bind` query, an NTP query or an SNMP query
-where they fit.
+A **soft match** names the service but not the product (a `+OK` greeting
+is POP3, but whose?). Probing then goes on only with the probes that can
+tell more about that service, as in nmap (with every probe at intensity
+9). Open UDP ports get the UDP probes the same way, without the listen and
+TLS steps. Like nmap, UDP ports the scan left `open|filtered` are probed
+too, and one that answers becomes `open` (reason `udp-response`).
 
-Replies are matched against FeroProbe's own rules, in
-`crates/feroprobe-core/src/service/rules.rs`; nmap's probe database is not
-used, because its licence does not allow redistributing it. The SERVICE
-column then shows the service (`ssl/http` for HTTP inside TLS) and a VERSION
-column is added. A reply no rule recognizes is printed under "Unrecognized
-service replies" in normal output, which is the starting point for writing a
-new rule.
+Each probe opens a new connection and waits up to `--version-timeout` for
+a reply, so a silent port costs one wait per probe tried: at the default
+intensity about 15 probes. `--version-light` makes such ports much quicker.
+
+Protocols with their own probes: HTTP, RTSP, SIP, SMB, RDP, Redis, LDAP,
+ONC RPC, DNS (TCP and UDP), Microsoft SQL Server, PostgreSQL, SOCKS5,
+memcached (TCP and UDP), AMQP, MQTT, MongoDB, ZooKeeper, X11, Java RMI,
+AJP, XMPP, PPTP, Erlang Port Mapper, Cassandra, beanstalkd, git, SNMP,
+NetBIOS name service, NTP, SSDP, IPMI and OpenVPN. Services recognized from
+what they send first: SSH, FTP, SMTP, POP3, IMAP, MySQL and MariaDB, VNC,
+telnet, rsync, NNTP, IRC, NATS, ActiveMQ, Subversion, dictd and ident.
+FeroProbe sends no probes for industrial protocols (Modbus, S7 and the
+like): a version probe is a request the device has to parse.
+
+The SERVICE column shows the service (`ssl/http` for HTTP inside TLS) and
+a VERSION column is added. Below the ports, a `Service Info` line collects
+what the services gave away about the host, as in nmap: host names, the
+operating system, the device type and operating-system CPEs
+(`Service Info: Host: mail.example.org; OS: Linux; CPE: cpe:/o:linux:linux_kernel`).
+The XML report carries every CPE as `<cpe>` elements of `<service>` and the
+`hostname`, `ostype` and `devicetype` attributes; the JSON report has the
+same fields.
+
+A reply no rule recognizes is shown with a `?` after the usual service
+name for the port and, at intensity 7 or more (as in nmap), printed under
+"Unrecognized service replies" in normal output and as `servicefp` in XML:
+the starting point for writing a new rule.
+
+#### `--version-intensity <level>`
+
+How many probes to try, from 0 to 9; default 7, as in nmap. A probe is
+sent when its rarity is at most the level, or when it is meant for the
+port. At 0, an open port only gets the probes meant for it and the `null`
+probe. At 9 every probe is tried, and soft matches no longer narrow the
+probes. The last of `--version-intensity`, `--version-light` and
+`--version-all` wins, as in nmap. Without `-sV` (or `-A`) the option does
+nothing, and FeroProbe warns.
+
+#### `--version-light`
+
+`--version-intensity 2`: the probes meant for the port, the `null` probe,
+HTTP, the generic line probe and TLS.
+
+#### `--version-all`
+
+`--version-intensity 9`: every probe.
+
+#### `--version-trace`
+
+Print what version detection does to standard output: each probe sent,
+each reply (escaped, up to 120 bytes), and each match with the rule that
+made it, in the layout of nmap's version trace. When a JSON, XML or
+grepable report goes to standard output (`-o json`, `-oX -`, ...), the
+trace goes to standard error instead, so the report stays readable:
+
+```
+Service scan sending probe null to 10.0.0.5:22 (tcp)
+Service scan got 32 bytes in reply to probe null from 10.0.0.5:22 (tcp): "SSH-2.0-OpenSSH_9.6p1 Debian-4\r\n"
+Service scan hard match (Probe null matched with built-in rules line 332): 10.0.0.5:22 is ssh.  Version: |OpenSSH|9.6p1|Debian-4; protocol 2.0|
+```
+
+The rule is named by its line in the rules file (or as a built-in parser
+or the built-in HTTP header reader), which makes the trace the tool for
+writing and debugging rules. nmap's version trace also prints its network
+library's debug lines; FeroProbe prints only the lines above.
+
+#### `--service-rules <file>`
+
+Read the probes and rules from `<file>` instead of the built-in ones. The
+file replaces the built-in rules completely, so start from a copy of
+[`crates/feroprobe-core/data/service-rules.txt`](../crates/feroprobe-core/data/service-rules.txt).
+A mistake in the file stops the scan before anything is sent, naming the
+line. nmap's `--versiondb` takes nmap's own format; FeroProbe does not read
+that format and says so if given an `nmap-service-probes` file.
 
 #### `--version-timeout <ms>`
 
 How long to wait for each service reply, in milliseconds. Default 3000.
 The timing templates do not change it.
+
+### Service rules file
+
+The rules file is plain text in FeroProbe's own format. It starts with the
+line `feroprobe-service-rules 1`. `#` starts a comment line. Directives
+start at the beginning of a line; their attributes follow on indented
+lines.
+
+```
+feroprobe-service-rules 1
+
+probe null tcp
+  rarity 0
+
+probe redis tcp
+  rarity 6
+  ports 6379,6380
+  send "*2\r\n$4\r\nINFO\r\n$6\r\nserver\r\n"
+
+match redis ^\$\d+\r\n.*?redis_version:([\d.]+)
+  product Redis key-value store
+  version ${1}
+  cpe cpe:/a:redis:redis:${1}
+
+softmatch pop3 ^\+OK\x20
+  probe null
+```
+
+`probe NAME tcp|udp` defines a probe:
+
+| Attribute | Meaning |
+| --- | --- |
+| `rarity N` | 0 to 9 (default 5). Sent at an intensity of at least `N`, and always to its own ports. 0 means always |
+| `ports LIST` | The ports the probe is meant for, such as `80,8000-8010` |
+| `send "TEXT"` | The bytes to send. `\r`, `\n`, `\t`, `\0`, `\\`, `\"` and `\xHH` are understood; several `send` lines are joined |
+| `pad N` | Append `N` zero bytes |
+| `tls` | A TLS handshake instead of a payload (the `tls` probe) |
+| `listen-ports LIST` | For the TLS probe: inside TLS, listen first on these ports |
+
+A probe with no payload, like `null`, connects and listens. The built-in
+parsers for binary replies (SQL Server, SMB, RDP, LDAP, DNS, NTP, SNMP,
+SSDP and NetBIOS) run on the replies to the probes of those names.
+
+`match SERVICE REGEX` and `softmatch SERVICE REGEX` define a rule. The
+regular expression is the rest of the line, run on the raw reply with
+`.` matching any byte, newlines included, and `\xNN` matching byte `NN`
+(Rust regex syntax, flags `(?s-u)`); write `\x20` for a space at either end.
+Rules are tried in file order, hard matches before soft ones, and the
+first match wins. A soft match takes only `probe`. Attributes:
+
+| Attribute | Meaning |
+| --- | --- |
+| `probe NAME` | Only read replies to this probe |
+| `product`, `version` | The product and version; `${1}`, `${2}`, ... are the regex's groups |
+| `info TEXT` | Extra information; may be repeated, joined with `; ` |
+| `host`, `os`, `device` | What goes in the `Service Info` line |
+| `cpe TEXT` | A CPE name such as `cpe:/a:openbsd:openssh:${2}`; may be repeated |
 
 ## OS detection
 
@@ -1077,7 +1211,11 @@ DNS traffic is allowed), so the addresses shown are the real ones,
 and the routing table is consulted (without sending) for the source
 address. No reverse DNS query is made. With `--traceroute`, a note names
 the TCP port traceroute would fall back to (or says hosts would not be
-traced).
+traced). With `-sV`, the notes describe its probes instead of listing them,
+since they go only to the TCP ports found open and the UDP ports found
+`open` or `open|filtered`: at the intensity in use, the
+TLS-first ports, the probes meant for each scanned port, the listen probe,
+then the other probes in the order they would be tried, for TCP and UDP.
 
 **A dry run is not a preview of nmap.** It lists FeroProbe's probes. nmap
 run with the same options sends different packets, and some of its
@@ -1089,7 +1227,7 @@ per option:
 | --- | --- |
 | `-A` | Also runs its default scripts (`-sC`). Some probe outside `-p`: `ms-sql-info` sends a 1-byte UDP datagram to port 1434 of every host; others connect to the open ports and talk to the services |
 | `-A` without root | Silently skips OS detection and traceroute (FeroProbe skips them with a warning) |
-| `-sV` | Sends probes from its own database (dozens to an unrecognized port), also probes UDP ports left `open\|filtered`, and runs its version scripts on open ports |
+| `-sV` | Sends probes from its own database (dozens to an unrecognized port), first the `NULL` probe (listen) on every port, and runs its version scripts on open ports |
 | `-O`, IPv4 | Sends 16 probes per host to an open TCP port, a closed TCP port and a closed UDP port. A closed port is one the scan found closed, else unfiltered; without one it picks a random TCP or UDP port between 30000 and 44780, regardless of `-p` |
 | `-O`, IPv6 | Sends up to 17 probes per host, including a neighbour solicitation to on-link targets. Without a closed (or unfiltered) TCP port it skips the closed-port TCP probes; without a closed (or unfiltered) UDP port it picks a random one between 30000 and 44780, regardless of `-p` |
 | `--traceroute` | Traces with the probe that got the best answer (TCP, UDP, SCTP or ICMP), else an ICMP echo |
@@ -1294,9 +1432,8 @@ with an error naming the supported alternatives:
   `--resolve-all`.
 - Scripting: `-sC`, `--script` and related options (nmap's scripts cannot
   be shipped under their licence).
-- Version and OS detection tuning: `--version-intensity`,
-  `--version-light`, `--version-all`, `--version-trace`, `--osscan-limit`,
-  `--osscan-guess`, `--max-os-tries`.
+- OS detection tuning: `--osscan-limit`, `--osscan-guess`,
+  `--max-os-tries`.
 - Timing: `--min-hostgroup`, `--max-hostgroup`, `--max-scan-delay`,
   `--defeat-rst-ratelimit`.
 - Evasion and packet options: `--spoof-mac`, `--data`, `--data-string`, `--data-length`, `--ip-options`, `--ttl`,
