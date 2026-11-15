@@ -917,7 +917,7 @@ def load_known(path):
             line = line.rstrip("\n")
             if not line.strip() or line.lstrip().startswith("#"):
                 continue
-            parts = [x.strip() for x in line.split("|", 2)]
+            parts = [x.strip() for x in line.split(" | ", 2)]
             if len(parts) != 3:
                 continue
             known.append((parts[0], re.compile(parts[1]), parts[2]))
