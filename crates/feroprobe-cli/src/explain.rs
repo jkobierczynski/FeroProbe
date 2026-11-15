@@ -344,7 +344,9 @@ pub(crate) fn explain(args: &Args, f: &Facts) -> Vec<String> {
         } else if let Some(n) = args.top_ports {
             format!("--top-ports {n}")
         } else {
-            "the default: the 1000 most common ports".into()
+            "the defaults: the 1000 most common TCP and UDP ports, the 50 most common SCTP ports, \
+             all 256 IP protocols with -sO"
+                .into()
         };
         say(&mut out, format!("ports come from {source}"));
         if let Some(ex) = &args.exclude_ports {
