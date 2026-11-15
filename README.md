@@ -282,6 +282,24 @@ bare IP header.
 sudo feroprobe -sO -p P:1,6,17,47,50,132 10.0.0.5
 ```
 
+### Settings file and ICS protection
+
+FeroProbe reads optional settings from `~/.config/feroprobe/config.toml`
+(`$XDG_CONFIG_HOME/feroprobe/config.toml` when that is set) and then from
+`.feroproberc` in the current directory, which wins; command-line options
+win over both. The one setting today is `ics_protection`, off by default:
+
+```toml
+ics_protection = true
+```
+
+With it on, FeroProbe refuses `-sV`, `-O` and `-A`, whose probes can hang or
+crash fragile PLCs and other control devices, and warns when a scan
+includes a well-known OT port (502, 102, 20000, 44818, 47808).
+`--override-ics-protection` allows one run anyway, with a warning. FeroProbe
+is not an ICS-specific tool and does not switch this on for you. See
+[docs/ics-protection.md](docs/ics-protection.md).
+
 ### Privileges
 
 The SYN scan and the other raw TCP scans send hand-built packets over raw
@@ -503,7 +521,8 @@ closely, with a few deliberate exceptions that keep it from helping
 attackers hide: evasion options such as decoys and spoofed addresses are
 refused against public targets unless you pass `--allow-public-evasion` to
 authorize a network you are permitted to test, its probes carry a documented
-signature, and the repository ships Suricata and Snort rules for
+signature, an opt-in `ics_protection` setting refuses the options that can
+upset fragile industrial devices, and the repository ships Suricata and Snort rules for
 defenders. See [docs/responsible-use.md](docs/responsible-use.md) for the
 reasons and the current state.
 

@@ -70,6 +70,7 @@ OUTPUT:
 MISC:
   -6: Scan the IPv6 address of hostnames
   -A: Version and OS detection plus traceroute
+  --override-ics-protection: Allow -sV/-O/-A once despite ics_protection = true
   --oui-file <file>: IEEE OUI list for MAC vendor names
   -V, --version: Print the version
   -h, --help: Print this help page

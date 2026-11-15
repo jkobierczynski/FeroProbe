@@ -107,6 +107,8 @@ the SCTP, IP protocol, IPv6 OS detection and probe-signature work).
 | --- | --- |
 | Recognizable probe signature | Raw TCP scans use window 65109 (`0xFE55`); generic UDP probes carry `FeroProbeScan/1\n`. Documented in `docs/responsible-use.md` |
 | IDS rules | Suricata (`rules/feroprobe.rules`) and Snort (`rules/feroprobe.snort.rules`) |
+| Settings files | `~/.config/feroprobe/config.toml` (XDG), then `./.feroproberc`; CLI wins. FeroProbe's own, nmap has none. `crates/feroprobe-cli/src/config.rs` |
+| ICS protection | `ics_protection = true` refuses `-sV`, `-O`, `-A` (future script scanning too); `--override-ics-protection` allows one run with a warning; warns on OT ports 102, 502, 20000, 44818, 47808. Off by default, so nmap behaviour is unchanged. `docs/ics-protection.md` |
 
 ### Platform and project
 

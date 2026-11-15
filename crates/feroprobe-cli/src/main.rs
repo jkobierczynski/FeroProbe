@@ -1,5 +1,6 @@
 //! `feroprobe`: an nmap-style network scanner, written natively in Rust.
 
+mod config;
 mod explain;
 mod grep;
 mod help;
@@ -384,6 +385,12 @@ struct Args {
     /// raw-socket privileges only -sV runs, with a warning
     #[arg(short = 'A')]
     aggressive: bool,
+
+    /// Run this once despite `ics_protection = true` in a settings file,
+    /// allowing -sV, -O and -A. Prints a warning naming what it allowed.
+    /// The settings file is not changed
+    #[arg(long = "override-ics-protection")]
+    override_ics_protection: bool,
 
     /// Ports to scan, e.g. "22", "1-1024", "22,80,443", "-" for all.
     /// T: and U: mark TCP and UDP ports: "22,U:53,T:80" (unmarked ports
@@ -1136,6 +1143,99 @@ fn aggressive(plan: &mut Plan, args: &Args, privileged: bool) -> Result<(bool, b
     Ok((args.os, args.traceroute))
 }
 
+/// The options that send probes able to upset fragile OT/ICS devices
+/// (PLCs, RTUs, protocol gateways), in the order they appear in the help.
+/// Version detection talks application protocols (HTTP, TLS, ...) to
+/// whatever answers; OS detection sends deliberately odd TCP/IP packets.
+/// Script scanning belongs here too once it exists.
+fn device_hostile_options(args: &Args) -> Vec<&'static str> {
+    let mut found = Vec::new();
+    if args.scan.contains(&ScanType::Version) {
+        found.push("-sV");
+    }
+    if args.os {
+        found.push("-O");
+    }
+    if args.aggressive {
+        found.push("-A");
+    }
+    found
+}
+
+/// Where `ics_protection` was switched on, for messages.
+fn ics_source(settings: &config::Settings) -> String {
+    settings.ics_protection_source.as_ref().map_or_else(
+        || "ics_protection = true".to_string(),
+        |p| format!("ics_protection = true in {}", p.display()),
+    )
+}
+
+/// The ICS protection guard. With `ics_protection` on, refuse a run that
+/// asks for a device-hostile option, unless `--override-ics-protection`
+/// lets it through with a warning. Returns the lines to print.
+fn gate_ics(settings: &config::Settings, args: &Args) -> Result<Vec<String>> {
+    if !settings.ics_protection {
+        if args.override_ics_protection {
+            return Ok(vec![
+                "Warning: --override-ics-protection has no effect: ICS protection is off"
+                    .to_string(),
+            ]);
+        }
+        return Ok(Vec::new());
+    }
+    let hostile = device_hostile_options(args);
+    if hostile.is_empty() {
+        return Ok(Vec::new());
+    }
+    let list = hostile.join(", ");
+    if !args.override_ics_protection {
+        bail!(
+            "ICS protection is on ({}), so {list} is refused: version and OS detection \
+             send probes that can hang or crash fragile OT/ICS devices such as PLCs. \
+             Leave out {list}, or pass --override-ics-protection to run this once anyway",
+            ics_source(settings)
+        );
+    }
+    Ok(vec![
+        "WARNING: ************************************************************".to_string(),
+        format!(
+            "WARNING: --override-ics-protection: running {list} although ICS protection is on ({})",
+            ics_source(settings)
+        ),
+        "WARNING: these probes can hang or crash fragile OT/ICS devices such as PLCs".to_string(),
+        "WARNING: ************************************************************".to_string(),
+    ])
+}
+
+/// Well-known OT/ICS ports: (port, TCP, UDP, protocol).
+const OT_PORTS: &[(u16, bool, bool, &str)] = &[
+    (102, true, false, "S7comm"),
+    (502, true, false, "Modbus"),
+    (20000, true, true, "DNP3"),
+    (44818, true, true, "EtherNet/IP"),
+    (47808, false, true, "BACnet"),
+];
+
+/// With ICS protection on, the warning for a port scan that includes
+/// well-known OT ports. Port scans are not refused; this is a reminder.
+fn ot_port_warning(tcp: &[u16], udp: &[u16]) -> Option<String> {
+    let hits: Vec<String> = OT_PORTS
+        .iter()
+        .flat_map(|&(port, t, u, name)| {
+            let tcp_hit = (t && tcp.contains(&port)).then(|| format!("{port}/tcp {name}"));
+            let udp_hit = (u && udp.contains(&port)).then(|| format!("{port}/udp {name}"));
+            [tcp_hit, udp_hit]
+        })
+        .flatten()
+        .collect();
+    (!hits.is_empty()).then(|| {
+        format!(
+            "ICS protection: the scan includes well-known OT ports ({}); keep it gentle on control devices (e.g. -T2, -sT)",
+            hits.join(", ")
+        )
+    })
+}
+
 /// The run's label for a raw TCP scan, as listed in `scan_types`.
 fn tcp_scan_label(kind: TcpScanKind) -> &'static str {
     match kind {
@@ -1387,6 +1487,14 @@ fn is_host_timeout(e: &anyhow::Error) -> bool {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse_from(nmap_style_args(std::env::args()));
+    // Settings files, then the ICS guard: before anything is resolved or sent.
+    let settings = config::load()?;
+    for w in &settings.warnings {
+        eprintln!("Warning: {w}");
+    }
+    for w in gate_ics(&settings.settings, &args)? {
+        eprintln!("{w}");
+    }
     let outputs = Outputs::from_args(&args)?;
     if args.packet_trace {
         feroprobe_core::packet_trace::enable();
@@ -1529,6 +1637,13 @@ async fn main() -> Result<()> {
                 eprintln!("Warning: skipping OS detection, which needs a port scan");
                 os = false;
             }
+        }
+    }
+    if settings.settings.ics_protection && !plan.ping_only {
+        let tcp: &[u16] = if plan.tcp.is_some() { &tcp_ports } else { &[] };
+        let udp: &[u16] = if plan.udp { &udp_ports } else { &[] };
+        if let Some(w) = ot_port_warning(tcp, udp) {
+            eprintln!("Warning: {w}");
         }
     }
     // The order probes go out in; reports keep the sorted lists.
@@ -2562,6 +2677,91 @@ mod tests {
         assert_eq!(
             parse_host_list("10.0.0.1 10.0.0.2\n# comment\n\nexample.org # web\n  10.1.0.0/24\n"),
             ["10.0.0.1", "10.0.0.2", "example.org", "10.1.0.0/24"]
+        );
+    }
+
+    fn ics(on: bool) -> config::Settings {
+        config::Settings {
+            ics_protection: on,
+            ics_protection_source: on.then(|| std::path::PathBuf::from(".feroproberc")),
+        }
+    }
+
+    fn argv(a: &[&str]) -> Args {
+        let mut v = vec!["feroprobe"];
+        v.extend_from_slice(a);
+        Args::try_parse_from(v).unwrap()
+    }
+
+    #[test]
+    fn ics_protection_off_by_default_runs_everything() {
+        let off = config::Settings::default();
+        assert!(!off.ics_protection);
+        for a in [&["-sV"][..], &["-O"], &["-A"], &["-sS", "-sV", "-O"]] {
+            let mut a = a.to_vec();
+            a.push("10.0.0.1");
+            assert!(gate_ics(&off, &argv(&a)).unwrap().is_empty(), "{a:?}");
+        }
+    }
+
+    #[test]
+    fn ics_protection_blocks_hostile_options() {
+        for (opts, named) in [
+            (&["-sV"][..], "-sV"),
+            (&["-O"], "-O"),
+            (&["-A"], "-A"),
+            (&["-sS", "-sV", "-O"], "-sV, -O"),
+        ] {
+            let mut a = opts.to_vec();
+            a.push("10.0.0.1");
+            let err = gate_ics(&ics(true), &argv(&a)).unwrap_err().to_string();
+            assert!(err.contains(&format!("so {named} is refused")), "{err}");
+            assert!(err.contains("--override-ics-protection"), "{err}");
+            assert!(err.contains(".feroproberc"), "{err}");
+        }
+    }
+
+    #[test]
+    fn ics_protection_allows_plain_scans() {
+        for opts in [&["-sS"][..], &["-sT", "-sU"], &["-sn"], &["--traceroute"]] {
+            let mut a = opts.to_vec();
+            a.push("10.0.0.1");
+            assert!(gate_ics(&ics(true), &argv(&a)).unwrap().is_empty(), "{a:?}");
+        }
+    }
+
+    #[test]
+    fn ics_override_runs_with_a_warning() {
+        let a = argv(&["-A", "--override-ics-protection", "10.0.0.1"]);
+        let lines = gate_ics(&ics(true), &a).unwrap();
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("running -A although ICS protection is on"))
+        );
+        assert!(lines.iter().all(|l| l.starts_with("WARNING:")));
+        // Nothing to override: one note, no block.
+        let a = argv(&["-sS", "--override-ics-protection", "10.0.0.1"]);
+        assert!(gate_ics(&ics(true), &a).unwrap().is_empty());
+        let lines = gate_ics(&ics(false), &a).unwrap();
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("has no effect"));
+    }
+
+    #[test]
+    fn ot_ports_warn_by_protocol() {
+        assert_eq!(ot_port_warning(&[22, 80, 443], &[53]), None);
+        let w = ot_port_warning(&[22, 502, 102], &[47808]).unwrap();
+        assert!(
+            w.contains("102/tcp S7comm, 502/tcp Modbus, 47808/udp BACnet"),
+            "{w}"
+        );
+        // BACnet is UDP: a TCP 47808 is no hit; Modbus is TCP only.
+        assert_eq!(ot_port_warning(&[47808], &[502]), None);
+        let w = ot_port_warning(&[20000, 44818], &[20000]).unwrap();
+        assert!(
+            w.contains("20000/tcp DNP3, 20000/udp DNP3, 44818/tcp EtherNet/IP"),
+            "{w}"
         );
     }
 }

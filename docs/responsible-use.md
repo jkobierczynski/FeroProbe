@@ -64,6 +64,31 @@ The idle scan (`-sI`), which bounces probes off a third "zombie" host, is
 **not** implemented: its only real use is educational, and nmap already
 serves that.
 
+### Opt-in ICS protection
+
+Version detection (`-sV`), OS detection (`-O`) and `-A` send probes that can
+hang or crash fragile industrial devices: a PLC whose Modbus handler on
+port 502 receives an HTTP request may fault or stop until it is
+power-cycled. Reports on penetration testing of control systems have
+described routine scans that upset production equipment for twenty years.
+
+Setting `ics_protection = true` in a settings file
+(`~/.config/feroprobe/config.toml`, or `.feroproberc` in the working
+directory) makes FeroProbe refuse those options, before it resolves or
+sends anything, with a message naming the option.
+`--override-ics-protection` lets one run through with a prominent warning.
+With protection on, scanning a well-known OT port (Modbus 502, S7comm 102,
+EtherNet/IP 44818, DNP3 20000, BACnet 47808) also prints a warning.
+
+This one is **off by default**, unlike the safeguards around it, and that
+is deliberate. FeroProbe is a general scanner that behaves like nmap; it is
+not an ICS tool. People who scan control networks must know these risks
+without leaning on a default, and the setting is there for those who want
+a safety catch on the machines they use for that work. With it off,
+FeroProbe behaves exactly like nmap. See
+[ics-protection.md](ics-protection.md) for the settings files, their
+precedence and the full rationale.
+
 ### Recognizable traffic
 
 FeroProbe's probes carry a stable, documented signature, so a network owner
