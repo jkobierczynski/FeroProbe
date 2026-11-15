@@ -43,7 +43,7 @@ use crate::connect::probe_port;
 use crate::model::{HostResult, PortState, ScanConfig, reason};
 use crate::ndp;
 use crate::raw::{raw_ipv6_available, raw_sockets_available};
-use crate::syn::{RawTcpScan, TcpScanKind, raw_tcp_scan};
+use crate::syn::{HostsDone, RawTcpScan, TcpScanKind, raw_tcp_scan_until};
 use crate::target::Target;
 use crate::udp::probe_udp;
 
@@ -251,7 +251,10 @@ async fn discover_with(
     }
     drop(reply_tx);
 
-    let pinged: Vec<AtomicBool> = decided.iter().map(|&d| AtomicBool::new(d)).collect();
+    // Hosts proven up (or settled before the probes): later probes skip
+    // them, the raw SYN and ACK scans included.
+    let pinged: Arc<Vec<AtomicBool>> =
+        Arc::new(decided.iter().map(|&d| AtomicBool::new(d)).collect());
 
     // An ICMP reply is the most direct proof of life; prefer its latency
     // over a TCP probe's, and keep the first one that came.
@@ -269,12 +272,12 @@ async fn discover_with(
     // With raw sockets on Linux, -PS and -PA send bare SYNs and ACKs, as
     // nmap does when privileged. Without them nmap connects to both port
     // lists instead, and so do we.
-    let live: Vec<Target> = targets
-        .iter()
-        .zip(&decided)
-        .filter(|(_, d)| !**d)
-        .map(|(t, _)| t.clone())
-        .collect();
+    let live_index: Vec<usize> = (0..targets.len()).filter(|&h| !decided[h]).collect();
+    let live: Vec<Target> = live_index.iter().map(|&h| targets[h].clone()).collect();
+    let done = HostsDone {
+        flags: Arc::clone(&pinged),
+        index: live_index,
+    };
     let raw_tcp = !live.is_empty() && raw_tcp_pings(&live);
     let raw_scans: Vec<_> = [
         (TcpScanKind::Syn, &probes.syn),
@@ -283,8 +286,10 @@ async fn discover_with(
     .into_iter()
     .filter(|(_, ports)| raw_tcp && !ports.is_empty())
     .map(|(kind, ports)| {
-        let (live, ports, cfg) = (live.clone(), ports.clone(), cfg.clone());
-        tokio::spawn(async move { raw_tcp_scan(&live, &ports, &cfg, RawTcpScan::new(kind)).await })
+        let (live, ports, cfg, done) = (live.clone(), ports.clone(), cfg.clone(), done.clone());
+        tokio::spawn(async move {
+            raw_tcp_scan_until(&live, &ports, &cfg, RawTcpScan::new(kind), Some(done)).await
+        })
     })
     .collect();
 
