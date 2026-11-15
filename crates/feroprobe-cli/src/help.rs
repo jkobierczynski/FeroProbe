@@ -29,6 +29,11 @@ SCAN TECHNIQUES:
   -sY/sZ: SCTP INIT and COOKIE ECHO scans
   -sO: IP protocol scan - which protocols (TCP, UDP, ICMP, ...) a host runs
   --scanflags <flags>: Send these TCP flags (e.g. SYNFIN) instead
+FIREWALL/IDS EVASION (raw IPv4 TCP scans; private ranges, or public with opt-in):
+  -f, --mtu <n>: Fragment raw IPv4 probes (8-byte pieces, or <n> per fragment)
+  -D, --decoys <a,b,ME,c>: Cloak the scan among decoy source addresses
+  -S, --source <addr>: Spoof the source address of raw IPv4 probes
+  --allow-public-evasion: Authorize the above against public targets you may test
 PORT SPECIFICATION AND SCAN ORDER:
   -p, --ports <port ranges>: Scan only these ports
     Ex: -p 443; -p 1-1024; -p 22,80,T:8080,U:53,S:2905; -sO -p P:1,6,17
@@ -96,6 +101,9 @@ mod tests {
                     "-oN/-oX/-oG/-oJ".to_string()
                 }
                 Some("output-all") => "-oA".to_string(),
+                // nmap's single-letter names for the evasion options.
+                Some("decoys") => "-D".to_string(),
+                Some("source") => "-S".to_string(),
                 Some(long) => format!("--{long}"),
                 None => format!("-{}", arg.get_short().unwrap()),
             };

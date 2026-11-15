@@ -351,6 +351,49 @@ mod imp {
         }
     }
 
+    /// Send one raw-TCP probe with the scan's evasion options applied:
+    /// build the probe from each source address (the decoys plus the real
+    /// or spoofed source), wrap each in a complete IPv4 packet, fragment it
+    /// if asked, and send every piece on the `IPPROTO_RAW` socket. IPv4
+    /// only; the command-line layer guarantees that.
+    #[allow(clippy::too_many_arguments)]
+    fn send_evasion(
+        sock: &Socket,
+        real_src: IpAddr,
+        dst: IpAddr,
+        sport: u16,
+        dport: u16,
+        seq: u32,
+        ack: u32,
+        flags: u8,
+        cfg: &ScanConfig,
+    ) -> io::Result<()> {
+        let IpAddr::V4(dst4) = dst else {
+            return Ok(());
+        };
+        let to = socket_addr(dst, 0);
+        for (i, source) in cfg.evasion.source_addrs(real_src).into_iter().enumerate() {
+            let IpAddr::V4(src4) = source else { continue };
+            let seg = if flags == TCP_SYN {
+                packet::tcp_syn(source, dst, sport, dport, seq).to_vec()
+            } else {
+                packet::tcp_probe(source, dst, sport, dport, seq, ack, flags).to_vec()
+            };
+            // A distinct identification per datagram; fragments of one
+            // datagram share it, as reassembly needs.
+            let id = (seq as u16) ^ dport ^ (i as u16);
+            let pkt = packet::ipv4_packet(src4, dst4, packet::IPPROTO_TCP, 64, id, &seg);
+            let frags = match cfg.evasion.fragment {
+                Some(f) => crate::evasion::fragment_ipv4(&pkt, f),
+                None => vec![pkt],
+            };
+            for frag in &frags {
+                send_with_backoff_until(sock, frag, to, cfg.deadline)?;
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn scan_blocking(
         targets: &[Target],
         ports: &[u16],
@@ -481,6 +524,18 @@ mod imp {
         }
         drop(tx);
 
+        // Evasion (fragmentation, decoys, spoofed source) sends complete
+        // IPv4 packets, so it needs an IPPROTO_RAW socket. The command-line
+        // layer only lets evasion through for private IPv4 targets.
+        let evasion_sock: Option<Socket> = if cfg.evasion.is_active() {
+            Some(raw_socket_in(
+                Domain::IPV4,
+                SockProto::from(libc::IPPROTO_RAW),
+            )?)
+        } else {
+            None
+        };
+
         let mut sent_at: HashMap<(usize, u16), Instant> = HashMap::new();
 
         // Port-major order spreads the probes across hosts.
@@ -537,14 +592,17 @@ mod imp {
                     let to = socket_addr(addrs[h], 0);
                     // The SYN scan keeps its MSS option, which makes the
                     // probe look like an ordinary connection attempt.
-                    let sent = if scan.flags == TCP_SYN {
-                        let pkt = packet::tcp_syn(src, addrs[h], sport, p, cookie);
-                        send_with_backoff_until(send_sock, &pkt, to, cfg.deadline)
-                    } else {
-                        let pkt =
-                            packet::tcp_probe(src, addrs[h], sport, p, cookie, ack, scan.flags);
-                        send_with_backoff_until(send_sock, &pkt, to, cfg.deadline)
-                    };
+                    let sent =
+                        if let Some(raw) = evasion_sock.as_ref().filter(|_| addrs[h].is_ipv4()) {
+                            send_evasion(raw, src, addrs[h], sport, p, cookie, ack, scan.flags, cfg)
+                        } else if scan.flags == TCP_SYN {
+                            let pkt = packet::tcp_syn(src, addrs[h], sport, p, cookie);
+                            send_with_backoff_until(send_sock, &pkt, to, cfg.deadline)
+                        } else {
+                            let pkt =
+                                packet::tcp_probe(src, addrs[h], sport, p, cookie, ack, scan.flags);
+                            send_with_backoff_until(send_sock, &pkt, to, cfg.deadline)
+                        };
                     match sent {
                         Ok(()) => {}
                         // The send gave up at the host deadline.

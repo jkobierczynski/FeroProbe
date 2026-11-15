@@ -217,6 +217,10 @@ pub struct ScanConfig {
     /// A `max_rate` budget shared with other scans. `None` gives each scan
     /// its own budget.
     pub rate_schedule: Option<crate::timing::RateSchedule>,
+    /// Evasion options (fragmentation, decoys, spoofed source) for the raw
+    /// IPv4 TCP scans. Only used when every target is private; the
+    /// command-line layer enforces that. Inactive by default.
+    pub evasion: crate::evasion::Evasion,
 }
 
 impl ScanConfig {
@@ -245,6 +249,7 @@ impl Default for ScanConfig {
             arp_ping: true,
             deadline: None,
             rate_schedule: None,
+            evasion: crate::evasion::Evasion::default(),
         }
     }
 }
