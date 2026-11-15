@@ -45,11 +45,25 @@ Then reload: `suricatasc -c reload-rules`, or restart Suricata.
 
 ### Snort
 
-Include `feroprobe.snort.rules` from your `snort.conf` / `snort.lua`:
+For **Snort 2.9.x**, include the file from `snort.conf`:
 
 ```
 include $RULE_PATH/feroprobe.snort.rules
 ```
+
+For **Snort 3.x**, add it to the `ips` module in `snort.lua` (the `include`
+directive above is not valid Lua):
+
+```lua
+ips =
+{
+    include = 'feroprobe.snort.rules',
+}
+```
+
+If your `ips` table already sets `include` (it takes a single file), load
+these rules inline through `ips.rules` instead, following your existing
+configuration.
 
 The rules use the local SID range `9100000+` and the `attempted-recon`
 class. Adjust the SIDs and `$HOME_NET` to fit your deployment.
