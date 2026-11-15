@@ -528,6 +528,9 @@ mod tests {
         );
         let i = m(b"HTTP/1.1 403 Forbidden\r\nX-Content-Type-Options: nosniff\r\nX-Jenkins: 2.440.1\r\n\r\n");
         assert_eq!(spv(&i), ("http", Some("Jenkins"), Some("2.440.1")));
+        // An empty X-Jenkins header does not take a version from the body.
+        let i = m(b"HTTP/1.1 200 OK\r\nX-Jenkins:\r\n\r\n2.440.1");
+        assert_ne!(i.product.as_deref(), Some("Jenkins"));
         let i = m(b"HTTP/1.1 200 OK\r\nX-Powered-By: Express\r\nContent-Type: text/html\r\n\r\n");
         assert_eq!(i.product.as_deref(), Some("Node.js Express framework"));
         let i = m(b"HTTP/1.1 200 OK\r\nServer: Docker/24.0.7 (linux)\r\n\r\n");

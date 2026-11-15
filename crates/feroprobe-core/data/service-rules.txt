@@ -658,12 +658,12 @@ match http ^HTTP/1\.[01] \d{3}.*\{"couchdb"\s*:\s*"Welcome".*?"version"\s*:\s*"(
   version ${1}
   cpe cpe:/a:apache:couchdb:${1}
 
-match http ^HTTP/1\.[01] \d{3}[^\r\n]*\r\n(?:[^\r\n]+\r\n)*?(?i:x-jenkins):\s*([\w.\-]+)
+match http ^HTTP/1\.[01] \d{3}[^\r\n]*\r\n(?:[^\r\n]+\r\n)*?(?i:x-jenkins):[ \t]*([\w.\-]+)
   product Jenkins
   version ${1}
   cpe cpe:/a:jenkins:jenkins:${1}
 
-match http ^HTTP/1\.[01] \d{3}[^\r\n]*\r\n(?:[^\r\n]+\r\n)*?(?i:x-influxdb-version):\s*v?([\w.\-]+)
+match http ^HTTP/1\.[01] \d{3}[^\r\n]*\r\n(?:[^\r\n]+\r\n)*?(?i:x-influxdb-version):[ \t]*v?([\w.\-]+)
   product InfluxDB http admin
   version ${1}
   cpe cpe:/a:influxdata:influxdb:${1}
