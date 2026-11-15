@@ -1138,6 +1138,19 @@ fn aggressive(plan: &mut Plan, args: &Args, privileged: bool) -> Result<(bool, b
     Ok((args.os, args.traceroute))
 }
 
+/// The run's label for a raw TCP scan, as listed in `scan_types`.
+fn tcp_scan_label(kind: TcpScanKind) -> &'static str {
+    match kind {
+        TcpScanKind::Syn => "tcp-syn",
+        TcpScanKind::Fin => "tcp-fin",
+        TcpScanKind::Null => "tcp-null",
+        TcpScanKind::Xmas => "tcp-xmas",
+        TcpScanKind::Ack => "tcp-ack",
+        TcpScanKind::Window => "tcp-window",
+        TcpScanKind::Maimon => "tcp-maimon",
+    }
+}
+
 /// What `-A` drops without raw sockets. nmap drops the same parts but says
 /// nothing; FeroProbe names them, so the downgrade is never a surprise.
 const AGGRESSIVE_UNPRIVILEGED: &str = "-A without root or CAP_NET_RAW skips OS detection (-O) \
@@ -1180,19 +1193,6 @@ const TRACE_NO_PORT: &str = "traceroute sends TCP SYN probes, and this command p
 const TRACE_NO_PORT_SN: &str = "traceroute sends TCP SYN probes, and this command probes no TCP \
      port to send them to; FeroProbe does not trace through a port outside the scan. Name one \
      with -p (for example -p 443)";
-
-/// The run's label for a raw TCP scan, as listed in `scan_types`.
-fn tcp_scan_label(kind: TcpScanKind) -> &'static str {
-    match kind {
-        TcpScanKind::Syn => "tcp-syn",
-        TcpScanKind::Fin => "tcp-fin",
-        TcpScanKind::Null => "tcp-null",
-        TcpScanKind::Xmas => "tcp-xmas",
-        TcpScanKind::Ack => "tcp-ack",
-        TcpScanKind::Window => "tcp-window",
-        TcpScanKind::Maimon => "tcp-maimon",
-    }
-}
 
 /// Add each scan's port results to the matching host in `hosts`.
 fn merge(hosts: &mut [HostResult], results: Vec<HostResult>) {
