@@ -655,8 +655,9 @@ instead of a second, and on a slow link the timeout grows to fit.
 
 ARP and neighbour discovery answers come from the link, not the host, so
 they do not feed the estimates; their sweep waits as long as a host that
-has not answered yet. Reverse DNS waits the initial timeout, at most 5 s,
-since the name servers are not scan targets.
+has not answered yet. Reverse DNS through `--dns-servers` waits the initial
+timeout, at most 5 s, since the name servers are not scan targets; the
+system resolver keeps its own timeouts.
 
 ### Congestion control
 

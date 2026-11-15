@@ -1061,8 +1061,9 @@ value.
 ARP and neighbour discovery answers come from the link, not the host, so
 they do not feed the estimates; their sweep waits as long as a host that
 has not answered yet.
-Reverse DNS waits the initial timeout, at most 5 s, since the name
-servers are not scan targets.
+Reverse DNS through \f[V]--dns-servers\f[R] waits the initial timeout,
+at most 5 s, since the name servers are not scan targets; the system
+resolver keeps its own timeouts.
 .SS Congestion control
 .PP
 Also like nmap, the scans hold back how many probes may wait for an

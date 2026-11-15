@@ -262,7 +262,10 @@ async fn probe_udp_tries(
         // trip. As in nmap's UDP scan, where silence means open|filtered,
         // an ICMP error counts like any other answer for the windows.
         let answered = outcome.is_ok();
-        if answered {
+        // Every try uses the same socket and payload, so an answer after a
+        // resend may belong to the earlier copy: only first tries are timed
+        // (Karn's rule).
+        if answered && tryno == 0 {
             cfg.observe_rtt(addr.ip(), start.elapsed());
         }
         if let Some(slot) = slot {

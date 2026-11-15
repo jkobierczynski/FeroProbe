@@ -64,6 +64,12 @@ impl RttTimeouts {
         }
     }
 
+    /// `timeout` kept between the minimum and the maximum, for estimates
+    /// made under other limits (a clone of the config with new ones).
+    fn clamp(&self, timeout: Duration) -> Duration {
+        timeout.min(self.max).max(self.min)
+    }
+
     /// Set the minimum, raising the maximum and the initial timeout to it
     /// where they are lower, as nmap does.
     pub fn set_min(&mut self, min: Duration) {
@@ -189,9 +195,9 @@ impl RttState {
 
     fn timeout_in(est: &Estimates, addr: IpAddr, limits: &RttTimeouts) -> Duration {
         if let Some(host) = est.hosts.get(&addr).filter(|t| t.measured()) {
-            host.timeout()
+            limits.clamp(host.timeout())
         } else if let Some(group) = est.group.filter(|t| t.measured()) {
-            group.timeout()
+            limits.clamp(group.timeout())
         } else {
             limits.initial
         }
@@ -201,7 +207,7 @@ impl RttState {
     /// any host has, else the initial timeout.
     pub fn group_timeout(&self, limits: &RttTimeouts) -> Duration {
         match self.lock().group.filter(|t| t.measured()) {
-            Some(group) => group.timeout(),
+            Some(group) => limits.clamp(group.timeout()),
             None => limits.initial,
         }
     }
@@ -528,6 +534,9 @@ pub(crate) struct Flight<K> {
     settled: std::collections::HashSet<(usize, K)>,
     /// Probes still waiting for an answer, per host.
     waiting: Vec<Vec<K>>,
+    /// The hosts with probes waiting, so timing out costs no more than
+    /// the probes in flight, however many hosts the scan has.
+    busy: std::collections::BTreeSet<usize>,
 }
 
 // Used by the raw scans, which are Linux only.
@@ -548,6 +557,7 @@ impl<K: Copy + Eq + Hash> Flight<K> {
             probes: HashMap::new(),
             settled: std::collections::HashSet::new(),
             waiting: vec![Vec::new(); addrs.len()],
+            busy: std::collections::BTreeSet::new(),
         }
     }
 
@@ -565,10 +575,8 @@ impl<K: Copy + Eq + Hash> Flight<K> {
 
     /// Time out the waiting probes whose time is up.
     pub(crate) fn expire(&mut self, now: Instant) {
-        for h in 0..self.waiting.len() {
-            if self.waiting[h].is_empty() {
-                continue;
-            }
+        let busy: Vec<usize> = self.busy.iter().copied().collect();
+        for h in busy {
             let timeout = self.timeout(h);
             let mut i = 0;
             while i < self.waiting[h].len() {
@@ -587,25 +595,36 @@ impl<K: Copy + Eq + Hash> Flight<K> {
                     i += 1;
                 }
             }
+            self.sync_busy(h);
+        }
+    }
+
+    /// Keep [`busy`](Self::busy) in step with host `h`'s waiting list.
+    fn sync_busy(&mut self, h: usize) {
+        if self.waiting[h].is_empty() {
+            self.busy.remove(&h);
+        } else {
+            self.busy.insert(h);
         }
     }
 
     /// When the next waiting probe times out.
     pub(crate) fn next_expiry(&self) -> Option<Instant> {
-        self.waiting
+        self.busy
             .iter()
-            .enumerate()
-            .filter(|(_, w)| !w.is_empty())
-            .filter_map(|(h, w)| {
+            .filter_map(|&h| {
                 let timeout = self.timeout(h);
-                w.iter().map(|k| self.probes[&(h, *k)].at + timeout).min()
+                self.waiting[h]
+                    .iter()
+                    .map(|k| self.probes[&(h, *k)].at + timeout)
+                    .min()
             })
             .min()
     }
 
     /// Whether any probe is still waiting for its answer.
     pub(crate) fn any_waiting(&self) -> bool {
-        self.waiting.iter().any(|w| !w.is_empty())
+        !self.busy.is_empty()
     }
 
     /// The next probe to send, after timing out the probes whose time is
@@ -671,6 +690,7 @@ impl<K: Copy + Eq + Hash> Flight<K> {
             },
         );
         self.waiting[h].push(k);
+        self.busy.insert(h);
         self.cc.sent(h);
     }
 
@@ -682,6 +702,7 @@ impl<K: Copy + Eq + Hash> Flight<K> {
         {
             p.waiting = false;
             self.waiting[h].retain(|x| *x != k);
+            self.sync_busy(h);
             self.cc.finished_waiting(h);
         }
         if self.settled.insert((h, k)) {
@@ -702,14 +723,20 @@ impl<K: Copy + Eq + Hash> Flight<K> {
     ) -> Option<Duration> {
         let p = *self.probes.get(&(h, k))?;
         let rtt = at.saturating_duration_since(p.at);
-        self.state
-            .observe(self.addrs[h], rtt, &self.limits, self.scan_delay);
+        // A resent probe goes out with the same contents, so its answer
+        // may belong to an earlier copy: only first tries are timed
+        // (Karn's rule; nmap tells its tries apart, we cannot).
+        if p.tryno == 0 {
+            self.state
+                .observe(self.addrs[h], rtt, &self.limits, self.scan_delay);
+        }
         if p.waiting {
             self.probes
                 .get_mut(&(h, k))
                 .expect("probe is known")
                 .waiting = false;
             self.waiting[h].retain(|x| *x != k);
+            self.sync_busy(h);
             self.cc.finished_waiting(h);
         }
         let outcome = if filtered_error {
@@ -734,6 +761,7 @@ impl<K: Copy + Eq + Hash> Flight<K> {
             }
             self.cc.finished_waiting(h);
         }
+        self.busy.remove(&h);
     }
 
     #[cfg(test)]
@@ -917,6 +945,30 @@ mod tests {
         let other = state.clone();
         other.observe(b, ms(1), &limits, Duration::ZERO);
         assert_eq!(state.timeout(b, &limits), ms(100));
+    }
+
+    #[test]
+    fn cached_timeouts_follow_the_current_limits() {
+        let state = RttState::new();
+        let a: IpAddr = "10.0.0.1".parse().unwrap();
+        state.observe(a, ms(40), &RttTimeouts::default(), Duration::ZERO);
+        assert_eq!(state.timeout(a, &RttTimeouts::default()), ms(200));
+        let fixed = RttTimeouts::fixed(ms(800));
+        assert_eq!(state.timeout(a, &fixed), ms(800));
+        assert_eq!(state.group_timeout(&fixed), ms(800));
+    }
+
+    #[test]
+    fn answers_to_resent_probes_are_not_timed() {
+        let cfg = cfg(500, 3);
+        let addrs: Vec<IpAddr> = vec!["10.0.0.1".parse().unwrap()];
+        let mut f: Flight<u16> = Flight::new(&cfg, &addrs, vec![1]);
+        let now = Instant::now();
+        f.start_round([(0, 80)], 1);
+        assert_eq!(f.next(now), Next::Send(0, 80));
+        f.sent(0, 80, now);
+        assert_eq!(f.answered(0, 80, now + ms(3), false), Some(ms(3)));
+        assert_eq!(cfg.rtt_state.srtt(addrs[0]), None);
     }
 
     fn cfg(concurrency: usize, level: u8) -> ScanConfig {

@@ -558,7 +558,7 @@ mod imp {
             let wait = jobs
                 .iter()
                 .enumerate()
-                .filter(|&(j, _)| found[j].is_none())
+                .filter(|&(j, _)| found[j].is_none() && sources[j].is_some())
                 .map(|(_, &(_, addr, _))| cfg.probe_timeout(addr.into()))
                 .max()
                 .unwrap_or(cfg.rtt.initial);
@@ -725,7 +725,7 @@ mod imp {
                 let wait = jobs
                     .iter()
                     .enumerate()
-                    .filter(|&(j, _)| found[j].is_none())
+                    .filter(|&(j, _)| found[j].is_none() && sources[j].is_some())
                     .map(|(_, &(_, addr, _))| cfg.probe_timeout(addr.into()))
                     .max()
                     .unwrap_or(cfg.rtt.initial);
