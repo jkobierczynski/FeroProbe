@@ -12,6 +12,18 @@ and [Deliberate differences from nmap](#deliberate-differences-from-nmap).
 Last audited against the source: 2026-11-15 (main at `34559fb`, v0.2.0 plus
 the SCTP, IP protocol, IPv6 OS detection and probe-signature work).
 
+## Documentation
+
+| Document | What it covers | Keep it current |
+| --- | --- | --- |
+| [README.md](README.md) | Overview, install, quick start and examples | When a headline feature changes |
+| [docs/manual.md](docs/manual.md) | The reference manual: every option with its syntax, default and interactions, nmap-style sections, the differences from nmap | In the same pull request as any option or behaviour change. A test (`every_option_is_in_the_manual` in `crates/feroprobe-cli/src/help.rs`) fails when an option has no heading there |
+| [docs/feroprobe.1](docs/feroprobe.1) | The man page, generated from `docs/manual.md` | Rebuild with `scripts/build-manpage.sh` (needs pandoc) whenever the manual changes, and commit both |
+| `--help` (`crates/feroprobe-cli/src/help.rs`) | One-page option summary, laid out like nmap's | A test fails when an option is missing |
+| [docs/responsible-use.md](docs/responsible-use.md) | The anti-abuse safeguards and why they exist | When a safeguard changes |
+| [rules/README.md](rules/README.md) | The Suricata and Snort rules for the probe signature | When the signature changes |
+| This file | Implemented features and the gap to nmap | With every feature change |
+
 ## Implemented
 
 ### Scan types

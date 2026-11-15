@@ -29,8 +29,11 @@ no external binaries.
 | OS detection, `-O`, from SYN-ACK traits with our own signatures, IPv4 and IPv6 (Linux, root) | ✅ |
 | Traceroute, `--traceroute`, IPv4 and IPv6 (Linux, root), and `-A` (`-sV -O --traceroute`) | ✅ |
 
-See [DEVELOPMENT.md](DEVELOPMENT.md) for the full feature list and the
-remaining gap to nmap parity.
+**[The FeroProbe manual](docs/manual.md)** documents every option, its
+default and how options interact, laid out like nmap's reference guide. It
+is also available as a man page, [`docs/feroprobe.1`](docs/feroprobe.1)
+(`man -l docs/feroprobe.1`). See [DEVELOPMENT.md](DEVELOPMENT.md) for the
+full feature list and the remaining gap to nmap parity.
 
 ## Install
 
@@ -84,7 +87,8 @@ sudo ./target/release/feroprobe -sn 2001:db8::/120 fe80::1%eth0
 ```
 
 Run `feroprobe --help` (or `feroprobe` alone) for all options, on one page
-laid out like nmap's.
+laid out like nmap's, and see [the manual](docs/manual.md) for the full
+reference.
 
 To see why FeroProbe does what it does, add `--explain`. Before sending
 anything it prints its plan to standard error, step by step, with the reason

@@ -125,6 +125,47 @@ mod tests {
         }
     }
 
+    /// The reference manual documents every option too, under its own
+    /// heading, so a new option can't be left out of it.
+    #[test]
+    fn every_option_is_in_the_manual() {
+        const MANUAL: &str = include_str!("../../../docs/manual.md");
+        let headings: Vec<&str> = MANUAL
+            .lines()
+            .filter(|l| l.starts_with("#### ") || l.starts_with("### "))
+            .collect();
+        let cmd = crate::Args::command();
+        for arg in cmd.get_arguments() {
+            if arg.is_positional() {
+                continue;
+            }
+            let shown = match arg.get_long() {
+                Some("input-file") => "-iL".to_string(),
+                Some("output-normal") => "-oN".to_string(),
+                Some("output-xml") => "-oX".to_string(),
+                Some("output-grepable") => "-oG".to_string(),
+                Some("output-json") => "-oJ".to_string(),
+                Some("output-all") => "-oA".to_string(),
+                Some(long) => format!("--{long}"),
+                None => format!("-{}", arg.get_short().unwrap()),
+            };
+            let shown = match shown.as_str() {
+                // -s and -P take the type run on; each type has a heading.
+                "-s" => "-sS".to_string(),
+                "-P" => "-Pn".to_string(),
+                "-T" => "-T<0-5>".to_string(),
+                _ => shown,
+            };
+            let found = headings.iter().any(|h| {
+                h.contains(&format!("`{shown}`"))
+                    || h.contains(&format!("`{shown} "))
+                    || h.contains(&format!("`{shown}["))
+                    || h.contains(&format!("({shown})"))
+            });
+            assert!(found, "{shown} has no heading in docs/manual.md");
+        }
+    }
+
     #[test]
     fn lines_fit_a_terminal() {
         for line in HELP.lines() {
