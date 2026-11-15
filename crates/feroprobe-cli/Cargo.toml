@@ -9,14 +9,24 @@ readme = "../../README.md"
 keywords.workspace = true
 categories.workspace = true
 
+[features]
+# Build a FeroProbe with ICS protection always on: -sV, -O and -A are
+# refused unless --override-ics-protection is given for a run, and
+# settings files cannot switch it off. Off in the default build.
+ics-protection-default = []
+
 [dependencies]
 anyhow = "1.0.104"
 clap = { version = "4.6.7", features = ["derive"] }
-feroprobe-core = { version = "0.3.0-dev", path = "../feroprobe-core" }
+feroprobe-core = { version = "0.3.0", path = "../feroprobe-core" }
 futures = "0.3.34"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros"] }
+toml = { version = "1", default-features = false, features = ["parse", "serde"] }
 
 [dev-dependencies]
 roxmltree = "0.21.2"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2.191"

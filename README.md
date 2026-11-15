@@ -129,6 +129,18 @@ NOT SENT (dry run) TCP 10.0.0.2:43970 > 10.0.0.5:22 S seq=1654920040 win=65109
 
 nmap has no such option; its list scan (`-sL`) only lists the targets.
 
+**A dry run shows FeroProbe's probes, not nmap's.** Do not use it to check
+an nmap command before running it with nmap: with the same options nmap
+sends different packets, and some of its features probe outside `-p` (for
+example `-A` runs nmap's scripts, one of which sends a UDP datagram to port
+1434 of every host, and `-O` may pick random closed ports). The manual's
+`--dry-run` section lists these differences per option.
+
+FeroProbe itself never probes outside the scan: `-sV` and `-O` only probe
+the open ports the scan found, and `--traceroute` only uses a TCP port the
+command names (a scanned port, the `-p` port with `-sn`, or a discovery port). When `-A` runs without root, the parts it skips are
+named in a warning instead of being dropped silently as nmap does.
+
 This matters most on operational-technology and industrial-control (OT/ICS)
 networks, where an unexpected packet can hang or reset a fragile device such
 as a PLC or RTU. With `--dry-run`, an operator can check every target,
@@ -142,7 +154,7 @@ the same command without `--dry-run`, ideally with a gentle timing template
 Example output:
 
 ```
-Starting FeroProbe 0.3.0-dev
+Starting FeroProbe 0.3.0
 
 Scan report for 127.0.0.1
 Host is up, localhost-response.
@@ -313,6 +325,26 @@ bare IP header.
 ```sh
 sudo feroprobe -sO -p P:1,6,17,47,50,132 10.0.0.5
 ```
+
+### Settings file and ICS protection
+
+FeroProbe reads optional settings from `~/.config/feroprobe/config.toml`
+(`$XDG_CONFIG_HOME/feroprobe/config.toml` when that is set) and then from
+`.feroproberc` in the current directory, which wins; command-line options
+win over both. The one setting today is `ics_protection`, off by default:
+
+```toml
+ics_protection = true
+```
+
+With it on, FeroProbe refuses `-sV`, `-O` and `-A`, whose probes can hang or
+crash fragile PLCs and other control devices, and warns when a scan
+includes a well-known OT port (502, 102, 20000, 44818, 47808).
+`--override-ics-protection` allows one run anyway, with a warning. FeroProbe
+is not an ICS-specific tool and does not switch this on for you. Under
+`sudo`, your own settings file is read too. For a binary with protection
+always on, build with `--features ics-protection-default`. See
+[docs/ics-protection.md](docs/ics-protection.md).
 
 ### Privileges
 
@@ -497,7 +529,7 @@ connect scan takes about 18 ms (about 55,000 ports per second).
 
 ## Releases
 
-Pushing a tag such as `v0.2.0` runs `.github/workflows/release.yml`, which
+Pushing a tag such as `v0.3.0` runs `.github/workflows/release.yml`, which
 builds the binaries above, smoke-tests each one (the Intel macOS build, which
 is cross-compiled, gets an architecture check instead), and publishes them with
 SHA-256 checksums as a GitHub release.
@@ -535,7 +567,8 @@ closely, with a few deliberate exceptions that keep it from helping
 attackers hide: evasion options such as decoys and spoofed addresses are
 refused against public targets unless you pass `--allow-public-evasion` to
 authorize a network you are permitted to test, its probes carry a documented
-signature, and the repository ships Suricata and Snort rules for
+signature, an opt-in `ics_protection` setting refuses the options that can
+upset fragile industrial devices, and the repository ships Suricata and Snort rules for
 defenders. See [docs/responsible-use.md](docs/responsible-use.md) for the
 reasons and the current state.
 

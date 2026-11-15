@@ -9,7 +9,9 @@
 //! maps back to its TTL.
 //!
 //! The probe goes to a port the scan found open, else one it found closed
-//! (both make the host answer), else port 80. Hops that never answer are
+//! (both make the host answer), else a fallback port the caller picks from
+//! the ports the command names (in -p, the scan or discovery). With no such port the host is not
+//! traced: traceroute never probes a port outside the scan. Hops that never answer are
 //! listed without an address, like nmap's `...`. Raw sockets: Linux, root
 //! or `CAP_NET_RAW`.
 
@@ -48,8 +50,9 @@ pub struct Trace {
     pub reached: bool,
 }
 
-/// The port to trace a host with: open, else closed, else `fallback`.
-fn trace_port(host: &HostResult, fallback: u16) -> u16 {
+/// The port to trace a host with: open, else closed, else `fallback`
+/// (`None`: do not trace the host).
+fn trace_port(host: &HostResult, fallback: Option<u16>) -> Option<u16> {
     let tcp = |state| {
         host.ports
             .iter()
@@ -58,7 +61,7 @@ fn trace_port(host: &HostResult, fallback: u16) -> u16 {
     };
     tcp(PortState::Open)
         .or_else(|| tcp(PortState::Closed))
-        .unwrap_or(fallback)
+        .or(fallback)
 }
 
 /// What came back for one probe: the host index, TTL, who answered, whether
@@ -105,21 +108,28 @@ fn build_trace(port: u16, answers: &[HopAnswer]) -> Trace {
 /// Trace the route to every host that is up, and store it in `trace`.
 /// With `assume_up` (`-Pn`), every host is traced, even one that never
 /// answered the scan: routers on the way may still answer. Hosts with no
-/// open or closed TCP port (as after `-sn`) are traced with `fallback_port`.
+/// open or closed TCP port (as after `-sn`) are traced with `fallback_port`,
+/// which should be a TCP port the command names (in -p, the scan or discovery); with `None` they
+/// are not traced. Returns how many hosts were left untraced for that reason.
 pub async fn traceroute(
     hosts: &mut [HostResult],
     cfg: &ScanConfig,
     assume_up: bool,
-    fallback_port: u16,
-) -> io::Result<()> {
-    let jobs: Vec<(usize, IpAddr, u16)> = hosts
+    fallback_port: Option<u16>,
+) -> io::Result<usize> {
+    let wanted: Vec<(usize, IpAddr, Option<u16>)> = hosts
         .iter()
         .enumerate()
         .filter(|(_, h)| assume_up || h.is_up())
         .map(|(i, h)| (i, h.addr, trace_port(h, fallback_port)))
         .collect();
+    let skipped = wanted.iter().filter(|j| j.2.is_none()).count();
+    let jobs: Vec<(usize, IpAddr, u16)> = wanted
+        .into_iter()
+        .filter_map(|(i, a, p)| Some((i, a, p?)))
+        .collect();
     if jobs.is_empty() {
-        return Ok(());
+        return Ok(skipped);
     }
     let cfg = cfg.clone();
     let probe_jobs = jobs.clone();
@@ -130,7 +140,7 @@ pub async fn traceroute(
         let mine: Vec<HopAnswer> = answers.iter().filter(|a| a.host == j).copied().collect();
         hosts[h].trace = Some(build_trace(port, &mine));
     }
-    Ok(())
+    Ok(skipped)
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -473,12 +483,16 @@ mod tests {
             service: None,
         };
         let mut h = HostResult::new("10.0.0.1".parse().unwrap(), None);
-        assert_eq!(trace_port(&h, 80), 80);
-        assert_eq!(trace_port(&h, 443), 443);
+        assert_eq!(trace_port(&h, Some(80)), Some(80));
+        assert_eq!(trace_port(&h, Some(443)), Some(443));
+        // No port in scope to fall back on: the host is not traced.
+        assert_eq!(trace_port(&h, None), None);
         h.ports.push(port(23, PortState::Filtered));
+        assert_eq!(trace_port(&h, None), None);
         h.ports.push(port(25, PortState::Closed));
-        assert_eq!(trace_port(&h, 80), 25);
+        assert_eq!(trace_port(&h, Some(80)), Some(25));
+        assert_eq!(trace_port(&h, None), Some(25));
         h.ports.push(port(22, PortState::Open));
-        assert_eq!(trace_port(&h, 80), 22);
+        assert_eq!(trace_port(&h, Some(80)), Some(22));
     }
 }

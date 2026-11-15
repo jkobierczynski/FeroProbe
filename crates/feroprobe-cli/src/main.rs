@@ -1,5 +1,6 @@
 //! `feroprobe`: an nmap-style network scanner, written natively in Rust.
 
+mod config;
 mod explain;
 mod grep;
 mod help;
@@ -384,6 +385,12 @@ struct Args {
     /// raw-socket privileges only -sV runs, with a warning
     #[arg(short = 'A')]
     aggressive: bool,
+
+    /// Run this once despite `ics_protection = true` in a settings file,
+    /// allowing -sV, -O and -A. Prints a warning naming what it allowed.
+    /// The settings file is not changed
+    #[arg(long = "override-ics-protection")]
+    override_ics_protection: bool,
 
     /// Ports to scan, e.g. "22", "1-1024", "22,80,443", "-" for all.
     /// T: and U: mark TCP and UDP ports: "22,U:53,T:80" (unmarked ports
@@ -1134,10 +1141,117 @@ fn aggressive(plan: &mut Plan, args: &Args, privileged: bool) -> Result<(bool, b
     if privileged {
         return Ok((true, true));
     }
-    eprintln!(
-        "Warning: -A without root runs only -sV; OS detection and traceroute need raw sockets"
-    );
+    eprintln!("Warning: {}", AGGRESSIVE_UNPRIVILEGED);
     Ok((args.os, args.traceroute))
+}
+
+/// The options that send probes able to upset fragile OT/ICS devices
+/// (PLCs, RTUs, protocol gateways), in the order they appear in the help.
+/// Version detection talks application protocols (HTTP, TLS, ...) to
+/// whatever answers; OS detection sends a raw SYN loaded with TCP options.
+/// Script scanning belongs here too once it exists.
+fn device_hostile_options(args: &Args) -> Vec<&'static str> {
+    let mut found = Vec::new();
+    if args.scan.contains(&ScanType::Version) {
+        found.push("-sV");
+    }
+    if args.os {
+        found.push("-O");
+    }
+    if args.aggressive {
+        found.push("-A");
+    }
+    found
+}
+
+/// Where `ics_protection` was switched on, for messages.
+fn ics_source(settings: &config::Settings) -> String {
+    if settings.ics_built_in && settings.ics_protection_source.is_none() {
+        return "built into this FeroProbe".to_string();
+    }
+    settings.ics_protection_source.as_ref().map_or_else(
+        || "ics_protection = true".to_string(),
+        |p| format!("ics_protection = true in {}", p.display()),
+    )
+}
+
+/// The ICS protection guard. With `ics_protection` on, refuse a run that
+/// asks for a device-hostile option, unless `--override-ics-protection`
+/// lets it through with a warning. A `--dry-run` is never refused, since
+/// it sends nothing, but gets a warning naming what a real run would
+/// refuse. Returns the lines to print.
+fn gate_ics(settings: &config::Settings, args: &Args) -> Result<Vec<String>> {
+    if !settings.ics_protection {
+        if args.override_ics_protection {
+            return Ok(vec![
+                "Warning: --override-ics-protection has no effect: ICS protection is off"
+                    .to_string(),
+            ]);
+        }
+        return Ok(Vec::new());
+    }
+    let hostile = device_hostile_options(args);
+    if hostile.is_empty() {
+        return Ok(Vec::new());
+    }
+    let list = hostile.join(", ");
+    if !args.override_ics_protection && args.dry_run {
+        // A dry run sends nothing, so it is allowed, but says what a real
+        // run would do: the habit is the thing to teach.
+        return Ok(vec![format!(
+            "Warning: ICS protection is on ({}): a real run with {list} would be refused, \
+             since version and OS detection send probes that can hang or crash fragile \
+             OT/ICS devices such as PLCs. This dry run sends nothing, so it goes ahead. \
+             For the real scan, leave out {list} or pass --override-ics-protection",
+            ics_source(settings)
+        )]);
+    }
+    if !args.override_ics_protection {
+        bail!(
+            "ICS protection is on ({}), so {list} is refused: version and OS detection \
+             send probes that can hang or crash fragile OT/ICS devices such as PLCs. \
+             Leave out {list}, or pass --override-ics-protection to run this once anyway",
+            ics_source(settings)
+        );
+    }
+    Ok(vec![
+        "WARNING: ************************************************************".to_string(),
+        format!(
+            "WARNING: --override-ics-protection: running {list} although ICS protection is on ({})",
+            ics_source(settings)
+        ),
+        "WARNING: these probes can hang or crash fragile OT/ICS devices such as PLCs".to_string(),
+        "WARNING: ************************************************************".to_string(),
+    ])
+}
+
+/// Well-known OT/ICS ports: (port, TCP, UDP, protocol).
+const OT_PORTS: &[(u16, bool, bool, &str)] = &[
+    (102, true, false, "S7comm"),
+    (502, true, false, "Modbus"),
+    (20000, true, true, "DNP3"),
+    (44818, true, true, "EtherNet/IP"),
+    (47808, false, true, "BACnet"),
+];
+
+/// With ICS protection on, the warning for a port scan that includes
+/// well-known OT ports. Port scans are not refused; this is a reminder.
+fn ot_port_warning(tcp: &[u16], udp: &[u16]) -> Option<String> {
+    let hits: Vec<String> = OT_PORTS
+        .iter()
+        .flat_map(|&(port, t, u, name)| {
+            let tcp_hit = (t && tcp.contains(&port)).then(|| format!("{port}/tcp {name}"));
+            let udp_hit = (u && udp.contains(&port)).then(|| format!("{port}/udp {name}"));
+            [tcp_hit, udp_hit]
+        })
+        .flatten()
+        .collect();
+    (!hits.is_empty()).then(|| {
+        format!(
+            "ICS protection: the scan includes well-known OT ports ({}); keep it gentle on control devices (e.g. -T2, -sT)",
+            hits.join(", ")
+        )
+    })
 }
 
 /// The run's label for a raw TCP scan, as listed in `scan_types`.
@@ -1152,6 +1266,49 @@ fn tcp_scan_label(kind: TcpScanKind) -> &'static str {
         TcpScanKind::Maimon => "tcp-maimon",
     }
 }
+
+/// What `-A` drops without raw sockets. nmap drops the same parts but says
+/// nothing; FeroProbe names them, so the downgrade is never a surprise.
+const AGGRESSIVE_UNPRIVILEGED: &str = "-A without root or CAP_NET_RAW skips OS detection (-O) \
+     and traceroute (--traceroute), which send raw packets; only version detection (-sV) runs. \
+     Run as root, or grant CAP_NET_RAW, to include them";
+
+/// The TCP port traceroute falls back to for a host where the scan found
+/// no open or closed TCP port: always one the command names (-p, the scan or discovery), so
+/// traceroute never reaches outside the scan. In order: the first TCP port
+/// of the TCP scan; with `-sn`, the first TCP port given with `-p`; else
+/// the first TCP port of host discovery (`-PS`, `-PA`, or the defaults).
+/// `None` when the command probes no TCP port at all: such hosts are not
+/// traced. (FeroProbe used to fall back to port 80 whatever the scope.)
+fn trace_fallback_port(
+    args: &Args,
+    plan: &Plan,
+    tcp_ports: &[u16],
+    probes: &PingProbes,
+) -> Option<u16> {
+    let scan_port = if plan.ping_only {
+        args.ports.as_ref().and_then(|_| tcp_ports.first().copied())
+    } else if plan.tcp.is_some() {
+        tcp_ports.first().copied()
+    } else {
+        None
+    };
+    scan_port.or_else(|| {
+        plan.discovery
+            .then(|| probes.syn.first().or(probes.ack.first()).copied())
+            .flatten()
+    })
+}
+
+/// Why a host with no open or closed TCP port is not traced.
+const TRACE_NO_PORT: &str = "traceroute sends TCP SYN probes, and this command probes no TCP \
+     port to send them to; FeroProbe does not trace through a port outside the scan. Scan a TCP \
+     port too to trace (for example -sS -sU -p U:53,T:443)";
+
+/// The same for `-sn`, where `-p` names the port to trace through.
+const TRACE_NO_PORT_SN: &str = "traceroute sends TCP SYN probes, and this command probes no TCP \
+     port to send them to; FeroProbe does not trace through a port outside the scan. Name one \
+     with -p (for example -p 443)";
 
 /// Add each scan's port results to the matching host in `hosts`.
 fn merge(hosts: &mut [HostResult], results: Vec<HostResult>) {
@@ -1396,6 +1553,8 @@ struct DryOrder<'a> {
     protocols: &'a [u8],
     os: bool,
     trace: bool,
+    /// See [`trace_fallback_port`].
+    trace_fallback: Option<u16>,
 }
 
 /// The notes a dry run prints above its probes: what it cannot show (steps
@@ -1418,6 +1577,18 @@ fn dry_run_notes(args: &Args, plan: &Plan, d: &DryOrder, privileged: bool) -> Ve
              depend on replies a dry run does not get",
             follow.join(", ")
         ));
+    }
+    if d.trace {
+        notes.push(match d.trace_fallback {
+            Some(port) => format!(
+                "Traceroute would send TCP SYNs to an open or closed TCP port the scan finds on \
+                 each host, else to TCP port {port}, which this command names"
+            ),
+            None => format!(
+                "Traceroute would use an open or closed TCP port the scan finds; hosts without \
+                 one are not traced: {TRACE_NO_PORT}"
+            ),
+        });
     }
     if !args.no_resolve {
         notes.push("Not shown: reverse DNS of the hosts found up (no DNS query is made)".into());
@@ -1508,6 +1679,14 @@ fn dry_run(
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse_from(nmap_style_args(std::env::args()));
+    // Settings files, then the ICS guard: before anything is resolved or sent.
+    let settings = config::load()?;
+    for w in &settings.warnings {
+        eprintln!("Warning: {w}");
+    }
+    for w in gate_ics(&settings.settings, &args)? {
+        eprintln!("{w}");
+    }
     let outputs = Outputs::from_args(&args)?;
     if args.packet_trace {
         feroprobe_core::packet_trace::enable();
@@ -1520,6 +1699,24 @@ async fn main() -> Result<()> {
         level: args.verbose,
         track: true,
     };
+    progress.say(1, || {
+        let files: Vec<String> = settings
+            .files
+            .iter()
+            .map(|f| f.display().to_string())
+            .collect();
+        let read = if files.is_empty() {
+            "no settings file found".to_string()
+        } else {
+            format!("settings read from {}", files.join(", "))
+        };
+        let ics = if settings.settings.ics_protection {
+            format!("on ({})", ics_source(&settings.settings))
+        } else {
+            "off".to_string()
+        };
+        format!("ICS protection {ics}; {read}")
+    });
     let version = if args.ipv6 {
         IpVersion::V6
     } else {
@@ -1610,6 +1807,12 @@ async fn main() -> Result<()> {
     if plan.ping_only && !plan.discovery && !trace {
         bail!("-sn with -Pn would do nothing (add --traceroute to only trace the route)");
     }
+    let trace_fallback = trace_fallback_port(&args, &plan, &tcp_ports, &probes);
+    if trace && plan.ping_only && trace_fallback.is_none() {
+        // With -sn no host can have a scanned TCP port, so nothing would
+        // be traced: say so up front rather than after discovery.
+        bail!("--traceroute with -sn: {TRACE_NO_PORT_SN}");
+    }
     if trace && !raw_sockets_available() && !args.dry_run {
         bail!("--traceroute sends raw packets: run as root or grant CAP_NET_RAW");
     }
@@ -1653,6 +1856,13 @@ async fn main() -> Result<()> {
                 eprintln!("Warning: skipping OS detection, which needs a port scan");
                 os = false;
             }
+        }
+    }
+    if settings.settings.ics_protection && !plan.ping_only {
+        let tcp: &[u16] = if plan.tcp.is_some() { &tcp_ports } else { &[] };
+        let udp: &[u16] = if plan.udp { &udp_ports } else { &[] };
+        if let Some(w) = ot_port_warning(tcp, udp) {
+            eprintln!("Warning: {w}");
         }
     }
     // The order probes go out in; reports keep the sorted lists.
@@ -1736,6 +1946,7 @@ async fn main() -> Result<()> {
                 protocols: &protocols,
                 os,
                 trace,
+                trace_fallback,
             },
         );
     }
@@ -1829,19 +2040,21 @@ async fn main() -> Result<()> {
     }
     if trace {
         scan_types.push("traceroute");
-        // Hosts without a scanned port are traced with the first -p port.
-        let fallback = if args.ports.is_some() {
-            tcp_ports.first().copied().unwrap_or(80)
-        } else {
-            80
-        };
+        // Hosts without an open or closed TCP port are traced through a
+        // TCP port the command names, or not at all.
         // Hosts given up on by --host-timeout are not traced either.
         let keep: Vec<usize> = (0..hosts.len()).filter(|&i| !hosts[i].timed_out).collect();
         let mut traced: Vec<HostResult> = keep.iter().map(|&i| hosts[i].clone()).collect();
         let done = progress.phase("traceroute", traced.len());
-        traceroute(&mut traced, &cfg, !plan.discovery, fallback)
+        let untraced = traceroute(&mut traced, &cfg, !plan.discovery, trace_fallback)
             .await
             .context("traceroute failed")?;
+        if untraced > 0 {
+            eprintln!(
+                "Warning: {untraced} host{} not traced: {TRACE_NO_PORT}",
+                if untraced == 1 { "" } else { "s" }
+            );
+        }
         done(&progress);
         for (&i, h) in keep.iter().zip(traced) {
             hosts[i] = h;
@@ -2473,7 +2686,67 @@ mod tests {
             protocols: &[],
             os: false,
             trace: false,
+            trace_fallback: Some(80),
         }
+    }
+
+    #[test]
+    fn traceroute_never_falls_back_outside_the_scan() {
+        let root = PingProbes::nmap_default(true);
+        let tcp = plan_with_tcp(Some(ScanType::Syn));
+        // A TCP scan: its first port, never a port it does not scan.
+        let a = args(&["--traceroute", "-p", "502,102"]);
+        assert_eq!(trace_fallback_port(&a, &tcp, &[102, 502], &root), Some(102));
+        // A UDP-only scan: the discovery SYN port (443 as root), which the
+        // command probes anyway.
+        let mut udp = plan_with_tcp(None);
+        udp.udp = true;
+        let a = args(&["-sU", "-p", "53", "--traceroute"]);
+        assert_eq!(trace_fallback_port(&a, &udp, &[53], &root), Some(443));
+        // ... and with -Pn, no TCP port at all: not traced (was port 80).
+        udp.discovery = false;
+        assert_eq!(trace_fallback_port(&a, &udp, &[53], &root), None);
+        // ICMP-only discovery probes no TCP port either.
+        udp.discovery = true;
+        let icmp = PingProbes {
+            echo: true,
+            ..PingProbes::none()
+        };
+        assert_eq!(trace_fallback_port(&a, &udp, &[53], &icmp), None);
+        // -sn: -p names the port, else the discovery ports.
+        let mut sn = plan_with_tcp(None);
+        sn.ping_only = true;
+        let a = args(&["-sn", "--traceroute", "-p", "443"]);
+        assert_eq!(trace_fallback_port(&a, &sn, &[443], &root), Some(443));
+        let a = args(&["-sn", "--traceroute", "-PA22"]);
+        let ack = PingProbes {
+            ack: vec![22],
+            ..PingProbes::none()
+        };
+        assert_eq!(trace_fallback_port(&a, &sn, &[1, 2, 3], &ack), Some(22));
+        // -sn -Pn without -p: nothing to trace through.
+        sn.discovery = false;
+        let a = args(&["-sn", "-Pn", "--traceroute"]);
+        assert_eq!(trace_fallback_port(&a, &sn, &[80], &root), None);
+    }
+
+    #[test]
+    fn dry_run_says_where_traceroute_goes() {
+        let plan = plan_with_tcp(Some(ScanType::Syn));
+        let d = DryOrder {
+            trace: true,
+            trace_fallback: Some(102),
+            ..dry_order()
+        };
+        let notes = dry_run_notes(&args(&["-n"]), &plan, &d, true).join("\n");
+        assert!(notes.contains("TCP port 102"), "{notes}");
+        let d = DryOrder {
+            trace: true,
+            trace_fallback: None,
+            ..dry_order()
+        };
+        let notes = dry_run_notes(&args(&["-n"]), &plan, &d, true).join("\n");
+        assert!(notes.contains("not traced"), "{notes}");
     }
 
     #[test]
@@ -2739,6 +3012,137 @@ mod tests {
         assert_eq!(
             parse_host_list("10.0.0.1 10.0.0.2\n# comment\n\nexample.org # web\n  10.1.0.0/24\n"),
             ["10.0.0.1", "10.0.0.2", "example.org", "10.1.0.0/24"]
+        );
+    }
+
+    fn ics(on: bool) -> config::Settings {
+        config::Settings {
+            ics_protection: on,
+            ics_protection_source: on.then(|| std::path::PathBuf::from(".feroproberc")),
+            ics_built_in: false,
+        }
+    }
+
+    fn argv(a: &[&str]) -> Args {
+        let mut v = vec!["feroprobe"];
+        v.extend_from_slice(a);
+        Args::try_parse_from(v).unwrap()
+    }
+
+    #[test]
+    fn ics_protection_off_by_default_runs_everything() {
+        let off = config::Settings::default();
+        assert!(!off.ics_protection);
+        for a in [&["-sV"][..], &["-O"], &["-A"], &["-sS", "-sV", "-O"]] {
+            let mut a = a.to_vec();
+            a.push("10.0.0.1");
+            assert!(gate_ics(&off, &argv(&a)).unwrap().is_empty(), "{a:?}");
+        }
+    }
+
+    #[test]
+    fn ics_protection_blocks_hostile_options() {
+        for (opts, named) in [
+            (&["-sV"][..], "-sV"),
+            (&["-O"], "-O"),
+            (&["-A"], "-A"),
+            (&["-sS", "-sV", "-O"], "-sV, -O"),
+        ] {
+            let mut a = opts.to_vec();
+            a.push("10.0.0.1");
+            let err = gate_ics(&ics(true), &argv(&a)).unwrap_err().to_string();
+            assert!(err.contains(&format!("so {named} is refused")), "{err}");
+            assert!(err.contains("--override-ics-protection"), "{err}");
+            assert!(err.contains(".feroproberc"), "{err}");
+        }
+    }
+
+    #[test]
+    fn ics_protection_allows_plain_scans() {
+        for opts in [&["-sS"][..], &["-sT", "-sU"], &["-sn"], &["--traceroute"]] {
+            let mut a = opts.to_vec();
+            a.push("10.0.0.1");
+            assert!(gate_ics(&ics(true), &argv(&a)).unwrap().is_empty(), "{a:?}");
+        }
+    }
+
+    #[test]
+    fn ics_override_runs_with_a_warning() {
+        let a = argv(&["-A", "--override-ics-protection", "10.0.0.1"]);
+        let lines = gate_ics(&ics(true), &a).unwrap();
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("running -A although ICS protection is on"))
+        );
+        assert!(lines.iter().all(|l| l.starts_with("WARNING:")));
+        // Nothing to override: one note, no block.
+        let a = argv(&["-sS", "--override-ics-protection", "10.0.0.1"]);
+        assert!(gate_ics(&ics(true), &a).unwrap().is_empty());
+        let lines = gate_ics(&ics(false), &a).unwrap();
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("has no effect"));
+    }
+
+    #[test]
+    fn ics_dry_run_previews_with_a_warning() {
+        let a = argv(&["--dry-run", "-sV", "-O", "10.0.0.1"]);
+        let lines = gate_ics(&ics(true), &a).unwrap();
+        assert_eq!(lines.len(), 1);
+        assert!(
+            lines[0].starts_with("Warning: ICS protection is on"),
+            "{}",
+            lines[0]
+        );
+        assert!(
+            lines[0].contains("a real run with -sV, -O would be refused"),
+            "{}",
+            lines[0]
+        );
+        assert!(
+            lines[0].contains("--override-ics-protection"),
+            "{}",
+            lines[0]
+        );
+        // Protection off: a dry run is as quiet as any other run.
+        assert!(gate_ics(&ics(false), &a).unwrap().is_empty());
+        // The same command without --dry-run is still refused.
+        assert!(gate_ics(&ics(true), &argv(&["-sV", "-O", "10.0.0.1"])).is_err());
+        // With the override too, the override's warning applies.
+        let a = argv(&["--dry-run", "-A", "--override-ics-protection", "10.0.0.1"]);
+        let lines = gate_ics(&ics(true), &a).unwrap();
+        assert!(lines.iter().any(|l| l.contains("running -A although")));
+    }
+
+    #[test]
+    fn built_in_ics_protection_names_the_build() {
+        let built = config::Settings {
+            ics_protection: true,
+            ics_protection_source: None,
+            ics_built_in: true,
+        };
+        let err = gate_ics(&built, &argv(&["-sV", "10.0.0.1"]))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("(built into this FeroProbe)"), "{err}");
+        let a = argv(&["-sV", "--override-ics-protection", "10.0.0.1"]);
+        assert!(!gate_ics(&built, &a).unwrap().is_empty());
+    }
+
+    #[test]
+    fn ot_ports_warn_by_protocol() {
+        assert_eq!(ot_port_warning(&[22, 80, 443], &[53]), None);
+        let w = ot_port_warning(&[22, 502, 102], &[47808]).unwrap();
+        assert!(
+            w.contains("102/tcp S7comm, 502/tcp Modbus, 47808/udp BACnet"),
+            "{w}"
+        );
+        // BACnet is UDP: a TCP 47808 is no hit; Modbus is TCP only.
+        assert_eq!(ot_port_warning(&[47808], &[502]), None);
+        let w = ot_port_warning(&[20000, 44818], &[20000]).unwrap();
+        assert!(
+            w.contains("20000/tcp DNP3, 20000/udp DNP3, 44818/tcp EtherNet/IP"),
+            "{w}"
         );
     }
 }
