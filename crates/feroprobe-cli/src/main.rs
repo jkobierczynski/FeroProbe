@@ -890,13 +890,22 @@ fn gate_evasion(ev: &Evasion, targets: &[Target], plan: &Plan) -> Result<()> {
         );
     }
     // The anti-abuse safeguard. Checked before the privilege check so a
-    // public target is refused whether or not raw sockets are available.
-    let addrs: Vec<IpAddr> = targets.iter().map(|t| t.addr).collect();
+    // public address is refused whether or not raw sockets are available.
+    // The decoy (-D) and spoofed-source (-S) addresses count too: a public
+    // one there would make the target answer a public host, which is the
+    // same abuse the safeguard is meant to stop.
+    let addrs: Vec<IpAddr> = targets
+        .iter()
+        .map(|t| t.addr)
+        .chain(ev.decoys.iter().copied())
+        .chain(ev.spoof_source)
+        .collect();
     if let Some(public) = feroprobe_core::scope::first_public(&addrs) {
         bail!(
             "evasion options (fragmentation, decoys, spoofed source) are only allowed \
-             against private address ranges, but {public} is a public address. This is a \
-             deliberate FeroProbe safeguard: see docs/responsible-use.md."
+             against private address ranges, but {public} is a public address (a target, \
+             a decoy, or the spoofed source). This is a deliberate FeroProbe safeguard: \
+             see docs/responsible-use.md."
         );
     }
     if !raw_sockets_available() {
@@ -2221,13 +2230,27 @@ mod tests {
         let err = gate_evasion(&ev, &public, &syn).unwrap_err().to_string();
         assert!(err.contains("private address"), "{err}");
 
+        // A public decoy or spoofed source is refused too, even when the
+        // target itself is private: it would make the target answer a
+        // public host.
+        let private = [Target::new("10.0.0.1".parse().unwrap())];
+        let public_decoy = evasion_from_args(&args(&["-D", "8.8.8.8"])).unwrap();
+        let err = gate_evasion(&public_decoy, &private, &syn)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("private address"), "{err}");
+        let public_source = evasion_from_args(&args(&["-S", "8.8.8.8"])).unwrap();
+        let err = gate_evasion(&public_source, &private, &syn)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("private address"), "{err}");
+
         // An IPv6 target is refused as IPv4-only.
         let v6 = [Target::new("fd00::1".parse().unwrap())];
         let err = gate_evasion(&ev, &v6, &syn).unwrap_err().to_string();
         assert!(err.contains("IPv4 only"), "{err}");
 
         // A connect scan cannot carry evasion.
-        let private = [Target::new("10.0.0.1".parse().unwrap())];
         let connect = plan_with_tcp(Some(ScanType::Connect));
         let err = gate_evasion(&ev, &private, &connect)
             .unwrap_err()

@@ -2,7 +2,7 @@
 //! the layout of nmap's packet trace (`SENT (0.0412s) TCP ...`). Lines go to
 //! standard output, as nmap's do.
 
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
@@ -152,11 +152,47 @@ fn local_for(dst: IpAddr) -> Option<IpAddr> {
     }
 }
 
+/// `IPPROTO_RAW` (255): the socket carries whole IP packets we built
+/// ourselves, so the trace must read the IP header, not the socket.
+const IPPROTO_RAW: u8 = 255;
+
 /// A sent raw packet: `to` is where it went.
 pub(crate) fn sent(proto: u8, pkt: &[u8], to: SocketAddr) {
     log("SENT", || {
-        describe(proto, pkt, local_for(to.ip()), Some(to.ip()))
+        if proto == IPPROTO_RAW {
+            // Evasion probes (-f/--mtu/-D/-S) are complete IPv4 packets, so
+            // the real (possibly spoofed or decoy) source and the inner
+            // protocol come from the header, not from the socket or `to`.
+            describe_raw_ipv4(pkt, to)
+        } else {
+            describe(proto, pkt, local_for(to.ip()), Some(to.ip()))
+        }
     });
+}
+
+/// Trace line for a complete IPv4 packet sent on an `IPPROTO_RAW` socket.
+fn describe_raw_ipv4(pkt: &[u8], to: SocketAddr) -> String {
+    if pkt.len() < 20 || (pkt[0] >> 4) != 4 {
+        return describe(IPPROTO_RAW, pkt, local_for(to.ip()), Some(to.ip()));
+    }
+    let ihl = usize::from(pkt[0] & 0x0f) * 4;
+    let proto = pkt[9];
+    let src = Ipv4Addr::new(pkt[12], pkt[13], pkt[14], pkt[15]);
+    let dst = Ipv4Addr::new(pkt[16], pkt[17], pkt[18], pkt[19]);
+    let frag = u16::from_be_bytes([pkt[6], pkt[7]]);
+    let offset = usize::from(frag & 0x1fff) * 8;
+    let more = frag & 0x2000 != 0;
+    // A fragment past the first carries no transport header to read.
+    if offset > 0 {
+        let tail = if more { " +" } else { "" };
+        return format!("IP {src} > {dst} proto {proto} frag offset={offset}{tail}");
+    }
+    let payload = pkt.get(ihl..).unwrap_or(&[]);
+    let mut line = describe(proto, payload, Some(IpAddr::V4(src)), Some(IpAddr::V4(dst)));
+    if more {
+        line.push_str(" (frag)");
+    }
+    line
 }
 
 /// A connect() attempt and how it ended, like nmap's CONN lines.
@@ -216,6 +252,41 @@ mod tests {
             Some("192.0.2.9".parse().unwrap()),
         );
         assert_eq!(line, "TCP 192.0.2.1:40000 > 192.0.2.9:80 S seq=7 win=65109");
+        // An evasion probe is a whole IPv4 packet on an IPPROTO_RAW socket:
+        // the trace reads the header, showing the (here spoofed) source.
+        let seg = packet::tcp_syn(
+            "10.0.0.9".parse::<IpAddr>().unwrap(),
+            "10.0.0.2".parse::<IpAddr>().unwrap(),
+            40000,
+            80,
+            7,
+        );
+        let ip = packet::ipv4_packet(
+            "10.0.0.9".parse().unwrap(),
+            "10.0.0.2".parse().unwrap(),
+            packet::IPPROTO_TCP,
+            64,
+            1,
+            &seg,
+        );
+        let to: SocketAddr = "10.0.0.2:0".parse().unwrap();
+        assert_eq!(
+            describe_raw_ipv4(&ip, to),
+            "TCP 10.0.0.9:40000 > 10.0.0.2:80 S seq=7 win=65109"
+        );
+        // A later fragment is shown as a fragment, not parsed as TCP.
+        let payload: Vec<u8> = (0..24u8).collect();
+        let ip = packet::ipv4_packet(
+            "10.0.0.9".parse().unwrap(),
+            "10.0.0.2".parse().unwrap(),
+            packet::IPPROTO_TCP,
+            64,
+            1,
+            &payload,
+        );
+        let frags = crate::evasion::fragment_ipv4(&ip, crate::evasion::Fragment::Eight);
+        let line = describe_raw_ipv4(&frags[1], to);
+        assert!(line.contains("frag offset=8"), "{line}");
         let echo = packet::icmp_echo(5, 1, &[]);
         let line = describe(
             packet::IPPROTO_ICMP,
