@@ -80,10 +80,6 @@ pub struct DryRun<'a> {
     /// Extra lines for the header: steps the dry run cannot show, what a
     /// real run would need, and so on.
     pub notes: Vec<String>,
-    /// What nmap, given the same options, would send in addition or
-    /// instead. Printed in a box at the top, because a dry run is no
-    /// preview of an nmap command.
-    pub nmap_differences: Vec<String>,
 }
 
 /// How many probes the dry run listed.
@@ -171,7 +167,6 @@ pub fn write(run: &DryRun<'_>, w: &mut dyn Write) -> io::Result<Summary> {
     let sources: Vec<Option<IpAddr>> = run.targets.iter().map(|t| route_source(t.addr)).collect();
     let mut out = Out { w, count: 0 };
     out.note("Dry run (--dry-run): these are the probes the scan would send. Nothing is sent.")?;
-    not_nmap_banner(&mut out, &run.nmap_differences)?;
     for n in &run.notes {
         out.note(n)?;
     }
@@ -276,8 +271,7 @@ pub fn write(run: &DryRun<'_>, w: &mut dyn Write) -> io::Result<Summary> {
         String::new()
     };
     out.note(&format!(
-        "Dry run done: {} discovery and {} port-scan probe{} for {} host{} listed, nothing sent{retry}. \
-         These are FeroProbe's probes, not nmap's",
+        "Dry run done: {} discovery and {} port-scan probe{} for {} host{} listed, nothing sent{retry}",
         summary.discovery,
         summary.scan,
         if summary.scan == 1 { "" } else { "s" },
@@ -285,25 +279,6 @@ pub fn write(run: &DryRun<'_>, w: &mut dyn Write) -> io::Result<Summary> {
         if run.targets.len() == 1 { "" } else { "s" },
     ))?;
     Ok(summary)
-}
-
-/// The warning at the top of every dry run: this lists FeroProbe's probes,
-/// and nmap run with the same options sends different ones. People may use
-/// a dry run to check a command before running it with nmap, so it is a
-/// box rather than small print, followed by what nmap would do differently.
-fn not_nmap_banner(out: &mut Out<'_>, differences: &[String]) -> io::Result<()> {
-    const RULE: &str = "=======================================================================";
-    out.note(RULE)?;
-    out.note("NOT A PREVIEW OF NMAP. These are FeroProbe's probes. nmap run with the same")?;
-    out.note("options sends different packets, sometimes to ports outside -p. Do not use")?;
-    out.note("this list to check what an nmap command will send.")?;
-    if !differences.is_empty() {
-        out.note("What nmap would send differently with these options:")?;
-        for d in differences {
-            out.note(&format!("  - {d}"))?;
-        }
-    }
-    out.note(RULE)
 }
 
 /// The UDP datagram a UDP probe sends; the kernel picks the source port.
@@ -656,7 +631,6 @@ mod tests {
             evasion: ev,
             retries: 1,
             notes: Vec::new(),
-            nmap_differences: Vec::new(),
         }
     }
 
