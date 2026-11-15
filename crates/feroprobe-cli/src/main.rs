@@ -1586,8 +1586,14 @@ fn dry_run_notes(args: &Args, plan: &Plan, d: &DryOrder, privileged: bool) -> Ve
                  each host, else to TCP port {port}, which this command names"
             ),
             None => format!(
-                "Traceroute would use an open or closed TCP port the scan finds; hosts without \
-                 one are not traced: {TRACE_NO_PORT}"
+                "Traceroute would use an open or closed TCP port the scan finds; a directly \
+                 connected host gets a one-hop trace without probes, and other hosts without \
+                 such a port are not traced: {}",
+                if plan.ping_only {
+                    TRACE_NO_PORT_SN
+                } else {
+                    TRACE_NO_PORT
+                }
             ),
         });
     }
