@@ -482,8 +482,9 @@ With a lower `--timeout`, closed ports show as filtered on Windows. The SYN scan
 
 Scan only networks you own or are allowed to test. FeroProbe follows nmap
 closely, with a few deliberate exceptions that keep it from helping
-attackers hide: evasion options such as decoys and spoofed addresses only
-work against private address ranges, its probes carry a documented
+attackers hide: evasion options such as decoys and spoofed addresses are
+refused against public targets unless you pass `--allow-public-evasion` to
+authorize a network you are permitted to test, its probes carry a documented
 signature, and the repository ships Suricata and Snort rules for
 defenders. See [docs/responsible-use.md](docs/responsible-use.md) for the
 reasons and the current state.
