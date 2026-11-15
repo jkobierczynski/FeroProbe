@@ -385,8 +385,9 @@ Well-known ports get a payload their service answers: DNS (53, 5353), NTP
 `FeroProbeScan/1\n` (see [Probe signature](#probe-signature)).
 
 Hosts rate-limit their ICMP errors, so a fast scan of many closed UDP ports
-can show some of them as `open|filtered`. Lower `--concurrency` or
-`--max-rate`, or add a `--scan-delay`, for more accurate results.
+can show some of them as `open|filtered`. Lower `--concurrency` or add a
+`--scan-delay` for more accurate results (`--max-rate` does not pace UDP
+probes).
 
 ### SCTP INIT scan (`-sY`)
 

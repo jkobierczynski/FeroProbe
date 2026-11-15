@@ -624,8 +624,8 @@ Probe signature).
 .PP
 Hosts rate-limit their ICMP errors, so a fast scan of many closed UDP
 ports can show some of them as \f[V]open|filtered\f[R].
-Lower \f[V]--concurrency\f[R] or \f[V]--max-rate\f[R], or add a
-\f[V]--scan-delay\f[R], for more accurate results.
+Lower \f[V]--concurrency\f[R] or add a \f[V]--scan-delay\f[R] for more
+accurate results (\f[V]--max-rate\f[R] does not pace UDP probes).
 .SS SCTP INIT scan (\f[V]-sY\f[R])
 .PP
 SCTP carries telephone- and mobile-network signalling (SIGTRAN,
