@@ -1670,7 +1670,8 @@ sudo feroprobe -sn 2001:db8::/120 fe80::1%eth0
 feroprobe -6 -p 22,443 scanme.example.org
 
 # Gentle scan of a fragile network: check the probes first, then run it
-feroprobe --dry-run -T1 --max-rate 10 -p 502,102 10.10.0.0/28
+# (same privileges for both, since root changes the default scan type)
+sudo feroprobe --dry-run -T1 --max-rate 10 -p 502,102 10.10.0.0/28
 sudo feroprobe -T1 --max-rate 10 -p 502,102 10.10.0.0/28
 
 # Test your own IDS with fragments and decoys (private range)
