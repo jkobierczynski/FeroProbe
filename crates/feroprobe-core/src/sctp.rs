@@ -381,7 +381,7 @@ mod imp {
             let stop = Arc::new(AtomicBool::new(false));
             let stack = fake_stack(2905, Arc::clone(&stop));
             let cfg = ScanConfig {
-                timeout: Duration::from_millis(400),
+                rtt: crate::rtt::RttTimeouts::fixed(Duration::from_millis(400)),
                 retries: 0,
                 ..Default::default()
             };

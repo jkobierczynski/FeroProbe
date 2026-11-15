@@ -1,8 +1,8 @@
 //! Timing templates (`-T0` to `-T5`) and probe spacing.
 //!
 //! Like nmap's templates, each one is a bundle of the existing knobs:
-//! per-probe timeout, retries, parallelism, packet rate and a minimum delay
-//! between probes. Flags given explicitly on the command line override the
+//! probe timeout limits (see [`crate::rtt`]), retries, parallelism, packet
+//! rate and a minimum delay between probes. Flags given explicitly on the command line override the
 //! template's value for that knob.
 
 use std::fmt;
@@ -10,6 +10,7 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use crate::model::ScanConfig;
+use crate::rtt::RttTimeouts;
 
 /// nmap-style timing template, from slowest and stealthiest to fastest.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
@@ -28,10 +29,6 @@ pub enum Timing {
     /// `-T5`: as fast as possible, trading accuracy for speed
     Insane,
 }
-
-/// The lowest timeout a template may set on Windows, which reports a refused
-/// connection only about two seconds after the reset arrives.
-const WINDOWS_MIN_TIMEOUT: Duration = Duration::from_millis(3000);
 
 impl Timing {
     pub const ALL: [Timing; 6] = [
@@ -62,27 +59,48 @@ impl Timing {
     /// The scan settings this template stands for.
     pub fn config(self) -> ScanConfig {
         let ms = Duration::from_millis;
-        let (timeout, retries, concurrency, max_rate, scan_delay) = match self {
-            Timing::Paranoid => (ms(5000), 2, 1, 1, Duration::from_secs(300)),
-            Timing::Sneaky => (ms(5000), 2, 1, 1, Duration::from_secs(15)),
-            Timing::Polite => (ms(3000), 2, 10, 100, ms(400)),
+        let (retries, concurrency, max_rate, scan_delay) = match self {
+            Timing::Paranoid => (2, 1, 1, Duration::from_secs(300)),
+            Timing::Sneaky => (2, 1, 1, Duration::from_secs(15)),
+            Timing::Polite => (2, 10, 100, ms(400)),
             Timing::Normal => return ScanConfig::default(),
-            Timing::Aggressive => (ms(1000), 1, 1000, 10_000, Duration::ZERO),
-            Timing::Insane => (ms(300), 0, 2000, 50_000, Duration::ZERO),
-        };
-        let timeout = if cfg!(windows) {
-            timeout.max(WINDOWS_MIN_TIMEOUT)
-        } else {
-            timeout
+            Timing::Aggressive => (1, 1000, 10_000, Duration::ZERO),
+            Timing::Insane => (0, 2000, 50_000, Duration::ZERO),
         };
         ScanConfig {
-            timeout,
+            rtt: self.rtt_timeouts(),
+            timing_level: self.level(),
             retries,
             concurrency,
             max_rate,
             scan_delay,
             ..ScanConfig::default()
         }
+    }
+
+    /// The probe timeout limits this template sets: nmap's values.
+    /// `-T0` and `-T1` raise the initial timeout (and with it the maximum)
+    /// to their scan delay, `-T4` and `-T5` shorten all three, and `-T2`
+    /// keeps the defaults.
+    pub fn rtt_timeouts(self) -> RttTimeouts {
+        let ms = Duration::from_millis;
+        let mut t = RttTimeouts::default();
+        match self {
+            Timing::Paranoid => t.set_initial(ms(300_000)),
+            Timing::Sneaky => t.set_initial(ms(15_000)),
+            Timing::Polite | Timing::Normal => {}
+            Timing::Aggressive => {
+                t.set_min(ms(100));
+                t.set_max(ms(1250));
+                t.set_initial(ms(500));
+            }
+            Timing::Insane => {
+                t.set_min(ms(50));
+                t.set_max(ms(300));
+                t.set_initial(ms(250));
+            }
+        }
+        t
     }
 }
 
@@ -233,25 +251,47 @@ mod tests {
             assert!(slow.scan_delay >= fast.scan_delay);
             assert!(slow.concurrency <= fast.concurrency);
             assert!(slow.max_rate <= fast.max_rate);
-            assert!(slow.timeout >= fast.timeout);
+            if slow.timing_level >= 2 {
+                assert!(slow.rtt.max >= fast.rtt.max);
+                assert!(slow.rtt.initial >= fast.rtt.initial);
+            }
         }
         let normal = Timing::Normal.config();
         let default = ScanConfig::default();
         assert_eq!(
             (
-                normal.timeout,
+                normal.rtt,
                 normal.retries,
                 normal.concurrency,
                 normal.max_rate
             ),
             (
-                default.timeout,
+                default.rtt,
                 default.retries,
                 default.concurrency,
                 default.max_rate
             )
         );
         assert_eq!(Timing::Sneaky.config().scan_delay, Duration::from_secs(15));
+    }
+
+    #[test]
+    fn templates_set_nmaps_rtt_timeouts() {
+        let ms = Duration::from_millis;
+        let t = |timing: Timing| {
+            let r = timing.rtt_timeouts();
+            (r.min, r.max, r.initial)
+        };
+        assert_eq!(t(Timing::Paranoid), (ms(100), ms(300_000), ms(300_000)));
+        assert_eq!(t(Timing::Sneaky), (ms(100), ms(15_000), ms(15_000)));
+        assert_eq!(t(Timing::Polite), (ms(100), ms(10_000), ms(1000)));
+        assert_eq!(t(Timing::Normal), (ms(100), ms(10_000), ms(1000)));
+        assert_eq!(t(Timing::Aggressive), (ms(100), ms(1250), ms(500)));
+        assert_eq!(t(Timing::Insane), (ms(50), ms(300), ms(250)));
+        for timing in Timing::ALL {
+            assert_eq!(timing.config().rtt, timing.rtt_timeouts());
+            assert_eq!(timing.config().timing_level, timing.level());
+        }
     }
 
     #[test]

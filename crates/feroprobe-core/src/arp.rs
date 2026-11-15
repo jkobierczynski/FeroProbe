@@ -578,7 +578,7 @@ mod tests {
             return;
         }
         let cfg = crate::model::ScanConfig {
-            timeout: std::time::Duration::from_secs(1),
+            rtt: crate::rtt::RttTimeouts::fixed(std::time::Duration::from_secs(1)),
             retries: 2,
             ..Default::default()
         };

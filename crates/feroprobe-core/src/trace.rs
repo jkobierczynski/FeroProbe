@@ -377,6 +377,7 @@ mod imp {
                 let seq = round_seq(cookie, round);
                 let mut pacer = Pacer::for_config(cfg);
                 let mut sent_any = false;
+                let mut sent_to = vec![false; jobs.len()];
                 for (j, &(_, addr, port)) in jobs.iter().enumerate() {
                     let (Some(src), Some(sock)) =
                         (sources[j], send_socks[usize::from(addr.is_ipv6())].as_ref())
@@ -402,6 +403,7 @@ mod imp {
                         let pkt = packet::tcp_syn(src, addr, sport, port, seq);
                         sent_at.insert((j, ttl, round), Instant::now());
                         sent_any = true;
+                        sent_to[j] = true;
                         match send_with_backoff(sock, &pkt, socket_addr(addr, 0)) {
                             Ok(()) => {}
                             Err(e) if is_network_error(&e) => break,
@@ -412,7 +414,16 @@ mod imp {
                 if !sent_any {
                     break;
                 }
-                let deadline = Instant::now() + cfg.timeout;
+                // The longest adaptive timeout among the targets probed this
+                // round: routers on the way answer sooner than the target.
+                let wait = jobs
+                    .iter()
+                    .zip(&sent_to)
+                    .filter(|(_, sent)| **sent)
+                    .map(|(&(_, addr, _), _)| cfg.probe_timeout(addr))
+                    .max()
+                    .unwrap_or(cfg.rtt.initial);
+                let deadline = Instant::now() + wait;
                 while let Some(left) = deadline.checked_duration_since(Instant::now()) {
                     match rx.recv_timeout(left) {
                         Ok(a) => record(&mut first, a),
@@ -473,7 +484,7 @@ mod imp {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             let port = listener.local_addr().unwrap().port();
             let cfg = ScanConfig {
-                timeout: Duration::from_millis(300),
+                rtt: crate::rtt::RttTimeouts::fixed(Duration::from_millis(300)),
                 retries: 0,
                 ..Default::default()
             };

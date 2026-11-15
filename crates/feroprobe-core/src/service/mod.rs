@@ -142,6 +142,13 @@ where
     out
 }
 
+/// How long to wait for a connection to a port the scan found open: the
+/// host's adaptive probe timeout, but never less than the initial one, since
+/// a refused or lost connect here costs the service's identification.
+fn connect_wait(addr: SocketAddr, cfg: &ScanConfig) -> Duration {
+    crate::connect::connect_wait(addr, cfg).max(cfg.rtt.initial)
+}
+
 /// Run one probe over a new plain TCP connection. `None` if the connection
 /// failed, which means the port is no longer reachable.
 async fn plain_probe(
@@ -151,7 +158,7 @@ async fn plain_probe(
     wait: Duration,
 ) -> Option<Vec<u8>> {
     pace(cfg.scan_delay).await;
-    let mut stream = tokio::time::timeout(cfg.timeout, crate::netif::connect_tcp(addr))
+    let mut stream = tokio::time::timeout(connect_wait(addr, cfg), crate::netif::connect_tcp(addr))
         .await
         .ok()?
         .ok()?;
@@ -177,12 +184,13 @@ async fn detect_tls(
             .unwrap_or(&rules::HTTP)
     };
     pace(cfg.scan_delay).await;
-    let (mut stream, cn) = tls::connect(addr, host, cfg.timeout, wait).await?;
+    let (mut stream, cn) = tls::connect(addr, host, connect_wait(addr, cfg), wait).await?;
     let mut data = exchange(&mut stream, probe.payload, wait).await;
     if data.is_empty() && probe.name != rules::HTTP.name {
         // No answer: try HTTP over a fresh session.
         pace(cfg.scan_delay).await;
-        if let Some((mut stream, _)) = tls::connect(addr, host, cfg.timeout, wait).await {
+        if let Some((mut stream, _)) = tls::connect(addr, host, connect_wait(addr, cfg), wait).await
+        {
             probe = &rules::HTTP;
             data = exchange(&mut stream, probe.payload, wait).await;
         }

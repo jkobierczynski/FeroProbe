@@ -77,7 +77,7 @@ fn connect_localhost(c: &mut Criterion) {
     // High ports, very likely closed.
     let ports: Vec<u16> = (61000..62000).collect();
     let cfg = ScanConfig {
-        timeout: Duration::from_secs(3),
+        rtt: feroprobe_core::RttTimeouts::fixed(Duration::from_secs(3)),
         concurrency: 200,
         ..Default::default()
     };

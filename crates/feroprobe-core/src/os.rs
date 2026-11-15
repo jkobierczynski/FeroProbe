@@ -554,7 +554,15 @@ mod imp {
                 }
             }
             recv_sock.set_nonblocking(false)?;
-            let mut deadline = Instant::now() + cfg.timeout;
+            // The longest adaptive timeout among the hosts still waited for.
+            let wait = jobs
+                .iter()
+                .enumerate()
+                .filter(|&(j, _)| found[j].is_none() && sources[j].is_some())
+                .map(|(_, &(_, addr, _))| cfg.probe_timeout(addr.into()))
+                .max()
+                .unwrap_or(cfg.rtt.initial);
+            let mut deadline = Instant::now() + wait;
             if let Some(limit) = cfg.deadline {
                 deadline = deadline.min(limit);
             }
@@ -711,9 +719,17 @@ mod imp {
                 if !unanswered(&found) {
                     break;
                 }
-                // Wait for stragglers, up to the per-round timeout or the
-                // host deadline, whichever is sooner.
-                let mut deadline = Instant::now() + cfg.timeout;
+                // Wait for stragglers, up to the longest adaptive timeout
+                // among the hosts still waited for, or the host deadline,
+                // whichever is sooner.
+                let wait = jobs
+                    .iter()
+                    .enumerate()
+                    .filter(|&(j, _)| found[j].is_none() && sources[j].is_some())
+                    .map(|(_, &(_, addr, _))| cfg.probe_timeout(addr.into()))
+                    .max()
+                    .unwrap_or(cfg.rtt.initial);
+                let mut deadline = Instant::now() + wait;
                 if let Some(limit) = cfg.deadline {
                     deadline = deadline.min(limit);
                 }

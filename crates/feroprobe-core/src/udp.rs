@@ -28,6 +28,7 @@ use tokio::net::UdpSocket;
 
 use crate::connect::is_network_error;
 use crate::model::{HostResult, PortResult, PortState, Protocol, ScanConfig, elapsed_ms, reason};
+use crate::rtt::{AsyncWindow, Outcome};
 use crate::target::Target;
 use crate::timing::pace;
 
@@ -187,8 +188,32 @@ fn enable_recverr(sock: &Socket, ipv4: bool) -> io::Result<()> {
     }
 }
 
-/// Probe a single UDP port.
+/// Probe a single UDP port. Each try waits for the host's current adaptive
+/// timeout (see [`crate::rtt`]), and every answer's round-trip time feeds
+/// that estimate.
 pub async fn probe_udp(addr: SocketAddr, cfg: &ScanConfig) -> io::Result<PortResult> {
+    probe_udp_in(addr, cfg, None).await
+}
+
+/// [`probe_udp`] as one probe of a scan: each try takes a place in the
+/// scan's congestion windows (host `h`) first.
+pub(crate) async fn probe_udp_in(
+    addr: SocketAddr,
+    cfg: &ScanConfig,
+    window: Option<(&AsyncWindow, usize)>,
+) -> io::Result<PortResult> {
+    let result = probe_udp_tries(addr, cfg, window).await;
+    if let Some((w, h)) = window {
+        w.settled(h);
+    }
+    result
+}
+
+async fn probe_udp_tries(
+    addr: SocketAddr,
+    cfg: &ScanConfig,
+    window: Option<(&AsyncWindow, usize)>,
+) -> io::Result<PortResult> {
     let result = |state, reason, rtt_ms| PortResult {
         port: addr.port(),
         protocol: Protocol::Udp,
@@ -219,7 +244,15 @@ pub async fn probe_udp(addr: SocketAddr, cfg: &ScanConfig) -> io::Result<PortRes
 
     let payload = payload_for(addr.port());
     let mut buf = [0u8; 2048];
-    for _ in 0..=cfg.retries {
+    for tryno in 0..=cfg.retries {
+        let slot = match window {
+            Some((w, h)) => match w.acquire(h).await {
+                Some(slot) => Some(slot),
+                // The host needs no more probes (proven up in discovery).
+                None => break,
+            },
+            None => None,
+        };
         pace(cfg.scan_delay).await;
         let start = Instant::now();
         if let Err(e) = sock.send(payload).await {
@@ -228,7 +261,26 @@ pub async fn probe_udp(addr: SocketAddr, cfg: &ScanConfig) -> io::Result<PortRes
         crate::packet_trace::log("SENT", || {
             format!("UDP localhost > {addr} len={}", payload.len())
         });
-        match tokio::time::timeout(cfg.timeout, sock.recv(&mut buf)).await {
+        let outcome = tokio::time::timeout(cfg.probe_timeout(addr.ip()), sock.recv(&mut buf)).await;
+        // Data or an ICMP error both answer the probe and time the round
+        // trip. As in nmap's UDP scan, where silence means open|filtered,
+        // an ICMP error counts like any other answer for the windows.
+        let answered = outcome.is_ok();
+        // Every try uses the same socket and payload, so an answer after a
+        // resend may belong to the earlier copy: only first tries are timed
+        // (Karn's rule).
+        if answered && tryno == 0 {
+            cfg.observe_rtt(addr.ip(), start.elapsed());
+        }
+        if let Some(slot) = slot {
+            let how = if answered {
+                Outcome::Answered
+            } else {
+                Outcome::TimedOut
+            };
+            slot.finish(start, tryno, how);
+        }
+        match outcome {
             Ok(Ok(n)) => {
                 crate::packet_trace::log("RCVD", || format!("UDP {addr} > localhost len={n}"));
                 return Ok(result(
@@ -272,10 +324,12 @@ pub async fn udp_scan(
     let jobs = ports
         .iter()
         .flat_map(|&port| (0..targets.len()).map(move |h| (h, port)));
+    let window = AsyncWindow::new(cfg, vec![ports.len(); targets.len()]);
+    let window = &window;
     let mut results = stream::iter(jobs)
         .map(|(h, port)| {
             let addr = crate::target::socket_addr(targets[h].addr, port);
-            async move { (h, probe_udp(addr, cfg).await) }
+            async move { (h, probe_udp_in(addr, cfg, Some((window, h))).await) }
         })
         .buffer_unordered(cfg.concurrency.max(1));
     while let Some((h, r)) = results.next().await {
@@ -314,7 +368,7 @@ mod tests {
         };
 
         let cfg = ScanConfig {
-            timeout: Duration::from_millis(300),
+            rtt: crate::rtt::RttTimeouts::fixed(Duration::from_millis(300)),
             retries: 0,
             ..Default::default()
         };

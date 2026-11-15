@@ -330,6 +330,7 @@ mod imp {
         Pacer, Rng, nmap_ip_header, probe_ttl, raw_socket_in, receive_loop,
         send_with_backoff_until, source_addr_for,
     };
+    use crate::rtt::{Flight, Next};
     use crate::target::socket_addr;
 
     /// An answer seen by a receiver thread: host index, port, state,
@@ -405,8 +406,9 @@ mod imp {
         let is_done = |h: usize| done.is_some_and(|d| d.is_done(h));
         // A TCP answer (not an ICMP error) proves the host up for the other
         // discovery probes too.
+        let no_answer = scan.kind.no_response();
         let record = |results: &mut HashMap<(usize, u16), PortResult>,
-                      sent_at: &HashMap<(usize, u16), Instant>,
+                      flight: &mut Flight<u16>,
                       a: Answer| {
             if let Some(d) = done
                 && a.2 != PortState::Filtered
@@ -421,7 +423,7 @@ mod imp {
                     results.remove(&(a.0, a.1));
                 }
             }
-            record(results, sent_at, a)
+            record(results, flight, no_answer, a)
         };
         let addrs: Vec<IpAddr> = targets.iter().map(|t| t.addr).collect();
         let index: Arc<HashMap<IpAddr, usize>> =
@@ -472,7 +474,6 @@ mod imp {
         let sport = crate::raw::probe_sport(cfg, &mut rng);
         let cookie = rng.next_u32();
         let ack = if scan.flags & TCP_ACK != 0 { cookie } else { 0 };
-        let no_answer = scan.kind.no_response();
 
         let mut results: HashMap<(usize, u16), PortResult> = HashMap::new();
 
@@ -537,8 +538,6 @@ mod imp {
             None
         };
 
-        let mut sent_at: HashMap<(usize, u16), Instant> = HashMap::new();
-
         // Port-major order spreads the probes across hosts.
         let mut pending: Vec<(usize, u16)> = ports
             .iter()
@@ -549,23 +548,79 @@ mod imp {
         // Probes settled before any is sent (no route) count as done.
         crate::progress::tick((addrs.len() * ports.len() - pending.len()) as u64);
 
+        let mut per_host = vec![0; addrs.len()];
+        for &(h, _) in &pending {
+            per_host[h] += 1;
+        }
+        let mut flight: Flight<u16> = Flight::new(cfg, &addrs, per_host);
+        // As a discovery probe, stop waiting for hosts that other probes
+        // proved up. Checked on a timer, not per answer, to stay cheap on
+        // large sweeps.
+        let mut retired = vec![false; addrs.len()];
+        let mut retire_done = |flight: &mut Flight<u16>| {
+            if done.is_none() {
+                return;
+            }
+            for (h, r) in retired.iter_mut().enumerate() {
+                if !*r && is_done(h) {
+                    *r = true;
+                    flight.retire_host(h);
+                }
+            }
+        };
+        // As a discovery probe, hosts can be proven up by other probes
+        // while we wait: wake up regularly to notice.
+        let slice = if done.is_some() {
+            Duration::from_millis(100)
+        } else {
+            Duration::MAX
+        };
+
         let outcome = (|| -> io::Result<()> {
             for round in 0..=cfg.retries {
                 let mut pacer = Pacer::for_config(cfg);
-                for &(h, p) in &pending {
-                    if round == 0 {
-                        crate::progress::tick(1);
-                    }
+                flight.start_round(pending.iter().copied(), round);
+                loop {
                     if cfg.expired() {
                         return Err(ScanConfig::timed_out());
                     }
-                    let Some(src) = sources[h] else { continue };
+                    let (h, p) = match flight.next(Instant::now()) {
+                        Next::Idle => break,
+                        Next::Send(h, p) => (h, p),
+                        // Every window is full: wait for an answer or a
+                        // timeout.
+                        Next::Wait(until) => {
+                            let until = cfg.deadline.map_or(until, |d| until.min(d));
+                            let left = until.saturating_duration_since(Instant::now()).min(slice);
+                            match rx.recv_timeout(left) {
+                                Ok(a) => {
+                                    record(&mut results, &mut flight, a);
+                                }
+                                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                                    std::thread::sleep(left)
+                                }
+                            }
+                            if round > 0 {
+                                retire_done(&mut flight);
+                            }
+                            continue;
+                        }
+                    };
+                    if round == 0 {
+                        crate::progress::tick(1);
+                    }
+                    let Some(src) = sources[h] else {
+                        flight.settle(h, p);
+                        continue;
+                    };
                     // Answered by a reply that came in during this round, or
                     // (on a retry) the host is already known to be up. The
                     // first round always goes out: nmap sends a host all
                     // its discovery probes in one burst, so an early ICMP
                     // reply does not hold back the SYN or ACK.
                     if results.contains_key(&(h, p)) || (round > 0 && is_done(h)) {
+                        flight.settle(h, p);
                         continue;
                     }
                     let Some(send_sock) = send_socks[usize::from(addrs[h].is_ipv6())].as_ref()
@@ -577,6 +632,7 @@ mod imp {
                             reason::UNREACHABLE,
                             None,
                         ));
+                        flight.settle(h, p);
                         continue;
                     };
                     // The wait gives up at the host deadline.
@@ -587,13 +643,14 @@ mod imp {
                     // the previous round's probe to arrive: record it against
                     // the old send time and do not send again.
                     while let Ok(a) = rx.try_recv() {
-                        record(&mut results, &sent_at, a);
+                        record(&mut results, &mut flight, a);
                     }
                     // Another probe may have proven the host up meanwhile.
                     if results.contains_key(&(h, p)) || (round > 0 && is_done(h)) {
+                        flight.settle(h, p);
                         continue;
                     }
-                    sent_at.insert((h, p), Instant::now());
+                    flight.sent(h, p, Instant::now());
                     let to = socket_addr(addrs[h], 0);
                     // The SYN scan keeps its MSS option, which makes the
                     // probe look like an ordinary connection attempt.
@@ -621,44 +678,38 @@ mod imp {
                                 reason::UNREACHABLE,
                                 None,
                             ));
+                            flight.settle(h, p);
                         }
                         Err(e) => return Err(e),
                     }
                     while let Ok(a) = rx.try_recv() {
-                        record(&mut results, &sent_at, a);
+                        record(&mut results, &mut flight, a);
                     }
                 }
-                // Wait for stragglers, but stop as soon as every probe is answered.
-                let outstanding = |results: &HashMap<(usize, u16), PortResult>| {
-                    outstanding(&pending, results, is_done)
-                };
-                let mut unanswered = outstanding(&results);
-                let mut deadline = Instant::now() + cfg.timeout;
-                if let Some(limit) = cfg.deadline {
-                    deadline = deadline.min(limit);
-                }
-                // As a discovery probe, hosts can be proven up by other
-                // probes while we wait: wake up regularly and count again,
-                // so a reply from such a host never stands in for another's.
-                let slice = if done.is_some() {
-                    Duration::from_millis(100)
-                } else {
-                    Duration::MAX
-                };
-                while unanswered > 0
-                    && let Some(left) = deadline.checked_duration_since(Instant::now())
-                {
-                    match rx.recv_timeout(left.min(slice)) {
-                        Ok(a) => {
-                            if record(&mut results, &sent_at, a) && done.is_none() {
-                                unanswered -= 1;
-                            }
+                // Wait for stragglers: until every probe is answered or has
+                // waited out its host's timeout, or (as a discovery probe)
+                // its host is proven up.
+                retire_done(&mut flight);
+                while flight.any_waiting() {
+                    let Some(mut until) = flight.next_expiry() else {
+                        break;
+                    };
+                    if let Some(limit) = cfg.deadline {
+                        if Instant::now() >= limit {
+                            break;
                         }
-                        Err(mpsc::RecvTimeoutError::Timeout) if done.is_some() => {}
-                        Err(_) => break,
+                        until = until.min(limit);
                     }
-                    if done.is_some() {
-                        unanswered = outstanding(&results);
+                    let left = until.saturating_duration_since(Instant::now()).min(slice);
+                    match rx.recv_timeout(left) {
+                        Ok(a) => {
+                            record(&mut results, &mut flight, a);
+                        }
+                        Err(mpsc::RecvTimeoutError::Timeout) => {
+                            flight.expire(Instant::now());
+                            retire_done(&mut flight);
+                        }
+                        Err(_) => break,
                     }
                 }
                 pending.retain(|&(h, p)| !results.contains_key(&(h, p)) && !is_done(h));
@@ -697,35 +748,26 @@ mod imp {
             .collect())
     }
 
-    /// The probes in `pending` still waiting for an answer: not answered
-    /// yet, and for a host not already known to be up. Counted afresh
-    /// rather than decremented per reply, so a late reply from a host that
-    /// is already up never stands in for another host's answer.
-    fn outstanding(
-        pending: &[(usize, u16)],
-        results: &HashMap<(usize, u16), PortResult>,
-        is_done: impl Fn(usize) -> bool,
-    ) -> usize {
-        pending
-            .iter()
-            .filter(|&&(h, p)| !results.contains_key(&(h, p)) && !is_done(h))
-            .count()
-    }
-
-    /// Store the first answer for a probe, with its round-trip time.
-    /// Returns whether it was new.
+    /// Store the first answer for a probe, with its round-trip time, and
+    /// feed it to the flight's timeouts and windows. Returns whether it was
+    /// new.
     fn record(
         results: &mut HashMap<(usize, u16), PortResult>,
-        sent_at: &HashMap<(usize, u16), Instant>,
+        flight: &mut Flight<u16>,
+        no_answer: PortState,
         (h, p, state, why, at): Answer,
     ) -> bool {
         if results.contains_key(&(h, p)) {
             return false;
         }
-        let rtt_ms = sent_at.get(&(h, p)).map(|s| {
-            (at.saturating_duration_since(*s).as_secs_f64() * 1_000_000.0).round() / 1000.0
-        });
-        results.insert((h, p), result(p, state, why, rtt_ms));
+        // An ICMP error moves no window on a retry when silence already
+        // means filtered (see `rtt::Outcome::FilteredError`).
+        let filtered_error = no_answer == PortState::Filtered && state == PortState::Filtered;
+        let Some(rtt) = flight.answered(h, p, at, filtered_error) else {
+            return false;
+        };
+        let rtt_ms = (rtt.as_secs_f64() * 1_000_000.0).round() / 1000.0;
+        results.insert((h, p), result(p, state, why, Some(rtt_ms)));
         true
     }
 
@@ -791,7 +833,7 @@ mod imp {
                 l.local_addr().unwrap().port()
             };
             let cfg = ScanConfig {
-                timeout: Duration::from_secs(5),
+                rtt: crate::rtt::RttTimeouts::fixed(Duration::from_secs(5)),
                 ..Default::default()
             };
             let target = Target::new("127.0.0.1".parse().unwrap());
@@ -845,27 +887,43 @@ mod imp {
         /// delayed TCP reply arrives. That reply must not use up B's count.
         #[test]
         fn late_reply_from_done_host_keeps_waiting_for_others() {
-            let pending = [(0, 80), (1, 80)];
+            let cfg = ScanConfig::default();
+            let addrs: Vec<IpAddr> = vec!["10.0.0.1".parse().unwrap(), "10.0.0.2".parse().unwrap()];
+            let mut flight: Flight<u16> = Flight::new(&cfg, &addrs, vec![1, 1]);
             let mut results = HashMap::new();
-            let sent_at = HashMap::new();
-            let a_up = std::cell::Cell::new(false);
-            let is_done = |h: usize| h == 0 && a_up.get();
-            assert_eq!(outstanding(&pending, &results, is_done), 2);
-            a_up.set(true);
-            assert_eq!(outstanding(&pending, &results, is_done), 1);
             let now = Instant::now();
+            flight.start_round([(0, 80), (1, 80)], 0);
+            while let Next::Send(h, p) = flight.next(now) {
+                flight.sent(h, p, now);
+            }
+            assert!(flight.any_waiting());
+            // ICMP proves A up: A no longer counts as waiting, B still does.
+            flight.retire_host(0);
+            assert!(flight.any_waiting());
+            // A's delayed TCP reply is still recorded ...
+            let later = now + Duration::from_millis(5);
             assert!(record(
                 &mut results,
-                &sent_at,
-                (0, 80, PortState::Closed, reason::RESET, now)
+                &mut flight,
+                PortState::Filtered,
+                (0, 80, PortState::Closed, reason::RESET, later)
             ));
-            assert_eq!(outstanding(&pending, &results, is_done), 1);
-            record(
+            // ... but does not stand in for B's answer.
+            assert!(flight.any_waiting());
+            assert!(record(
                 &mut results,
-                &sent_at,
-                (1, 80, PortState::Closed, reason::RESET, now),
-            );
-            assert_eq!(outstanding(&pending, &results, is_done), 0);
+                &mut flight,
+                PortState::Filtered,
+                (1, 80, PortState::Closed, reason::RESET, later),
+            ));
+            assert!(!flight.any_waiting());
+            // Only the first answer counts.
+            assert!(!record(
+                &mut results,
+                &mut flight,
+                PortState::Filtered,
+                (1, 80, PortState::Open, reason::SYN_ACK, later),
+            ));
         }
 
         #[test]
@@ -880,7 +938,7 @@ mod imp {
                 l.local_addr().unwrap().port()
             };
             let cfg = ScanConfig {
-                timeout: Duration::from_millis(500),
+                rtt: crate::rtt::RttTimeouts::fixed(Duration::from_millis(500)),
                 ..Default::default()
             };
             let target = Target::new("127.0.0.1".parse().unwrap());
@@ -932,7 +990,7 @@ mod imp {
                 l.local_addr().unwrap().port()
             };
             let cfg = ScanConfig {
-                timeout: Duration::from_millis(300),
+                rtt: crate::rtt::RttTimeouts::fixed(Duration::from_millis(300)),
                 retries: 0,
                 ..Default::default()
             };
@@ -997,7 +1055,7 @@ mod imp {
             .find(|p| *p != open4 && *p != open6)
             .unwrap();
             let cfg = ScanConfig {
-                timeout: Duration::from_millis(500),
+                rtt: crate::rtt::RttTimeouts::fixed(Duration::from_millis(500)),
                 ..Default::default()
             };
             let targets = [
