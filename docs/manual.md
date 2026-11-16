@@ -81,7 +81,7 @@ Options can come in any order, before or after the targets. Single-letter
 options that take a value accept it with or without a space (`-p22` or
 `-p 22`), except the `-P` ping options and `-s` scan types, whose value is
 always run on (`-PS22`, `-sS`). nmap's two-letter options `-iL`, `-oN`,
-`-oX`, `-oG`, `-oA` (and FeroProbe's `-oJ`) are written exactly as in nmap,
+`-oX`, `-oS`, `-oG`, `-oA` (and FeroProbe's `-oJ`) are written exactly as in nmap,
 as a separate word followed by their value.
 
 Durations (`<time>`) are in seconds unless they end in `ms`, `s`, `m` or
@@ -1221,6 +1221,15 @@ Also write the XML report to a file, in nmap's `-oX` layout (including
 `<trace>` for traceroute), so tools that import nmap XML can read it. The
 root element says `scanner="feroprobe"`; see `--nmap-label`.
 
+#### `-oS <file>`
+
+Also write the normal report to a file in "script kiddie" spelling, as
+nmap's `-oS` does: at random, letters become look-alikes (`4` for `A`, `3`
+for `e`, `0` for `o`, `$` or `z` for `s`, `!`, `|` or `1` for `i`, and `s`
+for `z`) or change case. Fingerprint lines (the `OS:` lines and the
+unrecognized service replies) are left as they are, so they can still be
+copied. It exists for parity with nmap; `-oA` does not include it.
+
 #### `-oG <file>`
 
 Also write the grepable report to a file: one line per host, like nmap's
@@ -1244,8 +1253,71 @@ usual report there; only one report can go to standard output. Two reports
 cannot share a file (FeroProbe checks the real files, so links and other
 spellings of the same path are caught), and `-oA -` is refused. All report
 files are opened (created, not truncated) before the scan starts, so an
-unwritable path fails at once, as in nmap. A `--dry-run` writes no reports
-and creates no files.
+unwritable path fails at once, as in nmap. A file's old content is
+replaced only when the new report is written, so a scan that fails leaves
+the previous report in place. A `--dry-run` writes no reports and creates
+no files.
+
+Report files are written through the handles opened at the start, so the
+paths are not looked up again: replacing a report path with a link while
+the scan runs does not redirect the report. When FeroProbe runs as root
+(for example under `sudo`), it also refuses to write a report through a
+symbolic link that another user owns in a shared directory with the sticky
+bit, such as `/tmp` (for example `sudo feroprobe -oN /tmp/scan.txt` when
+someone else has made `/tmp/scan.txt` a link to a system file). Linux
+refuses this too when `fs.protected_symlinks` is on; FeroProbe checks it
+on every system. The files are created with the usual permissions from the
+umask and owned by root, as with nmap.
+
+#### `--append-output`
+
+Add the reports to the end of the `-oN`, `-oX`, `-oS`, `-oG`, `-oJ` and
+`-oA` files instead of replacing them, as nmap's `--append-output` does.
+Each run adds a complete report, so a normal or grepable file collects one
+report after another. An XML file then holds several `<nmaprun>`
+documents one after another, each with its own `<?xml ...?>` header, which
+XML parsers refuse as one document until it is split, just as with nmap;
+a JSON file likewise holds one JSON document per run. Reports written to
+standard output (`-`) are not affected.
+
+#### `--stylesheet <path or URL>`
+
+Link this XSL stylesheet from the XML report, through an
+`<?xml-stylesheet href="..." type="text/xsl"?>` line after the
+`<!DOCTYPE>` line, as nmap does. A browser that opens the report applies
+the stylesheet and shows the report as a web page. The value is written as
+given, so give a URL or a path that is valid where the report will be
+opened.
+
+Without `--stylesheet`, `--webxml` or `--no-stylesheet`, the report links
+FeroProbe's own stylesheet, `feroprobe.xsl`: the copy installed with
+FeroProbe as a `file://` URL (next to the binary, as in the release
+archives, then `../share/feroprobe/` from the binary, then
+`/usr/local/share/feroprobe/` and `/usr/share/feroprobe/`), or the bare
+name `feroprobe.xsl` when no copy is found, as nmap does with `nmap.xsl`.
+The stylesheet is `docs/feroprobe.xsl` in the source; it is written for
+FeroProbe (nmap's `nmap.xsl` is not reused) and also shows nmap's own XML
+reports. Most browsers refuse to apply a stylesheet to a local file or
+from another site, so the reliable way to get a web page is to convert the
+report:
+
+```sh
+xsltproc -o report.html /usr/share/feroprobe/feroprobe.xsl report.xml
+```
+
+Of `--stylesheet`, `--webxml` and `--no-stylesheet`, the last one given
+wins, as in nmap.
+
+#### `--webxml`
+
+Link the published copy of FeroProbe's stylesheet,
+`https://jkobierczynski.github.io/feroprobe/feroprobe.xsl`, instead of the
+installed one, so the link works on machines where FeroProbe is not
+installed. Short for `--stylesheet` with that URL.
+
+#### `--no-stylesheet`
+
+Leave the `xml-stylesheet` line out of the XML report.
 
 #### `--nmap-label`
 
@@ -1382,7 +1454,7 @@ per option:
 These come from nmap 7.99's source.
 
 A dry run needs no root, writes no report files (it warns if `-oN`,
-`-oX`, `-oG`, `-oJ` or `-oA` were given), and notes when a real run of the
+`-oX`, `-oS`, `-oG`, `-oJ` or `-oA` were given), and notes when a real run of the
 same command would need raw-socket privileges. The evasion address check
 still applies: a public address with `-f`, `--mtu`, `-D` or `-S` is
 refused unless `--allow-public-evasion` is given.
@@ -1543,6 +1615,8 @@ safeguard calls for a difference. The deliberate differences are:
 | Settings files, `ics_protection`, `--override-ics-protection` | No equivalent | FeroProbe's own; off by default, so default behaviour is unchanged |
 | JSON output (`-oJ`) | No equivalent | FeroProbe's own format |
 | XML `scanner` attribute | `nmap` | `feroprobe`, unless `--nmap-label` |
+| XML stylesheet | Links `nmap.xsl`; `--webxml` links nmap.org's copy | Links FeroProbe's own `feroprobe.xsl`; `--webxml` links FeroProbe's published copy |
+| Report files as root | Written through any symbolic link | A link another user owns in a sticky shared directory such as `/tmp` is refused (see `-oA` under Output options) |
 | Service and OS signatures | nmap's databases | FeroProbe's own (nmap's cannot be redistributed); the OS database is much smaller than nmap's, so fewer hosts get a perfect match |
 | UDP service payloads (`-sU`) | nmap's payload database: several probes per port (two DNS queries to 53, two NTP versions to 123, SNMPv1 and v3 to 161, three NetBIOS queries to 137), up to dozens with `-sV` | FeroProbe's own, one per port: DNS (53, 5353), NTP (123), SNMP (161) and SSDP (1900); every other port gets `FeroProbeScan/1\n`. nmap's payloads cannot be redistributed; one payload per service is enough to make it answer |
 | OS detection probes (`-O`) | About 16 probes per try (6 SYNs with varied options, ECN, T2-T7 to open and closed ports, 2 ICMP echoes, a UDP probe to a closed port), with closed ports picked at random outside the scan when none was found, and hosts without an open port probed too | At most 9 probes per try (4 SYNs, ECN and an ACK to the open port; a SYN and an ACK to a closed port the scan found; an ICMP echo only if discovery sends echo requests). No UDP probe, no T3/T5-T7-style odd flag combinations, no random ports, and hosts without an open TCP port are not probed. The price: fewer tests, so some systems nmap tells apart look alike |

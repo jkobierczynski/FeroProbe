@@ -260,6 +260,91 @@ fn write_host(x: &mut String, host: &HostResult, info: &RunInfo, start: u64, end
     x.push_str("</host>\n");
 }
 
+/// The published copy of FeroProbe's stylesheet, for `--webxml`.
+pub const WEB_STYLESHEET: &str = "https://jkobierczynski.github.io/feroprobe/feroprobe.xsl";
+
+/// The stylesheet's file name, as shipped next to the binary.
+const STYLESHEET_FILE: &str = "feroprobe.xsl";
+
+/// The `xml-stylesheet` reference for the XML report, from `--stylesheet`,
+/// `--webxml` and `--no-stylesheet` (the last one given wins; clap leaves
+/// only that one set). Without any of them, the `feroprobe.xsl` installed
+/// with FeroProbe as a `file://` URL, or the bare name `feroprobe.xsl` when
+/// none is found, as nmap does with its `nmap.xsl`.
+pub fn stylesheet(given: Option<&str>, web: bool, none: bool) -> Option<String> {
+    if none {
+        return None;
+    }
+    if web {
+        return Some(WEB_STYLESHEET.to_string());
+    }
+    if let Some(given) = given {
+        return Some(given.to_string());
+    }
+    Some(
+        installed_stylesheet()
+            .map(|p| file_url(&p))
+            .unwrap_or_else(|| STYLESHEET_FILE.to_string()),
+    )
+}
+
+/// Where an installed `feroprobe.xsl` is looked for: next to the binary
+/// (where the release archives put it), then the `share` directories of
+/// a system install.
+fn installed_stylesheet() -> Option<std::path::PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(bin) = std::env::current_exe()
+        .ok()
+        .and_then(|e| e.canonicalize().ok())
+        .and_then(|e| e.parent().map(std::path::Path::to_path_buf))
+    {
+        dirs.push(bin.join("../share/feroprobe"));
+        dirs.insert(0, bin);
+    }
+    if cfg!(unix) {
+        dirs.push("/usr/local/share/feroprobe".into());
+        dirs.push("/usr/share/feroprobe".into());
+    }
+    dirs.into_iter()
+        .map(|d| d.join(STYLESHEET_FILE))
+        .find(|p| p.is_file())
+        .and_then(|p| p.canonicalize().ok())
+}
+
+/// A `file://` URL for an absolute path.
+fn file_url(path: &std::path::Path) -> String {
+    let text = path.to_string_lossy();
+    // Windows: C:\x\y.xsl → file:///C:/x/y.xsl (and no \\?\ prefix); a
+    // share, \\server\share\y.xsl or \\?\UNC\server\share\y.xsl, becomes
+    // file://server/share/y.xsl (RFC 8089).
+    let (text, share) = if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        (rest, true)
+    } else if let Some(rest) = text.strip_prefix(r"\\?\") {
+        (rest, false)
+    } else if let Some(rest) = text.strip_prefix(r"\\") {
+        (rest, true)
+    } else {
+        (&*text, false)
+    };
+    let text = text.replace('\\', "/");
+    let mut url = String::from(if share || text.starts_with('/') {
+        "file://"
+    } else {
+        "file:///"
+    });
+    for b in text.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'/' | b'-' | b'_' | b'.' | b'~' | b':' => {
+                url.push(b as char)
+            }
+            _ => {
+                let _ = write!(url, "%{b:02X}");
+            }
+        }
+    }
+    url
+}
+
 /// The whole report as an nmap-style XML document.
 pub fn render(hosts: &[HostResult], info: &RunInfo) -> String {
     let start = unix_secs(info.start);
@@ -267,6 +352,13 @@ pub fn render(hosts: &[HostResult], info: &RunInfo) -> String {
     let end = unix_secs(finish);
     let mut x = String::new();
     x.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE nmaprun>\n");
+    if let Some(href) = &info.stylesheet {
+        let _ = writeln!(
+            x,
+            "<?xml-stylesheet href=\"{}\" type=\"text/xsl\"?>",
+            esc(href)
+        );
+    }
     // Some importers only accept reports whose scanner is "nmap". The
     // comment keeps the real producer on record; nmap's DTD has no
     // attribute for it.
@@ -449,6 +541,59 @@ mod tests {
             top,
             ["scaninfo", "verbose", "debugging", "host", "runstats"]
         );
+    }
+
+    #[test]
+    fn stylesheet_reference() {
+        let none = render(&[], &info());
+        assert!(!none.contains("xml-stylesheet"));
+        let with = render(
+            &[],
+            &RunInfo {
+                stylesheet: Some("my \"style\".xsl".into()),
+                ..info()
+            },
+        );
+        // Right after the DOCTYPE, as nmap writes it, with the href escaped.
+        assert!(with.contains(
+            "<!DOCTYPE nmaprun>\n<?xml-stylesheet href=\"my &quot;style&quot;.xsl\" type=\"text/xsl\"?>\n<nmaprun "
+        ));
+        let opts = roxmltree::ParsingOptions {
+            allow_dtd: true,
+            ..Default::default()
+        };
+        assert!(roxmltree::Document::parse_with_options(&with, opts).is_ok());
+
+        assert_eq!(stylesheet(None, false, true), None);
+        assert_eq!(
+            stylesheet(Some("a.xsl"), false, false).as_deref(),
+            Some("a.xsl")
+        );
+        assert_eq!(
+            stylesheet(None, true, false).as_deref(),
+            Some(WEB_STYLESHEET)
+        );
+        // Default: an installed copy as a file:// URL, else the bare name.
+        let default = stylesheet(None, false, false).unwrap();
+        assert!(default == "feroprobe.xsl" || default.starts_with("file:///"));
+    }
+
+    #[test]
+    fn file_urls() {
+        assert_eq!(
+            file_url(std::path::Path::new("/usr/share/feroprobe/feroprobe.xsl")),
+            "file:///usr/share/feroprobe/feroprobe.xsl"
+        );
+        assert_eq!(
+            file_url(std::path::Path::new("/opt/my tools/a#b.xsl")),
+            "file:///opt/my%20tools/a%23b.xsl"
+        );
+        // Windows paths, spelled out so the test runs everywhere.
+        let win = |p: &str| file_url(std::path::Path::new(p));
+        assert_eq!(win(r"C:\x\f.xsl"), "file:///C:/x/f.xsl");
+        assert_eq!(win(r"\\?\C:\x\f.xsl"), "file:///C:/x/f.xsl");
+        assert_eq!(win(r"\\?\UNC\srv\share\f.xsl"), "file://srv/share/f.xsl");
+        assert_eq!(win(r"\\srv\share\f.xsl"), "file://srv/share/f.xsl");
     }
 
     #[test]
