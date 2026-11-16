@@ -1926,6 +1926,51 @@ Send the raw IPv4 probes from this forged source address.
 Answers go to that address, not to FeroProbe, so the scan is blind
 unless FeroProbe sits on the return path; it is mainly for watching what
 your IDS makes of the traffic, as in nmap.
+.SS \f[V]--spoof-mac <MAC address, prefix, or vendor name>\f[R]
+.PP
+Send IPv4 probes and ARP requests in Ethernet frames from this hardware
+address instead of the card\[aq]s own, as nmap does.
+The argument is read as nmap reads it:
+.IP \[bu] 2
+\f[V]0\f[R]: a random address (FeroProbe clears the multicast bit, which
+a source address must not have),
+.IP \[bu] 2
+hex digits, optionally separated by \f[V]:\f[R] (also \f[V]-\f[R] or
+\f[V].\f[R]): a whole address, or its first bytes with the rest random
+(\f[V]00:0C:29\f[R] looks like VMware),
+.IP \[bu] 2
+anything else: a vendor name, matched without regard to case against the
+built-in vendor table, then against the installed IEEE list (see
+\f[V]--oui-file\f[R]), whose prefix is used with three random bytes
+(\f[V]--spoof-mac Raspberry\f[R]).
+.PP
+FeroProbe prints the address it chose
+(\f[V]Spoofing MAC address 00:0C:29:5A:11:03 (VMware)\f[R]).
+The next hop\[aq]s address comes from the kernel\[aq]s neighbour table,
+or else from an ARP request sent from the spoofed address.
+Answers to the spoofed address are picked up off the card (which is told
+to accept that address, or put in promiscuous mode) and handed to
+FeroProbe through the loopback interface, with any checksum the card
+left unfinished filled in.
+TCP answers go with a deliberately wrong checksum: FeroProbe\[aq]s raw
+sockets read them first, and this host\[aq]s TCP then drops them instead
+of resetting each SYN-ACK from the real MAC address (nmap, reading
+answers with pcap, draws no reset either).
+A strict reverse-path filter (\f[V]net.ipv4.conf.all.rp_filter=1\f[R])
+drops those; FeroProbe warns, and only answers sent to the card\[aq]s
+own address are then seen.
+.PP
+Linux only, needs raw sockets.
+It covers raw IPv4 probes of every kind (the port scans, host discovery,
+OS detection, traceroute), UDP scan probes (which then go out on a raw
+socket) and ARP discovery.
+It does not cover IPv6 probes, the TCP connect scan, version detection
+or DNS, whose packets the system sends; FeroProbe warns when the scan
+includes any of them.
+\f[V]--packet-trace\f[R] adds \f[V]ether-src=<MAC>\f[R] to each probe
+sent this way.
+Like the other evasion options, public targets need
+\f[V]--allow-public-evasion\f[R].
 .SS \f[V]--allow-public-evasion\f[R]
 .PP
 Authorize the options above against public targets, decoys and spoofed
@@ -2910,6 +2955,16 @@ T}@T{
 Public targets or a public relay need \f[V]--allow-public-evasion\f[R]
 T}
 T{
+\f[V]--spoof-mac\f[R]
+T}@T{
+Allowed against any address; IPv6 frames spoofed too; \f[V]0\f[R] may
+pick a multicast address
+T}@T{
+Public targets need \f[V]--allow-public-evasion\f[R]; IPv4 and ARP only
+(IPv6 probes keep the real address, with a warning); \f[V]0\f[R] always
+picks a unicast address
+T}
+T{
 \f[V]--badsum\f[R] with \f[V]-O\f[R]
 T}@T{
 Also spoils the OS-detection probes (nmap\[aq]s checksum routine applies
@@ -3134,8 +3189,6 @@ Scans and discovery: \f[V]-sI\f[R] (idle scan, not planned),
 .IP \[bu] 2
 Scripting: \f[V]-sC\f[R], \f[V]--script\f[R] and related options
 (nmap\[aq]s scripts cannot be shipped under their licence).
-.IP \[bu] 2
-Evasion and packet options: \f[V]--spoof-mac\f[R].
 .IP \[bu] 2
 Output and misc: \f[V]--port-ratio\f[R].
 .PP

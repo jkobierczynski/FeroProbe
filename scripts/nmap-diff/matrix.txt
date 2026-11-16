@@ -64,6 +64,8 @@ ip-options-rr    | lan    | root | -sS --ip-options R -p @TCP
 badsum           | lan    | root | -sS --badsum --max-retries 0 -p @TCP
 defeat-rst       | routed | root | -sS --defeat-rst-ratelimit -p @TCP
 unprivileged     | lan    | root | --unprivileged -p @TCP
+spoof-mac        | lan    | root | -sS --spoof-mac 00:0C:29:11:22:33 -p @TCP
+spoof-mac-routed | routed | root | -sS --spoof-mac 00:0C:29:11:22:33 -p @TCP
 # -b (FTP bounce) needs an FTP relay that allows PORT to third parties; the
 # lab has none, so it is covered by the unit tests in ftp_bounce.rs.
 

@@ -363,6 +363,13 @@ struct Args {
     #[arg(short = 'b', value_name = "FTP_RELAY")]
     bounce: Option<String>,
 
+    /// Evasion: send IPv4 probes and ARP requests in Ethernet frames from
+    /// this MAC address: a whole address, its first bytes (the rest random),
+    /// a vendor name, or 0 for a random one (nmap's --spoof-mac). Linux,
+    /// raw sockets. Public targets need --allow-public-evasion
+    #[arg(long = "spoof-mac", value_name = "MAC")]
+    spoof_mac: Option<String>,
+
     /// --data HEX: add these bytes to raw probes (0xAABB, \xAA\xBB or
     /// AABB). They replace the UDP scan's and ICMP echo's usual payloads
     #[arg(long = "data", value_name = "HEX", value_parser = parse_data_hex,
@@ -1647,6 +1654,95 @@ fn redact_args(args: impl IntoIterator<Item = String>, secret: Option<&str>) -> 
             .map(|a| a.replace(&format!(":{s}@"), ":****@"))
             .collect(),
         None => out,
+    }
+}
+
+/// Check and parse `--spoof-mac`, and say what it will and will not
+/// change, as nmap's "Spoofing MAC address" line and our warnings.
+fn spoof_mac(
+    arg: &str,
+    args: &Args,
+    plan: &Plan,
+    targets: &[Target],
+) -> Result<feroprobe_core::arp::MacAddr> {
+    if !cfg!(target_os = "linux") {
+        bail!("--spoof-mac sends Ethernet frames, which FeroProbe does only on Linux");
+    }
+    if !args.allow_public_evasion {
+        let addrs: Vec<IpAddr> = targets.iter().map(|t| t.addr).collect();
+        if let Some(public) = feroprobe_core::scope::first_public(&addrs) {
+            bail!(
+                "--spoof-mac is refused against public addresses, but {public} is a public \
+                 address. Pass --allow-public-evasion to authorize this against targets you \
+                 have permission to test. This is a deliberate FeroProbe safeguard: see \
+                 docs/responsible-use.md."
+            );
+        }
+    }
+    let mut rng = rand_bytes();
+    let mac = feroprobe_core::spoofmac::parse(arg, &mut rng).map_err(anyhow::Error::msg)?;
+    if !args.dry_run && !raw_sockets_available() {
+        bail!("--spoof-mac sends raw Ethernet frames: run as root or grant CAP_NET_RAW");
+    }
+    eprintln!(
+        "Spoofing MAC address {mac} ({})",
+        feroprobe_core::arp::vendor(mac).unwrap_or("No registered vendor")
+    );
+    for w in spoof_mac_warnings(plan, targets, args.bounce.is_some(), args.dry_run) {
+        eprintln!("Warning: {w}");
+    }
+    Ok(mac)
+}
+
+/// What `--spoof-mac` does not cover in this run.
+fn spoof_mac_warnings(plan: &Plan, targets: &[Target], bounce: bool, dry_run: bool) -> Vec<String> {
+    let mut w = Vec::new();
+    if let Some(t) = targets.iter().find(|t| t.addr.is_ipv6()) {
+        w.push(format!(
+            "--spoof-mac covers IPv4 only, so probes to IPv6 targets such as {} keep this host's MAC address",
+            t.addr
+        ));
+    }
+    let mut system = Vec::new();
+    if !plan.ping_only && plan.tcp == Some(ScanType::Connect) {
+        system.push("the TCP connect scan (-sT)");
+    }
+    if !plan.ping_only && plan.version {
+        system.push("version detection (-sV)");
+    }
+    if bounce {
+        system.push("the FTP bounce scan (-b)");
+    }
+    if !system.is_empty() {
+        w.push(format!(
+            "--spoof-mac will not be honored for {}, whose packets the system sends",
+            system.join(" and ")
+        ));
+    }
+    if !dry_run && let Some(r) = feroprobe_core::spoofmac::relay_warning() {
+        w.push(r);
+    }
+    w
+}
+
+/// Random bytes for `--spoof-mac`, from the system's random source.
+fn rand_bytes() -> impl FnMut() -> u8 {
+    let mut state = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0x9e37_79b9_7f4a_7c15, |d| d.as_nanos() as u64)
+        ^ u64::from(std::process::id()) << 32;
+    let mut seed = [0u8; 8];
+    if std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| std::io::Read::read_exact(&mut f, &mut seed))
+        .is_ok()
+    {
+        state ^= u64::from_le_bytes(seed);
+    }
+    move || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        (state >> 24) as u8
     }
 }
 
@@ -3189,6 +3285,10 @@ async fn main() -> Result<()> {
         eprintln!("Warning: {w}");
     }
     feroprobe_core::packet_opts::set(packet_opts);
+    if let Some(arg) = &args.spoof_mac {
+        let mac = spoof_mac(arg, &args, &plan, &targets)?;
+        feroprobe_core::spoofmac::set(mac);
+    }
     if args.system_dns && !args.dns_servers.is_empty() {
         eprintln!("Warning: --system-dns uses the system resolver, so --dns-servers is ignored");
     }

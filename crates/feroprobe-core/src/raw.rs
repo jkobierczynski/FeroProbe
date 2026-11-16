@@ -573,7 +573,11 @@ pub(crate) fn send_logged_until(
         {
             log();
         }
-        match sock.send_to(pkt, &addr) {
+        let sent = match crate::spoofmac::try_send(sock, pkt, to) {
+            Some(r) => r.map(|()| 0),
+            None => sock.send_to(pkt, &addr),
+        };
+        match sent {
             Ok(_) => return Ok(()),
             Err(e) if is_no_buffer_space(&e) && attempts < 50 => {
                 attempts += 1;

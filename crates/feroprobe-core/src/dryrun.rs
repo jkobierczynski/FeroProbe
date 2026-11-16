@@ -194,6 +194,11 @@ fn packet_options_note() -> Option<String> {
     if opts.badsum {
         parts.push("wrong checksums (--badsum)".to_string());
     }
+    if let Some(mac) = crate::spoofmac::get() {
+        parts.push(format!(
+            "IPv4 probes and ARP requests in Ethernet frames from {mac} (--spoof-mac)"
+        ));
+    }
     (!parts.is_empty()).then(|| format!("Packet options: {}", parts.join("; ")))
 }
 

@@ -230,6 +230,18 @@ pub(crate) fn tcp_options_text(seg: &[u8]) -> String {
 /// options the socket adds (`--ip-options`).
 pub(crate) fn sent(proto: u8, pkt: &[u8], to: SocketAddr, ip_options: &[u8], ttl: Option<u8>) {
     log("SENT", || {
+        let line = sent_line(proto, pkt, to, ip_options, ttl);
+        match crate::spoofmac::get() {
+            Some(mac) if to.is_ipv4() && !to.ip().is_loopback() => {
+                format!("{line} ether-src={mac}")
+            }
+            _ => line,
+        }
+    });
+}
+
+fn sent_line(proto: u8, pkt: &[u8], to: SocketAddr, ip_options: &[u8], ttl: Option<u8>) -> String {
+    {
         if proto == IPPROTO_RAW {
             // Evasion probes (-f/--mtu/-D/-S) are complete IPv4 packets, so
             // the real (possibly spoofed or decoy) source and the inner
@@ -245,7 +257,7 @@ pub(crate) fn sent(proto: u8, pkt: &[u8], to: SocketAddr, ip_options: &[u8], ttl
                 kernel_header_note(ttl, ip_options, to.ip(), bad)
             )
         }
-    });
+    }
 }
 
 /// [`header_note`] for a probe whose IPv4 header the kernel writes from

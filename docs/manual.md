@@ -1284,6 +1284,43 @@ that address, not to FeroProbe, so the scan is blind unless FeroProbe sits
 on the return path; it is mainly for watching what your IDS makes of the
 traffic, as in nmap.
 
+#### `--spoof-mac <MAC address, prefix, or vendor name>`
+
+Send IPv4 probes and ARP requests in Ethernet frames from this hardware
+address instead of the card's own, as nmap does. The argument is read as
+nmap reads it:
+
+- `0`: a random address (FeroProbe clears the multicast bit, which a
+  source address must not have),
+- hex digits, optionally separated by `:` (also `-` or `.`): a whole
+  address, or its first bytes with the rest random (`00:0C:29` looks like
+  VMware),
+- anything else: a vendor name, matched without regard to case against the
+  built-in vendor table, then against the installed IEEE list (see
+  `--oui-file`), whose prefix is used with three random bytes
+  (`--spoof-mac Raspberry`).
+
+FeroProbe prints the address it chose (`Spoofing MAC address
+00:0C:29:5A:11:03 (VMware)`). The next hop's address comes from the
+kernel's neighbour table, or else from an ARP request sent from the spoofed
+address. Answers to the spoofed address are picked up off the card (which
+is told to accept that address, or put in promiscuous mode) and handed to
+FeroProbe through the loopback interface, with any checksum the card left
+unfinished filled in. TCP answers go with a deliberately wrong checksum:
+FeroProbe's raw sockets read them first, and this host's TCP then drops
+them instead of resetting each SYN-ACK from the real MAC address (nmap,
+reading answers with pcap, draws no reset either). A strict reverse-path filter
+(`net.ipv4.conf.all.rp_filter=1`) drops those; FeroProbe warns, and only
+answers sent to the card's own address are then seen.
+
+Linux only, needs raw sockets. It covers raw IPv4 probes of every kind (the
+port scans, host discovery, OS detection, traceroute), UDP scan probes
+(which then go out on a raw socket) and ARP discovery. It does not cover
+IPv6 probes, the TCP connect scan, version detection or DNS, whose packets
+the system sends; FeroProbe warns when the scan includes any of them.
+`--packet-trace` adds `ether-src=<MAC>` to each probe sent this way. Like
+the other evasion options, public targets need `--allow-public-evasion`.
+
 #### `--allow-public-evasion`
 
 Authorize the options above against public targets, decoys and spoofed
@@ -1985,6 +2022,7 @@ safeguard calls for a difference. The deliberate differences are:
 | Decoy order (`-D ...,ME,...`) | `ME` places the real probe | `ME` is accepted, but the real probe always goes last |
 | Probe signature | None (empty ICMP echo payload) | Raw TCP probes use window 65109; generic UDP probes carry `FeroProbeScan/1\n`; ICMP echo requests carry `feroprobe`. A `--data`, `--data-string` or `--data-length` payload replaces the UDP and echo markers, as nmap's replaces its payloads |
 | FTP bounce scan (`-b`) | Allowed against any target through any relay | Public targets or a public relay need `--allow-public-evasion` |
+| `--spoof-mac` | Allowed against any address; IPv6 frames spoofed too; `0` may pick a multicast address | Public targets need `--allow-public-evasion`; IPv4 and ARP only (IPv6 probes keep the real address, with a warning); `0` always picks a unicast address |
 | `--badsum` with `-O` | Also spoils the OS-detection probes (nmap's checksum routine applies it to every packet), which makes their answers meaningless | OS-detection probes keep correct checksums |
 | Unprivileged discovery | TCP connects to 80 and 443 only | The same, plus an ICMP echo through an unprivileged ping socket where the OS offers one |
 | `--explain`, `--dry-run` | No equivalent | FeroProbe's own planning and checking options |
@@ -2023,7 +2061,6 @@ These nmap options are refused as unknown:
   `--resolve-all`.
 - Scripting: `-sC`, `--script` and related options (nmap's scripts cannot
   be shipped under their licence).
-- Evasion and packet options: `--spoof-mac`.
 - Output and misc: `--port-ratio`.
 
 [DEVELOPMENT.md](../DEVELOPMENT.md) tracks which of these are planned.

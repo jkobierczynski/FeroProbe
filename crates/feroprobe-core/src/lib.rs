@@ -43,6 +43,7 @@ pub mod rtt;
 pub mod scope;
 pub mod sctp;
 pub mod service;
+pub mod spoofmac;
 pub mod syn;
 pub mod target;
 pub mod timing;

@@ -117,6 +117,18 @@ impl OuiDb {
             .or_insert_with(|| name.into());
     }
 
+    /// Every 24-bit prefix with its vendor, for `--spoof-mac <vendor>`.
+    pub(crate) fn prefixes24(&self) -> Vec<([u8; 3], &str)> {
+        self.map
+            .iter()
+            .filter(|((bits, _), _)| *bits == 24)
+            .map(|((_, p), n)| {
+                let b = p.to_be_bytes();
+                ([b[2], b[3], b[4]], &**n)
+            })
+            .collect()
+    }
+
     pub fn load(path: &Path) -> io::Result<Self> {
         let bytes = std::fs::read(path)?;
         let mut db = Self::parse(&String::from_utf8_lossy(&bytes));

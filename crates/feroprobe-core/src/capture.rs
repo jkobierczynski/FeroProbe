@@ -86,8 +86,9 @@ pub(crate) fn open() -> io::Result<OwnedFd> {
     }
     // SAFETY: fd is a freshly created, owned descriptor.
     let fd = unsafe { OwnedFd::from_raw_fd(fd) };
-    // With -e, only see what arrives on that interface.
-    if let Some(ifc) = crate::netif::interface() {
+    // With -e, only see what arrives on that interface (and loopback,
+    // where --spoof-mac hands over answers, so not then).
+    if let Some(ifc) = crate::netif::interface().filter(|_| crate::spoofmac::get().is_none()) {
         // SAFETY: an all-zero sockaddr_ll is valid; the fields are set below.
         let mut sll: libc::sockaddr_ll = unsafe { mem::zeroed() };
         sll.sll_family = libc::AF_PACKET as u16;
@@ -168,7 +169,9 @@ pub(crate) fn receive_loop<T>(
             return;
         }
         let at = Instant::now();
-        if from.sll_pkttype == libc::PACKET_OUTGOING {
+        // Frames for another host: the IP stack drops them, and with
+        // --spoof-mac the relay passes those for us on through loopback.
+        if from.sll_pkttype == libc::PACKET_OUTGOING || from.sll_pkttype == libc::PACKET_OTHERHOST {
             continue;
         }
         let ethertype = u16::from_be(from.sll_protocol);

@@ -70,6 +70,10 @@ FTP relay must be private addresses unless you pass
 `--allow-public-evasion`. Bouncing through a public FTP server into the
 network behind it is exactly the abuse RFC 2577 warns about.
 
+`--spoof-mac` is gated the same way too: it hides which machine on the
+local network sent the probes, so public targets need
+`--allow-public-evasion`.
+
 The packet options `--data`, `--data-string`, `--data-length`, `--ttl`,
 `--ip-options` and `--badsum` are not gated: they change what a probe
 carries, not who appears to send it or where it goes, and nmap users rely
