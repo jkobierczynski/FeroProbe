@@ -224,6 +224,17 @@ mod imp {
     }
 
     fn send_frame(fd: &OwnedFd, ifindex: u32, frame: &[u8]) -> io::Result<()> {
+        send_frame_until(fd, ifindex, frame, None)
+    }
+
+    /// `send_frame`, but the pauses after `ENOBUFS` stop at `deadline`
+    /// (the host timeout), which then ends the send with `TimedOut`.
+    fn send_frame_until(
+        fd: &OwnedFd,
+        ifindex: u32,
+        frame: &[u8],
+        deadline: Option<Instant>,
+    ) -> io::Result<()> {
         let sll = sockaddr_ll(ifindex, 0);
         let mut attempts = 0;
         loop {
@@ -244,7 +255,15 @@ mod imp {
             let e = io::Error::last_os_error();
             if e.raw_os_error() == Some(libc::ENOBUFS) && attempts < 50 {
                 attempts += 1;
-                std::thread::sleep(Duration::from_millis(10));
+                let mut pause = Duration::from_millis(10);
+                if let Some(d) = deadline {
+                    let left = d.saturating_duration_since(Instant::now());
+                    if left.is_zero() {
+                        return Err(crate::model::ScanConfig::timed_out());
+                    }
+                    pause = pause.min(left);
+                }
+                std::thread::sleep(pause);
                 continue;
             }
             return Err(e);
@@ -608,7 +627,7 @@ mod imp {
             if past_deadline() {
                 return Err(crate::model::ScanConfig::timed_out());
             }
-            send_frame(&fd, ifindex, &request)?;
+            send_frame_until(&fd, ifindex, &request, deadline)?;
             crate::packet_trace::log("SENT", || {
                 format!("ARP who-has {hop} tell {src} (from {mac})")
             });
