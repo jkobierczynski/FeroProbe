@@ -155,7 +155,7 @@ the SCTP, IP protocol, IPv6 OS detection and probe-signature work).
 | macOS, Windows | Connect scan, UDP, discovery, `-sV`, all output formats |
 | CI | ubuntu, macOS, Windows, plus a root job for raw sockets |
 | Releases | `release.yml` builds binaries on `v*` tags |
-| Live test scripts | `scripts/test-sctp.sh`, `scripts/test-os6.sh`; one per option in a namespace lab (`scripts/lib/lab.sh`) that checks the wire: `scripts/test-interface.sh` (`-e`), `scripts/test-source-port.sh` (`-g`), `scripts/test-max-retries.sh`, `scripts/test-max-parallelism.sh` (`-M`/`-c`), `scripts/test-min-parallelism.sh`. All need root and print PASS/FAIL |
+| Live test scripts | `scripts/test-sctp.sh`, `scripts/test-os6.sh`; one per option in a namespace lab (`scripts/lib/lab.sh`) that checks the wire: `scripts/test-interface.sh` (`-e`), `scripts/test-source-port.sh` (`-g`), `scripts/test-max-retries.sh`, `scripts/test-max-parallelism.sh` (`-M`/`-c`), `scripts/test-min-parallelism.sh`. All need root and print PASS/FAIL. `scripts/test-feroprobe-diff.sh` checks every `feroprobe-diff` feature from small reports and two real connect scans; it needs no root and runs in CI on Linux and macOS |
 | nmap differential test | `scripts/nmap-diff/`: runs nmap and FeroProbe with the same options in a namespace lab, captures both, and reports every difference in what they send (out-of-scope ports, probe contents, counts, results). Report only; CI runs it in the `nmap diff` workflow against the pinned nmap (`NMAP_VERSION`) |
 
 ## Deliberate differences from nmap
