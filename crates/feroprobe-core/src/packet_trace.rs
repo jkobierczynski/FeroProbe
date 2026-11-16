@@ -36,7 +36,29 @@ pub(crate) fn log(kind: &str, line: impl FnOnce() -> String) {
         return;
     }
     let at = START.get_or_init(Instant::now).elapsed().as_secs_f64();
-    println!("{kind} ({at:.4}s) {}", line());
+    let ether = ETHER_SRC
+        .with(std::cell::Cell::get)
+        .filter(|_| kind == "SENT");
+    match ether {
+        Some(mac) => println!("{kind} ({at:.4}s) {} ether-src={mac}", line()),
+        None => println!("{kind} ({at:.4}s) {}", line()),
+    }
+}
+
+thread_local! {
+    /// The source MAC address of the frame being sent, while
+    /// [`with_ether_src`] runs: `--spoof-mac` probes that really go out in
+    /// an Ethernet frame of FeroProbe's own.
+    static ETHER_SRC: std::cell::Cell<Option<crate::arp::MacAddr>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Run `f`, its SENT lines ending in `ether-src=` `mac` (when given).
+pub(crate) fn with_ether_src<R>(mac: Option<crate::arp::MacAddr>, f: impl FnOnce() -> R) -> R {
+    let before = ETHER_SRC.with(|c| c.replace(mac));
+    let out = f();
+    ETHER_SRC.with(|c| c.set(before));
+    out
 }
 
 /// The TCP flags as nmap writes them: S, A, F, R, P, U, E, C.
@@ -229,15 +251,7 @@ pub(crate) fn tcp_options_text(seg: &[u8]) -> String {
 /// A sent raw packet: `to` is where it went, and `ip_options` the IPv4
 /// options the socket adds (`--ip-options`).
 pub(crate) fn sent(proto: u8, pkt: &[u8], to: SocketAddr, ip_options: &[u8], ttl: Option<u8>) {
-    log("SENT", || {
-        let line = sent_line(proto, pkt, to, ip_options, ttl);
-        match crate::spoofmac::get() {
-            Some(mac) if to.is_ipv4() && !to.ip().is_loopback() => {
-                format!("{line} ether-src={mac}")
-            }
-            _ => line,
-        }
-    });
+    log("SENT", || sent_line(proto, pkt, to, ip_options, ttl));
 }
 
 fn sent_line(proto: u8, pkt: &[u8], to: SocketAddr, ip_options: &[u8], ttl: Option<u8>) -> String {

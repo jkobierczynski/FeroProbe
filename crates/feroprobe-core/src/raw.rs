@@ -76,7 +76,7 @@ pub(crate) fn raw_socket_in(domain: Domain, proto: Protocol) -> io::Result<Socke
             e
         }
     })?;
-    crate::netif::bind_socket(&sock, domain == Domain::IPV6)?;
+    crate::netif::bind_receiver(&sock, domain == Domain::IPV6)?;
     Ok(sock)
 }
 
@@ -564,6 +564,9 @@ pub(crate) fn send_logged_until(
     let addr = to.into();
     let mut attempts = 0;
     let mut log = Some(log);
+    // --spoof-mac: the probe in an Ethernet frame of our own, if it goes
+    // out that way.
+    let framed = crate::spoofmac::prepare(sock, pkt, to).transpose()?;
     loop {
         if deadline.is_some_and(|d| Instant::now() >= d) {
             return Err(crate::model::ScanConfig::timed_out());
@@ -571,10 +574,10 @@ pub(crate) fn send_logged_until(
         if crate::packet_trace::enabled()
             && let Some(log) = log.take()
         {
-            log();
+            crate::packet_trace::with_ether_src(framed.as_ref().map(|f| f.source()), log);
         }
-        let sent = match crate::spoofmac::try_send(sock, pkt, to) {
-            Some(r) => r.map(|()| 0),
+        let sent = match &framed {
+            Some(f) => f.send().map(|()| 0),
             None => sock.send_to(pkt, &addr),
         };
         match sent {

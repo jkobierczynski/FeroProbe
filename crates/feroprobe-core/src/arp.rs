@@ -438,7 +438,7 @@ mod linux {
         let fd = Arc::new(open(net.ifindex)?);
         // --spoof-mac: ask from that address, and hear the replies to it.
         let mac = crate::spoofmac::get().unwrap_or(net.mac);
-        crate::spoofmac::listen_on(net.ifindex);
+        crate::spoofmac::listen_on(net.ifindex)?;
         let receive = {
             let fd = Arc::clone(&fd);
             let mut buf = [0u8; 2048];
@@ -454,7 +454,6 @@ mod linux {
                 let reply = parse_arp_reply(&buf[..n as usize]);
                 if let Some((ip, mac)) = reply {
                     crate::packet_trace::log("RCVD", || format!("ARP reply {ip} is-at {mac}"));
-                    crate::spoofmac::remember(ip, mac);
                 }
                 Ok(reply)
             }
@@ -467,7 +466,13 @@ mod linux {
             });
             Ok(())
         };
-        request_sweep(targets, cfg, cancel, send_one, receive, on_reply)
+        // Only targets of this sweep that answered: unasked replies are
+        // not kept.
+        let mut on_reply = |ip: Ipv4Addr, m: MacAddr, rtt: f64| {
+            crate::spoofmac::remember(net.ifindex, ip, m);
+            on_reply(ip, m, rtt);
+        };
+        request_sweep(targets, cfg, cancel, send_one, receive, &mut on_reply)
     }
 }
 

@@ -116,7 +116,7 @@ pub(crate) async fn connected_socket(
     addr: SocketAddr,
     sport: Option<u16>,
 ) -> io::Result<UdpSocket> {
-    let sock = crate::netif::udp_socket(addr.is_ipv6())?;
+    let sock = crate::netif::udp_receiver(addr.is_ipv6())?;
     #[cfg(target_os = "linux")]
     enable_recverr(&sock, addr.is_ipv4())?;
     // nmap's raw UDP probes: no "don't fragment", random TTL.
@@ -143,6 +143,17 @@ pub(crate) async fn connected_socket(
             Ok(ip) => SocketAddr::new(ip, p),
             Err(_) => crate::netif::any_addr(addr.ip(), p),
         },
+        // Not bound to the -e interface under --spoof-mac (see
+        // netif::udp_receiver): its address still picks the source.
+        None if addr.is_ipv4()
+            && crate::spoofmac::get().is_some()
+            && crate::netif::interface().is_some() =>
+        {
+            crate::netif::route_source(addr.ip()).map_or_else(
+                |_| crate::netif::any_addr(addr.ip(), 0),
+                |ip| SocketAddr::new(ip, 0),
+            )
+        }
         None => crate::netif::any_addr(addr.ip(), 0),
     };
     sock.bind(&bind.into()).map_err(|e| match sport {

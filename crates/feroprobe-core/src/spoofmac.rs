@@ -3,7 +3,7 @@
 //! `--send-eth`).
 //!
 //! Sending: [`crate::raw::send_logged_until`] hands every IPv4 probe to
-//! [`try_send`], which completes the IP header the kernel would have
+//! [`prepare`], which completes the IP header the kernel would have
 //! written, finds the next hop (the target on the same network, else the
 //! gateway) and its MAC address (the kernel's neighbour table, else an ARP
 //! request from the spoofed address), and sends the frame on an
@@ -17,7 +17,8 @@
 //! partial checksums), so every receiving socket sees
 //! them as usual. TCP frames go with a checksum one off: raw sockets read
 //! them before TCP checks it, and TCP then drops them instead of answering
-//! each SYN-ACK with a reset from the real MAC address. A strict
+//! each SYN-ACK with a reset from the real MAC address. Frames of a
+//! connection a kernel socket holds (`-sV`'s, say) are left intact. A strict
 //! reverse-path filter (`rp_filter=1`) drops the relayed frames, which
 //! [`relay_warning`] reports.
 //!
@@ -106,17 +107,31 @@ fn vendor_prefix(name: &str) -> Option<[u8; 3]> {
 #[cfg(target_os = "linux")]
 pub use imp::relay_warning;
 #[cfg(target_os = "linux")]
-pub(crate) use imp::{listen_on, remember, try_send};
+pub(crate) use imp::{listen_on, prepare, remember};
 
 /// Not Linux: `--spoof-mac` is refused before the scan, so nothing is
 /// ever sent this way.
 #[cfg(not(target_os = "linux"))]
-pub(crate) fn try_send(
+pub(crate) fn prepare(
     _: &socket2::Socket,
     _: &[u8],
     _: std::net::SocketAddr,
-) -> Option<std::io::Result<()>> {
+) -> Option<std::io::Result<Framed>> {
     None
+}
+
+/// Not Linux: no frame is ever prepared.
+#[cfg(not(target_os = "linux"))]
+pub(crate) enum Framed {}
+
+#[cfg(not(target_os = "linux"))]
+impl Framed {
+    pub(crate) fn source(&self) -> MacAddr {
+        match *self {}
+    }
+    pub(crate) fn send(&self) -> std::io::Result<()> {
+        match *self {}
+    }
 }
 
 /// Not Linux: there is nothing to warn about.
@@ -145,8 +160,8 @@ mod imp {
 
     #[derive(Default)]
     struct State {
-        /// Next hop to its MAC address.
-        neighbours: HashMap<Ipv4Addr, MacAddr>,
+        /// Next hop (interface index and address) to its MAC address.
+        neighbours: HashMap<(u32, Ipv4Addr), MacAddr>,
         /// Interfaces with a relay running.
         relays: HashSet<u32>,
         /// Destinations already warned about (no Ethernet on the way).
@@ -215,38 +230,106 @@ mod imp {
         }
     }
 
-    /// Send `pkt`, written for raw socket `sock`, to `to` in an Ethernet
-    /// frame from the spoofed address. `None` when it should go the usual
-    /// way: no `--spoof-mac`, IPv6, or no Ethernet on the way (a warning is
-    /// printed once per destination then).
-    pub(crate) fn try_send(sock: &Socket, pkt: &[u8], to: SocketAddr) -> Option<io::Result<()>> {
+    /// A probe ready to go out in an Ethernet frame from the spoofed
+    /// address.
+    pub(crate) struct Framed {
+        ifindex: u32,
+        frame: Vec<u8>,
+    }
+
+    impl Framed {
+        /// The spoofed source address of the frame.
+        pub(crate) fn source(&self) -> MacAddr {
+            let mut m = [0u8; 6];
+            m.copy_from_slice(&self.frame[6..12]);
+            MacAddr(m)
+        }
+
+        pub(crate) fn send(&self) -> io::Result<()> {
+            send_frame(sender()?, self.ifindex, &self.frame)
+        }
+    }
+
+    /// The frame that sends `pkt`, written for raw socket `sock`, to `to`
+    /// from the spoofed address. `None` when it should go the usual way: no
+    /// `--spoof-mac`, IPv6, this host itself, or no Ethernet on the way (a
+    /// warning is printed once per destination then). An error when it
+    /// cannot go either way: the next hop does not answer ARP, the relay
+    /// for its answers cannot start, or no Ethernet route leaves through
+    /// the `-e` interface (the raw socket is not bound to it then).
+    pub(crate) fn prepare(sock: &Socket, pkt: &[u8], to: SocketAddr) -> Option<io::Result<Framed>> {
         let mac = get()?;
         let IpAddr::V4(dst) = to.ip() else {
             return None;
         };
         // A source-routed probe goes to the route's first hop.
         let (opts, first) = wire_options(sock, dst);
+        if is_local(first) {
+            return None;
+        }
         let (ifindex, hop) = match route(first) {
             Some(r) => r,
             None => {
+                if let Some(ifc) = crate::netif::interface() {
+                    return Some(Err(io::Error::other(format!(
+                        "--spoof-mac: no Ethernet route to {first} through {} (-e)",
+                        ifc.name
+                    ))));
+                }
                 warn_once(to.ip(), "no Ethernet route to it");
                 return None;
             }
         };
-        let packet = match full_packet(sock, pkt, first, &opts) {
-            Ok(p) => p,
-            Err(e) => return Some(Err(e)),
-        };
         Some((|| {
-            listen_on(ifindex);
+            let packet = full_packet(sock, pkt, first, &opts)?;
+            listen_on(ifindex)?;
             let hop_mac = neighbour(ifindex, hop, mac)?;
             let mut frame = Vec::with_capacity(14 + packet.len());
             frame.extend_from_slice(&hop_mac.0);
             frame.extend_from_slice(&mac.0);
             frame.extend_from_slice(&ETH_P_IP.to_be_bytes());
             frame.extend_from_slice(&packet);
-            send_frame(sender()?, ifindex, &frame)
+            Ok(Framed { ifindex, frame })
         })())
+    }
+
+    /// The connection an IPv4 TCP packet received belongs to: this host's
+    /// address and port, then the sender's.
+    type Flow = (Ipv4Addr, u16, Ipv4Addr, u16);
+
+    pub(super) fn tcp_answer(ip: &[u8]) -> Option<Flow> {
+        if ip.len() < 20 || ip[0] >> 4 != 4 || ip[9] != 6 {
+            return None;
+        }
+        let ihl = usize::from(ip[0] & 0x0f) * 4;
+        let tcp = ip.get(ihl..ihl + 4)?;
+        let addr = |a: &[u8]| Ipv4Addr::new(a[0], a[1], a[2], a[3]);
+        Some((
+            addr(&ip[16..20]),
+            u16::from_be_bytes([tcp[2], tcp[3]]),
+            addr(&ip[12..16]),
+            u16::from_be_bytes([tcp[0], tcp[1]]),
+        ))
+    }
+
+    /// Whether a kernel TCP socket in `table` (`/proc/net/tcp`) holds the
+    /// connection `flow`: a connect scan's or `-sV`'s, not a raw probe's.
+    pub(super) fn kernel_holds(table: &str, flow: Flow) -> bool {
+        let (local, lport, remote, rport) = flow;
+        // Addresses as the kernel prints them: the 32-bit value in host
+        // byte order, in hex; ports in hex.
+        let hex = |a: Ipv4Addr, p: u16| format!("{:08X}:{p:04X}", u32::from_ne_bytes(a.octets()));
+        let (want_local, want_remote) = (hex(local, lport), hex(remote, rport));
+        table.lines().skip(1).any(|l| {
+            let mut f = l.split_whitespace().skip(1);
+            f.next() == Some(want_local.as_str()) && f.next() == Some(want_remote.as_str())
+        })
+    }
+
+    /// This host's own address (or loopback): no frame needed.
+    fn is_local(dst: Ipv4Addr) -> bool {
+        dst.is_loopback()
+            || crate::netif::route_source(IpAddr::V4(dst)).is_ok_and(|a| a == IpAddr::V4(dst))
     }
 
     fn warn_once(dst: IpAddr, why: &str) {
@@ -299,12 +382,9 @@ mod imp {
     }
 
     /// The interface and next hop for `dst`, from the kernel's main routing
-    /// table (the `-e` interface only, when given). `None` for this host's
-    /// own addresses and interfaces without Ethernet.
+    /// table (the `-e` interface only, when given). `None` for
+    /// interfaces without Ethernet.
     fn route(dst: Ipv4Addr) -> Option<(u32, Ipv4Addr)> {
-        if dst.is_loopback() || crate::netif::route_source(IpAddr::V4(dst)).ok()? == dst {
-            return None;
-        }
         let table = std::fs::read_to_string("/proc/net/route").ok()?;
         let only = crate::netif::interface().map(|i| i.name.as_str());
         let (name, gw) = best_route(&table, dst, only)?;
@@ -361,13 +441,14 @@ mod imp {
             .map(|(_, _, name, gw)| (name, gw))
     }
 
-    /// Keep `mac` as `ip`'s address (from ARP discovery), so probes to it
-    /// need no ARP request of their own.
-    pub(crate) fn remember(ip: Ipv4Addr, mac: MacAddr) {
+    /// Keep `mac` as the address of `ip` on `ifindex` (a target that
+    /// answered ARP discovery), so probes to it need no ARP request of
+    /// their own.
+    pub(crate) fn remember(ifindex: u32, ip: Ipv4Addr, mac: MacAddr) {
         if get().is_some()
             && let Ok(mut s) = state().lock()
         {
-            s.neighbours.insert(ip, mac);
+            s.neighbours.insert((ifindex, ip), mac);
         }
     }
 
@@ -378,7 +459,7 @@ mod imp {
             state()
                 .lock()
                 .ok()
-                .and_then(|s| s.neighbours.get(&hop).copied())
+                .and_then(|s| s.neighbours.get(&(ifindex, hop)).copied())
         };
         if let Some(m) = cached() {
             return Ok(m);
@@ -392,19 +473,26 @@ mod imp {
         }
         let found = std::fs::read_to_string("/proc/net/arp")
             .ok()
-            .and_then(|t| kernel_neighbour(&t, hop))
+            .and_then(|t| {
+                kernel_neighbour(&t, hop, |dev| crate::netif::index_of(dev) == Some(ifindex))
+            })
             .map_or_else(|| arp(ifindex, hop, mac), Ok)?;
         if let Ok(mut s) = state().lock() {
-            s.neighbours.insert(hop, found);
+            s.neighbours.insert((ifindex, hop), found);
         }
         Ok(found)
     }
 
-    /// A complete entry for `ip` in `/proc/net/arp`.
-    pub(super) fn kernel_neighbour(table: &str, ip: Ipv4Addr) -> Option<MacAddr> {
+    /// A complete entry for `ip` in `/proc/net/arp`, on a device that
+    /// `on_device` accepts.
+    pub(super) fn kernel_neighbour(
+        table: &str,
+        ip: Ipv4Addr,
+        on_device: impl Fn(&str) -> bool,
+    ) -> Option<MacAddr> {
         table.lines().skip(1).find_map(|l| {
             let f: Vec<&str> = l.split_whitespace().collect();
-            if f.len() < 4 || f[0].parse::<Ipv4Addr>().ok()? != ip {
+            if f.len() < 6 || f[0].parse::<Ipv4Addr>().ok()? != ip || !on_device(f[5]) {
                 return None;
             }
             let flags = u32::from_str_radix(f[2].trim_start_matches("0x"), 16).ok()?;
@@ -485,28 +573,38 @@ mod imp {
     }
 
     /// Make sure answers to the spoofed MAC on `ifindex` reach this host:
-    /// start that interface's relay once. Does nothing without
-    /// `--spoof-mac`.
-    pub(crate) fn listen_on(ifindex: u32) {
-        let Some(mac) = get() else { return };
-        {
-            let Ok(mut s) = state().lock() else { return };
-            if !s.relays.insert(ifindex) {
-                return;
-            }
+    /// start that interface's relay once. An error, and another try next
+    /// time, when it cannot start. Does nothing without `--spoof-mac`.
+    pub(crate) fn listen_on(ifindex: u32) -> io::Result<()> {
+        let Some(mac) = get() else { return Ok(()) };
+        let running = || state().lock().is_ok_and(|s| s.relays.contains(&ifindex));
+        if running() {
+            return Ok(());
         }
-        let fd = match relay_socket(ifindex, mac) {
-            Ok(fd) => fd,
-            Err(e) => {
-                eprintln!("Warning: --spoof-mac: cannot read answers to {mac}: {e}");
-                return;
-            }
+        // One start at a time: others wait until the relay is listening.
+        static STARTING: Mutex<()> = Mutex::new(());
+        let _one = STARTING.lock();
+        if running() {
+            return Ok(());
+        }
+        let fail = |e: io::Error| {
+            io::Error::new(
+                e.kind(),
+                format!("--spoof-mac: cannot read answers to {mac}: {e}"),
+            )
         };
+        let fd = relay_socket(ifindex, mac).map_err(fail)?;
         let lo = crate::netif::index_of("lo").unwrap_or(1);
         std::thread::Builder::new()
             .name("spoof-mac relay".into())
             .spawn(move || relay(&fd, mac, lo))
-            .ok();
+            .map_err(fail)?;
+        // The socket is listening already, so nothing sent from here on is
+        // missed.
+        if let Ok(mut s) = state().lock() {
+            s.relays.insert(ifindex);
+        }
+        Ok(())
     }
 
     /// An `AF_PACKET` socket on `ifindex` with the card told to accept
@@ -606,11 +704,17 @@ mod imp {
                 if csum_not_ready(&msg) {
                     complete_checksum(&mut frame[14..]);
                 }
-                // TCP answers are for FeroProbe's raw sockets alone, which see
-                // them before TCP checks the checksum. Given a valid one, TCP
-                // would answer each SYN-ACK with a reset from this host's real
-                // MAC address, as nmap's pcap-read answers never draw.
-                if frame.get(14 + 9) == Some(&6) {
+                // TCP answers to raw probes are for FeroProbe's raw sockets
+                // alone, which see them before TCP checks the checksum. Given
+                // a valid one, TCP would answer each SYN-ACK with a reset
+                // from this host's real MAC address, as nmap's pcap-read
+                // answers never draw. Only a connection of the kernel's own
+                // (-sV, say, once the target has learnt the spoofed address)
+                // gets its packets intact.
+                if let Some(flow) = tcp_answer(&frame[14..])
+                    && !std::fs::read_to_string("/proc/net/tcp")
+                        .is_ok_and(|t| kernel_holds(&t, flow))
+                {
                     complete_checksum(&mut frame[14..]);
                     spoil_tcp_checksum(&mut frame[14..]);
                 }
@@ -777,11 +881,16 @@ eth1\t0000000A\t00000000\t0001\t0\t0\t0\t000000FF\t0\t0\t0\n";
 192.168.1.1      0x1         0x2         aa:bb:cc:dd:ee:01     *        eth0\n\
 192.168.1.9      0x1         0x0         00:00:00:00:00:00     *        eth0\n";
         assert_eq!(
-            imp::kernel_neighbour(t, "192.168.1.1".parse().unwrap()),
+            imp::kernel_neighbour(t, "192.168.1.1".parse().unwrap(), |d| d == "eth0"),
             Some(MacAddr([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 1]))
         );
+        // The same address on another link is another host.
         assert_eq!(
-            imp::kernel_neighbour(t, "192.168.1.9".parse().unwrap()),
+            imp::kernel_neighbour(t, "192.168.1.1".parse().unwrap(), |d| d == "eth1"),
+            None
+        );
+        assert_eq!(
+            imp::kernel_neighbour(t, "192.168.1.9".parse().unwrap(), |_| true),
             None
         );
     }
@@ -805,6 +914,29 @@ eth1\t0000000A\t00000000\t0001\t0\t0\t0\t000000FF\t0\t0\t0\n";
         partial[26..28].copy_from_slice(&[0x12, 0x34]);
         imp::complete_checksum(&mut partial);
         assert_eq!(partial, ip);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn kernel_connections_are_told_from_raw_answers() {
+        use std::net::IpAddr;
+        let (us, them) = (Ipv4Addr::new(10, 66, 1, 1), Ipv4Addr::new(10, 66, 1, 2));
+        let tcp = crate::packet::tcp_syn(IpAddr::V4(them), IpAddr::V4(us), 80, 40000, 1);
+        let answer = crate::packet::ipv4_packet_with_options(them, us, 6, 64, 1, &[], &tcp);
+        let flow = imp::tcp_answer(&answer).unwrap();
+        assert_eq!(flow, (us, 40000, them, 80));
+        let mut udp = answer.clone();
+        udp[9] = 17;
+        assert_eq!(imp::tcp_answer(&udp), None);
+        // 10.66.1.1:40000 <-> 10.66.1.2:80, as a little-endian kernel prints it.
+        let held = "  sl  local_address rem_address   st tx_queue rx_queue\n   \
+   0: 0101420A:9C40 0201420A:0050 01 00000000:00000000\n";
+        let listening = "  sl  local_address rem_address   st\n   \
+   0: 00000000:9C40 00000000:0000 0A 00000000:00000000\n";
+        if cfg!(target_endian = "little") {
+            assert!(imp::kernel_holds(held, flow));
+        }
+        assert!(!imp::kernel_holds(listening, flow));
     }
 
     #[cfg(target_os = "linux")]

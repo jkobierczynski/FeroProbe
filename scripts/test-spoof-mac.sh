@@ -11,6 +11,11 @@
 #   -sU --spoof-mac MAC  the same for UDP probes; the echo service answers
 #   -sn --spoof-mac MAC  the ARP ping comes from MAC; the host is up
 #   --packet-trace       SENT lines end in ether-src=MAC
+#   -e IFACE             the same through the chosen interface: answers
+#                        still reach the scan (they come back through lo)
+#   -sS                  no reset from this host answers a SYN-ACK
+#   -sS -sV              the version scan's own connections complete,
+#                        though the target now answers the spoofed MAC
 #   --spoof-mac 0        a random address: not the interface's, unicast
 #   --spoof-mac Apple    a vendor name: Apple's prefix
 #   --spoof-mac 02:aa    a prefix: the rest is filled in
@@ -33,7 +38,7 @@ REAL="$(nsx "$NS_SCAN" cat /sys/class/net/fpt-a0/address)"
 
 # --- frame capture --------------------------------------------------------------
 # One line per frame the scanner sends on fpt-a0:
-#   <src-mac> <ip|arp> <dst-ip> <arp-sender-mac or ->
+#   <src-mac> <ip|arp> <dst-ip> <arp-sender-mac or -> <tcp-flags or ->
 FRAMES=""
 _FR_PID=""
 frames_start() {
@@ -56,9 +61,13 @@ while not stop:
         continue
     t = f[12:14]
     if t == b"\x08\x00":
-        out.write("%s ip %s -\n" % (mac(f[6:12]), socket.inet_ntoa(f[30:34])))
+        flags = "-"
+        if f[23] == 6:
+            b = f[14 + (f[14] & 15) * 4 + 13]
+            flags = "".join(c for bit, c in zip((2, 16, 1, 4, 8), "SAFRP") if b & bit) or "."
+        out.write("%s ip %s - %s\n" % (mac(f[6:12]), socket.inet_ntoa(f[30:34]), flags))
     elif t == b"\x08\x06":
-        out.write("%s arp %s %s\n" % (mac(f[6:12]), socket.inet_ntoa(f[38:42]), mac(f[22:28])))
+        out.write("%s arp %s %s -\n" % (mac(f[6:12]), socket.inet_ntoa(f[38:42]), mac(f[22:28])))
 PY
     _FR_PID=$!
     _PIDS+=("$_FR_PID")
@@ -77,6 +86,8 @@ fero_frames() { frames_start; fero "$@"; frames_stop; }
 to_target() { awk -v t="$TGT_A" '$3 == t' "$FRAMES"; }
 count_to_target() { to_target | wc -l | tr -d ' '; }
 macs_to_target() { to_target | awk '{print $1}' | sort -u | paste -sd' ' -; }
+# TCP frames to the target with exactly these flags, and from which MAC.
+tcp_with() { to_target | awk -v f="$1" '$2 == "ip" && $5 == f'; }
 arp_senders() { to_target | awk '$2 == "arp" {print $4}' | sort -u | paste -sd' ' -; }
 
 echo "== -sS --spoof-mac $SPOOF =="
@@ -89,6 +100,16 @@ check_true "frames were sent to the target ($(count_to_target))" test "$(count_t
 check "every frame comes from the spoofed MAC" "$(macs_to_target)" "$SPOOF"
 check "ARP sender field is the spoofed MAC" "$(arp_senders)" "$SPOOF"
 check_true "trace lines show ether-src" output_has "ether-src=02:11:22:33:44:55"
+check "no reset answers the SYN-ACK" "$(tcp_with R | wc -l | tr -d ' ')" 0
+
+echo "== -e fpt-a0 --spoof-mac $SPOOF =="
+fero_frames -e fpt-a0 -Pn -sS --spoof-mac "$SPOOF" -p "$TCP_PORTS" "$TGT_A"
+check "exit status" "$RC" 0
+check "open port" "$(state_of tcp "$TCP_OPEN")" open
+check "closed port" "$(state_of tcp "$TCP_CLOSED")" closed
+check "every frame comes from the spoofed MAC" "$(macs_to_target)" "$SPOOF"
+fero -e fpt-a0 -Pn -sU --spoof-mac "$SPOOF" -p "$UDP_OPEN" "$TGT_A"
+check "UDP echo port" "$(state_of udp "$UDP_OPEN")" open
 
 echo "== -sU --spoof-mac $SPOOF =="
 fero_frames -Pn -sU --spoof-mac "$SPOOF" -p "$UDP_OPEN" "$TGT_A"
@@ -121,6 +142,18 @@ echo "== --spoof-mac 02:aa (prefix) =="
 fero_frames -Pn -sS --spoof-mac 02:aa -p "$TCP_OPEN" "$TGT_A"
 check "exit status" "$RC" 0
 check "frames carry the prefix" "$(macs_to_target | cut -c1-5)" "02:aa"
+
+echo "== -sS -sV --spoof-mac $SPOOF =="
+# Last of the captured runs: the system's own connections may still be
+# closing, from its real MAC, when the next scan starts.
+# No -Pn: the ARP ping from the spoofed MAC teaches the target that
+# address, so it answers the version scan's connections there too.
+fero_frames -sS -sV --spoof-mac "$SPOOF" -p "$TCP_OPEN" "$TGT_A"
+check "exit status" "$RC" 0
+check "open port" "$(state_of tcp "$TCP_OPEN")" open
+check_true "the version scan's connections complete (ACK from $REAL)" \
+    bash -c "[ -n \"\$(awk -v t='$TGT_A' -v m='$REAL' '\$3 == t && \$1 == m && \$5 == \"A\"' '$FRAMES')\" ]"
+check "  and the SYN scan draws no reset" "$(tcp_with R | awk -v m="$SPOOF" '$1 != m' | wc -l | tr -d ' ')" 0
 
 echo "== -sT --spoof-mac =="
 fero -Pn -sT --spoof-mac "$SPOOF" -p "$TCP_OPEN" "$TGT_A"

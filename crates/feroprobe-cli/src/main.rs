@@ -3285,6 +3285,11 @@ async fn main() -> Result<()> {
         eprintln!("Warning: {w}");
     }
     feroprobe_core::packet_opts::set(packet_opts);
+    // Loaded before --spoof-mac, which can name a vendor from this list.
+    if let Some(path) = &args.oui_file {
+        feroprobe_core::oui::use_file(path)
+            .with_context(|| format!("reading OUI list {}", path.display()))?;
+    }
     if let Some(arg) = &args.spoof_mac {
         let mac = spoof_mac(arg, &args, &plan, &targets)?;
         feroprobe_core::spoofmac::set(mac);
@@ -3371,11 +3376,6 @@ async fn main() -> Result<()> {
                 bounce: bounce.as_ref().map(|(a, _)| *a),
             },
         );
-    }
-
-    if let Some(path) = &args.oui_file {
-        feroprobe_core::oui::use_file(path)
-            .with_context(|| format!("reading OUI list {}", path.display()))?;
     }
 
     let started = Instant::now();

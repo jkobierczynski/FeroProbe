@@ -95,6 +95,17 @@ pub(crate) fn bind_socket(sock: &Socket, ipv6: bool) -> io::Result<()> {
     })
 }
 
+/// [`bind_socket`] for a socket that receives answers to probes, which
+/// is left unbound for IPv4 under `--spoof-mac`: those answers arrive
+/// through the loopback interface (see [`crate::spoofmac`]), and the
+/// probes leave through the `-e` interface in frames of their own.
+pub(crate) fn bind_receiver(sock: &Socket, ipv6: bool) -> io::Result<()> {
+    if !ipv6 && crate::spoofmac::get().is_some() {
+        return Ok(());
+    }
+    bind_socket(sock, ipv6)
+}
+
 #[cfg(any(target_os = "linux", target_os = "android"))]
 fn bind_to(sock: &Socket, ifc: &Interface, _ipv6: bool) -> io::Result<()> {
     sock.bind_device(Some(ifc.name.as_bytes()))
@@ -124,6 +135,17 @@ pub(crate) fn udp_socket(ipv6: bool) -> io::Result<Socket> {
     let domain = if ipv6 { Domain::IPV6 } else { Domain::IPV4 };
     let sock = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))?;
     bind_socket(&sock, ipv6)?;
+    sock.set_nonblocking(true)?;
+    Ok(sock)
+}
+
+/// [`udp_socket`] for a UDP scan's probes and answers: under
+/// `--spoof-mac` an IPv4 one is not bound to the `-e` interface (see
+/// [`bind_receiver`]).
+pub(crate) fn udp_receiver(ipv6: bool) -> io::Result<Socket> {
+    let domain = if ipv6 { Domain::IPV6 } else { Domain::IPV4 };
+    let sock = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))?;
+    bind_receiver(&sock, ipv6)?;
     sock.set_nonblocking(true)?;
     Ok(sock)
 }

@@ -1309,7 +1309,12 @@ FeroProbe through the loopback interface, with any checksum the card left
 unfinished filled in. TCP answers go with a deliberately wrong checksum:
 FeroProbe's raw sockets read them first, and this host's TCP then drops
 them instead of resetting each SYN-ACK from the real MAC address (nmap,
-reading answers with pcap, draws no reset either). A strict reverse-path filter
+reading answers with pcap, draws no reset either). Packets of a connection
+the system itself holds (version detection's, once the target has learnt
+the spoofed address from the ARP requests) are passed on intact. With `-e`,
+the probes leave through that interface, and the sockets that read IPv4
+answers are not bound to it, since the answers come in through loopback. A
+strict reverse-path filter
 (`net.ipv4.conf.all.rp_filter=1`) drops those; FeroProbe warns, and only
 answers sent to the card's own address are then seen.
 
@@ -1318,7 +1323,8 @@ port scans, host discovery, OS detection, traceroute), UDP scan probes
 (which then go out on a raw socket) and ARP discovery. It does not cover
 IPv6 probes, the TCP connect scan, version detection or DNS, whose packets
 the system sends; FeroProbe warns when the scan includes any of them.
-`--packet-trace` adds `ether-src=<MAC>` to each probe sent this way. Like
+`--packet-trace` adds `ether-src=<MAC>` to each probe that really went out
+in a spoofed frame. Like
 the other evasion options, public targets need `--allow-public-evasion`.
 
 #### `--allow-public-evasion`
