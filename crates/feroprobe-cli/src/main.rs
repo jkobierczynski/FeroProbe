@@ -1302,6 +1302,13 @@ fn packet_option_warnings(
             t.addr
         ));
     }
+    if !opts.ip_options.is_empty() && !cfg!(target_os = "linux") {
+        w.push(
+            "--ip-options are set only on Linux for probes whose IP header the system writes; \
+             here only probes FeroProbe builds whole (-sO, -f, --mtu, -D, -S) carry them"
+                .to_string(),
+        );
+    }
     w
 }
 

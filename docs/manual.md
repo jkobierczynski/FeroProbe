@@ -1271,7 +1271,9 @@ Send IPv4 probes with these IP header options, in nmap's notation:
 The result is padded to a multiple of 4 bytes and may be at most 40.
 IPv4 only: probes to IPv6 targets go without them, with a warning. With
 `-f`/`--mtu` every fragment carries the whole header, options included, as
-in nmap. Many routers drop packets with source routes.
+in nmap. Many routers drop packets with source routes. On systems other
+than Linux only the probes FeroProbe builds whole (`-sO`, `-f`, `--mtu`,
+`-D`, `-S`) carry the options, with a warning.
 
 #### `--ttl <value>`
 

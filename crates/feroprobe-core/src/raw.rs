@@ -130,7 +130,7 @@ pub(crate) fn nmap_ip_header(sock: &Socket, ipv6: bool) {
 /// kernel sends to the first hop and puts the destination in the last
 /// slot, as nmap does by hand.
 pub(crate) fn set_ip_options(sock: &Socket, opts: &[u8]) {
-    #[cfg(unix)]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     {
         use std::os::fd::AsRawFd;
         // SAFETY: valid socket fd, and a pointer/length pair for `opts`.
@@ -144,12 +144,13 @@ pub(crate) fn set_ip_options(sock: &Socket, opts: &[u8]) {
             );
         }
     }
-    #[cfg(not(unix))]
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
     let _ = (sock, opts);
 }
 
 /// [`nmap_ip_header`] without the `--ip-options`, for OS detection,
 /// whose probes nmap sends with a plain IP header.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) fn nmap_ip_header_bare(sock: &Socket, ipv6: bool) {
     let ttl = u32::from(probe_ttl());
     if ipv6 {
@@ -162,7 +163,7 @@ pub(crate) fn nmap_ip_header_bare(sock: &Socket, ipv6: bool) {
 
 /// The IPv4 options set on `sock` with `IP_OPTIONS`, for the trace.
 pub(crate) fn ip_options_of(sock: &Socket) -> Vec<u8> {
-    #[cfg(unix)]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     {
         use std::os::fd::AsRawFd;
         let mut buf = [0u8; 40];
@@ -182,7 +183,7 @@ pub(crate) fn ip_options_of(sock: &Socket) -> Vec<u8> {
         }
         Vec::new()
     }
-    #[cfg(not(unix))]
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
     {
         let _ = sock;
         Vec::new()
