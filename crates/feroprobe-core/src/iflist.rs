@@ -76,9 +76,9 @@ pub fn interfaces() -> io::Result<Vec<IfEntry>> {
         return Err(io::Error::last_os_error());
     }
     let mut cur = ifap;
-    while !cur.is_null() {
-        // SAFETY: `cur` is a node of the list getifaddrs returned.
-        let ifa = unsafe { &*cur };
+    // SAFETY: `cur` is null or a node of the list getifaddrs returned,
+    // which stays valid until freeifaddrs below; as_ref checks for null.
+    while let Some(ifa) = unsafe { cur.as_ref() } {
         cur = ifa.ifa_next;
         if ifa.ifa_name.is_null() {
             continue;
