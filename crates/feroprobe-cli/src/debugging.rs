@@ -121,13 +121,14 @@ fn apply<'a>(options: impl IntoIterator<Item = Level<'a>>) -> Result<(u8, u8), S
 /// hosts are scanned together.
 pub(crate) fn timing_report(
     cfg: &ScanConfig,
-    group: usize,
+    group_min: usize,
+    group_max: usize,
     host_timeout: Option<Duration>,
 ) -> String {
     let ms = |d: Duration| d.as_millis();
     format!(
         "--------------- Timing report ---------------
-  hostgroups: min 1, max {group}
+  hostgroups: min {group_min}, max {group_max}
   rtt-timeouts: init {}, min {}, max {}
   max-scan-delay: TCP {}, UDP {}, SCTP {}
   parallelism: min {}, max {}
@@ -211,7 +212,7 @@ mod tests {
     #[test]
     fn timing_report_has_nmaps_lines() {
         let cfg = ScanConfig::default();
-        let r = timing_report(&cfg, 32, Some(Duration::from_secs(60)));
+        let r = timing_report(&cfg, 1, 100_000, Some(Duration::from_secs(60)));
         assert!(r.starts_with("--------------- Timing report"));
         assert!(r.contains("\n  rtt-timeouts: init "));
         assert!(r.contains("host-timeout: 60000\n"));

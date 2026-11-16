@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE nmaprun>
+<nmaprun scanner="feroprobe" args="feroprobe -sV -O 10.0.0.0/28" start="1763280000" startstr="Sun Nov 16 08:00:00 2025 UTC" version="0.5.0" xmloutputversion="1.05">
+<scaninfo type="syn" protocol="tcp" numservices="1000" services="1-1000"/>
+<host starttime="1763280000" endtime="1763280060"><status state="up" reason="arp-response" reason_ttl="0"/>
+<address addr="10.0.0.2" addrtype="ipv4"/>
+<hostnames>
+</hostnames>
+<ports><extraports state="closed" count="999">
+</extraports>
+<port protocol="tcp" portid="53"><state state="open" reason="syn-ack" reason_ttl="0"/><service name="domain" method="table" conf="3"/></port>
+</ports>
+</host>
+<host starttime="1763280000" endtime="1763280060"><status state="up" reason="arp-response" reason_ttl="0"/>
+<address addr="10.0.0.5" addrtype="ipv4"/>
+<hostnames>
+<hostname name="web.lan" type="PTR"/>
+</hostnames>
+<ports><extraports state="closed" count="997">
+</extraports>
+<port protocol="tcp" portid="22"><state state="open" reason="syn-ack" reason_ttl="0"/><service name="ssh" product="OpenSSH" version="9.6p1" extrainfo="protocol 2.0" method="probed" conf="10"/></port>
+<port protocol="tcp" portid="80"><state state="open" reason="syn-ack" reason_ttl="0"/><service name="http" method="table" conf="3"/></port>
+<port protocol="tcp" portid="443"><state state="open" reason="syn-ack" reason_ttl="0"/><service name="http" method="probed" conf="10"/></port>
+</ports>
+<os><osmatch name="Linux 4.19 - 6.x" accuracy="100" line="1"></osmatch>
+</os>
+</host>
+<host starttime="1763280000" endtime="1763280060"><status state="up" reason="arp-response" reason_ttl="0"/>
+<address addr="10.0.0.10" addrtype="ipv4"/>
+<hostnames>
+</hostnames>
+<ports><extraports state="filtered" count="1000">
+</extraports>
+</ports>
+</host>
+<host starttime="1763280000" endtime="1763280060"><status state="up" reason="arp-response" reason_ttl="0"/>
+<address addr="10.0.0.12" addrtype="ipv4"/>
+<hostnames>
+<hostname name="old-name.lan" type="PTR"/>
+</hostnames>
+<ports><extraports state="filtered" count="1000">
+</extraports>
+</ports>
+</host>
+<runstats><finished time="1763280060" timestr="Sun Nov 16 08:01:00 2025 UTC" elapsed="60.00" summary="" exit="success"/><hosts up="4" down="12" total="16"/>
+</runstats>
+</nmaprun>

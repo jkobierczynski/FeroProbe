@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE nmaprun>
+<?xml-stylesheet href="feroprobe.xsl" type="text/xsl"?>
+<nmaprun scanner="feroprobe" args="feroprobe -sV -O 10.0.0.0/28" start="1763366400" startstr="Mon Nov 17 08:00:00 2025 UTC" version="0.5.0" xmloutputversion="1.05">
+<scaninfo type="syn" protocol="tcp" numservices="1000" services="1-1000"/>
+<host starttime="1763366400" endtime="1763366460"><status state="up" reason="arp-response" reason_ttl="0"/>
+<address addr="10.0.0.2" addrtype="ipv4"/>
+<hostnames>
+</hostnames>
+<ports><extraports state="closed" count="999">
+</extraports>
+<port protocol="tcp" portid="53"><state state="open" reason="syn-ack" reason_ttl="0"/><service name="domain" method="table" conf="3"/></port>
+</ports>
+</host>
+<host starttime="1763366400" endtime="1763366460"><status state="up" reason="arp-response" reason_ttl="0"/>
+<address addr="10.0.0.5" addrtype="ipv4"/>
+<hostnames>
+<hostname name="web.lan" type="PTR"/>
+</hostnames>
+<ports><extraports state="closed" count="997">
+</extraports>
+<port protocol="tcp" portid="80"><state state="open" reason="syn-ack" reason_ttl="0"/><service name="http" product="nginx" version="1.24.0" method="probed" conf="10"/></port>
+<port protocol="tcp" portid="443"><state state="open" reason="syn-ack" reason_ttl="0"/><service name="http" tunnel="ssl" method="probed" conf="10"/></port>
+<port protocol="tcp" portid="8080"><state state="open" reason="syn-ack" reason_ttl="0"/><service name="http-proxy" method="table" conf="3"/></port>
+</ports>
+<os><osmatch name="Linux 3.x - 4.18" accuracy="100" line="1"></osmatch>
+</os>
+</host>
+<host starttime="1763366400" endtime="1763366460"><status state="up" reason="arp-response" reason_ttl="0"/>
+<address addr="10.0.0.11" addrtype="ipv4"/>
+<hostnames>
+</hostnames>
+<ports><extraports state="closed" count="999">
+</extraports>
+<port protocol="udp" portid="161"><state state="open" reason="udp-response" reason_ttl="0"/><service name="snmp" method="table" conf="3"/></port>
+</ports>
+</host>
+<host starttime="1763366400" endtime="1763366460"><status state="up" reason="arp-response" reason_ttl="0"/>
+<address addr="10.0.0.12" addrtype="ipv4"/>
+<hostnames>
+<hostname name="new-name.lan" type="PTR"/>
+</hostnames>
+<ports><extraports state="filtered" count="1000">
+</extraports>
+</ports>
+</host>
+<runstats><finished time="1763366460" timestr="Mon Nov 17 08:01:00 2025 UTC" elapsed="60.00" summary="" exit="success"/><hosts up="4" down="12" total="16"/>
+</runstats>
+</nmaprun>
