@@ -566,7 +566,11 @@ pub(crate) fn send_logged_until(
     let mut log = Some(log);
     // --spoof-mac: the probe in an Ethernet frame of our own, if it goes
     // out that way.
-    let framed = crate::spoofmac::prepare(sock, pkt, to).transpose()?;
+    // A next hop's ARP lookup stops at the host timeout too.
+    if deadline.is_some_and(|d| Instant::now() >= d) {
+        return Err(crate::model::ScanConfig::timed_out());
+    }
+    let framed = crate::spoofmac::prepare(sock, pkt, to, deadline).transpose()?;
     loop {
         if deadline.is_some_and(|d| Instant::now() >= d) {
             return Err(crate::model::ScanConfig::timed_out());

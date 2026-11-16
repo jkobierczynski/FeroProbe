@@ -116,6 +116,7 @@ pub(crate) fn prepare(
     _: &socket2::Socket,
     _: &[u8],
     _: std::net::SocketAddr,
+    _: Option<std::time::Instant>,
 ) -> Option<std::io::Result<Framed>> {
     None
 }
@@ -223,6 +224,17 @@ mod imp {
     }
 
     fn send_frame(fd: &OwnedFd, ifindex: u32, frame: &[u8]) -> io::Result<()> {
+        send_frame_until(fd, ifindex, frame, None)
+    }
+
+    /// `send_frame`, but the pauses after `ENOBUFS` stop at `deadline`
+    /// (the host timeout), which then ends the send with `TimedOut`.
+    fn send_frame_until(
+        fd: &OwnedFd,
+        ifindex: u32,
+        frame: &[u8],
+        deadline: Option<Instant>,
+    ) -> io::Result<()> {
         let sll = sockaddr_ll(ifindex, 0);
         let mut attempts = 0;
         loop {
@@ -243,7 +255,15 @@ mod imp {
             let e = io::Error::last_os_error();
             if e.raw_os_error() == Some(libc::ENOBUFS) && attempts < 50 {
                 attempts += 1;
-                std::thread::sleep(Duration::from_millis(10));
+                let mut pause = Duration::from_millis(10);
+                if let Some(d) = deadline {
+                    let left = d.saturating_duration_since(Instant::now());
+                    if left.is_zero() {
+                        return Err(crate::model::ScanConfig::timed_out());
+                    }
+                    pause = pause.min(left);
+                }
+                std::thread::sleep(pause);
                 continue;
             }
             return Err(e);
@@ -277,7 +297,12 @@ mod imp {
     /// cannot go either way: the next hop does not answer ARP, the relay
     /// for its answers cannot start, or no Ethernet route leaves through
     /// the `-e` interface (the raw socket is not bound to it then).
-    pub(crate) fn prepare(sock: &Socket, pkt: &[u8], to: SocketAddr) -> Option<io::Result<Framed>> {
+    pub(crate) fn prepare(
+        sock: &Socket,
+        pkt: &[u8],
+        to: SocketAddr,
+        deadline: Option<Instant>,
+    ) -> Option<io::Result<Framed>> {
         let mac = get()?;
         let IpAddr::V4(dst) = to.ip() else {
             return None;
@@ -303,7 +328,7 @@ mod imp {
         Some((|| {
             let packet = full_packet(sock, pkt, first, &opts)?;
             listen_on(ifindex)?;
-            let hop_mac = neighbour(ifindex, hop, mac)?;
+            let hop_mac = neighbour(ifindex, hop, mac, deadline)?;
             let mut frame = Vec::with_capacity(14 + packet.len());
             frame.extend_from_slice(&hop_mac.0);
             frame.extend_from_slice(&mac.0);
@@ -474,7 +499,12 @@ mod imp {
 
     /// The MAC address of `hop` on `ifindex`: cached, from the kernel's
     /// neighbour table, or asked for with ARP from the spoofed address.
-    fn neighbour(ifindex: u32, hop: Ipv4Addr, mac: MacAddr) -> io::Result<MacAddr> {
+    fn neighbour(
+        ifindex: u32,
+        hop: Ipv4Addr,
+        mac: MacAddr,
+        deadline: Option<Instant>,
+    ) -> io::Result<MacAddr> {
         let key = (ifindex, hop);
         let unanswered = || {
             io::Error::new(
@@ -513,7 +543,7 @@ mod imp {
             .and_then(|t| {
                 kernel_neighbour(&t, hop, |dev| crate::netif::index_of(dev) == Some(ifindex))
             })
-            .map_or_else(|| arp(ifindex, hop, mac), Ok);
+            .map_or_else(|| arp(ifindex, hop, mac, deadline), Ok);
         if let Ok(mut s) = state().lock() {
             match found {
                 Ok(m) => {
@@ -567,7 +597,14 @@ mod imp {
 
     /// Ask for `hop`'s MAC address with ARP requests from the spoofed
     /// address (three tries, a second in all).
-    fn arp(ifindex: u32, hop: Ipv4Addr, mac: MacAddr) -> io::Result<MacAddr> {
+    /// Stops at `deadline` (the host timeout) with a `TimedOut` error,
+    /// which is not remembered as an unanswered hop.
+    fn arp(
+        ifindex: u32,
+        hop: Ipv4Addr,
+        mac: MacAddr,
+        deadline: Option<Instant>,
+    ) -> io::Result<MacAddr> {
         let src = match crate::netif::route_source(IpAddr::V4(hop))? {
             IpAddr::V4(a) => a,
             IpAddr::V6(_) => return Err(io::Error::other("no IPv4 source address")),
@@ -585,12 +622,19 @@ mod imp {
         set_timeout(&fd, Duration::from_millis(50));
         let request = arp_request(mac, src, hop);
         let mut buf = [0u8; 2048];
+        let past_deadline = || deadline.is_some_and(|d| Instant::now() >= d);
         for _ in 0..3 {
-            send_frame(&fd, ifindex, &request)?;
+            if past_deadline() {
+                return Err(crate::model::ScanConfig::timed_out());
+            }
+            send_frame_until(&fd, ifindex, &request, deadline)?;
             crate::packet_trace::log("SENT", || {
                 format!("ARP who-has {hop} tell {src} (from {mac})")
             });
-            let until = Instant::now() + Duration::from_millis(333);
+            let mut until = Instant::now() + Duration::from_millis(333);
+            if let Some(d) = deadline {
+                until = until.min(d);
+            }
             while Instant::now() < until {
                 // SAFETY: reads into a buffer we own, of the given size.
                 let n =
@@ -605,6 +649,9 @@ mod imp {
                     return Ok(m);
                 }
             }
+        }
+        if past_deadline() {
+            return Err(crate::model::ScanConfig::timed_out());
         }
         Err(io::Error::new(
             io::ErrorKind::HostUnreachable,
