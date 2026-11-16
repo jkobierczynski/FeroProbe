@@ -1630,9 +1630,24 @@ A timed-out host is reported without port or OS results:
 \f[V]timedout=\[dq]true\[dq]\f[R] in XML.
 It is not traced.
 \f[V]0\f[R] means no limit, as in nmap.
+.SS \f[V]--min-hostgroup <size>\f[R], \f[V]--max-hostgroup <size>\f[R]
 .PP
-nmap\[aq]s \f[V]--min-hostgroup\f[R] and \f[V]--max-hostgroup\f[R] are
-not available.
+As in nmap, hosts are pinged in batches of up to 4096 targets, then
+port-scanned, traced and reported a group at a time; each group\[aq]s
+results are printed and written to the report files as soon as it
+finishes.
+The group size is nmap\[aq]s: 128 hosts for UDP or SCTP scans, 1024
+divided by the TCP port count (at least 64) for TCP scans, and 16
+otherwise.
+A TCP scan of more than 1000 ports at \f[V]-T4\f[R] or slower starts
+with a quick group of 4 hosts (8 at \f[V]-T4\f[R]) to show results
+early.
+These two options hold the size between \f[V]--min-hostgroup\f[R]
+(default 1) and \f[V]--max-hostgroup\f[R] (default 100000).
+A larger group can be faster; a smaller one reports sooner.
+\f[V]--min-hostgroup\f[R] above \f[V]--max-hostgroup\f[R] is an error,
+and above 100 it warns, as in nmap.
+A minimum above 4096 also raises the discovery batch to it.
 .SH FIREWALL/IDS EVASION AND SPOOFING
 .SS Interface and source port
 .PP
@@ -1813,6 +1828,12 @@ output, the default), \f[V]xml\f[R], \f[V]grepable\f[R] or
 .SS \f[V]-oN <file>\f[R]
 .PP
 Also write the normal report to a file.
+As in nmap, the file starts with a comment line naming the version, the
+start time and the command line
+(\f[V]# FeroProbe 0.5.0 scan initiated ... as: feroprobe -oN scan.nmap ...\f[R]),
+which \f[V]--resume\f[R] reads, and ends with
+\f[V]# FeroProbe done at ...\f[R] instead of the screen\[aq]s summary
+line.
 .SS \f[V]-oX <file>\f[R]
 .PP
 Also write the XML report to a file, in nmap\[aq]s \f[V]-oX\f[R] layout
@@ -1856,8 +1877,14 @@ links and other spellings of the same path are caught), and
 \f[V]-oA -\f[R] is refused.
 All report files are opened (created, not truncated) before the scan
 starts, so an unwritable path fails at once, as in nmap.
-A file\[aq]s old content is replaced only when the new report is
-written, so a scan that fails leaves the previous report in place.
+A file\[aq]s old content is replaced when the first part of the new
+report is written, just before the first host group is scanned, so a
+command that fails before scanning leaves the previous report in place.
+The normal, XML, grepable and \f[V]-oS\f[R] reports are then written a
+host group at a time as the scan goes (see \f[V]--max-hostgroup\f[R]),
+so an aborted scan leaves reports of the hosts it finished, which
+\f[V]--resume\f[R] can carry on from.
+The JSON report is a single document and is written when the scan ends.
 A \f[V]--dry-run\f[R] writes no reports and creates no files.
 .PP
 Report files are written through the handles opened at the start, so the
@@ -1928,6 +1955,55 @@ Short for \f[V]--stylesheet\f[R] with that URL.
 .SS \f[V]--no-stylesheet\f[R]
 .PP
 Leave the \f[V]xml-stylesheet\f[R] line out of the XML report.
+.SS \f[V]--resume <filename>\f[R]
+.PP
+Carry on with a scan that was aborted (with Ctrl-C, a lost connection, a
+reboot), given its normal (\f[V]-oN\f[R]), XML (\f[V]-oX\f[R]) or
+grepable (\f[V]-oG\f[R]) report; for \f[V]-oA\f[R], any of the three
+files.
+As in nmap, it takes no other options:
+.IP
+.nf
+\f[C]
+feroprobe --resume scan.gnmap
+\f[R]
+.fi
+.PP
+The command line is read back from the report, so the resumed scan runs
+with the same options, targets and report files.
+Every target up to and including the last host the report lists is
+skipped, and the scan continues with the next one, appending to the
+existing reports (the command line is run with \f[V]--append-output\f[R]
+added, as nmap does): the normal and grepable files get a second
+\f[V]scan initiated\f[R] line, and the XML document is continued rather
+than started again, so that it ends up complete.
+Like nmap, the file is searched for grepable \f[V]Host:\f[R] lines
+first, then XML \f[V]<address>\f[R] elements, then normal
+\f[V]Scan report for\f[R] lines.
+.PP
+Because the reports are written a host group at a time, hosts of the
+group that was running when the scan stopped are scanned again.
+Hosts found down are not listed in the reports, so those after the last
+listed host are probed again too.
+Other things to know:
+.IP \[bu] 2
+If the report lists no finished host, the scan starts from the
+beginning, with a warning.
+.IP \[bu] 2
+If the last host it lists is not among the targets (the targets were
+given by a name that now resolves differently, for example), nothing is
+left to scan, as in nmap, with a warning.
+.IP \[bu] 2
+With \f[V]--randomize-hosts\f[R] the targets come in a different order
+each time, so some hosts may be scanned twice and others missed; a
+warning says so, as in nmap.
+.IP \[bu] 2
+The JSON report (\f[V]-oJ\f[R]) is written only when a scan ends, so the
+aborted run left none, and the one written after resuming lists only the
+hosts scanned since; a warning says so.
+.IP \[bu] 2
+The settings files and ICS protection apply to the resumed scan as they
+would to the command typed again.
 .SS \f[V]--nmap-label\f[R]
 .PP
 Write \f[V]scanner=\[dq]nmap\[dq]\f[R] in the XML report instead of
@@ -2748,18 +2824,17 @@ scan, not planned), \f[V]-b\f[R] (FTP bounce), \f[V]-PO\f[R],
 Scripting: \f[V]-sC\f[R], \f[V]--script\f[R] and related options
 (nmap\[aq]s scripts cannot be shipped under their licence).
 .IP \[bu] 2
-Timing: \f[V]--min-hostgroup\f[R], \f[V]--max-hostgroup\f[R],
-\f[V]--defeat-rst-ratelimit\f[R].
+Timing: \f[V]--defeat-rst-ratelimit\f[R].
 .IP \[bu] 2
 Evasion and packet options: \f[V]--spoof-mac\f[R], \f[V]--data\f[R],
 \f[V]--data-string\f[R], \f[V]--data-length\f[R],
 \f[V]--ip-options\f[R], \f[V]--ttl\f[R], \f[V]--badsum\f[R].
 .IP \[bu] 2
 Output and misc: \f[V]-oS\f[R], \f[V]--append-output\f[R],
-\f[V]--resume\f[R], \f[V]--stylesheet\f[R], \f[V]--webxml\f[R],
-\f[V]--no-stylesheet\f[R], \f[V]-d\f[R], \f[V]--iflist\f[R],
-\f[V]--privileged\f[R], \f[V]--unprivileged\f[R],
-\f[V]--port-ratio\f[R], and the interactive keys during a scan.
+\f[V]--stylesheet\f[R], \f[V]--webxml\f[R], \f[V]--no-stylesheet\f[R],
+\f[V]-d\f[R], \f[V]--iflist\f[R], \f[V]--privileged\f[R],
+\f[V]--unprivileged\f[R], \f[V]--port-ratio\f[R], and the interactive
+keys during a scan.
 .PP
 DEVELOPMENT.md tracks which of these are planned.
 .SH EXIT STATUS

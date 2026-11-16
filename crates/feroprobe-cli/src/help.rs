@@ -67,6 +67,7 @@ TIMING AND PERFORMANCE:
   --retries, --max-retries <tries>: Most resends of a probe without an answer
   -c, -M, --concurrency, --max-parallelism <number>: Most probes waiting at once
   --min-parallelism <number>: At least <number> probes allowed to wait at once
+  --min-hostgroup/--max-hostgroup <size>: Parallel host scan group sizes
   --min-rate <number>: Send at least <number> packets per second
   --max-rate <number>: Send at most <number> packets per second
   --scan-delay <time>: Wait at least <time> between probes
@@ -92,6 +93,7 @@ OUTPUT:
   --nmap-label: Write scanner=\"nmap\" in XML, for tools that need it
   --iflist: Print host interfaces and routes (for debugging)
   --noninteractive: No keys during the scan (v/V, d/D, p/P, ?, status)
+  --resume <filename>: Resume an aborted scan
 MISC:
   -6: Scan the IPv6 address of hostnames
   -A: Version and OS detection plus traceroute

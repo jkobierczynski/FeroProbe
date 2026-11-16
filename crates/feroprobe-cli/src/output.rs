@@ -119,14 +119,27 @@ pub(crate) fn port_rows<'a>(
     (hidden, rows)
 }
 
-/// The report in nmap's "normal" layout (stdout, `-oN`).
-pub fn render_table(hosts: &[HostResult], info: &RunInfo) -> String {
+/// The first line of the normal report. On screen it names the version;
+/// in an `-oN` file it is nmap's comment line with the start time and the
+/// command line, which `--resume` reads.
+pub fn table_header(info: &RunInfo, file: bool) -> String {
+    if file {
+        format!(
+            "# FeroProbe {} scan initiated {} as: {}\n",
+            env!("CARGO_PKG_VERSION"),
+            crate::xml::time_str(info.start),
+            info.args.replace('\n', " ")
+        )
+    } else {
+        format!("Starting FeroProbe {}\n", env!("CARGO_PKG_VERSION"))
+    }
+}
+
+/// The normal report of the reported hosts among `hosts`.
+pub fn table_hosts(hosts: &[HostResult], info: &RunInfo) -> String {
     let mut s = String::new();
     let out = &mut s;
-    w!(out, "Starting FeroProbe {}", env!("CARGO_PKG_VERSION"));
-    let mut up = 0;
     for host in hosts.iter().filter(|h| reported(h, info)) {
-        up += 1;
         match host.hostname.as_ref().or(host.rdns.as_ref()) {
             Some(name) => w!(out, "\nScan report for {name} ({})", host.addr),
             None => w!(out, "\nScan report for {}", host.addr),
@@ -165,11 +178,26 @@ pub fn render_table(hosts: &[HostResult], info: &RunInfo) -> String {
             print_trace(out, host);
         }
     }
-    if hosts.len() == 1 && up == 0 && !info.assume_up {
+    s
+}
+
+/// The end of the normal report: `total` hosts, `up` of them reported up.
+/// An `-oN` file ends with nmap's comment line instead of the screen's
+/// summary.
+pub fn table_footer(total: usize, up: usize, info: &RunInfo, file: bool) -> String {
+    let mut s = String::new();
+    let out = &mut s;
+    if total == 1 && up == 0 && !info.assume_up {
         w!(
             out,
             "Note: the host seems down. If it is up but blocks our ping probes, try -Pn"
         );
+    }
+    if file {
+        // The same line as the grepable report's.
+        out.push('\n');
+        out.push_str(&crate::grep::footer(total, up, info));
+        return s;
     }
     let what = if info.ping_only {
         String::new()
@@ -178,12 +206,19 @@ pub fn render_table(hosts: &[HostResult], info: &RunInfo) -> String {
     };
     w!(
         out,
-        "\nFeroProbe done: {} host(s), {} up{what}, in {:.2}s",
-        hosts.len(),
-        up,
+        "\nFeroProbe done: {total} host(s), {up} up{what}, in {:.2}s",
         info.elapsed.as_secs_f64()
     );
     s
+}
+
+/// The report in nmap's "normal" layout, as the screen shows it.
+#[cfg(test)]
+pub fn render_table(hosts: &[HostResult], info: &RunInfo) -> String {
+    let up = hosts.iter().filter(|h| reported(h, info)).count();
+    table_header(info, false)
+        + &table_hosts(hosts, info)
+        + &table_footer(hosts.len(), up, info, false)
 }
 
 /// nmap's "Not shown" list: `98 filtered ports, 30 closed ports`.

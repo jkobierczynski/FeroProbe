@@ -1049,7 +1049,20 @@ without port or OS results: `Skipping host <addr> due to host timeout` in
 normal output, `Status: Timeout` in grepable output and `timedout="true"`
 in XML. It is not traced. `0` means no limit, as in nmap.
 
-nmap's `--min-hostgroup` and `--max-hostgroup` are not available.
+#### `--min-hostgroup <size>`, `--max-hostgroup <size>`
+
+As in nmap, hosts are pinged in batches of up to 4096 targets, then
+port-scanned, traced and reported a group at a time; each group's results
+are printed and written to the report files as soon as it finishes. The
+group size is nmap's: 128 hosts for UDP or SCTP scans, 1024 divided by the
+TCP port count (at least 64) for TCP scans, and 16 otherwise. A TCP scan of
+more than 1000 ports at `-T4` or slower starts with a quick group of 4 hosts
+(8 at `-T4`) to show results early. These two options hold the size
+between `--min-hostgroup` (default 1) and `--max-hostgroup` (default
+100000). A larger group can be faster; a smaller one reports sooner.
+`--min-hostgroup` above `--max-hostgroup` is an error, and above 100 it
+warns, as in nmap. A minimum above 4096 also raises the discovery batch to
+it.
 
 ## Firewall/IDS evasion and spoofing
 
@@ -1213,7 +1226,11 @@ the default), `xml`, `grepable` or `json`.
 
 #### `-oN <file>`
 
-Also write the normal report to a file.
+Also write the normal report to a file. As in nmap, the file starts with a
+comment line naming the version, the start time and the command line
+(`# FeroProbe 0.5.0 scan initiated ... as: feroprobe -oN scan.nmap ...`),
+which `--resume` reads, and ends with `# FeroProbe done at ...` instead of
+the screen's summary line.
 
 #### `-oX <file>`
 
@@ -1254,9 +1271,14 @@ cannot share a file (FeroProbe checks the real files, so links and other
 spellings of the same path are caught), and `-oA -` is refused. All report
 files are opened (created, not truncated) before the scan starts, so an
 unwritable path fails at once, as in nmap. A file's old content is
-replaced only when the new report is written, so a scan that fails leaves
-the previous report in place. A `--dry-run` writes no reports and creates
-no files.
+replaced when the first part of the new report is written, just before
+the first host group is scanned, so a command that fails before scanning
+leaves the previous report in place. The normal, XML, grepable and `-oS`
+reports are then written a host group at a time as the scan goes (see
+`--max-hostgroup`), so an aborted scan leaves reports of the hosts it
+finished, which `--resume` can carry on from. The JSON report is a single
+document and is written when the scan ends. A `--dry-run` writes no
+reports and creates no files.
 
 Report files are written through the handles opened at the start, so the
 paths are not looked up again: replacing a report path with a link while
@@ -1318,6 +1340,45 @@ installed. Short for `--stylesheet` with that URL.
 #### `--no-stylesheet`
 
 Leave the `xml-stylesheet` line out of the XML report.
+
+#### `--resume <filename>`
+
+Carry on with a scan that was aborted (with Ctrl-C, a lost connection, a
+reboot), given its normal (`-oN`), XML (`-oX`) or grepable (`-oG`) report;
+for `-oA`, any of the three files. As in nmap, it takes no other options:
+
+```
+feroprobe --resume scan.gnmap
+```
+
+The command line is read back from the report, so the resumed scan runs
+with the same options, targets and report files. Every target up to and
+including the last host the report lists is skipped, and the scan continues
+with the next one, appending to the existing reports (the command line is
+run with `--append-output` added, as nmap does): the normal and grepable
+files get a second `scan initiated` line, and the XML document is
+continued rather than started again, so that it ends up complete. Like nmap, the file is searched
+for grepable `Host:` lines first, then XML `<address>` elements, then normal
+`Scan report for` lines.
+
+Because the reports are written a host group at a time, hosts of the group
+that was running when the scan stopped are scanned again. Hosts found down
+are not listed in the reports, so those after the last listed host are
+probed again too. Other things to know:
+
+- If the report lists no finished host, the scan starts from the
+  beginning, with a warning.
+- If the last host it lists is not among the targets (the targets were
+  given by a name that now resolves differently, for example), nothing is
+  left to scan, as in nmap, with a warning.
+- With `--randomize-hosts` the targets come in a different order each
+  time, so some hosts may be scanned twice and others missed; a warning
+  says so, as in nmap.
+- The JSON report (`-oJ`) is written only when a scan ends, so the
+  aborted run left none, and the one written after resuming lists only
+  the hosts scanned since; a warning says so.
+- The settings files and ICS protection apply to the resumed scan as they
+  would to the command typed again.
 
 #### `--nmap-label`
 
@@ -1751,10 +1812,10 @@ with an error naming the supported alternatives:
   `--resolve-all`.
 - Scripting: `-sC`, `--script` and related options (nmap's scripts cannot
   be shipped under their licence).
-- Timing: `--min-hostgroup`, `--max-hostgroup`, `--defeat-rst-ratelimit`.
+- Timing: `--defeat-rst-ratelimit`.
 - Evasion and packet options: `--spoof-mac`, `--data`, `--data-string`, `--data-length`, `--ip-options`, `--ttl`,
   `--badsum`.
-- Output and misc: `-oS`, `--append-output`, `--resume`, `--stylesheet`,
+- Output and misc: `-oS`, `--append-output`, `--stylesheet`,
   `--webxml`, `--no-stylesheet`, `-d`, `--iflist`, `--privileged`,
   `--unprivileged`, `--port-ratio`, and the interactive keys during a scan.
 
