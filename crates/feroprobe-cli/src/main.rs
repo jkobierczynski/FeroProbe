@@ -491,6 +491,11 @@ struct Args {
     #[arg(long, value_name = "TIME", value_parser = parse_duration)]
     scan_delay: Option<Duration>,
 
+    /// The longest delay between probes the scan may set on its own for a
+    /// host that loses many probes, e.g. 100ms [default: from -T; normally 1s]
+    #[arg(long, value_name = "TIME", value_parser = parse_max_scan_delay)]
+    max_scan_delay: Option<Duration>,
+
     /// Give up on a host whose port scan and detection take longer than
     /// this, e.g. 30s or 5m; it is reported without results
     #[arg(long, value_name = "TIME", value_parser = parse_duration)]
@@ -959,6 +964,10 @@ fn parse_rtt(s: &str, name: &str) -> Result<Duration, String> {
     Ok(d)
 }
 
+fn parse_max_scan_delay(s: &str) -> Result<Duration, String> {
+    parse_rtt(s, "--max-scan-delay")
+}
+
 fn parse_min_rtt(s: &str) -> Result<Duration, String> {
     parse_rtt(s, "--min-rtt-timeout")
 }
@@ -1002,6 +1011,7 @@ fn rtt_timeouts(args: &Args) -> RttTimeouts {
 /// The timing template's settings, with any explicit flags on top.
 fn scan_config(args: &Args) -> ScanConfig {
     let base = args.timing.unwrap_or_default().config();
+    let scan_delay = args.scan_delay.unwrap_or(base.scan_delay);
     ScanConfig {
         rtt: rtt_timeouts(args),
         // One set of RTT estimates for the whole run, like nmap's per-target
@@ -1014,7 +1024,16 @@ fn scan_config(args: &Args) -> ScanConfig {
         concurrency: args.concurrency.unwrap_or(base.concurrency).max(1),
         retries: args.retries.unwrap_or(base.retries),
         max_rate: args.max_rate.unwrap_or(base.max_rate).max(1),
-        scan_delay: args.scan_delay.unwrap_or(base.scan_delay),
+        scan_delay,
+        // Like nmap: an explicit --scan-delay above the template's cap
+        // raises it, and --max-scan-delay replaces it. The scan never goes
+        // below --scan-delay whatever the cap.
+        max_scan_delay: args
+            .max_scan_delay
+            .unwrap_or(base.max_scan_delay.max(scan_delay)),
+        max_udp_scan_delay: args
+            .max_scan_delay
+            .unwrap_or(base.max_udp_scan_delay.max(scan_delay)),
         arp_ping: !args.disable_arp_ping,
         deadline: None,
         // One --max-rate for the whole run, like nmap's, however many scans

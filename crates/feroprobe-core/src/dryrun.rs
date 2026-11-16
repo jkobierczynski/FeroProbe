@@ -75,7 +75,7 @@ pub struct DryRun<'a> {
     /// `-sO`: the IP protocol numbers.
     pub protocols: &'a [u8],
     pub evasion: &'a Evasion,
-    /// Unanswered probes are sent this many more times in a real run.
+    /// The most times unanswered probes are resent in a real run.
     pub retries: u32,
     /// `-g`: the source port of raw and UDP probes (random when `None`).
     pub source_port: Option<u16>,
@@ -260,9 +260,12 @@ pub fn write(run: &DryRun<'_>, w: &mut dyn Write) -> io::Result<Summary> {
     summary.scan = out.count - before;
     let retry = if run.retries > 0 {
         format!(
-            "; a real run resends unanswered probes up to {} more time{}",
-            run.retries,
-            if run.retries == 1 { "" } else { "s" }
+            "; a real run resends unanswered probes once{}",
+            if run.retries > 1 {
+                format!(", or up to {} times to hosts that lose probes", run.retries)
+            } else {
+                String::new()
+            }
         )
     } else {
         String::new()
@@ -678,7 +681,7 @@ mod tests {
         assert!(probes[0].ends_with("win=65109"), "{text}");
         assert!(text.contains("skipped (-Pn)"), "{text}");
         assert!(text.contains("nothing sent"), "{text}");
-        assert!(text.contains("up to 1 more time"), "{text}");
+        assert!(text.contains("resends unanswered probes once"), "{text}");
         // No receive side at all.
         assert!(!text.contains("RCVD"), "{text}");
     }

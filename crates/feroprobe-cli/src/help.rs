@@ -56,12 +56,13 @@ TIMING AND PERFORMANCE:
       is measured; after that, each host's wait follows its round-trip times
   --min-rtt-timeout, --max-rtt-timeout <time>: Limits on that adaptive wait
   --timeout <ms>: A fixed wait for each probe (sets all three of the above)
-  --retries, --max-retries <tries>: Extra attempts for probes without an answer
+  --retries, --max-retries <tries>: Most resends of a probe without an answer
   -c, -M, --concurrency, --max-parallelism <number>: Most probes waiting at once
   --min-parallelism <number>: At least <number> probes allowed to wait at once
   --min-rate <number>: Send at least <number> packets per second
   --max-rate <number>: Send at most <number> packets per second
   --scan-delay <time>: Wait at least <time> between probes
+  --max-scan-delay <time>: Longest delay the scan may add for a lossy host
   --host-timeout <time>: Give up on a host after <time>
 OUTPUT:
   -oN/-oX/-oG/-oJ <file>: Write normal, XML, grepable or JSON output to <file>

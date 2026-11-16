@@ -284,7 +284,7 @@ mod imp {
         // Source ports base+1 ..= base+MAX_HOPS stand for TTLs 1 ..= MAX_HOPS.
         let base = 40000 + (rng.next_u32() % 20000) as u16;
         let cookie = rng.next_u32();
-        let rounds = cfg.retries.saturating_add(1).min(256);
+        let rounds = cfg.first_retries().saturating_add(1);
         let ttl_of = move |sport: u16| -> Option<u8> {
             let ttl = sport.checked_sub(base)?;
             (1..=u16::from(MAX_HOPS))

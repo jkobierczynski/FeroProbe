@@ -269,7 +269,7 @@ impl Pacer {
 /// `send` sends one request. `receive` runs on its own thread and returns
 /// the next answer it reads, `Ok(None)` when its read timed out or the
 /// packet was not an answer, or an error that ends the sweep. Rounds repeat
-/// for unanswered targets up to `cfg.retries`; after each round, answers
+/// for unanswered targets up to `cfg.first_retries()`; after each round, answers
 /// are awaited for the run's current probe timeout (see [`crate::rtt`]). `on_reply` gets each target's first
 /// answer and its round-trip time in ms. Stops early when `cancel` is set.
 ///
@@ -335,7 +335,7 @@ where
 
     let mut pending: Vec<A> = targets.to_vec();
     let outcome = (|| -> io::Result<()> {
-        for _ in 0..=cfg.retries {
+        for _ in 0..=cfg.first_retries() {
             let mut pacer = Pacer::for_config(cfg);
             for &a in &pending {
                 if !pacer.wait_or_cancel(cancel) {

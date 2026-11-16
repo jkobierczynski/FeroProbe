@@ -277,7 +277,7 @@ pub async fn detect_udp(addr: SocketAddr, cfg: &ScanConfig, wait: Duration) -> O
     let payload = udp_info::payload(addr.port())?;
     let sock = crate::udp::connected_socket(addr, None).await.ok()?;
     let mut buf = [0u8; 4096];
-    for _ in 0..=cfg.retries {
+    for _ in 0..=cfg.first_retries() {
         pace(cfg.scan_delay).await;
         sock.send(payload).await.ok()?;
         if let Ok(Ok(n)) = tokio::time::timeout(wait, sock.recv(&mut buf)).await {

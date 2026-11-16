@@ -392,13 +392,70 @@ pub(crate) struct Congestion {
     min_rate: u32,
     start: Instant,
     sent: u64,
+    /// Each host's resends and delay between probes, adapted to its
+    /// losses as in nmap.
+    pace: Vec<HostPace>,
+    /// `--max-retries`: the highest try number a probe may reach.
+    retry_cap: u32,
+    /// How far a host's delay may be raised: `--max-scan-delay`.
+    max_delay: Duration,
+    /// Whether the scan has more than one probe; nmap pauses for rate
+    /// limiting only then.
+    several: bool,
+    /// The first raise of a delay that was zero: 5 ms, or 50 ms for UDP.
+    first_boost: Duration,
+    /// A host whose answers come only after this many resends gets a
+    /// longer delay: 3, or 4 with `-T4` and `-T5`.
+    boost_after_tryno: u32,
+    /// The share of answers that came only after a resend above which a
+    /// host's delay is raised: 30 %, or 40 % with `-T4` and `-T5`.
+    drop_ratio: f64,
 }
+
+/// nmap's per-host retransmission and send-delay state
+/// (`max_successful_tryno` and `sdn`).
+#[derive(Debug, Clone, Copy)]
+struct HostPace {
+    /// The highest try number that drew an answer.
+    max_successful_tryno: u32,
+    /// The least time between two probes to this host.
+    delay: Duration,
+    /// When the delay was last raised.
+    last_boost: Instant,
+    /// Answers to resent probes sent after that, and other answers.
+    dropped: u32,
+    good: u32,
+    /// When the last probe went to this host.
+    last_sent: Option<Instant>,
+    /// The highest try number sent to this host so far, and until when
+    /// the host is paused because a higher one was due: nmap's rate
+    /// limit detection (`rld`).
+    max_tryno_sent: u32,
+    paused_until: Option<Instant>,
+}
+
+/// How long a host is paused the first time one of its probes is due for
+/// a higher try than any sent before (nmap's `RLD_TIME_MS`): a host that
+/// limits its answers' rate gets time to recover before the resends.
+const RATE_LIMIT_PAUSE: Duration = Duration::from_secs(1);
 
 impl Congestion {
     /// `work[h]` is how many probes host `h` has to go (first tries).
     pub(crate) fn new(cfg: &ScanConfig, work: Vec<usize>) -> Self {
         let perf = Perf::for_config(cfg);
         let hosts = work.len();
+        let now = Instant::now();
+        let pace = HostPace {
+            max_successful_tryno: 0,
+            delay: cfg.scan_delay,
+            last_boost: now,
+            dropped: 0,
+            good: 0,
+            last_sent: None,
+            max_tryno_sent: 0,
+            paused_until: None,
+        };
+        let fast = cfg.timing_level >= 4;
         Self {
             perf,
             group: Window::new(&perf),
@@ -406,11 +463,86 @@ impl Congestion {
             active: vec![0; hosts],
             active_total: 0,
             incomplete: work.iter().filter(|&&w| w > 0).count(),
+            several: work.iter().sum::<usize>() > 1,
             work,
             min_rate: cfg.min_rate,
-            start: Instant::now(),
+            start: now,
             sent: 0,
+            pace: vec![pace; hosts],
+            retry_cap: cfg.retries,
+            max_delay: cfg.max_scan_delay.max(cfg.scan_delay),
+            first_boost: Duration::from_millis(5),
+            boost_after_tryno: if fast { 4 } else { 3 },
+            drop_ratio: if fast { 0.40 } else { 0.30 },
         }
+    }
+
+    /// For a UDP scan: its delay starts higher when raised (50 ms) and may
+    /// go up to `--max-scan-delay` even with `-T4` and `-T5`, as in nmap.
+    pub(crate) fn for_udp(mut self, cfg: &ScanConfig) -> Self {
+        self.first_boost = Duration::from_millis(50);
+        self.max_delay = cfg.max_udp_scan_delay.max(cfg.scan_delay);
+        self
+    }
+
+    /// The highest try number (0 for the first send) a probe to host `h`
+    /// may reach now: nmap's `allowedTryno`. One resend until a resent
+    /// probe draws an answer, then one more than the highest try that
+    /// did, up to `--max-retries`.
+    pub(crate) fn allowed_tryno(&self, h: usize) -> u32 {
+        (self.pace[h].max_successful_tryno + 1).min(self.retry_cap)
+    }
+
+    /// When host `h`'s delay between probes, or its pause (see
+    /// [`pause_for_try`](Self::pause_for_try)), lets the next probe go, if
+    /// it has either.
+    pub(crate) fn delay_due(&self, h: usize) -> Option<Instant> {
+        let p = &self.pace[h];
+        let delay = if p.delay.is_zero() {
+            None
+        } else {
+            p.last_sent.map(|t| t + p.delay)
+        };
+        delay.max(p.paused_until)
+    }
+
+    /// A probe to host `h` is about to go as try `tryno`. The first time
+    /// a try that high is due, the host is paused for a second instead,
+    /// and this returns true: the probe has to wait. nmap's rate limit
+    /// detection, which lets a host that limits its answers' rate (as
+    /// many do with RSTs and ICMP errors) recover before the resends,
+    /// so their answers do not look like more losses.
+    pub(crate) fn pause_for_try(&mut self, h: usize, tryno: u32, now: Instant) -> bool {
+        let p = &mut self.pace[h];
+        if tryno <= p.max_tryno_sent || !self.several {
+            return false;
+        }
+        p.max_tryno_sent = tryno;
+        p.paused_until = Some(now + RATE_LIMIT_PAUSE);
+        true
+    }
+
+    /// Host `h`'s current delay between probes.
+    #[cfg(test)]
+    pub(crate) fn host_delay(&self, h: usize) -> Duration {
+        self.pace[h].delay
+    }
+
+    /// Raise host `h`'s delay: nmap's `boostScanDelay`.
+    fn boost(&mut self, h: usize, now: Instant) {
+        let second = Duration::from_secs(1);
+        let p = &mut self.pace[h];
+        if p.delay < second {
+            p.delay = if p.delay.is_zero() {
+                self.first_boost
+            } else {
+                (p.delay * 2).min(second)
+            };
+        }
+        p.delay = p.delay.min(self.max_delay);
+        p.last_boost = now;
+        p.dropped = 0;
+        p.good = 0;
     }
 
     /// Whether `--min-rate` needs a probe to go now, window or not.
@@ -435,13 +567,22 @@ impl Congestion {
         self.incomplete < 2 || self.group.has_room(self.active_total)
     }
 
-    /// Whether a probe to host `h` may go now.
-    pub(crate) fn may_send(&self, h: usize, now: Instant) -> bool {
-        (self.host_has_room(h) && self.group_has_room()) || self.behind_min_rate(now)
+    /// Whether host `h`'s delay between probes has passed.
+    fn delay_passed(&self, h: usize, now: Instant) -> bool {
+        self.delay_due(h).is_none_or(|due| now >= due)
     }
 
-    /// A probe to host `h` went out.
-    pub(crate) fn sent(&mut self, h: usize) {
+    /// Whether a probe to host `h` may go now. A host's delay between
+    /// probes holds even `--min-rate` back, to stay gentle with a host
+    /// that is losing probes.
+    pub(crate) fn may_send(&self, h: usize, now: Instant) -> bool {
+        self.delay_passed(h, now)
+            && ((self.host_has_room(h) && self.group_has_room()) || self.behind_min_rate(now))
+    }
+
+    /// A probe to host `h` went out at `now`.
+    pub(crate) fn sent(&mut self, h: usize, now: Instant) {
+        self.pace[h].last_sent = Some(now);
         self.active[h] += 1;
         self.active_total += 1;
         self.sent += 1;
@@ -492,6 +633,36 @@ impl Congestion {
             self.group.ack(&self.perf);
             self.hosts[h].ack(&self.perf);
         }
+        self.adjust_pace(h, sent, tryno, outcome != Outcome::TimedOut, now);
+    }
+
+    /// nmap's send-delay and retry bookkeeping for one probe. An answer
+    /// that came only after a resend means the first copy (or its answer)
+    /// was lost. When over 10 such answers make up more than 30 % (40 %
+    /// with `-T4` and `-T5`) of the host's answers since its delay last
+    /// changed, the delay goes up; it also goes up when the host answers
+    /// only after more than 3 (4) resends. Answers to resends also let the
+    /// host's probes be resent more times.
+    /// Only answers to resends sent since the delay last changed count
+    /// against it.
+    fn adjust_pace(&mut self, h: usize, sent: Instant, tryno: u32, answered: bool, now: Instant) {
+        let p = &mut self.pace[h];
+        let dropped = tryno > 0 && answered;
+        if dropped && sent > p.last_boost {
+            p.dropped += 1;
+        } else if answered {
+            p.good += 1;
+        }
+        if p.dropped > 10 && f64::from(p.dropped) / f64::from(p.dropped + p.good) > self.drop_ratio
+        {
+            self.boost(h, now);
+        }
+        if answered && tryno > self.pace[h].max_successful_tryno {
+            self.pace[h].max_successful_tryno = tryno;
+            if tryno > self.boost_after_tryno {
+                self.boost(h, now);
+            }
+        }
     }
 
     #[cfg(test)]
@@ -528,28 +699,47 @@ struct Sent {
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 /// The send loop of a raw scan, keyed by (host index, port or protocol):
 /// which probe goes next given the congestion windows, when each waiting
-/// probe times out given the hosts' RTT estimates, and the bookkeeping
-/// for both. The scan still does the sending and the receiving.
+/// probe times out given the hosts' RTT estimates, which probes to send
+/// again, and the bookkeeping for all of it. The scan still does the
+/// sending and the receiving.
 ///
-/// Probes go out in the order given to [`start_round`](Self::start_round);
-/// a probe whose host's window is full is held back, and goes as soon as
-/// that host has room, so one slow host does not hold up the others.
+/// First tries go out in the order given to [`start`](Self::start). Like
+/// nmap's scan engine, a probe that times out is sent again as soon as
+/// its host may send, ahead of first tries, while its host allows another
+/// try ([`Congestion::allowed_tryno`]); otherwise it waits on a bench in
+/// case the host's allowance grows, and gives up once nothing for that
+/// host could make it grow. A probe whose host's window is full is held
+/// back, and goes as soon as that host has room, so one slow host does
+/// not hold up the others.
 pub(crate) struct Flight<K> {
     addrs: Vec<IpAddr>,
     limits: RttTimeouts,
     scan_delay: Duration,
     state: RttState,
     cc: Congestion,
-    tryno: u32,
+    /// First tries not yet handed out.
     queue: VecDeque<(usize, K)>,
-    held: HashMap<usize, VecDeque<K>>,
+    /// Probes due to be sent again.
+    retry: VecDeque<(usize, K)>,
+    /// Probes held back by their host's window or delay.
+    held: std::collections::BTreeMap<usize, VecDeque<K>>,
+    /// Probes not yet handed out (queued, due again or held), per host.
+    unsent: Vec<usize>,
+    /// Probes out of tries for now, per host, and how many in all.
+    bench: Vec<Vec<K>>,
+    benched: usize,
     probes: HashMap<(usize, K), Sent>,
+    /// When each earlier try of a resent probe went out, to time answers
+    /// that name their try.
+    earlier: HashMap<(usize, K), Vec<Instant>>,
     settled: std::collections::HashSet<(usize, K)>,
     /// Probes still waiting for an answer, per host.
     waiting: Vec<Vec<K>>,
     /// The hosts with probes waiting, so timing out costs no more than
     /// the probes in flight, however many hosts the scan has.
     busy: std::collections::BTreeSet<usize>,
+    /// Hosts that need nothing more (proven up during discovery).
+    retired: Vec<bool>,
 }
 
 // Used by the raw scans, which are Linux only.
@@ -558,27 +748,40 @@ impl<K: Copy + Eq + Hash> Flight<K> {
     /// A flight over `addrs`, with `per_host[h]` first-try probes to send
     /// to host `h`.
     pub(crate) fn new(cfg: &ScanConfig, addrs: &[IpAddr], per_host: Vec<usize>) -> Self {
+        let hosts = addrs.len();
         Self {
             addrs: addrs.to_vec(),
             limits: cfg.rtt,
             scan_delay: cfg.scan_delay,
             state: cfg.rtt_state.clone(),
             cc: Congestion::new(cfg, per_host),
-            tryno: 0,
             queue: VecDeque::new(),
-            held: HashMap::new(),
+            retry: VecDeque::new(),
+            held: std::collections::BTreeMap::new(),
+            unsent: vec![0; hosts],
+            bench: vec![Vec::new(); hosts],
+            benched: 0,
             probes: HashMap::new(),
+            earlier: HashMap::new(),
             settled: std::collections::HashSet::new(),
-            waiting: vec![Vec::new(); addrs.len()],
+            waiting: vec![Vec::new(); hosts],
             busy: std::collections::BTreeSet::new(),
+            retired: vec![false; hosts],
         }
     }
 
-    /// Queue the probes of try `tryno` (0 for the first), in sending order.
-    pub(crate) fn start_round(&mut self, probes: impl IntoIterator<Item = (usize, K)>, tryno: u32) {
-        self.tryno = tryno;
-        self.queue = probes.into_iter().collect();
-        self.held.clear();
+    /// Queue the first tries, in sending order.
+    pub(crate) fn start(&mut self, probes: impl IntoIterator<Item = (usize, K)>) {
+        for (h, k) in probes {
+            self.unsent[h] += 1;
+            self.queue.push_back((h, k));
+        }
+    }
+
+    /// Whether probe `(h, k)` has been sent before, so sending it now is
+    /// a resend.
+    pub(crate) fn is_resend(&self, h: usize, k: K) -> bool {
+        self.probes.contains_key(&(h, k))
     }
 
     /// The timeout for a probe to host `h` now.
@@ -587,7 +790,8 @@ impl<K: Copy + Eq + Hash> Flight<K> {
             .timeout(self.addrs[h], &self.limits, self.scan_delay)
     }
 
-    /// Time out the waiting probes whose time is up.
+    /// Time out the waiting probes whose time is up, and line up their
+    /// resends.
     pub(crate) fn expire(&mut self, now: Instant) {
         let busy: Vec<usize> = self.busy.iter().copied().collect();
         for h in busy {
@@ -605,11 +809,61 @@ impl<K: Copy + Eq + Hash> Flight<K> {
                     self.waiting[h].swap_remove(i);
                     self.cc.finished_waiting(h);
                     self.cc.adjust(h, at, tryno, Outcome::TimedOut, now);
+                    self.timed_out(h, k, tryno);
                 } else {
                     i += 1;
                 }
             }
             self.sync_busy(h);
+            self.tidy(h);
+        }
+    }
+
+    /// Probe `(h, k)`, sent as try `tryno`, timed out: send it again if
+    /// its host allows another try, else bench it.
+    fn timed_out(&mut self, h: usize, k: K, tryno: u32) {
+        if self.retired[h] || self.settled.contains(&(h, k)) {
+            return;
+        }
+        if tryno < self.cc.allowed_tryno(h) {
+            self.unsent[h] += 1;
+            self.retry.push_back((h, k));
+        } else {
+            self.bench[h].push(k);
+            self.benched += 1;
+        }
+    }
+
+    /// Host `h`'s bench: back in line once its allowance has grown past
+    /// a benched probe's try, given up once nothing could make it grow
+    /// (no probe of the host is waiting or unsent). nmap's
+    /// `retransmitBench` and `dismissBench`.
+    fn tidy(&mut self, h: usize) {
+        if self.bench[h].is_empty() {
+            return;
+        }
+        let allowed = self.cc.allowed_tryno(h);
+        let bench = std::mem::take(&mut self.bench[h]);
+        self.benched -= bench.len();
+        for k in bench {
+            let tryno = self.probes[&(h, k)].tryno;
+            if self.settled.contains(&(h, k)) {
+                continue;
+            }
+            if tryno < allowed {
+                self.unsent[h] += 1;
+                self.retry.push_back((h, k));
+            } else {
+                self.bench[h].push(k);
+                self.benched += 1;
+            }
+        }
+        if self.waiting[h].is_empty() && self.unsent[h] == 0 {
+            let bench = std::mem::take(&mut self.bench[h]);
+            self.benched -= bench.len();
+            for k in bench {
+                self.settle(h, k);
+            }
         }
     }
 
@@ -637,48 +891,121 @@ impl<K: Copy + Eq + Hash> Flight<K> {
     }
 
     /// Whether any probe is still waiting for its answer.
+    #[cfg(test)]
     pub(crate) fn any_waiting(&self) -> bool {
         !self.busy.is_empty()
     }
 
+    /// Whether resending probe `(h, k)` has to wait for its host's pause
+    /// first (see [`Congestion::pause_for_try`]).
+    fn pauses(&mut self, h: usize, k: K, now: Instant) -> bool {
+        match self.probes.get(&(h, k)) {
+            Some(p) => self.cc.pause_for_try(h, p.tryno + 1, now),
+            None => false,
+        }
+    }
+
+    /// Hold back resend `(h, k)` while its host may not send: behind the
+    /// host's other held resends, ahead of its held first tries.
+    fn hold_resend(&mut self, h: usize, k: K) {
+        let q = self.held.entry(h).or_default();
+        let probes = &self.probes;
+        let at = q
+            .iter()
+            .position(|x| !probes.contains_key(&(h, *x)))
+            .unwrap_or(q.len());
+        q.insert(at, k);
+    }
+
+    /// Hand out probe `(h, k)`: it is no longer unsent.
+    fn hand_out(&mut self, h: usize, k: K) -> Next<K> {
+        self.unsent[h] -= 1;
+        Next::Send(h, k)
+    }
+
     /// The next probe to send, after timing out the probes whose time is
-    /// up. `Wait` gives the moment something can change on its own (a
-    /// timeout or `--min-rate`); an answer can change it sooner.
+    /// up: resends first, as in nmap, then held probes, then first tries.
+    /// `Wait` gives the moment something can change on its own (a
+    /// timeout, a host's delay or pause, or `--min-rate`); an answer can
+    /// change it sooner. `Idle` means every probe is settled.
     pub(crate) fn next(&mut self, now: Instant) -> Next<K> {
         self.expire(now);
-        // Held probes first: they have waited longest.
+        // Resends first: a host that loses probes gets its losses made up
+        // before it is sent more.
+        while let Some(&(h, k)) = self.retry.front() {
+            self.retry.pop_front();
+            if self.settled.contains(&(h, k)) {
+                self.unsent[h] -= 1;
+                self.tidy(h);
+                continue;
+            }
+            if self.cc.may_send(h, now) && !self.pauses(h, k, now) {
+                return self.hand_out(h, k);
+            }
+            self.hold_resend(h, k);
+            if !self.cc.group_has_room() && !self.cc.behind_min_rate(now) {
+                break;
+            }
+        }
+        // Then held probes: they have waited longest.
         if self.cc.group_has_room() || self.cc.behind_min_rate(now) {
-            let ready = self
-                .held
-                .iter()
-                .find(|(h, q)| !q.is_empty() && self.cc.may_send(**h, now))
-                .map(|(h, _)| *h);
-            if let Some(h) = ready {
+            loop {
+                let ready = self
+                    .held
+                    .iter()
+                    .find(|(h, q)| !q.is_empty() && self.cc.may_send(**h, now))
+                    .map(|(h, _)| *h);
+                let Some(h) = ready else { break };
                 let q = self.held.get_mut(&h).expect("ready host is held");
                 let k = q.pop_front().expect("ready queue is not empty");
                 if q.is_empty() {
                     self.held.remove(&h);
                 }
-                return Next::Send(h, k);
+                if self.settled.contains(&(h, k)) {
+                    self.unsent[h] -= 1;
+                    self.tidy(h);
+                    continue;
+                }
+                if self.pauses(h, k, now) {
+                    self.held.entry(h).or_default().push_front(k);
+                    continue;
+                }
+                return self.hand_out(h, k);
             }
         }
+        // Then first tries.
         while let Some(&(h, k)) = self.queue.front() {
             if self.cc.may_send(h, now) {
                 self.queue.pop_front();
-                return Next::Send(h, k);
+                return self.hand_out(h, k);
             }
             if !self.cc.group_has_room() && !self.cc.behind_min_rate(now) {
                 break;
             }
-            // Only this host is full: hold its probe, try the next one.
+            // Only this host is held back: hold its probe, try the next.
             self.queue.pop_front();
             self.held.entry(h).or_default().push_back(k);
         }
-        if self.queue.is_empty() && self.held.is_empty() {
+        if self.queue.is_empty()
+            && self.retry.is_empty()
+            && self.held.is_empty()
+            && self.busy.is_empty()
+            && self.benched == 0
+        {
             return Next::Idle;
         }
         let soon = now + crate::timing::CANCEL_POLL;
-        let due = [self.next_expiry(), self.cc.min_rate_due()]
+        // A host held back only by its delay between probes is free again
+        // when the delay has passed.
+        let delays = self
+            .held
+            .keys()
+            .copied()
+            .chain(self.queue.front().map(|&(h, _)| h))
+            .chain(self.retry.front().map(|&(h, _)| h))
+            .filter_map(|h| self.cc.delay_due(h))
+            .min();
+        let due = [self.next_expiry(), self.cc.min_rate_due(), delays]
             .into_iter()
             .flatten()
             .min()
@@ -686,26 +1013,44 @@ impl<K: Copy + Eq + Hash> Flight<K> {
         Next::Wait(due.max(now))
     }
 
-    /// Probe `(h, k)` went out at `at`.
+    /// The highest try number a probe to host `h` may reach now (see
+    /// [`Congestion::allowed_tryno`]).
+    #[cfg(test)]
+    pub(crate) fn allowed_tryno(&self, h: usize) -> u32 {
+        self.cc.allowed_tryno(h)
+    }
+
+    /// The try number of probe `(h, k)`'s latest send (0 for the first).
+    pub(crate) fn tryno(&self, h: usize, k: K) -> u32 {
+        self.probes.get(&(h, k)).map_or(0, |p| p.tryno)
+    }
+
+    /// Probe `(h, k)` went out at `at`: its first try, or one more.
     pub(crate) fn sent(&mut self, h: usize, k: K, at: Instant) {
-        if let Some(old) = self.probes.get(&(h, k))
-            && old.waiting
-        {
-            // Sent again while the earlier copy still waits: one entry.
-            self.waiting[h].retain(|x| *x != k);
-            self.cc.finished_waiting(h);
-        }
+        let tryno = match self.probes.get(&(h, k)) {
+            Some(old) => {
+                if old.waiting {
+                    // Sent again while the earlier copy still waits: one entry.
+                    self.waiting[h].retain(|x| *x != k);
+                    self.cc.finished_waiting(h);
+                }
+                let (prev, tryno) = (old.at, old.tryno + 1);
+                self.earlier.entry((h, k)).or_default().push(prev);
+                tryno
+            }
+            None => 0,
+        };
         self.probes.insert(
             (h, k),
             Sent {
                 at,
-                tryno: self.tryno,
+                tryno,
                 waiting: true,
             },
         );
         self.waiting[h].push(k);
         self.busy.insert(h);
-        self.cc.sent(h);
+        self.cc.sent(h, at);
     }
 
     /// Probe `(h, k)` will not be sent again (answered, unreachable, or
@@ -722,25 +1067,35 @@ impl<K: Copy + Eq + Hash> Flight<K> {
         if self.settled.insert((h, k)) {
             self.cc.settled(h);
         }
+        self.tidy(h);
     }
 
     /// The first answer to probe `(h, k)` came in at `at`: measure its
     /// round trip, move the windows and settle the probe. `filtered_error`
-    /// marks an ICMP error in a scan where silence means filtered. Returns
-    /// the round-trip time, if the probe was sent.
+    /// marks an ICMP error in a scan where silence means filtered.
+    /// `answers_try` is the try the answer names, when the probes carry
+    /// their try number (the raw TCP scans); else the latest is assumed.
+    /// Returns the round-trip time, if that try was sent.
     pub(crate) fn answered(
         &mut self,
         h: usize,
         k: K,
         at: Instant,
         filtered_error: bool,
+        answers_try: Option<u32>,
     ) -> Option<Duration> {
         let p = *self.probes.get(&(h, k))?;
-        let rtt = at.saturating_duration_since(p.at);
-        // A resent probe goes out with the same contents, so its answer
-        // may belong to an earlier copy: only first tries are timed
-        // (Karn's rule; nmap tells its tries apart, we cannot).
-        if p.tryno == 0 {
+        let (tryno, sent_at) = match answers_try {
+            None => (p.tryno, p.at),
+            Some(t) if t == p.tryno => (t, p.at),
+            Some(t) if t < p.tryno => (t, *self.earlier.get(&(h, k))?.get(t as usize)?),
+            Some(_) => return None,
+        };
+        let rtt = at.saturating_duration_since(sent_at);
+        // Without try numbers, an answer to a resent probe may belong to an
+        // earlier copy: only first tries are timed then (Karn's rule). With
+        // them every answer is timed, as in nmap.
+        if answers_try.is_some() || tryno == 0 {
             self.state
                 .observe(self.addrs[h], rtt, &self.limits, self.scan_delay);
         }
@@ -758,17 +1113,21 @@ impl<K: Copy + Eq + Hash> Flight<K> {
         } else {
             Outcome::Answered
         };
-        self.cc.adjust(h, p.at, p.tryno, outcome, at);
+        self.cc.adjust(h, sent_at, tryno, outcome, at);
         if self.settled.insert((h, k)) {
             self.cc.settled(h);
         }
+        // The answer may have let the host's benched probes try again.
+        self.tidy(h);
         Some(rtt)
     }
 
-    /// Stop waiting for host `h`'s probes: it needs nothing more (proven
-    /// up during discovery). Its probes still queued come out of
-    /// [`next`](Self::next) as usual, for the scan to skip and settle.
+    /// Stop waiting for host `h`'s probes and resending them: it needs
+    /// nothing more (proven up during discovery). Its first tries still
+    /// queued come out of [`next`](Self::next) as usual, for the scan to
+    /// skip and settle.
     pub(crate) fn retire_host(&mut self, h: usize) {
+        self.retired[h] = true;
         for k in std::mem::take(&mut self.waiting[h]) {
             if let Some(p) = self.probes.get_mut(&(h, k)) {
                 p.waiting = false;
@@ -776,6 +1135,34 @@ impl<K: Copy + Eq + Hash> Flight<K> {
             self.cc.finished_waiting(h);
         }
         self.busy.remove(&h);
+        let mut give_up: Vec<K> = std::mem::take(&mut self.bench[h]);
+        self.benched -= give_up.len();
+        let before = self.retry.len();
+        self.retry.retain(|&(x, k)| {
+            if x == h {
+                give_up.push(k);
+            }
+            x != h
+        });
+        self.unsent[h] -= before - self.retry.len();
+        if let Some(q) = self.held.get_mut(&h) {
+            let probes = &self.probes;
+            let held_before = q.len();
+            q.retain(|k| {
+                let resend = probes.contains_key(&(h, *k));
+                if resend {
+                    give_up.push(*k);
+                }
+                !resend
+            });
+            self.unsent[h] -= held_before - q.len();
+            if q.is_empty() {
+                self.held.remove(&h);
+            }
+        }
+        for k in give_up {
+            self.settle(h, k);
+        }
     }
 
     #[cfg(test)]
@@ -818,13 +1205,29 @@ impl AsyncWindow {
         self
     }
 
+    /// For a UDP scan (see [`Congestion::for_udp`]).
+    pub(crate) fn for_udp(self, cfg: &ScanConfig) -> Self {
+        let cc = self.cc.into_inner().unwrap_or_else(|e| e.into_inner());
+        Self {
+            cc: Mutex::new(cc.for_udp(cfg)),
+            ..self
+        }
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, Congestion> {
         self.cc.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Wait until a probe to host `h` may go, and count it as sent. `None`
-    /// when the host's probes are to be skipped (see [`with_skip`](Self::with_skip)).
-    pub(crate) async fn acquire(&self, h: usize) -> Option<Slot<'_>> {
+    /// The highest try number a probe to host `h` may reach now (see
+    /// [`Congestion::allowed_tryno`]).
+    pub(crate) fn allowed_tryno(&self, h: usize) -> u32 {
+        self.lock().allowed_tryno(h)
+    }
+
+    /// Wait until try `tryno` (0 for the first) of a probe to host `h` may
+    /// go, and count it as sent. `None` when the host's probes are to be
+    /// skipped (see [`with_skip`](Self::with_skip)).
+    pub(crate) async fn acquire(&self, h: usize, tryno: u32) -> Option<Slot<'_>> {
         loop {
             if self.skip.as_ref().is_some_and(|skip| skip(h)) {
                 return None;
@@ -835,15 +1238,22 @@ impl AsyncWindow {
             let due = {
                 let mut cc = self.lock();
                 let now = Instant::now();
-                if cc.may_send(h, now) {
-                    cc.sent(h);
+                // A first resend this high pauses the host first.
+                let paused = cc.pause_for_try(h, tryno, now);
+                if !paused && cc.may_send(h, now) {
+                    cc.sent(h, now);
                     return Some(Slot {
                         window: self,
                         h,
                         done: false,
                     });
                 }
-                cc.min_rate_due()
+                // Wake for --min-rate or the host's delay between probes,
+                // whichever comes first; answers wake it sooner.
+                [cc.min_rate_due(), cc.delay_due(h)]
+                    .into_iter()
+                    .flatten()
+                    .min()
             };
             match due {
                 Some(due) => {
@@ -1002,10 +1412,15 @@ mod tests {
         let addrs: Vec<IpAddr> = vec!["10.0.0.1".parse().unwrap()];
         let mut f: Flight<u16> = Flight::new(&cfg, &addrs, vec![1]);
         let now = Instant::now();
-        f.start_round([(0, 80)], 1);
+        f.start([(0, 80)]);
         assert_eq!(f.next(now), Next::Send(0, 80));
         f.sent(0, 80, now);
-        assert_eq!(f.answered(0, 80, now + ms(3), false), Some(ms(3)));
+        // It times out (1 s initial timeout) and goes again.
+        let again = now + ms(1500);
+        assert_eq!(f.next(again), Next::Send(0, 80));
+        assert!(f.is_resend(0, 80));
+        f.sent(0, 80, again);
+        assert_eq!(f.answered(0, 80, again + ms(3), false, None), Some(ms(3)));
         assert_eq!(cfg.rtt_state.srtt(addrs[0]), None);
     }
 
@@ -1043,6 +1458,303 @@ mod tests {
     }
 
     #[test]
+    fn resends_grow_with_answered_resends_like_nmap() {
+        let now = Instant::now();
+        let mut cc = Congestion::new(&cfg(500, 3), vec![100, 100]);
+        // One resend until a resend is answered.
+        assert_eq!(cc.allowed_tryno(0), 1);
+        cc.adjust(0, now, 0, Outcome::Answered, now);
+        cc.adjust(0, now, 0, Outcome::TimedOut, now);
+        assert_eq!(cc.allowed_tryno(0), 1);
+        // An answer to try 1: up to try 2, for this host only.
+        cc.adjust(0, now, 1, Outcome::Answered, now);
+        assert_eq!((cc.allowed_tryno(0), cc.allowed_tryno(1)), (2, 1));
+        // Timeouts and ICMP errors to resends (filtered scans) do not count.
+        cc.adjust(0, now, 2, Outcome::TimedOut, now);
+        cc.adjust(0, now, 2, Outcome::FilteredError, now);
+        assert_eq!(cc.allowed_tryno(0), 2);
+        // Never past --max-retries.
+        for tryno in 2..20 {
+            cc.adjust(0, now, tryno, Outcome::Answered, now);
+        }
+        assert_eq!(cc.allowed_tryno(0), 10);
+        let capped = ScanConfig {
+            retries: 0,
+            ..cfg(500, 3)
+        };
+        assert_eq!(Congestion::new(&capped, vec![1]).allowed_tryno(0), 0);
+    }
+
+    #[test]
+    fn late_answers_raise_the_delay_like_nmap() {
+        let ms = Duration::from_millis;
+        let start = Instant::now();
+        let later = start + ms(1);
+        let mut cc = Congestion::new(&cfg(500, 3), vec![100]);
+        assert_eq!(cc.host_delay(0), Duration::ZERO);
+        // Answers after 1, 2 and 3 resends: no delay yet.
+        for tryno in 1..=3 {
+            cc.adjust(0, later, tryno, Outcome::Answered, later);
+        }
+        assert_eq!(cc.host_delay(0), Duration::ZERO);
+        // After 4 (more than 3 at -T3): 5 ms.
+        cc.adjust(0, later, 4, Outcome::Answered, later);
+        assert_eq!(cc.host_delay(0), ms(5));
+        // -T4 waits for more than 4.
+        let mut fast = Congestion::new(&cfg(500, 4), vec![100]);
+        fast.adjust(0, later, 4, Outcome::Answered, later);
+        assert_eq!(fast.host_delay(0), Duration::ZERO);
+        fast.adjust(0, later, 5, Outcome::Answered, later);
+        assert_eq!(fast.host_delay(0), ms(5));
+        // But -T4 caps TCP delays at 10 ms.
+        let t4 = crate::timing::Timing::Aggressive.config();
+        let mut fast = Congestion::new(&t4, vec![100]);
+        for _ in 0..5 {
+            fast.boost(0, later);
+        }
+        assert_eq!(fast.host_delay(0), ms(10));
+        // UDP starts at 50 ms and keeps the 1 s cap even at -T4.
+        let mut udp = Congestion::new(&t4, vec![100]).for_udp(&t4);
+        udp.boost(0, later);
+        assert_eq!(udp.host_delay(0), ms(50));
+        for _ in 0..10 {
+            udp.boost(0, later);
+        }
+        assert_eq!(udp.host_delay(0), ms(1000));
+    }
+
+    #[test]
+    fn many_resent_answers_raise_the_delay() {
+        let ms = Duration::from_millis;
+        let start = Instant::now();
+        let mut cc = Congestion::new(&cfg(500, 3), vec![1000]);
+        let at = |n: u64| start + ms(n);
+        // 10 answers to resends are not enough...
+        for n in 1..=10 {
+            cc.adjust(0, at(n), 1, Outcome::Answered, at(n));
+        }
+        assert_eq!(cc.host_delay(0), Duration::ZERO);
+        // ... the 11th, at over 30 % of answers, is.
+        cc.adjust(0, at(11), 1, Outcome::Answered, at(11));
+        assert_eq!(cc.host_delay(0), ms(5));
+        // The count starts over. Answers to probes sent before the raise
+        // count as good ones, and plenty of good answers keep the ratio
+        // under 30 %.
+        for n in 1..=30 {
+            cc.adjust(0, at(n), 0, Outcome::Answered, at(20 + n));
+        }
+        for n in 12..=23 {
+            cc.adjust(0, at(n), 1, Outcome::Answered, at(60 + n));
+        }
+        assert_eq!(cc.host_delay(0), ms(5));
+        // Then the ratio passes 30 %: doubled.
+        for n in 24..=40 {
+            cc.adjust(0, at(n), 1, Outcome::Answered, at(100 + n));
+        }
+        assert_eq!(cc.host_delay(0), ms(10));
+    }
+
+    #[test]
+    fn the_delay_holds_probes_back_and_starts_at_scan_delay() {
+        let ms = Duration::from_millis;
+        let now = Instant::now();
+        let gentle = ScanConfig {
+            scan_delay: ms(200),
+            max_scan_delay: ms(10),
+            ..cfg(500, 3)
+        };
+        let mut cc = Congestion::new(&gentle, vec![10, 10]);
+        assert_eq!(cc.host_delay(0), ms(200));
+        assert!(cc.may_send(0, now));
+        cc.sent(0, now);
+        assert!(!cc.may_send(0, now + ms(100)), "sent within the delay");
+        assert!(cc.may_send(1, now + ms(100)), "the delay is per host");
+        assert_eq!(cc.delay_due(0), Some(now + ms(200)));
+        assert!(cc.may_send(0, now + ms(200)));
+        // --scan-delay above --max-scan-delay raises the cap to itself, so
+        // a raise leaves it there, and never takes it lower.
+        cc.boost(0, now);
+        assert_eq!(cc.host_delay(0), ms(200));
+        // Even --min-rate waits for it.
+        let rushed = ScanConfig {
+            min_rate: 1_000_000,
+            ..gentle
+        };
+        let mut cc = Congestion::new(&rushed, vec![10]);
+        cc.sent(0, now);
+        assert!(!cc.may_send(0, now + ms(100)));
+    }
+
+    #[test]
+    fn flight_resends_only_what_the_host_allows() {
+        let ms = Duration::from_millis;
+        let a: IpAddr = "10.0.0.1".parse().unwrap();
+        let b: IpAddr = "10.0.0.2".parse().unwrap();
+        let cfg = ScanConfig {
+            rtt: RttTimeouts::fixed(ms(100)),
+            ..cfg(500, 3)
+        };
+        let mut f: Flight<u16> = Flight::new(&cfg, &[a, b], vec![2, 2]);
+        let t0 = Instant::now();
+        f.start([(0, 1), (0, 2), (1, 1), (1, 2)]);
+        let send_all = |f: &mut Flight<u16>, t: Instant| {
+            let mut out = Vec::new();
+            while let Next::Send(h, k) = f.next(t) {
+                f.sent(h, k, t);
+                out.push((h, k));
+            }
+            out
+        };
+        assert_eq!(send_all(&mut f, t0).len(), 4);
+        // All four time out. The first resends wait out each host's pause,
+        // then go.
+        let t1 = t0 + ms(150);
+        assert_eq!(send_all(&mut f, t1), vec![]);
+        let t1 = t1 + RATE_LIMIT_PAUSE;
+        assert_eq!(send_all(&mut f, t1), vec![(0, 1), (0, 2), (1, 1), (1, 2)]);
+        // Host 0 answers a resend: it may now resend a second time.
+        f.answered(0, 1, t1 + ms(5), false, None);
+        assert_eq!(f.allowed_tryno(0), 2);
+        assert_eq!(f.allowed_tryno(1), 1);
+        // So its other probe goes a third time, after another pause; host
+        // 1's give up.
+        let t2 = t1 + ms(150);
+        assert_eq!(send_all(&mut f, t2), vec![]);
+        assert!(f.settled.contains(&(1, 1)) && f.settled.contains(&(1, 2)));
+        let t2 = t2 + RATE_LIMIT_PAUSE;
+        assert_eq!(send_all(&mut f, t2), vec![(0, 2)]);
+        // That one times out too, and the scan is over.
+        assert_eq!(f.next(t2 + ms(150)), Next::Idle);
+    }
+
+    #[test]
+    fn flight_resends_a_benched_probe_when_the_host_allows_more() {
+        let ms = Duration::from_millis;
+        let a: IpAddr = "10.0.0.1".parse().unwrap();
+        let cfg = ScanConfig {
+            rtt: RttTimeouts::fixed(ms(100)),
+            ..cfg(500, 3)
+        };
+        let mut f: Flight<u16> = Flight::new(&cfg, &[a], vec![2]);
+        let t0 = Instant::now();
+        f.start([(0, 1), (0, 2)]);
+        for k in [1, 2] {
+            assert_eq!(f.next(t0), Next::Send(0, k));
+            f.sent(0, k, t0);
+        }
+        // Both go again after the host's pause, port 2 a little later.
+        assert!(matches!(f.next(t0 + ms(150)), Next::Wait(_)));
+        let t1 = t0 + ms(150) + RATE_LIMIT_PAUSE;
+        assert_eq!(f.next(t1), Next::Send(0, 1));
+        f.sent(0, 1, t1);
+        assert_eq!(f.next(t1 + ms(50)), Next::Send(0, 2));
+        f.sent(0, 2, t1 + ms(50));
+        // Port 1's resend times out: one resend is all it may have, so it
+        // waits on the bench while port 2's resend is still out.
+        assert!(matches!(f.next(t1 + ms(120)), Next::Wait(_)));
+        assert!(!f.settled.contains(&(0, 1)));
+        // Port 2's resend is answered: the host loses packets, so port 1
+        // goes a third time, after a pause for the new try.
+        f.answered(0, 2, t1 + ms(130), false, None);
+        assert!(matches!(f.next(t1 + ms(130)), Next::Wait(_)));
+        assert_eq!(f.next(t1 + ms(130) + RATE_LIMIT_PAUSE), Next::Send(0, 1));
+    }
+
+    #[test]
+    fn resends_go_before_first_tries_after_a_pause() {
+        let ms = Duration::from_millis;
+        let cfg = ScanConfig {
+            rtt: RttTimeouts::fixed(ms(100)),
+            ..cfg(2, 3)
+        };
+        let a: IpAddr = "10.0.0.1".parse().unwrap();
+        let mut f: Flight<u16> = Flight::new(&cfg, &[a], vec![4]);
+        let t0 = Instant::now();
+        f.start([(0, 1), (0, 2), (0, 3), (0, 4)]);
+        // A window of two: ports 1 and 2 go.
+        for k in [1, 2] {
+            assert_eq!(f.next(t0), Next::Send(0, k));
+            f.sent(0, k, t0);
+        }
+        // Both time out. The host is paused for a second before the first
+        // resend, so a host that limits its answers' rate can recover;
+        // nothing goes then, not even a first try.
+        let t1 = t0 + ms(150);
+        let Next::Wait(until) = f.next(t1) else {
+            panic!("the host should be paused");
+        };
+        assert_eq!(until, t1 + RATE_LIMIT_PAUSE);
+        // Then the resends go first, in order, before ports 3 and 4.
+        let t2 = t1 + RATE_LIMIT_PAUSE;
+        assert_eq!(f.next(t2), Next::Send(0, 1));
+        f.sent(0, 1, t2);
+        assert_eq!(f.next(t2), Next::Send(0, 2));
+        assert!(f.is_resend(0, 2));
+    }
+
+    #[test]
+    fn a_single_probe_is_resent_without_a_pause() {
+        let ms = Duration::from_millis;
+        let cfg = ScanConfig {
+            rtt: RttTimeouts::fixed(ms(100)),
+            ..cfg(500, 3)
+        };
+        let a: IpAddr = "10.0.0.1".parse().unwrap();
+        let mut f: Flight<u16> = Flight::new(&cfg, &[a], vec![1]);
+        let t0 = Instant::now();
+        f.start([(0, 80)]);
+        assert_eq!(f.next(t0), Next::Send(0, 80));
+        f.sent(0, 80, t0);
+        assert_eq!(f.next(t0 + ms(150)), Next::Send(0, 80));
+    }
+
+    #[test]
+    fn answers_naming_their_try_are_timed_from_that_try() {
+        let ms = Duration::from_millis;
+        let cfg = ScanConfig {
+            rtt: RttTimeouts::fixed(ms(100)),
+            ..cfg(500, 3)
+        };
+        let addrs: Vec<IpAddr> = vec!["10.0.0.1".parse().unwrap()];
+        let mut f: Flight<u16> = Flight::new(&cfg, &addrs, vec![1]);
+        let t0 = Instant::now();
+        f.start([(0, 80)]);
+        assert_eq!(f.next(t0), Next::Send(0, 80));
+        f.sent(0, 80, t0);
+        let t1 = t0 + ms(150);
+        assert_eq!(f.next(t1), Next::Send(0, 80));
+        f.sent(0, 80, t1);
+        assert_eq!(f.tryno(0, 80), 1);
+        // A try that was never sent is no answer.
+        assert_eq!(f.answered(0, 80, t1 + ms(10), false, Some(2)), None);
+        // The first copy's late answer: timed from the first send, and no
+        // loss, so the host's resends do not grow.
+        assert_eq!(
+            f.answered(0, 80, t1 + ms(10), false, Some(0)),
+            Some(ms(160))
+        );
+        assert_eq!(cfg.rtt_state.srtt(addrs[0]), Some(ms(160)));
+        assert_eq!(f.allowed_tryno(0), 1);
+    }
+
+    #[test]
+    fn flight_waits_out_a_hosts_delay() {
+        let ms = Duration::from_millis;
+        let a: IpAddr = "10.0.0.1".parse().unwrap();
+        let cfg = ScanConfig {
+            scan_delay: ms(50),
+            ..cfg(500, 3)
+        };
+        let mut f: Flight<u16> = Flight::new(&cfg, &[a], vec![2]);
+        let t0 = Instant::now();
+        f.start([(0, 1), (0, 2)]);
+        assert_eq!(f.next(t0), Next::Send(0, 1));
+        f.sent(0, 1, t0);
+        assert_eq!(f.next(t0 + ms(10)), Next::Wait(t0 + ms(50)));
+        assert_eq!(f.next(t0 + ms(50)), Next::Send(0, 2));
+    }
+
+    #[test]
     fn window_grows_and_shrinks_like_nmap() {
         let cfg = cfg(500, 3);
         let mut cc = Congestion::new(&cfg, vec![100, 100]);
@@ -1050,7 +1762,7 @@ mod tests {
         assert_eq!(cc.host_window(0).cwnd(), 10.0);
         // Slow start: one more per answer.
         for _ in 0..5 {
-            cc.sent(0);
+            cc.sent(0, Instant::now());
             cc.finished_waiting(0);
             cc.adjust(0, now, 0, Outcome::Answered, now);
         }
@@ -1081,7 +1793,7 @@ mod tests {
         let mut cc = Congestion::new(&cfg, vec![10]);
         let now = Instant::now();
         assert!(cc.may_send(0, now));
-        cc.sent(0);
+        cc.sent(0, Instant::now());
         assert!(!cc.may_send(0, now));
         cc.finished_waiting(0);
         cc.adjust(0, now, 0, Outcome::Answered, now);
@@ -1094,30 +1806,33 @@ mod tests {
         cfg.min_rate = 1000;
         let mut cc = Congestion::new(&cfg, vec![10]);
         cc.start -= ms(100);
-        cc.sent(0);
+        cc.sent(0, Instant::now());
         // 100 ms at 1000/s wants 100 sent; only 1 was.
         assert!(cc.may_send(0, Instant::now()));
     }
 
     #[test]
     fn flight_holds_back_a_full_host_and_sends_the_others() {
-        let cfg = cfg(500, 3);
+        // No resends, to follow the first tries alone.
+        let cfg = ScanConfig {
+            retries: 0,
+            ..cfg(500, 3)
+        };
         let addrs: Vec<IpAddr> = vec!["10.0.0.1".parse().unwrap(), "10.0.0.2".parse().unwrap()];
         let mut f: Flight<u16> = Flight::new(&cfg, &addrs, vec![20, 6]);
         let now = Instant::now();
         // Host 1 answers five probes: its window and the group's grow to
         // 15, host 0's stays at 10.
-        f.start_round(
+        f.start(
             (1..=5)
                 .map(|p| (1, p))
                 .chain((1..=20).map(|p| (0, p)))
                 .chain([(1, 6)]),
-            0,
         );
         for p in 1..=5 {
             assert_eq!(f.next(now), Next::Send(1, p));
             f.sent(1, p, now);
-            f.answered(1, p, now + ms(5), false);
+            f.answered(1, p, now + ms(5), false, None);
         }
         let mut order = Vec::new();
         while let Next::Send(h, k) = f.next(now) {
@@ -1131,7 +1846,7 @@ mod tests {
         assert!(matches!(f.next(now), Next::Wait(_)));
         // An answer frees a place and grows the window by one more.
         let t = now + ms(5);
-        f.answered(0, 1, t, false);
+        f.answered(0, 1, t, false, None);
         assert_eq!(f.next(t), Next::Send(0, 11));
         f.sent(0, 11, t);
         assert_eq!(f.next(t), Next::Send(0, 12));
@@ -1155,7 +1870,7 @@ mod tests {
         let cfg = cfg(500, 3);
         let addrs: Vec<IpAddr> = vec!["10.0.0.1".parse().unwrap()];
         let mut f: Flight<u16> = Flight::new(&cfg, &addrs, vec![30]);
-        f.start_round((1..=30).map(|p| (0, p)), 0);
+        f.start((1..=30).map(|p| (0, p)));
         let now = Instant::now();
         while let Next::Send(h, k) = f.next(now) {
             f.sent(h, k, now);
@@ -1178,10 +1893,10 @@ mod tests {
     async fn async_window_waits_for_a_free_place() {
         let cfg = cfg(2, 3);
         let w = AsyncWindow::new(&cfg, vec![3]);
-        let a = w.acquire(0).await.unwrap();
-        let _b = w.acquire(0).await.unwrap();
+        let a = w.acquire(0, 0).await.unwrap();
+        let _b = w.acquire(0, 0).await.unwrap();
         // The third waits until one finishes.
-        let third = w.acquire(0);
+        let third = w.acquire(0, 0);
         tokio::pin!(third);
         assert!(
             tokio::time::timeout(ms(50), third.as_mut()).await.is_err(),
@@ -1200,10 +1915,10 @@ mod tests {
         let flag = up.clone();
         let w = AsyncWindow::new(&cfg, vec![3])
             .with_skip(move |_| flag.load(std::sync::atomic::Ordering::Relaxed));
-        let a = w.acquire(0).await.unwrap();
+        let a = w.acquire(0, 0).await.unwrap();
         // The second waits for the full window; meanwhile the host is
         // proven up, so when a place frees it is not sent.
-        let second = w.acquire(0);
+        let second = w.acquire(0, 0);
         tokio::pin!(second);
         assert!(tokio::time::timeout(ms(50), second.as_mut()).await.is_err());
         up.store(true, std::sync::atomic::Ordering::Relaxed);

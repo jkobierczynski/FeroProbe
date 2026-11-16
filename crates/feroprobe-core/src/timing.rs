@@ -59,13 +59,15 @@ impl Timing {
     /// The scan settings this template stands for.
     pub fn config(self) -> ScanConfig {
         let ms = Duration::from_millis;
-        let (retries, concurrency, max_rate, scan_delay) = match self {
-            Timing::Paranoid => (2, 1, 1, Duration::from_secs(300)),
-            Timing::Sneaky => (2, 1, 1, Duration::from_secs(15)),
-            Timing::Polite => (2, 10, 100, ms(400)),
+        // Retries are a cap, as in nmap: 10 unless -T4 (6) or -T5 (2).
+        // -T4 and -T5 also keep the automatic delay of TCP probes short.
+        let (retries, concurrency, max_rate, scan_delay, max_scan_delay) = match self {
+            Timing::Paranoid => (10, 1, 1, Duration::from_secs(300), Duration::from_secs(1)),
+            Timing::Sneaky => (10, 1, 1, Duration::from_secs(15), Duration::from_secs(1)),
+            Timing::Polite => (10, 10, 100, ms(400), Duration::from_secs(1)),
             Timing::Normal => return ScanConfig::default(),
-            Timing::Aggressive => (1, 1000, 10_000, Duration::ZERO),
-            Timing::Insane => (0, 2000, 50_000, Duration::ZERO),
+            Timing::Aggressive => (6, 1000, 10_000, Duration::ZERO, ms(10)),
+            Timing::Insane => (2, 2000, 50_000, Duration::ZERO, ms(5)),
         };
         ScanConfig {
             rtt: self.rtt_timeouts(),
@@ -74,6 +76,9 @@ impl Timing {
             concurrency,
             max_rate,
             scan_delay,
+            // A template's own scan delay raises the cap, as in nmap.
+            max_scan_delay: max_scan_delay.max(scan_delay),
+            max_udp_scan_delay: Duration::from_secs(1).max(scan_delay),
             ..ScanConfig::default()
         }
     }

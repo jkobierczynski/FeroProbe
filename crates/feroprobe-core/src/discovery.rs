@@ -695,7 +695,7 @@ mod icmp {
         };
 
         let outcome = (|| -> io::Result<()> {
-            for _ in 0..=cfg.retries {
+            for _ in 0..=cfg.first_retries() {
                 let mut pacer = Pacer::for_config(cfg);
                 for &(seq, addr) in &pending {
                     let pkt = query.request(v6, id, seq);

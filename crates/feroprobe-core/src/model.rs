@@ -215,13 +215,25 @@ pub struct ScanConfig {
     /// Maximum number of probes waiting for an answer at once; caps the
     /// congestion window.
     pub concurrency: usize,
-    /// Extra attempts for probes that got no answer.
+    /// The most times a probe without an answer is sent again (nmap's
+    /// `--max-retries`). Like nmap, a host's probes are resent once until
+    /// one of its resent probes draws an answer, which shows packets are
+    /// being lost: then they may be resent one time more than the highest
+    /// try that was answered, up to this cap. See
+    /// [`ScanConfig::first_retries`].
     pub retries: u32,
     /// Maximum packets per second for raw-socket scans (SYN, ICMP).
     pub max_rate: u32,
     /// Minimum time between probes (nmap's `--scan-delay`), whatever the
     /// parallelism. Zero means no extra spacing.
     pub scan_delay: Duration,
+    /// How far the scan may raise a host's delay between probes on its
+    /// own when many of them are lost (nmap's `--max-scan-delay`, for
+    /// TCP, SCTP and IP protocol probes). Never below `scan_delay`.
+    pub max_scan_delay: Duration,
+    /// The same for UDP probes: the templates leave it at a second, as
+    /// nmap does, because UDP answers are so often rate-limited.
+    pub max_udp_scan_delay: Duration,
     /// During host discovery, decide targets on a local Ethernet network by
     /// ARP (when privileged on Linux) instead of ICMP and TCP probes.
     pub arp_ping: bool,
@@ -248,6 +260,15 @@ impl ScanConfig {
     /// host's measured round-trip times (see [`crate::rtt`]).
     pub fn probe_timeout(&self, addr: std::net::IpAddr) -> Duration {
         self.rtt_state.timeout(addr, &self.rtt, self.scan_delay)
+    }
+
+    /// How many times a probe is resent before any loss is seen: one, or
+    /// none with `--max-retries 0`. This is what nmap's adaptive retries
+    /// come to on a network that loses nothing, and what the probes that
+    /// do not adapt (DNS, OS detection, traceroute, ARP, ICMP discovery)
+    /// use.
+    pub fn first_retries(&self) -> u32 {
+        self.retries.min(1)
     }
 
     /// Record a round-trip time measured to `addr`.
@@ -278,9 +299,11 @@ impl Default for ScanConfig {
             min_rate: 0,
             min_parallelism: 0,
             concurrency: 500,
-            retries: 1,
+            retries: 10,
             max_rate: 5000,
             scan_delay: Duration::ZERO,
+            max_scan_delay: Duration::from_secs(1),
+            max_udp_scan_delay: Duration::from_secs(1),
             arp_ping: true,
             deadline: None,
             rate_schedule: None,

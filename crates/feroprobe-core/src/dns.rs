@@ -185,14 +185,14 @@ async fn ask(server: SocketAddr, name: &str, id: u16, cfg: &ScanConfig) -> PtrAn
 }
 
 /// Ask `servers` for `ip`'s PTR record: every server in turn, for
-/// `cfg.retries + 1` rounds, until one gives a final answer.
+/// `cfg.first_retries() + 1` rounds, until one gives a final answer.
 async fn query_servers(ip: IpAddr, servers: &[SocketAddr], cfg: &ScanConfig) -> Option<String> {
     let name = ptr_name(ip);
     let seed = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.subsec_nanos()) as u16;
     let mut attempt: u16 = 0;
-    for _ in 0..=cfg.retries {
+    for _ in 0..=cfg.first_retries() {
         for &server in servers {
             let id = seed ^ attempt.wrapping_mul(0x9e37);
             attempt = attempt.wrapping_add(1);

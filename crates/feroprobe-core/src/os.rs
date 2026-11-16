@@ -451,7 +451,7 @@ mod imp {
     }
 
     /// Send one option-rich SYN to each IPv4 job's port and collect the
-    /// SYN-ACKs, in job order. Unanswered probes are retried `cfg.retries`
+    /// SYN-ACKs, in job order. Unanswered probes are retried `cfg.first_retries()`
     /// times.
     fn probe_blocking_v4(
         jobs: &[(usize, Ipv4Addr, u16)],
@@ -512,7 +512,7 @@ mod imp {
             )
         };
 
-        for _ in 0..=cfg.retries {
+        for _ in 0..=cfg.first_retries() {
             if cfg.expired() {
                 return Err(ScanConfig::timed_out());
             }
@@ -627,7 +627,7 @@ mod imp {
     /// only the payload, not the header the hop limit is in. A capture thread
     /// matches each SYN-ACK to its job and hands back its traits; the main
     /// thread sends paced, drains the channel, and retries up to
-    /// `cfg.retries` times.
+    /// `cfg.first_retries()` times.
     fn probe_blocking_v6(
         jobs: &[(usize, Ipv6Addr, u16)],
         cfg: &ScanConfig,
@@ -696,7 +696,7 @@ mod imp {
 
         let mut pacer = Pacer::for_config(cfg);
         let outcome = (|| -> io::Result<()> {
-            for _ in 0..=cfg.retries {
+            for _ in 0..=cfg.first_retries() {
                 if cfg.expired() {
                     return Err(ScanConfig::timed_out());
                 }

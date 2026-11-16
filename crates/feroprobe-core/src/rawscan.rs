@@ -3,8 +3,9 @@
 //! scan. Each probe is a (host, key) pair, the key being a port or an IP
 //! protocol number. Probes go out paced like every other raw probe, held to
 //! the congestion windows and timed out by the hosts' adaptive timeouts
-//! ([`crate::rtt`]), in rounds: a probe without an answer is sent again, up
-//! to `cfg.retries` times. Linux only.
+//! ([`crate::rtt`]). A probe without an answer is sent again as it times
+//! out, as often as its host's losses call for, up to `cfg.retries` times.
+//! Linux only.
 
 #![cfg(target_os = "linux")]
 
@@ -119,7 +120,8 @@ pub(crate) fn run(
             return false;
         }
         let filtered_error = silence_is_filtered && a.state == PortState::Filtered;
-        let Some(rtt) = flight.answered(a.host, a.key, at, filtered_error) else {
+        // These answers do not tell the tries apart.
+        let Some(rtt) = flight.answered(a.host, a.key, at, filtered_error, None) else {
             return false;
         };
         let rtt = (rtt.as_secs_f64() * 1e6).round() / 1000.0;
@@ -128,7 +130,7 @@ pub(crate) fn run(
     };
 
     // Key-major order spreads the probes across hosts.
-    let mut pending: Vec<(usize, u16)> = keys
+    let pending: Vec<(usize, u16)> = keys
         .iter()
         .flat_map(|&k| (0..addrs.len()).map(move |h| (h, k)))
         .filter(|p| !results.contains_key(p))
@@ -142,94 +144,67 @@ pub(crate) fn run(
     let mut flight: Flight<u16> = Flight::new(cfg, &addrs, per_host);
 
     let outcome = (|| -> io::Result<()> {
-        // One pacer for the whole scan, so retries keep to the rate budget
-        // rather than each round starting a fresh allowance.
+        // One pacer for the whole scan, resends included.
         let mut pacer = Pacer::for_config(cfg);
-        for round in 0..=cfg.retries {
-            flight.start_round(pending.iter().copied(), round);
-            loop {
-                if cfg.expired() {
-                    return Err(ScanConfig::timed_out());
-                }
-                let (h, k) = match flight.next(Instant::now()) {
-                    Next::Idle => break,
-                    Next::Send(h, k) => (h, k),
-                    // Every window is full: wait for an answer or a timeout.
-                    Next::Wait(until) => {
-                        let until = cfg.deadline.map_or(until, |d| until.min(d));
-                        let left = until.saturating_duration_since(Instant::now());
-                        match rx.recv_timeout(left) {
-                            Ok(a) => {
-                                record(&mut results, &mut flight, a);
-                            }
-                            Err(mpsc::RecvTimeoutError::Timeout) => {}
-                            Err(mpsc::RecvTimeoutError::Disconnected) => std::thread::sleep(left),
-                        }
-                        continue;
-                    }
-                };
-                if round == 0 {
-                    crate::progress::tick(1);
-                }
-                let Some(src) = sources[h] else {
-                    flight.settle(h, k);
-                    continue;
-                };
-                if results.contains_key(&(h, k)) {
-                    flight.settle(h, k);
-                    continue;
-                }
-                if !pacer.wait_until(cfg.deadline) {
-                    return Err(ScanConfig::timed_out());
-                }
-                while let Ok(a) = rx.try_recv() {
-                    record(&mut results, &mut flight, a);
-                }
-                if results.contains_key(&(h, k)) {
-                    continue;
-                }
-                flight.sent(h, k, Instant::now());
-                match send(h, k, src, addrs[h]) {
-                    Ok(()) => {}
-                    Err(_) if cfg.expired() => return Err(ScanConfig::timed_out()),
-                    Err(e) if is_network_error(&e) => {
-                        results.entry((h, k)).or_insert(result(
-                            k,
-                            PortState::Filtered,
-                            reason::UNREACHABLE,
-                            None,
-                        ));
-                        flight.settle(h, k);
-                    }
-                    Err(e) => return Err(e),
-                }
-            }
-            // Wait for stragglers: until every probe is answered or has
-            // waited out its host's timeout.
-            while flight.any_waiting() {
-                let Some(mut until) = flight.next_expiry() else {
-                    break;
-                };
-                if let Some(limit) = cfg.deadline {
-                    if Instant::now() >= limit {
-                        break;
-                    }
-                    until = until.min(limit);
-                }
-                match rx.recv_timeout(until.saturating_duration_since(Instant::now())) {
-                    Ok(a) => {
-                        record(&mut results, &mut flight, a);
-                    }
-                    Err(mpsc::RecvTimeoutError::Timeout) => flight.expire(Instant::now()),
-                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
-                }
-            }
-            pending.retain(|p| !results.contains_key(p));
-            if pending.is_empty() {
-                break;
-            }
+        // Resends go out as their probes time out, as often as each host's
+        // losses call for, up to cfg.retries (see Flight).
+        flight.start(pending.iter().copied());
+        loop {
             if cfg.expired() {
                 return Err(ScanConfig::timed_out());
+            }
+            let (h, k) = match flight.next(Instant::now()) {
+                Next::Idle => break,
+                Next::Send(h, k) => (h, k),
+                // Every window is full, or only probes waiting for their
+                // answers are left: wait for an answer or a timeout.
+                Next::Wait(until) => {
+                    let until = cfg.deadline.map_or(until, |d| until.min(d));
+                    let left = until.saturating_duration_since(Instant::now());
+                    match rx.recv_timeout(left) {
+                        Ok(a) => {
+                            record(&mut results, &mut flight, a);
+                        }
+                        Err(mpsc::RecvTimeoutError::Timeout) => {}
+                        Err(mpsc::RecvTimeoutError::Disconnected) => std::thread::sleep(left),
+                    }
+                    continue;
+                }
+            };
+            if !flight.is_resend(h, k) {
+                crate::progress::tick(1);
+            }
+            let Some(src) = sources[h] else {
+                flight.settle(h, k);
+                continue;
+            };
+            if results.contains_key(&(h, k)) {
+                flight.settle(h, k);
+                continue;
+            }
+            if !pacer.wait_until(cfg.deadline) {
+                return Err(ScanConfig::timed_out());
+            }
+            while let Ok(a) = rx.try_recv() {
+                record(&mut results, &mut flight, a);
+            }
+            if results.contains_key(&(h, k)) {
+                continue;
+            }
+            flight.sent(h, k, Instant::now());
+            match send(h, k, src, addrs[h]) {
+                Ok(()) => {}
+                Err(_) if cfg.expired() => return Err(ScanConfig::timed_out()),
+                Err(e) if is_network_error(&e) => {
+                    results.entry((h, k)).or_insert(result(
+                        k,
+                        PortState::Filtered,
+                        reason::UNREACHABLE,
+                        None,
+                    ));
+                    flight.settle(h, k);
+                }
+                Err(e) => return Err(e),
             }
         }
         Ok(())
