@@ -18,6 +18,12 @@ pub fn enable() {
     ENABLED.store(true, Ordering::Relaxed);
 }
 
+/// Turn the trace off again (the `P` key while a scan runs). The trace
+/// clock keeps running, so later lines still count from the first start.
+pub fn disable() {
+    ENABLED.store(false, Ordering::Relaxed);
+}
+
 /// Whether `--packet-trace` is on.
 pub fn enabled() -> bool {
     ENABLED.load(Ordering::Relaxed)

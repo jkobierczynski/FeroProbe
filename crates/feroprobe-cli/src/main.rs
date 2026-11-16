@@ -1,9 +1,11 @@
 //! `feroprobe`: an nmap-style network scanner, written natively in Rust.
 
 mod config;
+mod debugging;
 mod explain;
 mod grep;
 mod help;
+mod keys;
 mod output;
 mod xml;
 
@@ -250,7 +252,7 @@ struct Args {
     /// Targets: IPv4 or IPv6 addresses, CIDR blocks (10.0.0.0/24, 2001:db8::/120),
     /// ranges (10.0.0.1-20), link-local addresses with their interface
     /// (fe80::1%eth0) or hostnames
-    #[arg(required_unless_present = "input_file")]
+    #[arg(required_unless_present_any = ["input_file", "iflist"])]
     targets: Vec<String>,
 
     /// -iL FILE: read more targets from FILE (one or more per line, # starts
@@ -672,10 +674,54 @@ struct Args {
     #[arg(long = "output-all", value_name = "BASE")]
     out_all: Option<String>,
 
+    /// -oS FILE: also write the normal report in "script kiddie" spelling
+    /// to FILE ("-" for stdout), as nmap's -oS does
+    #[arg(long = "output-skid", value_name = "FILE")]
+    out_skid: Option<String>,
+
+    /// Append to the report files instead of overwriting them
+    #[arg(long)]
+    append_output: bool,
+
+    /// Reference this XSL stylesheet (a path or URL) from the XML report
+    #[arg(long, value_name = "PATH/URL", overrides_with_all = ["stylesheet", "webxml", "no_stylesheet"])]
+    stylesheet: Option<String>,
+
+    /// Reference the published copy of FeroProbe's stylesheet from the XML
+    /// report, for viewing it on machines without FeroProbe installed
+    #[arg(long, overrides_with_all = ["stylesheet", "webxml", "no_stylesheet"])]
+    webxml: bool,
+
+    /// Leave the stylesheet reference out of the XML report
+    #[arg(long, overrides_with_all = ["stylesheet", "webxml", "no_stylesheet"])]
+    no_stylesheet: bool,
+
     /// -v: report progress on standard error (each phase with its time,
     /// and the open ports each scan found when it finishes); -vv for more
     #[arg(short = 'v', action = clap::ArgAction::Count)]
     verbose: u8,
+
+    /// -d: raise the debugging level (and the verbosity) by one; -dd by
+    /// two, and so on; -d<level> sets both to <level> (0 to 10). Also turns
+    /// on --reason, as in nmap
+    #[arg(
+        long = "debug",
+        value_name = "LEVEL",
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "",
+        action = clap::ArgAction::Append
+    )]
+    debug: Vec<String>,
+
+    /// Print the host's interfaces and routes, then stop
+    #[arg(long)]
+    iflist: bool,
+
+    /// Do not read keys from the terminal while the scan runs (v/V, d/D,
+    /// p/P, ? and any other key for a status line)
+    #[arg(long)]
+    noninteractive: bool,
 }
 
 /// nmap's two-letter options (`-iL`, `-oN`, `-oX`, `-oG`, `-oA`) clash with
@@ -700,6 +746,14 @@ fn nmap_style_args(argv: impl IntoIterator<Item = String>) -> Vec<String> {
             "-oG" => Some("--output-grepable"),
             "-oJ" => Some("--output-json"),
             "-oA" => Some("--output-all"),
+            "-oS" => Some("--output-skid"),
+            // -d, -dd, -d3: nmap's debug option takes its argument only
+            // when attached, so `-d host` keeps `host` as a target.
+            "-d" => Some("--debug"),
+            d if d.starts_with("-d") => {
+                out.push(format!("--debug={}", &d[2..]));
+                continue;
+            }
             _ => None,
         };
         out.push(long.map_or(a, str::to_string));
@@ -735,6 +789,10 @@ struct Outputs {
     xml: Vec<String>,
     grep: Vec<String>,
     json: Vec<String>,
+    /// `-oS`: the normal report in "script kiddie" spelling.
+    skid: Vec<String>,
+    /// `--append-output`: add to the files instead of replacing them.
+    append: bool,
 }
 
 /// The real location a report path names, so that `r`, `./r`, `sub/../r`
@@ -763,6 +821,8 @@ impl Outputs {
         push(&mut o.xml, &args.out_xml);
         push(&mut o.grep, &args.out_grep);
         push(&mut o.json, &args.out_json);
+        push(&mut o.skid, &args.out_skid);
+        o.append = args.append_output;
         if let Some(base) = &args.out_all {
             if base == "-" {
                 bail!("-oA needs a file name base, not -");
@@ -771,7 +831,7 @@ impl Outputs {
             o.xml.push(format!("{base}.xml"));
             o.grep.push(format!("{base}.gnmap"));
         }
-        let to_stdout = [&o.normal, &o.xml, &o.grep, &o.json]
+        let to_stdout = [&o.normal, &o.xml, &o.grep, &o.json, &o.skid]
             .iter()
             .flat_map(|v| v.iter())
             .filter(|p| *p == "-")
@@ -790,7 +850,7 @@ impl Outputs {
     }
 
     fn files(&self) -> impl Iterator<Item = &String> {
-        [&self.normal, &self.xml, &self.grep, &self.json]
+        [&self.normal, &self.xml, &self.grep, &self.json, &self.skid]
             .into_iter()
             .flat_map(|v| v.iter())
             .filter(|p| *p != "-")
@@ -804,11 +864,25 @@ impl Outputs {
     /// share one file. On Unix the file's device and inode decide; on other
     /// systems the canonical path of the now existing file, which on Windows
     /// comes back in the case stored on disk.
-    fn open_files(&self) -> Result<()> {
+    ///
+    /// The handles are kept and the reports are written through them, so
+    /// the path is never looked up a second time: what was checked here is
+    /// what gets written, even if someone swaps the path for a link while
+    /// the scan runs. With `--append-output` the files are opened for
+    /// appending (nmap's `fopen(..., "a")`); otherwise each file is emptied
+    /// only when its report is written, so a scan that fails leaves the old
+    /// report in place.
+    fn open_files(&self) -> Result<ReportFiles> {
         let mut seen = std::collections::HashSet::new();
+        let mut files = ReportFiles {
+            append: self.append,
+            ..Default::default()
+        };
         for path in self.files() {
+            refuse_planted_link(path)?;
             let file = std::fs::OpenOptions::new()
                 .write(true)
+                .append(self.append)
                 .create(true)
                 .truncate(false)
                 .open(path)
@@ -820,23 +894,96 @@ impl Outputs {
                 (m.dev(), m.ino())
             };
             #[cfg(not(unix))]
-            let id = {
-                drop(file);
-                std::fs::canonicalize(path).with_context(|| format!("resolving {path}"))?
-            };
+            let id = std::fs::canonicalize(path).with_context(|| format!("resolving {path}"))?;
             if !seen.insert(id) {
                 bail!("two reports would be written to {path}; give each its own file");
             }
+            files.handles.insert(path.clone(), file);
         }
-        Ok(())
+        Ok(files)
     }
 
     /// Whether some -o option took over standard output.
     fn stdout_taken(&self) -> bool {
-        [&self.normal, &self.xml, &self.grep, &self.json]
+        [&self.normal, &self.xml, &self.grep, &self.json, &self.skid]
             .iter()
             .any(|v| v.iter().any(|p| p == "-"))
     }
+}
+
+/// The report files [`Outputs::open_files`] opened, by path.
+#[derive(Default)]
+struct ReportFiles {
+    handles: std::collections::HashMap<String, std::fs::File>,
+    append: bool,
+}
+
+impl ReportFiles {
+    /// Write one whole report to `path`: appended with `--append-output`,
+    /// else replacing what the file held.
+    fn write(&mut self, path: &str, text: &str) -> Result<()> {
+        use std::io::{Seek, Write};
+        let file = self
+            .handles
+            .get_mut(path)
+            .with_context(|| format!("{path} was not opened"))?;
+        // Only a regular file can be emptied: /dev/null, a named pipe or a
+        // terminal is written to as it is.
+        let regular = file.metadata().is_ok_and(|m| m.is_file());
+        if !self.append && regular {
+            file.set_len(0)
+                .with_context(|| format!("emptying {path}"))?;
+            file.rewind().with_context(|| format!("writing {path}"))?;
+        }
+        file.write_all(text.as_bytes())
+            .and_then(|()| file.flush())
+            .with_context(|| format!("writing {path}"))
+    }
+}
+
+/// Refuse, when running as root, to write a report through a symbolic link
+/// that another user owns in a sticky, world-writable directory such as
+/// `/tmp`: that is how someone tricks `sudo feroprobe -oN /tmp/scan.txt`
+/// into overwriting a file of root's choosing. Linux's
+/// `fs.protected_symlinks` refuses the same, but not every system has it
+/// switched on, and other systems lack it.
+#[cfg(unix)]
+fn refuse_planted_link(path: &str) -> Result<()> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    // SAFETY: geteuid has no preconditions.
+    let euid = unsafe { libc::geteuid() };
+    if euid != 0 {
+        return Ok(());
+    }
+    let p = std::path::Path::new(path);
+    let Ok(link) = std::fs::symlink_metadata(p) else {
+        return Ok(());
+    };
+    if !link.file_type().is_symlink() || link.uid() == euid {
+        return Ok(());
+    }
+    let dir = match p.parent() {
+        Some(d) if !d.as_os_str().is_empty() => d,
+        _ => std::path::Path::new("."),
+    };
+    let Ok(dir_meta) = std::fs::metadata(dir) else {
+        return Ok(());
+    };
+    let mode = dir_meta.permissions().mode();
+    // Sticky (o+t) and writable by everyone (o+w); the owner of the
+    // directory itself may link as it likes, as with protected_symlinks.
+    if mode & 0o1002 == 0o1002 && dir_meta.uid() != link.uid() {
+        bail!(
+            "{path} is a symbolic link owned by another user in a shared directory; \
+             refusing to write a report through it as root"
+        );
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn refuse_planted_link(_path: &str) -> Result<()> {
+    Ok(())
 }
 
 /// Progress on standard error for -v.
@@ -844,7 +991,9 @@ impl Outputs {
 /// `--stats-every` names.
 #[derive(Clone, Copy)]
 struct Progress {
-    level: u8,
+    /// Say nothing, whatever the verbosity (the per-host jobs of
+    /// `--host-timeout`, which report as one).
+    quiet: bool,
     /// Whether this run's phases are the ones `--stats-every` reports. Off
     /// for the per-host scans of `--host-timeout`, which share one count.
     track: bool,
@@ -860,8 +1009,8 @@ fn set_phase(what: &str, probes: usize) {
 
 impl Progress {
     fn say(&self, level: u8, msg: impl FnOnce() -> String) {
-        if self.level >= level {
-            eprintln!("{}", msg());
+        if !self.quiet {
+            feroprobe_core::debug::verbose(level, msg);
         }
     }
 
@@ -888,20 +1037,27 @@ impl Progress {
         }
     }
 
-    /// Announce the open ports a scan found, like nmap's -v.
+    /// Announce the open ports a scan found, like nmap's -v; from -d2 on,
+    /// the ports in every state, as nmap does.
     fn found(&self, results: &[HostResult]) {
+        if self.quiet {
+            return;
+        }
+        // nmap: open ports at -v, every port at -d2, whatever the other
+        // level (the keys change them independently).
+        // Read per port, so a key pressed meanwhile takes effect at once.
+        let every = || feroprobe_core::debug::debugging() > 1;
+        let open = || feroprobe_core::debug::verbosity() > 0;
         for h in results {
             for p in h
                 .ports
                 .iter()
-                .filter(|p| p.state == feroprobe_core::PortState::Open)
+                .filter(|p| every() || (open() && p.state == feroprobe_core::PortState::Open))
             {
-                self.say(1, || {
-                    format!(
-                        "Discovered open port {}/{} on {}",
-                        p.port, p.protocol, h.addr
-                    )
-                });
+                eprintln!(
+                    "Discovered {} port {}/{} on {}",
+                    p.state, p.port, p.protocol, h.addr
+                );
             }
         }
     }
@@ -2077,7 +2233,7 @@ impl ScanJob<'_> {
             live.len() * probes,
         );
         let quiet = Progress {
-            level: 0,
+            quiet: true,
             track: false,
         };
         let start: Vec<HostResult> = hosts.to_vec();
@@ -2242,7 +2398,7 @@ fn dry_run(
     use std::io::Write;
     if outputs.files().next().is_some() {
         eprintln!(
-            "Warning: --dry-run sends nothing, so no report is written (-oN/-oX/-oG/-oJ/-oA ignored)"
+            "Warning: --dry-run sends nothing, so no report is written (-oN/-oX/-oS/-oG/-oJ/-oA ignored)"
         );
     }
     let privileged = raw_sockets_available();
@@ -2293,7 +2449,16 @@ fn dry_run(
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let args = Args::parse_from(nmap_style_args(std::env::args()));
+    let args = debugging::parse_args(nmap_style_args(std::env::args()));
+    if args.iflist {
+        let debug = feroprobe_core::debug::debugging() > 0;
+        use feroprobe_core::iflist;
+        print!(
+            "{}",
+            iflist::render(&iflist::interfaces(), &iflist::routes(), debug)
+        );
+        return Ok(());
+    }
     // Settings files, then the ICS guard: before anything is resolved or sent.
     let settings = config::load()?;
     for w in &settings.warnings {
@@ -2307,11 +2472,13 @@ async fn main() -> Result<()> {
         feroprobe_core::packet_trace::enable();
     }
     // A dry run writes no report, so it does not create the files either.
-    if !args.dry_run {
-        outputs.open_files()?;
-    }
+    let mut report_files = if args.dry_run {
+        ReportFiles::default()
+    } else {
+        outputs.open_files()?
+    };
     let progress = Progress {
-        level: args.verbose,
+        quiet: false,
         track: true,
     };
     progress.say(1, || {
@@ -2703,6 +2870,20 @@ async fn main() -> Result<()> {
             }
         })
     });
+    feroprobe_core::debug::debug(1, || {
+        let group = if args.host_timeout.is_some_and(|d| !d.is_zero()) {
+            host_group(targets.len(), &cfg)
+        } else {
+            targets.len().max(1)
+        };
+        debugging::timing_report(&cfg, group, args.host_timeout)
+    });
+    // Keys typed while the scan runs (v/V, d/D, p/P, ?, status).
+    let keys = if args.noninteractive {
+        None
+    } else {
+        keys::start(started)
+    };
     let mut hosts: Vec<HostResult> = if plan.discovery {
         let done = progress.phase("host discovery", targets.len());
         let hosts = discover(&targets, &cfg, &probes)
@@ -2787,6 +2968,16 @@ async fn main() -> Result<()> {
                 .srtt(h.addr)
                 .map(|d| (d.as_secs_f64() * 1e6).round() / 1000.0);
         }
+        for h in &hosts {
+            if let Some((srtt, rttvar, to)) = cfg.rtt_state.times(h.addr) {
+                feroprobe_core::debug::debug(1, || {
+                    format!(
+                        "Final times for host {}: srtt: {srtt} rttvar: {rttvar}  to: {to}",
+                        h.addr
+                    )
+                });
+            }
+        }
     } else {
         scan_types.push("ping");
     }
@@ -2823,6 +3014,9 @@ async fn main() -> Result<()> {
     if let Some(task) = stats {
         task.abort();
     }
+    if let Some(k) = keys {
+        k.stop();
+    }
     let ports_per_host = plan
         .tcp
         .or(bounce.as_ref().map(|_| ScanType::Connect))
@@ -2853,7 +3047,7 @@ async fn main() -> Result<()> {
         ports_per_host,
         elapsed: started.elapsed(),
         only_open: args.open,
-        show_reason: args.reason,
+        show_reason: args.reason || feroprobe_core::debug::debugging() > 0,
         show_version: plan.version,
         show_os: os,
         os_guess: args.osscan_guess,
@@ -2862,26 +3056,31 @@ async fn main() -> Result<()> {
         ping_only: plan.ping_only,
         nmap_label: args.nmap_label,
         defeat_rst: cfg.defeat_rst_ratelimit && plan.tcp.is_some(),
-        verbosity: args.verbose,
+        verbosity: feroprobe_core::debug::verbosity(),
+        stylesheet: xml::stylesheet(args.stylesheet.as_deref(), args.webxml, args.no_stylesheet),
     };
     if !outputs.stdout_taken() {
         print!("{}", render(args.output, &hosts, &info)?);
     }
     for (format, paths) in [
-        (Format::Table, &outputs.normal),
-        (Format::Xml, &outputs.xml),
-        (Format::Grepable, &outputs.grep),
-        (Format::Json, &outputs.json),
+        (Some(Format::Table), &outputs.normal),
+        (Some(Format::Xml), &outputs.xml),
+        (Some(Format::Grepable), &outputs.grep),
+        (Some(Format::Json), &outputs.json),
+        (None, &outputs.skid),
     ] {
         if paths.is_empty() {
             continue;
         }
-        let text = render(format, &hosts, &info)?;
+        let text = match format {
+            Some(format) => render(format, &hosts, &info)?,
+            None => output::skid(&render(Format::Table, &hosts, &info)?),
+        };
         for path in paths {
             if path == "-" {
                 print!("{text}");
             } else {
-                std::fs::write(path, &text).with_context(|| format!("writing {path}"))?;
+                report_files.write(path, &text)?;
             }
         }
     }
@@ -3267,6 +3466,147 @@ mod tests {
         assert!(o.stdout_taken());
         // Targets are required unless -iL gives them.
         assert!(Args::try_parse_from(["feroprobe", "-p", "22"]).is_err());
+    }
+
+    #[test]
+    fn output_extras_options() {
+        let parse = |v: &[&str]| Args::parse_from(nmap_style_args(v.iter().map(|s| s.to_string())));
+        let a = parse(&["feroprobe", "-oS", "k.txt", "--append-output", "10.0.0.1"]);
+        let o = Outputs::from_args(&a).unwrap();
+        assert_eq!(o.skid, vec!["k.txt".to_string()]);
+        assert!(o.append);
+        assert!(Outputs::from_args(&parse(&["feroprobe", "-oS", "-", "-oX", "-", "x"])).is_err());
+        // The last stylesheet option wins, as in nmap.
+        let sheet = |v: &[&str]| {
+            let a = parse(v);
+            xml::stylesheet(a.stylesheet.as_deref(), a.webxml, a.no_stylesheet)
+        };
+        assert_eq!(
+            sheet(&["feroprobe", "--webxml", "--stylesheet", "s.xsl", "x"]).as_deref(),
+            Some("s.xsl")
+        );
+        assert_eq!(
+            sheet(&["feroprobe", "--stylesheet", "s.xsl", "--webxml", "x"]).as_deref(),
+            Some(xml::WEB_STYLESHEET)
+        );
+        assert_eq!(
+            sheet(&["feroprobe", "--stylesheet", "s.xsl", "--no-stylesheet", "x"]),
+            None
+        );
+        assert_eq!(
+            sheet(&[
+                "feroprobe",
+                "--no-stylesheet",
+                "--stylesheet",
+                "a",
+                "--stylesheet",
+                "b",
+                "x"
+            ])
+            .as_deref(),
+            Some("b")
+        );
+    }
+
+    /// A fresh directory private to this user, for tests that write files.
+    fn private_dir(tag: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("feroprobe-{tag}-{}-{nanos}", std::process::id()));
+        #[cfg(unix)]
+        std::os::unix::fs::DirBuilderExt::mode(&mut std::fs::DirBuilder::new(), 0o700)
+            .create(&dir)
+            .unwrap();
+        #[cfg(not(unix))]
+        std::fs::DirBuilder::new().create(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn reports_replace_or_append() {
+        let dir = private_dir("append");
+        let path = dir.join("r.txt");
+        let name = path.display().to_string();
+        std::fs::write(&path, "a much longer old report\n").unwrap();
+        let outputs = |append| Outputs {
+            normal: vec![name.clone()],
+            append,
+            ..Default::default()
+        };
+        // Opening keeps the old report until the new one is written.
+        let mut files = outputs(false).open_files().unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "a much longer old report\n"
+        );
+        files.write(&name, "new\n").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new\n");
+        drop(files);
+        let mut files = outputs(true).open_files().unwrap();
+        files.write(&name, "more\n").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new\nmore\n");
+        // The handle opened up front is what gets written, even if the
+        // path is replaced in the meantime.
+        std::fs::rename(&path, dir.join("moved")).unwrap();
+        files.write(&name, "last\n").unwrap();
+        assert!(!path.exists());
+        assert_eq!(
+            std::fs::read_to_string(dir.join("moved")).unwrap(),
+            "new\nmore\nlast\n"
+        );
+        // Not a regular file: written as it is, not emptied first.
+        #[cfg(unix)]
+        {
+            let null = Outputs {
+                normal: vec!["/dev/null".into()],
+                ..Default::default()
+            };
+            let mut files = null.open_files().unwrap();
+            files.write("/dev/null", "report\n").unwrap();
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// As root, a link another user planted in a sticky shared directory is
+    /// refused; root's own links, and links in private directories, work.
+    #[cfg(unix)]
+    #[test]
+    fn planted_links_are_refused_as_root() {
+        use std::os::unix::fs::PermissionsExt;
+        // SAFETY: geteuid has no preconditions.
+        if unsafe { libc::geteuid() } != 0 {
+            return;
+        }
+        let dir = private_dir("sticky");
+        let shared = dir.join("shared");
+        std::fs::create_dir(&shared).unwrap();
+        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o1777)).unwrap();
+        let target = dir.join("target");
+        std::fs::write(&target, "keep").unwrap();
+        let link = shared.join("scan.txt");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let lchown = |p: &std::path::Path, uid: u32| {
+            let c = std::ffi::CString::new(p.as_os_str().as_encoded_bytes()).unwrap();
+            // SAFETY: c is a valid NUL-terminated path.
+            assert_eq!(unsafe { libc::lchown(c.as_ptr(), uid, u32::MAX) }, 0);
+        };
+        let name = link.display().to_string();
+        assert!(refuse_planted_link(&name).is_ok());
+        lchown(&link, 65534);
+        assert!(refuse_planted_link(&name).is_err());
+        let o = Outputs {
+            normal: vec![name.clone()],
+            ..Default::default()
+        };
+        assert!(o.open_files().is_err());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep");
+        // The directory's owner may link: same owner as the link.
+        lchown(&shared, 65534);
+        assert!(refuse_planted_link(&name).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -3966,7 +4306,7 @@ mod tests {
             hostname: None,
         };
         let quiet = Progress {
-            level: 0,
+            quiet: true,
             track: false,
         };
         let fresh = || vec![HostResult::new(target.addr, None)];

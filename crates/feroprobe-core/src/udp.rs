@@ -378,7 +378,9 @@ pub async fn udp_scan(
     let jobs = ports
         .iter()
         .flat_map(|&port| (0..targets.len()).map(move |h| (h, port)));
-    let window = AsyncWindow::new(cfg, vec![ports.len(); targets.len()]).for_udp(cfg);
+    let window = AsyncWindow::new(cfg, vec![ports.len(); targets.len()])
+        .for_udp(cfg)
+        .with_addrs(targets.iter().map(|t| t.addr).collect());
     let window = &window;
     let mut results = stream::iter(jobs)
         .map(|(h, port)| {

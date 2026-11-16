@@ -18,11 +18,13 @@ pub mod arp;
 #[cfg(target_os = "linux")]
 mod capture;
 pub mod connect;
+pub mod debug;
 pub mod discovery;
 pub mod dns;
 pub mod dryrun;
 pub mod evasion;
 pub mod ftp_bounce;
+pub mod iflist;
 pub mod ipproto;
 pub mod model;
 pub mod ndp;
