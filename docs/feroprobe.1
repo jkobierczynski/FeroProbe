@@ -1411,8 +1411,9 @@ The scan delay also sets a floor under every measured timeout, so
 .PP
 Like nmap, FeroProbe adapts its timeouts to the network.
 Every answer (a SYN-ACK, a reset, an ICMP error, a UDP reply, an echo
-reply) gives a round-trip time, and each host keeps a smoothed
-round-trip time and its variance, the way TCP does (RFC 6298).
+reply, an ARP or neighbor discovery reply) gives a round-trip time, and
+each host keeps a smoothed round-trip time and its variance, the way TCP
+does (RFC 6298).
 A probe to that host waits the smoothed time plus four times the
 variance, kept between \f[V]--min-rtt-timeout\f[R] and
 \f[V]--max-rtt-timeout\f[R] and never below the scan delay.

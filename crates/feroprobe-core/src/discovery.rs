@@ -436,6 +436,10 @@ async fn neighbour_phase(
         let mut replies: HashMap<IpAddr, (Option<MacAddr>, f64, &'static str)> = HashMap::new();
         for (net, ips) in &arp_groups {
             let r = arp::sweep(net, ips, &cfg2, &flag, &mut |ip, mac, rtt| {
+                // The round trip times the port scan's first probes, as in
+                // nmap: without it they wait the full initial timeout until
+                // a port answers.
+                cfg2.observe_rtt(ip.into(), std::time::Duration::from_secs_f64(rtt / 1000.0));
                 replies.insert(ip.into(), (Some(mac), rtt, reason::ARP_RESPONSE));
             });
             if r.is_ok() {
@@ -444,6 +448,10 @@ async fn neighbour_phase(
         }
         for (link, ips) in &nd_groups {
             let r = ndp::sweep(link, ips, &cfg2, &flag, &mut |ip, mac, rtt| {
+                // The round trip times the port scan's first probes, as in
+                // nmap: without it they wait the full initial timeout until
+                // a port answers.
+                cfg2.observe_rtt(ip.into(), std::time::Duration::from_secs_f64(rtt / 1000.0));
                 replies.insert(ip.into(), (mac, rtt, reason::ND_RESPONSE));
             });
             if r.is_ok() {

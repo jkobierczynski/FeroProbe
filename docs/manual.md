@@ -854,7 +854,8 @@ their delay.
 ### How long a probe waits
 
 Like nmap, FeroProbe adapts its timeouts to the network. Every answer
-(a SYN-ACK, a reset, an ICMP error, a UDP reply, an echo reply) gives a
+(a SYN-ACK, a reset, an ICMP error, a UDP reply, an echo reply, an ARP
+or neighbor discovery reply) gives a
 round-trip time, and each host keeps a smoothed round-trip time and its
 variance, the way TCP does (RFC 6298). A probe to that host waits the
 smoothed time plus four times the variance, kept between
