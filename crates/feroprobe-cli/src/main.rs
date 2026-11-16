@@ -2872,6 +2872,9 @@ async fn main() -> Result<()> {
             )
             .await?;
             info.elapsed = started.elapsed();
+            // The keys (v/V, d/D) may have changed the levels meanwhile.
+            info.verbosity = feroprobe_core::debug::verbosity();
+            info.show_reason = args.reason || feroprobe_core::debug::debugging() > 0;
             reports.group(&hosts[from..to], &info, group_start, SystemTime::now())?;
             done_hosts += to - from;
             from = to;

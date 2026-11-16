@@ -85,7 +85,9 @@ impl Reports {
                 Kind::Format(Format::Table) => output::table_header(info, file),
                 Kind::Skid => output::skid(&output::table_header(info, false)),
                 Kind::Format(Format::Grepable) => grep::header(info),
-                Kind::Format(Format::Xml) if self.resuming => String::new(),
+                // A resumed file continues the aborted run's document; standard
+                // output starts a new one.
+                Kind::Format(Format::Xml) if self.resuming && file => String::new(),
                 Kind::Format(Format::Xml) => xml::header(info),
                 Kind::Format(Format::Json) => String::new(),
             };
