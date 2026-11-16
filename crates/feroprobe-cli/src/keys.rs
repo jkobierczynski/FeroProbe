@@ -16,6 +16,8 @@ use std::time::Instant;
 use feroprobe_core::debug::{self, MAX_LEVEL};
 
 /// The `?` key's text.
+// Only read from a terminal on Unix for now.
+#[cfg_attr(not(unix), allow(dead_code))]
 const HELP: &str = "Interactive keyboard commands:
 ?               Display this information
 v/V             Increase/decrease verbosity
@@ -26,6 +28,8 @@ More help: see \"Runtime interaction\" in the FeroProbe manual";
 
 /// What one key does: changes a level or the packet trace, and returns
 /// the line to print.
+// Only read from a terminal on Unix for now.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) fn handle_key(key: u8, started: Instant) -> String {
     let up = |l: u8| (l + 1).min(MAX_LEVEL);
     match key {
@@ -59,6 +63,8 @@ pub(crate) fn handle_key(key: u8, started: Instant) -> String {
 }
 
 /// Reads keys until dropped, then puts the terminal back.
+// Only read from a terminal on Unix for now.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) struct Keys {
     #[cfg(unix)]
     _inner: unix::Reader,

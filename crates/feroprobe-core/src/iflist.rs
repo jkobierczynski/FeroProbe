@@ -232,6 +232,7 @@ fn link_layer(ifa: &libc::ifaddrs, family: i32, mac: &mut Option<MacAddr>, mtu: 
 fn link_layer(_: &libc::ifaddrs, _: i32, _: &mut Option<MacAddr>, _: &mut Option<u32>) {}
 
 /// An interface's MTU where the link-layer entry did not give it.
+#[cfg(unix)]
 fn mtu_of(name: &str) -> Option<u32> {
     if cfg!(target_os = "linux") {
         std::fs::read_to_string(format!("/sys/class/net/{name}/mtu"))
