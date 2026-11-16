@@ -112,6 +112,13 @@ can tell FeroProbe traffic apart from other traffic. The marks are:
 - **ICMP and ICMPv6 echo requests** sent for host discovery carry the
   9-byte ASCII payload `feroprobe` (nmap's echo requests are empty). Echo
   replies copy the payload back, so the marker shows in both directions.
+  This includes the echo request of the IP protocol ping (`-PO`); the
+  `-sO` scan's stays empty, as in nmap. The TCP ACK that `-sO`/`-PO` send
+  for protocol 6 carries the window marker like the other raw TCP probes.
+
+SCTP probes (`-sY`, `-sZ`, `-PY`) and the other IP protocol probes
+(`-sO`, `-PO`: IGMP, IP-in-IP, bare headers, and their UDP datagram) carry
+no FeroProbe mark yet; they are the same packets nmap sends.
 
 Two scans carry no marker, on purpose:
 

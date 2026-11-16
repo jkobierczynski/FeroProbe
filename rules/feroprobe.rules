@@ -11,7 +11,7 @@
 #     is otherwise meaningless, so this does not change how the probe behaves.
 #   * UDP probes to ports with no service-specific payload carry the ASCII
 #     marker "FeroProbeScan/1".
-#   * ICMP and ICMPv6 echo requests (host discovery) carry the 9-byte payload
+#   * ICMP and ICMPv6 echo requests (host discovery, -PO included) carry the 9-byte payload
 #     "feroprobe"; nmap's are empty.
 #
 # Note: the TCP *connect* scan (-sT) uses the operating system's own TCP
@@ -32,6 +32,6 @@ alert tcp any any -> $HOME_NET any (msg:"FeroProbe stateless TCP scan probe (win
 # UDP scan probe carrying FeroProbe's payload marker.
 alert udp any any -> $HOME_NET any (msg:"FeroProbe UDP scan probe (payload marker)"; content:"FeroProbeScan/1"; depth:16; classtype:attempted-recon; metadata:tool FeroProbe; sid:9100003; rev:1;)
 
-# ICMP echo request (host discovery) carrying FeroProbe's 9-byte payload.
+# ICMP echo request (host discovery, -PO included) carrying FeroProbe's 9-byte payload.
 alert icmp any any -> $HOME_NET any (msg:"FeroProbe ping probe (echo payload marker)"; itype:8; dsize:9; content:"feroprobe"; depth:9; classtype:attempted-recon; metadata:tool FeroProbe; sid:9100004; rev:1;)
 alert icmp any any -> $HOME_NET any (msg:"FeroProbe IPv6 ping probe (echo payload marker)"; itype:128; dsize:9; content:"feroprobe"; depth:9; classtype:attempted-recon; metadata:tool FeroProbe; sid:9100005; rev:1;)

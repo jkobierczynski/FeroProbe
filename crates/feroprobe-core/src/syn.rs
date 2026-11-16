@@ -268,8 +268,9 @@ pub async fn raw_tcp_scan(
 /// Hosts already proven up, so a raw scan used as a discovery probe sends
 /// them nothing more. Target `h` of the scan is done once `flags[index[h]]`
 /// (set by other probes, such as ICMP) or `tcp[index[h]]` (set when a raw
-/// TCP probe draws an answer) is set. The two are kept apart so a TCP
-/// answer does not stop an ICMP reply from being reported as the reason.
+/// TCP, SCTP or IP protocol probe draws an answer) is set. The two are kept
+/// apart so such an answer does not stop an ICMP reply from being reported
+/// as the reason.
 #[derive(Clone)]
 pub(crate) struct HostsDone {
     pub flags: std::sync::Arc<Vec<std::sync::atomic::AtomicBool>>,
@@ -279,15 +280,16 @@ pub(crate) struct HostsDone {
 
 impl HostsDone {
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-    fn is_done(&self, h: usize) -> bool {
+    pub(crate) fn is_done(&self, h: usize) -> bool {
         use std::sync::atomic::Ordering::Relaxed;
         let i = self.index[h];
         self.flags[i].load(Relaxed) || self.tcp[i].load(Relaxed)
     }
 
-    /// Mark target `h` of the scan done: it answered a raw TCP probe.
+    /// Mark target `h` of the scan done: it answered a raw probe (TCP,
+    /// SCTP or IP protocol).
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-    fn mark(&self, h: usize) {
+    pub(crate) fn mark(&self, h: usize) {
         self.tcp[self.index[h]].store(true, std::sync::atomic::Ordering::Relaxed);
     }
 }
@@ -431,8 +433,9 @@ mod imp {
         let record = |results: &mut HashMap<(usize, u16), PortResult>,
                       flight: &mut Flight<u16>,
                       a: Answer| {
+            let proof = done.is_some() && a.2 != PortState::Filtered;
             if let Some(d) = done
-                && a.2 != PortState::Filtered
+                && proof
             {
                 d.mark(a.0);
                 // As a discovery probe, a TCP answer is proof of life, so it
@@ -444,7 +447,12 @@ mod imp {
                     results.remove(&(a.0, a.1));
                 }
             }
-            record(results, flight, no_answer, a)
+            let host = a.0;
+            let recorded = record(results, flight, no_answer, a);
+            if proof {
+                flight.retire_host(host);
+            }
+            recorded
         };
         let addrs: Vec<IpAddr> = targets.iter().map(|t| t.addr).collect();
         let index: Arc<HashMap<IpAddr, usize>> =
@@ -586,10 +594,14 @@ mod imp {
         // proved up. Checked on a timer, not per answer, to stay cheap on
         // large sweeps.
         let mut retired = vec![false; addrs.len()];
+        // Looking costs a pass over the targets: at most every
+        // RETIRE_EVERY (this scan's own answers retire their host at once).
+        let mut looked = Instant::now();
         let mut retire_done = |flight: &mut Flight<u16>| {
-            if done.is_none() {
+            if done.is_none() || looked.elapsed() < crate::rawscan::RETIRE_EVERY {
                 return;
             }
+            looked = Instant::now();
             for (h, r) in retired.iter_mut().enumerate() {
                 if !*r && is_done(h) {
                     *r = true;

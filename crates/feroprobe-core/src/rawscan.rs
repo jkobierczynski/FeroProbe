@@ -15,13 +15,14 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::capture::{self, Packet};
 use crate::connect::is_network_error;
 use crate::model::{HostResult, PortResult, PortState, Protocol, ScanConfig, reason};
 use crate::raw::{Pacer, source_addr_for};
 use crate::rtt::{Flight, Next};
+use crate::syn::HostsDone;
 use crate::target::Target;
 
 /// What a received packet says about one probe.
@@ -47,6 +48,17 @@ const QUEUE_CAP: usize = 8192;
 /// `classify` reads each captured packet, on its own thread, and returns
 /// the answers it gives (the IP protocol scan can learn about two probes
 /// from one packet). Probes that never got an answer get `no_answer`.
+///
+/// As a host-discovery probe (`done` given), the scan sends nothing more to
+/// a host that `done` marks as up, and an answer that is neither `no_answer`
+/// nor filtered proves its host up and marks it so (see
+/// [`crate::discovery`]). The probes skipped that way come back as no
+/// answer.
+/// How often a discovery probe looks for hosts that other probes proved
+/// up (see [`run`]).
+pub(crate) const RETIRE_EVERY: Duration = Duration::from_millis(100);
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn run(
     targets: &[Target],
     keys: &[u16],
@@ -55,7 +67,9 @@ pub(crate) fn run(
     no_answer: PortState,
     mut send: impl FnMut(usize, u16, IpAddr, IpAddr) -> io::Result<()>,
     classify: impl Fn(&Packet<'_>, &Index) -> Vec<Answer> + Send + 'static,
+    done: Option<&HostsDone>,
 ) -> io::Result<Vec<HostResult>> {
+    let is_done = |h: usize| done.is_some_and(|d| d.is_done(h));
     let addrs: Vec<IpAddr> = targets.iter().map(|t| t.addr).collect();
     let index: Arc<Index> = Arc::new(addrs.iter().enumerate().map(|(i, a)| (*a, i)).collect());
     let result = |key: u16, state, why, rtt_ms| PortResult {
@@ -126,6 +140,13 @@ pub(crate) fn run(
         };
         let rtt = (rtt.as_secs_f64() * 1e6).round() / 1000.0;
         results.insert((a.host, a.key), result(a.key, a.state, a.reason, Some(rtt)));
+        if let Some(d) = done
+            && a.state != no_answer
+            && a.state != PortState::Filtered
+        {
+            d.mark(a.host);
+            flight.retire_host(a.host);
+        }
         true
     };
 
@@ -149,6 +170,24 @@ pub(crate) fn run(
         // Resends go out as their probes time out, as often as each host's
         // losses call for, up to cfg.retries (see Flight).
         flight.start(pending.iter().copied());
+        // As a discovery probe, stop waiting on and resending to hosts
+        // proven up by another discovery probe (this scan's own answers
+        // retire their host at once, in `record`). Looking costs a pass
+        // over the targets, so it is done at most every RETIRE_EVERY.
+        let mut retired = vec![false; addrs.len()];
+        let mut looked = Instant::now();
+        let mut retire_done = |flight: &mut Flight<u16>| {
+            if done.is_none() || looked.elapsed() < RETIRE_EVERY {
+                return;
+            }
+            looked = Instant::now();
+            for (h, r) in retired.iter_mut().enumerate() {
+                if !*r && is_done(h) {
+                    *r = true;
+                    flight.retire_host(h);
+                }
+            }
+        };
         loop {
             if cfg.expired() {
                 return Err(ScanConfig::timed_out());
@@ -158,14 +197,19 @@ pub(crate) fn run(
             while let Ok(a) = rx.try_recv() {
                 record(&mut results, &mut flight, a);
             }
+            retire_done(&mut flight);
             let (h, k) = match flight.next(Instant::now()) {
                 Next::Idle => break,
                 Next::Send(h, k) => (h, k),
                 // Every window is full, or only probes waiting for their
-                // answers are left: wait for an answer or a timeout.
+                // answers are left: wait for an answer or a timeout or (as
+                // a discovery probe) for the host to be proven up.
                 Next::Wait(until) => {
                     let until = cfg.deadline.map_or(until, |d| until.min(d));
-                    let left = until.saturating_duration_since(Instant::now());
+                    let mut left = until.saturating_duration_since(Instant::now());
+                    if done.is_some() {
+                        left = left.min(RETIRE_EVERY);
+                    }
                     match rx.recv_timeout(left) {
                         Ok(a) => {
                             record(&mut results, &mut flight, a);
@@ -183,7 +227,7 @@ pub(crate) fn run(
                 flight.settle(h, k);
                 continue;
             };
-            if results.contains_key(&(h, k)) {
+            if results.contains_key(&(h, k)) || is_done(h) {
                 flight.settle(h, k);
                 continue;
             }
@@ -193,7 +237,9 @@ pub(crate) fn run(
             while let Ok(a) = rx.try_recv() {
                 record(&mut results, &mut flight, a);
             }
-            if results.contains_key(&(h, k)) {
+            // The wait may have let an answer prove the host up.
+            if results.contains_key(&(h, k)) || is_done(h) {
+                flight.settle(h, k);
                 continue;
             }
             flight.sent(h, k, Instant::now());

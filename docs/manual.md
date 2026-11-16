@@ -62,7 +62,9 @@ FeroProbe has run unchanged, with the same defaults.
 A scan runs in this order:
 
 1. Targets are read, resolved and filtered by the exclusions.
-2. Host discovery finds the targets that are up (skipped with `-Pn`).
+2. Host discovery finds the targets that are up (skipped with `-Pn`). A
+   list scan (`-sL`) stops after the next step and sends the targets
+   nothing.
 3. Reverse DNS names the hosts (`-n` turns it off).
 4. The port scans run on the hosts that are up: one TCP scan, plus UDP,
    SCTP and IP protocol scans if asked for.
@@ -188,7 +190,28 @@ the probes you ask for are sent. The options can be repeated and combined,
 for example `-PE -PP -PS22,443 -PA80`. Port lists are written like `-p`
 lists and run on without a space; `-PS 22` is an error because `22` would be
 read as a target. A probe type the process cannot send (for example `-PP`
-without raw sockets) is skipped, and the other probes decide.
+without raw sockets) is skipped, and the other probes decide. The exceptions
+are `-PY` and `-PO`, which have no fallback: without raw sockets on Linux
+FeroProbe refuses them, as nmap does without root, rather than leaving them
+out. `--dry-run` still lists them.
+
+#### `-sL` (list scan)
+
+List the targets and send them nothing: no ping, no ARP or neighbour
+discovery, no port scan. Each target is reported with its reverse DNS name
+(unless `-n`), so it is a quick way to see what a target specification
+expands to, and what the addresses are called, before scanning anything.
+The only traffic is the DNS queries for those names, which go to the
+resolver, not to the targets. The report lists every target with no host
+status (XML `state="unknown"`, grepable `Status: Unknown`, JSON
+`"up": false`), and the totals count no host as up, as in nmap.
+
+`-sL` cannot be combined with port scan types, `-sV`, `--scanflags`,
+`-p`, `-F`, `--top-ports`, `-O`, `-A` or `--traceroute`. `-sn` may come
+along and changes nothing. `-P` options are ignored, with a warning for
+each (nmap ignores them silently). `--dry-run -sL` lists the targets and
+says nothing would be sent. `-sL` is not `--dry-run`: a dry run lists the
+probes a scan would send, a list scan only the targets.
 
 #### `-sn` (no port scan)
 
@@ -229,6 +252,38 @@ to be open). A reply, or an ICMP port unreachable, proves the host is up.
 Datagrams to well-known ports carry that service's probe payload (see
 [UDP scan](#udp-scan--su)).
 
+#### `-PY[portlist]` (SCTP INIT ping)
+
+Send an SCTP INIT chunk to each port (default port 80), the same packet as
+the `-sY` scan's. An INIT-ACK (the port is open) or an ABORT (closed)
+proves the host is up, and so does an ICMP port or protocol unreachable
+that the target sends itself; the same error from a router on the way
+proves nothing. Needs raw sockets on Linux (refused otherwise). Hosts
+whose kernel has no SCTP support usually answer with a protocol
+unreachable, which counts.
+
+#### `-PO[protocol list]` (IP protocol ping)
+
+Send one IP packet of each protocol in the list (default `1,2,4`: ICMP,
+IGMP and IP-in-IP), built as the `-sO` scan builds them: an ICMP echo
+request for 1, an IGMP membership query for 2, a TCP ACK to port 80 for 6,
+a UDP datagram to port 40125 for 17, an SCTP INIT to port 80 for 132, and
+a bare IP header for the others. Any answer from the target in a probed
+protocol proves it up (`proto-response`), and so does an ICMP protocol or
+port unreachable from the target itself. Protocol numbers run from 0 to
+255 and run on without a space: `-PO1,6,17`. Needs raw sockets on Linux
+(refused otherwise). The echo request carries FeroProbe's `feroprobe`
+payload like every discovery echo request; `-sO`'s stays empty, as in nmap.
+
+#### `-PR` (ARP ping)
+
+Accepted, and changes nothing, as in nmap (whose current versions call it
+deprecated): targets on a local Ethernet network always get an ARP or
+neighbour discovery request when FeroProbe has raw sockets, unless
+`--disable-arp-ping` is given, and other targets get the usual probes. In
+particular `-PR` does not stop the ping probes to remote targets. A warning
+says so on every run (nmap prints its note only with `-v`).
+
 #### `-PE` (ICMP echo)
 
 Send an ICMP echo request (ICMPv6 for IPv6 targets). Needs raw sockets,
@@ -248,13 +303,10 @@ hosts answer it today.
 Do not use ARP or neighbour discovery: local targets get the ping probes
 like remote ones. The two names do the same thing; `--send-ip` is nmap's.
 
-nmap's `-PO` (IP protocol ping), `-PY` (SCTP ping) and `-PR` (ARP ping
-only) are not supported and are refused with an error. ARP happens on its
-own as described above.
-
-`--exclude-ports` also removes its ports from the `-PS`, `-PA` and `-PU`
-probes and from the default TCP probes, as nmap does. If that leaves a TCP
-or UDP ping type with no ports, it is skipped with a warning.
+`--exclude-ports` also removes its ports from the `-PS`, `-PA`, `-PU` and
+`-PY` probes (`S:` ports for `-PY`), its `P:` protocols from `-PO`, and its
+ports from the default TCP probes, as nmap does. If that leaves a ping type
+with no ports, it is skipped with a warning.
 
 ## Reverse DNS
 
@@ -307,11 +359,11 @@ are nmap's:
 | `udp-response` | A UDP reply came back |
 | `port-unreach`, `proto-unreach`, `host-unreach`, `net-unreach`, `admin-prohibited`, `unreachable` | An ICMP destination unreachable error of that kind |
 | `init-ack`, `abort` | SCTP answers |
-| `proto-response` | IP protocol scan: an answer in the probed protocol |
+| `proto-response` | IP protocol scan or ping (`-PO`): an answer in the probed protocol |
 | `echo-reply`, `timestamp-reply`, `addressmask-reply` | ICMP answers to discovery probes |
 | `arp-response`, `nd-response` | The host answered ARP or neighbour discovery |
 | `localhost-response` | The target is this machine (see [Host discovery](#host-discovery)) |
-| `user-set` | `-Pn`: the host was assumed up |
+| `user-set` | `-Pn`: the host was assumed up; with `-sL`, the host was only listed |
 | `time-exceeded`, `param-problem` | Other ICMP errors |
 
 ## Scan techniques
@@ -1616,6 +1668,8 @@ per option:
 | `-g` with `-O` | Sends its OS detection probes from a run of source ports starting at the `-g` port, not all from it |
 | `-g 0` with `-sU` or `-PU` | Sends the UDP probes from port 0 (FeroProbe cannot, and uses a random port, with a warning) |
 | Default discovery without root | Only TCP connects to 80 and 443, no ICMP echo |
+| `-PO` with protocol 1 | Its ICMP echo request is empty (FeroProbe's carries `feroprobe`) |
+| `-sL` with `-sV` or `--traceroute`, as root | Drops them, but the route lookup they cause can send ARP requests to local targets (FeroProbe refuses the combination) |
 
 These come from nmap 7.99's source.
 
@@ -1795,6 +1849,9 @@ safeguard calls for a difference. The deliberate differences are:
 | Probes outside the requested ports | `-A`'s scripts can probe other ports (`ms-sql-info`: UDP 1434 on every host); `-O` picks a random UDP port (and for IPv4 also TCP), regardless of `-p`, when the scan found no closed or unfiltered one | Never beyond the command's own ports (`-p` plus the host-discovery ports): `-sV` probes only open ports the scan found, `-O` an open TCP port the scan found and, when it found one, a closed one (and ICMP echo only when discovery sends it), traceroute only a scanned port, a discovery port, or (with `-sn`) the `-p` port, and FeroProbe has no scripts |
 | Traceroute port | The probe that got the best answer during discovery or the scan, else ICMP echo | TCP SYNs to an open or closed scanned port, else a TCP port the command names (`-p` with `-sn`, or a discovery port), else the host is not traced (FeroProbe used to fall back to port 80) |
 | `-A` without root | Silently drops `-O` and traceroute | Drops them with a warning naming them |
+| `-sL` with `-P` options | Ignores them silently | Ignores them with a warning per option |
+| `-sL` with `-sV` or `--traceroute` | Silently drops them (and as root still looks up routes, so local targets can get ARP requests) | Refuses the combination; a list scan sends the targets nothing at all |
+| `-PR` | A no-op; says so only with `-v` | A no-op; says so on every run |
 
 Behaviour that looks unusual but matches nmap includes: skipping discovery
 for this machine as root (`localhost-response`), ARP or neighbour discovery
@@ -1804,12 +1861,10 @@ order, and skipping (rather than failing) a scan type left without ports.
 
 ## nmap options FeroProbe does not have
 
-These nmap options are refused as unknown, or (for `-PO`, `-PY`, `-PR`)
-with an error naming the supported alternatives:
+These nmap options are refused as unknown:
 
-- Scans and discovery: `-sL` (list scan), `-sI` (idle scan, not planned),
-  `-b` (FTP bounce), `-PO`, `-PY`, `-PR`, `-iR`, `--system-dns`,
-  `--resolve-all`.
+- Scans and discovery: `-sI` (idle scan, not planned), `-b` (FTP bounce),
+  `-iR`, `--system-dns`, `--resolve-all`.
 - Scripting: `-sC`, `--script` and related options (nmap's scripts cannot
   be shipped under their licence).
 - Timing: `--defeat-rst-ratelimit`.

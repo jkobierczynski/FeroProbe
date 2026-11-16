@@ -40,15 +40,21 @@ pub(crate) struct Probe {
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub ipid: u16,
     pub icmp_id: u16,
+    /// The payload of the ICMP and ICMPv6 echo requests: empty for `-sO`,
+    /// as in nmap, and FeroProbe's `feroprobe` marker for the `-PO` ping,
+    /// like every other host-discovery echo request.
+    pub echo_payload: &'static [u8],
 }
 
 impl Probe {
     /// The body of the probe for protocol `proto`, after the IP header.
     pub(crate) fn body(&self, proto: u8, src: IpAddr, dst: IpAddr) -> Vec<u8> {
         match (proto, src, dst) {
-            (IPPROTO_ICMP, IpAddr::V4(_), _) => packet::icmp_echo(self.icmp_id, 0, &[]),
+            (IPPROTO_ICMP, IpAddr::V4(_), _) => {
+                packet::icmp_echo(self.icmp_id, 0, self.echo_payload)
+            }
             (IPPROTO_ICMPV6, IpAddr::V6(s), IpAddr::V6(d)) => {
-                packet::icmpv6_echo_with_checksum(s, d, self.icmp_id, 0)
+                packet::icmpv6_echo_with_checksum(s, d, self.icmp_id, 0, self.echo_payload)
             }
             (IPPROTO_IGMP, IpAddr::V4(_), _) => packet::igmp_query().to_vec(),
             (IPPROTO_TCP, ..) => packet::tcp_probe(
@@ -93,9 +99,31 @@ pub async fn ip_protocol_scan(
     cfg: &ScanConfig,
 ) -> io::Result<Vec<HostResult>> {
     let (targets, protocols, cfg) = (targets.to_vec(), protocols.to_vec(), cfg.clone());
-    tokio::task::spawn_blocking(move || imp::scan_blocking(&targets, &protocols, &cfg))
+    tokio::task::spawn_blocking(move || imp::scan_blocking(&targets, &protocols, &cfg, None))
         .await
         .map_err(io::Error::other)?
+}
+
+/// The IP protocol ping (`-PO`), a host-discovery probe: one packet of each
+/// protocol in `protocols`, built as `-sO` builds them (except that echo
+/// requests carry the `feroprobe` marker). As in nmap, a host is up when it
+/// answers in any of those protocols, or sends back an ICMP port or
+/// protocol unreachable itself (a router's error proves nothing). Each
+/// protocol's result is [`PortState::Open`] with the answer as its reason
+/// when the answer proves the host up; anything else means it did not.
+/// Hosts that `done` marks as up get no more probes.
+pub(crate) async fn ip_proto_ping(
+    targets: &[Target],
+    protocols: &[u8],
+    cfg: &ScanConfig,
+    done: Option<crate::syn::HostsDone>,
+) -> io::Result<Vec<HostResult>> {
+    let (targets, protocols, cfg) = (targets.to_vec(), protocols.to_vec(), cfg.clone());
+    tokio::task::spawn_blocking(move || {
+        imp::scan_blocking(&targets, &protocols, &cfg, Some(done.as_ref()))
+    })
+    .await
+    .map_err(io::Error::other)?
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -106,10 +134,11 @@ mod imp {
         _: &[Target],
         _: &[u8],
         _: &ScanConfig,
+        _: Option<Option<&crate::syn::HostsDone>>,
     ) -> io::Result<Vec<HostResult>> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            "the IP protocol scan (-sO) is only supported on Linux for now",
+            "the IP protocol scan and ping (-sO, -PO) are only supported on Linux for now",
         ))
     }
 }
@@ -133,6 +162,8 @@ mod imp {
         targets: &[Target],
         protocols: &[u8],
         cfg: &ScanConfig,
+        // As a ping (-PO): the hosts already proven up, if tracked.
+        ping: Option<Option<&crate::syn::HostsDone>>,
     ) -> io::Result<Vec<HostResult>> {
         // IPPROTO_RAW sockets take the IP header from us, so one socket
         // per family can send any protocol.
@@ -157,6 +188,11 @@ mod imp {
             seq: rng.next_u32(),
             ipid: (rng.next_u32() as u16) | 1,
             icmp_id: (rng.next_u32() as u16) | 1,
+            echo_payload: if ping.is_some() {
+                packet::ECHO_MARKER
+            } else {
+                &[]
+            },
         };
         let keys: Vec<u16> = protocols.iter().map(|&p| u16::from(p)).collect();
         let send = |_: usize, proto: u16, src: IpAddr, dst: IpAddr| -> io::Result<()> {
@@ -178,7 +214,14 @@ mod imp {
                 });
             })
         };
-        let classify = move |pkt: &Packet<'_>, index: &Index| answers(pkt, index, &probe);
+        let as_ping = ping.is_some();
+        let classify = move |pkt: &Packet<'_>, index: &Index| {
+            if as_ping {
+                ping_answers(pkt, index, &probe)
+            } else {
+                answers(pkt, index, &probe)
+            }
+        };
         rawscan::run(
             targets,
             &keys,
@@ -187,7 +230,70 @@ mod imp {
             PortState::OpenFiltered,
             send,
             classify,
+            ping.flatten(),
         )
+    }
+
+    /// Whether `pkt` is one of our own probes, seen coming back in: on the
+    /// loopback interface a probe is delivered to us as well as sent, even
+    /// when its source and destination differ (127.0.0.1 -> 127.0.0.2). Our
+    /// IPv4 probes carry a fixed IP id that a target's reply never echoes,
+    /// so that alone identifies them; IPv6 has no such field, so there we
+    /// can only catch the same-address loopback echo.
+    fn is_ours(pkt: &Packet<'_>, probe: &Probe) -> bool {
+        match pkt.ipid {
+            Some(id) => id == probe.ipid,
+            None => {
+                pkt.src == pkt.dst
+                    && pkt.payload == probe.body(pkt.protocol, pkt.src, pkt.dst).as_slice()
+            }
+        }
+    }
+
+    /// What a captured packet says about our `-PO` pings, as nmap reads
+    /// them: an ICMP error quoting a probe proves its host up only when the
+    /// host sent it itself and it is a port or protocol unreachable; any
+    /// other packet from a target in a protocol we probed proves it up
+    /// (`proto-response`). Proof comes back as [`PortState::Open`].
+    pub(super) fn ping_answers(pkt: &Packet<'_>, index: &Index, probe: &Probe) -> Vec<Answer> {
+        let mut out = Vec::new();
+        if is_ours(pkt, probe) {
+            return out;
+        }
+        let v6 = pkt.src.is_ipv6();
+        let icmp = if v6 { IPPROTO_ICMPV6 } else { IPPROTO_ICMP };
+        if pkt.protocol == icmp
+            && let Some(e) = packet::parse_icmp_error(pkt.payload, v6)
+        {
+            if e.id.is_none_or(|id| id == probe.ipid)
+                && let Some(&host) = index.get(&e.dst)
+                && let Some(why) = rawscan::icmp_reason(v6, e.kind, e.code)
+            {
+                let proof =
+                    pkt.src == e.dst && matches!(why, reason::PORT_UNREACH | reason::PROTO_UNREACH);
+                out.push(Answer {
+                    host,
+                    key: u16::from(e.protocol),
+                    state: if proof {
+                        PortState::Open
+                    } else {
+                        PortState::Filtered
+                    },
+                    reason: why,
+                });
+            }
+            // An error is never a reply in its own protocol.
+            return out;
+        }
+        if let Some(&host) = index.get(&pkt.src) {
+            out.push(Answer {
+                host,
+                key: u16::from(pkt.protocol),
+                state: PortState::Open,
+                reason: reason::PROTO_RESPONSE,
+            });
+        }
+        out
     }
 
     /// Everything a captured packet says about our probes, as nmap reads
@@ -196,20 +302,7 @@ mod imp {
     pub(super) fn answers(pkt: &Packet<'_>, index: &Index, probe: &Probe) -> Vec<Answer> {
         let mut out = Vec::new();
         let v6 = pkt.src.is_ipv6();
-        // One of our own probes, seen coming back in: on the loopback
-        // interface a probe is delivered to us as well as sent, even when
-        // its source and destination differ (127.0.0.1 -> 127.0.0.2). Our
-        // IPv4 probes carry a fixed IP id that a target's reply never
-        // echoes, so that alone identifies them; IPv6 has no such field, so
-        // there we can only catch the same-address loopback echo.
-        let ours = match pkt.ipid {
-            Some(id) => id == probe.ipid,
-            None => {
-                pkt.src == pkt.dst
-                    && pkt.payload == probe.body(pkt.protocol, pkt.src, pkt.dst).as_slice()
-            }
-        };
-        if ours {
+        if is_ours(pkt, probe) {
             return out;
         }
         let icmp = if v6 { IPPROTO_ICMPV6 } else { IPPROTO_ICMP };
@@ -287,6 +380,7 @@ mod imp {
             seq: 5,
             ipid: 0x1234,
             icmp_id: 9,
+            echo_payload: &[],
         };
 
         fn target() -> IpAddr {
@@ -462,7 +556,8 @@ mod imp {
             };
             let target = Target::new("127.0.0.1".parse().unwrap());
             // 253 is reserved for experiments: Linux has no handler.
-            let hosts = scan_blocking(&[target], &[1, 6, 17, 253], &cfg).unwrap();
+            let hosts =
+                scan_blocking(std::slice::from_ref(&target), &[1, 6, 17, 253], &cfg, None).unwrap();
             let state = |p: u16| {
                 let r = hosts[0].ports.iter().find(|r| r.port == p).unwrap();
                 (r.protocol, r.state)
@@ -471,6 +566,77 @@ mod imp {
             assert_eq!(state(6), (Protocol::Ip, PortState::Open));
             assert_eq!(state(17), (Protocol::Ip, PortState::Open));
             assert_eq!(state(253), (Protocol::Ip, PortState::Closed));
+
+            // As a ping (-PO 253), the protocol unreachable proves the host.
+            let ping = scan_blocking(&[target], &[253], &cfg, Some(None)).unwrap();
+            let r = &ping[0].ports[0];
+            assert_eq!(
+                (r.state, r.reason),
+                (PortState::Open, reason::PROTO_UNREACH)
+            );
+        }
+
+        #[test]
+        fn reads_ping_answers_like_nmap() {
+            let idx = index();
+            let ping = |src: IpAddr, proto: u8, payload: &[u8]| {
+                got(ping_answers(
+                    &packet_from(src, proto, payload),
+                    &idx,
+                    &PROBE,
+                ))
+            };
+            // The target's own protocol unreachable: up. Unlike -sO, the
+            // error does not also count as an ICMP reply.
+            assert_eq!(
+                ping(target(), IPPROTO_ICMP, &unreachable(2, 4)),
+                [(4, PortState::Open, reason::PROTO_UNREACH)]
+            );
+            assert_eq!(
+                ping(target(), IPPROTO_ICMP, &unreachable(3, IPPROTO_UDP)),
+                [(17, PortState::Open, reason::PORT_UNREACH)]
+            );
+            // From a router, or another code: no proof.
+            let router: IpAddr = Ipv4Addr::new(10, 0, 0, 254).into();
+            assert_eq!(
+                ping(router, IPPROTO_ICMP, &unreachable(2, 4)),
+                [(4, PortState::Filtered, reason::PROTO_UNREACH)]
+            );
+            assert_eq!(
+                ping(target(), IPPROTO_ICMP, &unreachable(13, 2)),
+                [(2, PortState::Filtered, reason::ADMIN_PROHIBITED)]
+            );
+            // Any reply in a probed protocol: proto-response, as in nmap.
+            let reply = {
+                let mut r = packet::icmp_echo(9, 0, packet::ECHO_MARKER);
+                r[0] = ICMP_ECHO_REPLY;
+                r
+            };
+            assert_eq!(
+                ping(target(), IPPROTO_ICMP, &reply),
+                [(1, PortState::Open, reason::PROTO_RESPONSE)]
+            );
+            assert_eq!(
+                ping(target(), IPPROTO_IGMP, &packet::igmp_query()),
+                [(2, PortState::Open, reason::PROTO_RESPONSE)]
+            );
+            // Not from a target: nothing.
+            assert!(ping(router, IPPROTO_IGMP, &packet::igmp_query()).is_empty());
+            // Our own probe looped back: nothing.
+            let mut mine = packet_from(target(), IPPROTO_IGMP, &[]);
+            mine.ipid = Some(PROBE.ipid);
+            assert!(ping_answers(&mine, &idx, &PROBE).is_empty());
+        }
+
+        #[test]
+        fn ping_echo_requests_carry_the_marker() {
+            let src: IpAddr = Ipv4Addr::new(10, 0, 0, 1).into();
+            let ping = Probe {
+                echo_payload: packet::ECHO_MARKER,
+                ..PROBE
+            };
+            assert!(ping.body(1, src, target()).ends_with(packet::ECHO_MARKER));
+            assert_eq!(PROBE.body(1, src, target()).len(), 8);
         }
     }
 }

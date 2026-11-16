@@ -73,6 +73,10 @@ pub fn hosts(hosts: &[HostResult], info: &RunInfo) -> String {
             let _ = writeln!(x, "{head}\tStatus: Timeout");
             continue;
         }
+        if info.list_scan {
+            let _ = writeln!(x, "{head}\tStatus: Unknown");
+            continue;
+        }
         let _ = writeln!(x, "{head}\tStatus: Up");
         if info.ping_only {
             continue;

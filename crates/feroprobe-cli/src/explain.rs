@@ -123,7 +123,12 @@ pub(crate) fn explain(args: &Args, f: &Facts) -> Vec<String> {
     // 2. Host discovery.
     head(&mut out, "Host discovery");
     let p = f.plan;
-    if !p.discovery {
+    if p.list {
+        say(
+            &mut out,
+            "none: -sL only lists the targets and sends them nothing, not even ARP".into(),
+        );
+    } else if !p.discovery {
         say(
             &mut out,
             "skipped (-Pn): every target is treated as up".into(),
@@ -239,6 +244,36 @@ pub(crate) fn explain(args: &Args, f: &Facts) -> Vec<String> {
                     ),
                 );
             }
+            if !pr.sctp.is_empty() {
+                say(
+                    &mut out,
+                    format!(
+                        "  SCTP INIT to port {} (raw; an INIT-ACK, an ABORT or the host's own port or protocol unreachable proves it)",
+                        ports(&pr.sctp)
+                    ),
+                );
+            }
+            if !pr.proto.is_empty() {
+                let names: Vec<String> = pr
+                    .proto
+                    .iter()
+                    .map(|&n| format!("{n} ({})", feroprobe_core::ip_protocol_name(n)))
+                    .collect();
+                say(
+                    &mut out,
+                    format!(
+                        "  IP protocol ping, protocol {} (raw; an answer in that protocol or the host's own protocol unreachable proves it)",
+                        names.join(", ")
+                    ),
+                );
+            }
+        }
+        if args.ping.contains(&crate::PingArg::Arp) {
+            say(
+                &mut out,
+                "-PR adds nothing: ARP and neighbour discovery already run where they can, as in nmap"
+                    .into(),
+            );
         }
         if args.exclude_ports.is_some() {
             say(
@@ -261,6 +296,11 @@ pub(crate) fn explain(args: &Args, f: &Facts) -> Vec<String> {
     };
     if args.no_resolve {
         say(&mut out, "off (-n)".into());
+    } else if p.list {
+        say(
+            &mut out,
+            format!("every target, as a list scan does, asking {servers} (-n turns it off)"),
+        );
     } else if args.always_resolve {
         say(&mut out, format!("every target (-R), asking {servers}"));
     } else {

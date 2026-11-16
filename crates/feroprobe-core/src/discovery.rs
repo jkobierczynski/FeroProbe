@@ -24,8 +24,13 @@
 //! bare TCP ACKs that a live host answers with a reset (`-PA`), UDP
 //! datagrams that draw an answer or a port unreachable (`-PU`), and ICMP
 //! echo, timestamp and address mask requests (`-PE`, `-PP`, `-PM`; the last
-//! two need raw sockets and IPv4). The TCP probes are raw packets when raw
-//! sockets are available on Linux, and connects otherwise, as in nmap.
+//! two need raw sockets and IPv4), SCTP INITs that a live host answers
+//! with an INIT-ACK or an ABORT (`-PY`), and IP protocol pings (`-PO`: by
+//! default ICMP, IGMP and IP-in-IP packets, any answer in the same protocol
+//! or an ICMP protocol unreachable from the host proving it). The TCP
+//! probes are raw packets when raw sockets are available on Linux, and
+//! connects otherwise, as in nmap; `-PY` and `-PO` need raw sockets on
+//! Linux.
 //!
 //! Hosts that answer none of them are reported as down and not scanned
 //! (unless discovery is skipped with `-Pn`).
@@ -65,6 +70,13 @@ pub const DEFAULT_TCP_PING_PORT: u16 = 80;
 /// to be open, so a live host answers with a port unreachable.
 pub const DEFAULT_UDP_PING_PORT: u16 = 40125;
 
+/// The port `-PY` probes when no ports are given, as in nmap.
+pub const DEFAULT_SCTP_PING_PORT: u16 = 80;
+
+/// The protocols `-PO` probes when none are given, as in nmap: ICMP, IGMP
+/// and IP-in-IP.
+pub const DEFAULT_PROTO_PINGS: [u8; 3] = [1, 2, 4];
+
 /// Which probes host discovery sends, like nmap's `-P` options.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PingProbes {
@@ -84,6 +96,13 @@ pub struct PingProbes {
     /// `-PU`: UDP ports to send a datagram to; an answer or a port
     /// unreachable proves the host.
     pub udp: Vec<u16>,
+    /// `-PY`: SCTP ports to send an INIT to; an INIT-ACK or an ABORT proves
+    /// the host. Raw sockets on Linux only.
+    pub sctp: Vec<u16>,
+    /// `-PO`: IP protocols to send a packet of; an answer in the same
+    /// protocol, or the host's own protocol or port unreachable, proves it.
+    /// Raw sockets on Linux only.
+    pub proto: Vec<u8>,
 }
 
 impl Default for PingProbes {
@@ -126,7 +145,15 @@ impl PingProbes {
             syn: Vec::new(),
             ack: Vec::new(),
             udp: Vec::new(),
+            sctp: Vec::new(),
+            proto: Vec::new(),
         }
+    }
+
+    /// Whether any probe needs raw sockets on Linux whatever the fallback:
+    /// `-PY` and `-PO` have none, as in nmap.
+    pub fn needs_raw(&self) -> bool {
+        !self.sctp.is_empty() || !self.proto.is_empty()
     }
 }
 
@@ -312,6 +339,24 @@ async fn discover_with(
         })
     })
     .collect();
+    // -PY and -PO: raw SCTP INITs and IP protocol packets, read off the
+    // packet capture like the -sY and -sO scans.
+    let sctp_ping = (!live.is_empty() && !probes.sctp.is_empty()).then(|| {
+        let (live, ports, cfg, done) =
+            (live.clone(), probes.sctp.clone(), cfg.clone(), done.clone());
+        tokio::spawn(async move { crate::sctp::sctp_ping(&live, &ports, &cfg, Some(done)).await })
+    });
+    let proto_ping = (!live.is_empty() && !probes.proto.is_empty()).then(|| {
+        let (live, protos, cfg, done) = (
+            live.clone(),
+            probes.proto.clone(),
+            cfg.clone(),
+            done.clone(),
+        );
+        tokio::spawn(async move {
+            crate::ipproto::ip_proto_ping(&live, &protos, &cfg, Some(done)).await
+        })
+    });
 
     let mut tcp_ports = Vec::new();
     if !raw_tcp {
@@ -395,6 +440,21 @@ async fn discover_with(
             let host = &mut hosts[h];
             if host.up_reason.is_none()
                 && let Some(p) = r.ports.iter().find(|p| p.state != PortState::Filtered)
+            {
+                host.up_reason = Some(p.reason);
+                host.latency_ms = p.rtt_ms;
+            }
+        }
+    }
+    // The SCTP and IP protocol pings mark each answer that proves its host
+    // up as open (see sctp::sctp_ping, ipproto::ip_proto_ping).
+    for ping in [sctp_ping, proto_ping].into_iter().flatten() {
+        let answered = ping.await.map_err(io::Error::other)??;
+        let undecided_hosts = (0..targets.len()).filter(|&h| !decided[h]);
+        for (h, r) in undecided_hosts.zip(answered) {
+            let host = &mut hosts[h];
+            if host.up_reason.is_none()
+                && let Some(p) = r.ports.iter().find(|p| p.state == PortState::Open)
             {
                 host.up_reason = Some(p.reason);
                 host.latency_ms = p.rtt_ms;
@@ -913,6 +973,18 @@ mod tests {
             })
             .await;
             assert_eq!(host.up_reason, Some(reason::PORT_UNREACH), "{host:?}");
+        }
+
+        // -PO: Linux has no handler for protocol 253 (reserved for
+        // experiments), so it answers with a protocol unreachable; IGMP
+        // draws nothing back on loopback, so 253 decides.
+        if raw {
+            let host = run(PingProbes {
+                proto: vec![2, 253],
+                ..PingProbes::none()
+            })
+            .await;
+            assert_eq!(host.up_reason, Some(reason::PROTO_UNREACH), "{host:?}");
         }
 
         // Linux answers ICMP timestamp requests, but not address mask ones.

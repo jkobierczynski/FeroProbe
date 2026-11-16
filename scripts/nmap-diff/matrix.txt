@@ -78,6 +78,17 @@ ping-syn         | routed | root | -sn -PS22,80
 ping-ack         | routed | root | -sn -PA80
 ping-udp         | routed | root | -sn -PU
 ping-send-ip     | lan    | root | -sn --send-ip
+ping-sctp        | routed | root | -sn -PY
+ping-sctp-ports  | routed | root | -sn -PY80,2905
+ping-proto       | routed | root | -sn -PO
+ping-proto-list  | routed | root | -sn -PO6,17,132
+ping-arp-flag    | lan    | root | -sn -PR
+ping-arp-routed  | routed | root | -sn -PR
+
+# --- List scan ---------------------------------------------------------------
+list             | lan    | root | -sL
+list-routed      | routed | root | -sL
+user-list        | lan    | user | -sL
 
 # --- Top ports (exposes port-list differences) -------------------------------
 fast             | lan    | root | -sS -F
