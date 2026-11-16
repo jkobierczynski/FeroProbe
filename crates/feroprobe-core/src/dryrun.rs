@@ -1165,7 +1165,12 @@ mod tests {
         // The -PO echo request carries the marker: 8 + 9 bytes.
         assert!(text.contains("Echo request"), "{text}");
         assert!(text.contains("IGMP"), "{text}");
-        assert!(!text.contains("a real run needs root"), "{text}");
+        // Elsewhere than Linux they cannot be sent even as root.
+        assert_eq!(
+            text.contains("a real run needs root"),
+            !cfg!(target_os = "linux"),
+            "{text}"
+        );
         // Without raw sockets the dry run still lists them, and says a
         // real run would refuse.
         let run = DryRun {
