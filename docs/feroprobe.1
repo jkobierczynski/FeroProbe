@@ -2020,11 +2020,149 @@ excluded hosts, and each open port as a scan finds it
 (\f[V]Discovered open port 22/tcp on 10.0.0.5\f[R]).
 \f[V]-vv\f[R] adds more notes, such as resolver hints.
 Each \f[V]-v\f[R] also raises the Not shown limit.
+When a host loses so many probes that FeroProbe slows down for it,
+\f[V]-v\f[R] says so, as nmap does
+(\f[V]Increasing send delay for 10.0.0.5 from 0 to 5 due to 11 out of 30 dropped probes since last increase.\f[R]).
+The verbosity can be changed while the scan runs; see Runtime
+interaction.
+.SS \f[V]-d\f[R], \f[V]-dd\f[R], \f[V]-d<level>\f[R], \f[V]--debug[=<level>]\f[R]
+.PP
+Raise the debugging level, as nmap\[aq]s \f[V]-d\f[R] does: each
+\f[V]-d\f[R] (or each extra \f[V]d\f[R], as in \f[V]-ddd\f[R]) raises
+the debugging level and the verbosity by one; \f[V]-d<level>\f[R] (or
+\f[V]--debug=<level>\f[R]) sets both to \f[V]<level>\f[R], from 0 to 10.
+Options apply in command-line order, so \f[V]-v -d\f[R] gives verbosity
+2 and debugging 1, while \f[V]-vv -d1\f[R] gives 1 and 1.
+The level must be attached: \f[V]-d 3\f[R] is \f[V]-d\f[R] followed by
+the target \f[V]3\f[R].
+Like nmap\[aq]s, \f[V]-d\f[R] also turns on \f[V]--reason\f[R].
+The output goes to standard error, with the \f[V]-v\f[R] progress:
+.IP \[bu] 2
+\f[V]-d\f[R]: a timing report before the scan
+(\f[V]--------------- Timing report ---------------\f[R], with the host
+group size, the RTT timeouts in milliseconds, \f[V]--max-scan-delay\f[R]
+for TCP, UDP and SCTP, \f[V]--min-parallelism\f[R] and the parallelism
+cap, \f[V]--max-retries\f[R], \f[V]--host-timeout\f[R],
+\f[V]--min-rate\f[R] and \f[V]--max-rate\f[R]; 0 means not set),
+\f[V]Increased max_successful_tryno for <host> to <n> (packet drop)\f[R]
+each time a host answers only a resent probe, which lets its probes be
+sent once more, and after the port scan
+\f[V]Final times for host <address>: srtt: <us> rttvar: <us>  to: <us>\f[R]
+with the host\[aq]s smoothed round-trip time, its variance and its probe
+timeout in microseconds.
+.IP \[bu] 2
+\f[V]-d2\f[R]:
+\f[V]Discovered <state> port <port>/<protocol> on <host>\f[R] for ports
+in every state, not only open ones.
+.IP \[bu] 2
+With \f[V]--iflist\f[R], the reason a table could not be read.
+.PP
+nmap prints much more at high debugging levels (its scan engine\[aq]s
+internal state); FeroProbe prints the messages above and adds more where
+they help.
 .SS \f[V]--stats-every <time>\f[R]
 .PP
 Print a progress line to standard error at this interval, for example
 \f[V]Stats: 0:01:05 elapsed; TCP SYN scan: 45.20% done (4520 of 10000 probes)\f[R].
 \f[V]0\f[R] turns it off.
+Pressing a key during the scan prints the same line once; see Runtime
+interaction.
+.SS \f[V]--iflist\f[R]
+.PP
+Print the host\[aq]s network interfaces and routes, then stop, in
+nmap\[aq]s layout.
+The interface table has one row per address of each interface (an
+interface without addresses shows \f[V](none)/0\f[R]), with its type
+(\f[V]ethernet\f[R], \f[V]loopback\f[R], \f[V]point2point\f[R] or
+\f[V]other\f[R]), whether it is up, its MTU and, for Ethernet, its MAC
+address.
+The route table lists each route that goes through a listed interface,
+IPv4 first, then the longest prefixes first, with its metric and
+gateway.
+.IP
+.nf
+\f[C]
+************************INTERFACES************************
+DEV  (SHORT) IP/MASK        TYPE     UP MTU   MAC
+lo   (lo)    127.0.0.1/8    loopback up 65536
+eth0 (eth0)  192.168.0.5/24 ethernet up 1500  00:1A:2B:3C:4D:5E
+eth0 (eth0)  fe80::5/64     ethernet up 1500  00:1A:2B:3C:4D:5E
+
+**************************ROUTES**************************
+DST/MASK       DEV  METRIC GATEWAY
+192.168.0.0/24 eth0 100
+0.0.0.0/0      eth0 100    192.168.0.1
+fe80::/64      eth0 256
+\f[R]
+.fi
+.PP
+Needs no root and no target.
+The routes are read on Linux only for now; elsewhere the route table
+shows \f[V]ROUTES: NONE FOUND(!)\f[R] (with \f[V]-d\f[R], the reason).
+On Windows neither table is available yet.
+.SS \f[V]--noninteractive\f[R]
+.PP
+Do not read keys from the terminal during the scan; see Runtime
+interaction.
+.SS Runtime interaction
+.PP
+While a scan runs in a terminal, FeroProbe reads single keys from it, as
+nmap does:
+.PP
+.TS
+tab(@);
+l l.
+T{
+Key
+T}@T{
+Effect
+T}
+_
+T{
+\f[V]v\f[R] / \f[V]V\f[R]
+T}@T{
+Raise / lower the verbosity by one (\f[V]Verbosity Increased to 2.\f[R])
+T}
+T{
+\f[V]d\f[R] / \f[V]D\f[R]
+T}@T{
+Raise / lower the debugging level by one
+(\f[V]Debugging Increased to 1.\f[R])
+T}
+T{
+\f[V]p\f[R] / \f[V]P\f[R]
+T}@T{
+Turn the packet trace on / off (\f[V]Packet Tracing enabled.\f[R])
+T}
+T{
+\f[V]?\f[R]
+T}@T{
+List these keys
+T}
+T{
+any other key
+T}@T{
+Print a status line, as \f[V]--stats-every\f[R] does
+T}
+.TE
+.PP
+The keys take effect at once: a higher verbosity also lists more ports
+in the final report.
+Their messages go to standard error, like the rest of the progress
+output (nmap writes them to standard output).
+Keys are read from the controlling terminal (\f[V]/dev/tty\f[R]), not
+standard input, so they work with \f[V]-iL -\f[R]; only while FeroProbe
+is the terminal\[aq]s foreground job, so a scan started in the
+background with \f[V]&\f[R] reads nothing; and only during the scan
+itself, not during \f[V]--dry-run\f[R] or after the scan.
+Line editing and echo are turned off on the terminal while keys are read
+and are restored when the scan ends, when FeroProbe exits, and on
+Ctrl-C.
+Keys are not read when FeroProbe was started with SIGTTOU ignored or
+blocked: the terminal could then not keep a scan that was moved to the
+background from changing another job\[aq]s settings.
+\f[V]--noninteractive\f[R] turns key reading off.
+Not available on Windows yet.
 .SH CHECKING A SCAN BEFORE AND WHILE IT RUNS
 .PP
 These options show what FeroProbe will do or is doing.
