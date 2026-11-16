@@ -260,11 +260,25 @@ fn write_host(x: &mut String, host: &HostResult, info: &RunInfo, start: u64, end
     x.push_str("</host>\n");
 }
 
-/// The whole report as an nmap-style XML document.
-pub fn render(hosts: &[HostResult], info: &RunInfo) -> String {
+/// Escape text for an XML comment: as an attribute, and with the second
+/// `-` of every `--` written as `&#45;`, since a comment cannot hold `--`
+/// (nmap does the same).
+fn comment_esc(s: &str) -> String {
+    let mut out = String::new();
+    for c in esc(s).chars() {
+        if c == '-' && out.ends_with('-') {
+            out.push_str("&#45;");
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// The start of the document, up to the first host. A resumed run appends
+/// to the aborted run's document, so it writes none (as nmap does).
+pub fn header(info: &RunInfo) -> String {
     let start = unix_secs(info.start);
-    let finish = info.start + info.elapsed;
-    let end = unix_secs(finish);
     let mut x = String::new();
     x.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE nmaprun>\n");
     // Some importers only accept reports whose scanner is "nmap". The
@@ -280,6 +294,14 @@ pub fn render(hosts: &[HostResult], info: &RunInfo) -> String {
     } else {
         "feroprobe"
     };
+    // nmap's comment with the command line, which --resume reads.
+    let _ = writeln!(
+        x,
+        "<!-- FeroProbe {} scan initiated {} as: {} -->",
+        env!("CARGO_PKG_VERSION"),
+        time_str(info.start),
+        comment_esc(&info.args)
+    );
     let _ = writeln!(
         x,
         "<nmaprun scanner=\"{scanner}\" args=\"{}\" start=\"{start}\" startstr=\"{}\" version=\"{}\" xmloutputversion=\"1.05\">",
@@ -310,22 +332,42 @@ pub fn render(hosts: &[HostResult], info: &RunInfo) -> String {
         "<verbose level=\"{}\"/>\n<debugging level=\"0\"/>",
         info.verbosity
     );
-    let mut up = 0;
+    x
+}
+
+/// The reported hosts of one host group, scanned from `start` to `end`.
+pub fn hosts(hosts: &[HostResult], info: &RunInfo, start: SystemTime, end: SystemTime) -> String {
+    let (start, end) = (unix_secs(start), unix_secs(end));
+    let mut x = String::new();
     for host in hosts.iter().filter(|h| reported(h, info)) {
-        up += 1;
         write_host(&mut x, host, info, start, end);
     }
+    x
+}
+
+/// The end of the document: `total` hosts, `up` of them up.
+pub fn footer(total: usize, up: usize, info: &RunInfo) -> String {
+    let finish = info.start + info.elapsed;
+    let end = unix_secs(finish);
     let elapsed = info.elapsed.as_secs_f64();
+    let mut x = String::new();
     let _ = writeln!(
         x,
-        "<runstats><finished time=\"{end}\" timestr=\"{}\" elapsed=\"{elapsed:.2}\" summary=\"FeroProbe done: {} host(s), {up} up, in {elapsed:.2}s\" exit=\"success\"/><hosts up=\"{up}\" down=\"{}\" total=\"{}\"/>\n</runstats>",
+        "<runstats><finished time=\"{end}\" timestr=\"{}\" elapsed=\"{elapsed:.2}\" summary=\"FeroProbe done: {total} host(s), {up} up, in {elapsed:.2}s\" exit=\"success\"/><hosts up=\"{up}\" down=\"{}\" total=\"{total}\"/>\n</runstats>",
         time_str(finish),
-        hosts.len(),
-        hosts.len() - up,
-        hosts.len()
+        total - up,
     );
     x.push_str("</nmaprun>\n");
     x
+}
+
+/// The whole report as an nmap-style XML document.
+#[cfg(test)]
+pub fn render(all: &[HostResult], info: &RunInfo) -> String {
+    let up = all.iter().filter(|h| reported(h, info)).count();
+    header(info)
+        + &hosts(all, info, info.start, info.start + info.elapsed)
+        + &footer(all.len(), up, info)
 }
 
 /// The `<os>` element and what follows it, in nmap's layout: the ports
@@ -455,7 +497,7 @@ mod tests {
     fn nmap_label() {
         let plain = render(&[], &info());
         assert!(plain.contains("<nmaprun scanner=\"feroprobe\" "));
-        assert!(!plain.contains("<!--"));
+        assert!(!plain.contains("<!-- Generated"));
 
         let labelled = render(
             &[],

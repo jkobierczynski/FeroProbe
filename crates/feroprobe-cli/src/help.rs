@@ -67,6 +67,7 @@ TIMING AND PERFORMANCE:
   --retries, --max-retries <tries>: Most resends of a probe without an answer
   -c, -M, --concurrency, --max-parallelism <number>: Most probes waiting at once
   --min-parallelism <number>: At least <number> probes allowed to wait at once
+  --min-hostgroup/--max-hostgroup <size>: Parallel host scan group sizes
   --min-rate <number>: Send at least <number> packets per second
   --max-rate <number>: Send at most <number> packets per second
   --scan-delay <time>: Wait at least <time> between probes
@@ -84,6 +85,7 @@ OUTPUT:
   --open: Show only open (or possibly open) ports
   --stats-every <time>: Print a progress line every <time>
   --nmap-label: Write scanner=\"nmap\" in XML, for tools that need it
+  --resume <filename>: Resume an aborted scan
 MISC:
   -6: Scan the IPv6 address of hostnames
   -A: Version and OS detection plus traceroute

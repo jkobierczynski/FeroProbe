@@ -3,8 +3,11 @@
 mod config;
 mod explain;
 mod grep;
+mod groups;
 mod help;
 mod output;
+mod report;
+mod resume;
 mod xml;
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -233,15 +236,6 @@ enum Format {
     Grepable,
 }
 
-fn render(format: Format, hosts: &[HostResult], info: &RunInfo) -> Result<String> {
-    Ok(match format {
-        Format::Table => output::render_table(hosts, info),
-        Format::Json => output::render_json(hosts, info)?,
-        Format::Xml => xml::render(hosts, info),
-        Format::Grepable => grep::render(hosts, info),
-    })
-}
-
 /// Fast, native network scanner with an nmap-style command line. The help
 /// page is [`help::HELP`], laid out like nmap's.
 #[derive(Debug, Parser)]
@@ -250,7 +244,7 @@ struct Args {
     /// Targets: IPv4 or IPv6 addresses, CIDR blocks (10.0.0.0/24, 2001:db8::/120),
     /// ranges (10.0.0.1-20), link-local addresses with their interface
     /// (fe80::1%eth0) or hostnames
-    #[arg(required_unless_present = "input_file")]
+    #[arg(required_unless_present_any = ["input_file", "resume"])]
     targets: Vec<String>,
 
     /// -iL FILE: read more targets from FILE (one or more per line, # starts
@@ -489,6 +483,16 @@ struct Args {
     #[arg(long, value_name = "N", value_parser = parse_parallelism)]
     min_parallelism: Option<usize>,
 
+    /// Port-scan and report at least this many hosts at a time (nmap's
+    /// --min-hostgroup; default 1)
+    #[arg(long, value_name = "N")]
+    min_hostgroup: Option<usize>,
+
+    /// Port-scan and report at most this many hosts at a time (nmap's
+    /// --max-hostgroup; default 100000)
+    #[arg(long, value_name = "N")]
+    max_hostgroup: Option<usize>,
+
     /// Maximum packets per second for raw-socket probes (SYN, ICMP, ARP, NDP) [default: from -T; normally 5000]
     #[arg(long, value_name = "PPS")]
     max_rate: Option<u32>,
@@ -576,6 +580,12 @@ struct Args {
     /// and no root needed. Hostnames are still resolved
     #[arg(long = "dry-run")]
     dry_run: bool,
+
+    /// Carry on with an aborted scan from its -oN, -oG or -oX report: the
+    /// command line is read from the file, the hosts it finished are
+    /// skipped and the reports are appended to. Takes no other options
+    #[arg(long, value_name = "FILE")]
+    resume: Option<String>,
 
     /// Show why each port got its state (syn-ack, reset, port-unreach, ...)
     #[arg(long)]
@@ -735,7 +745,7 @@ impl Outputs {
             .filter(|p| *p != "-")
     }
 
-    /// Open (creating, not truncating) every report file before the scan,
+    /// Open (creating) every report file before the scan,
     /// as nmap does. This catches unwritable paths up front, and then
     /// compares the files themselves, so that aliases a path can't show
     /// (a link whose target doesn't exist yet, a hard link, or another
@@ -743,31 +753,55 @@ impl Outputs {
     /// share one file. On Unix the file's device and inode decide; on other
     /// systems the canonical path of the now existing file, which on Windows
     /// comes back in the case stored on disk.
-    fn open_files(&self) -> Result<()> {
+    ///
+    /// Then the files are emptied, as nmap's `fopen("w")` does, unless
+    /// `append` is set, and kept open, so that the reports can be written
+    /// into them as the scan goes.
+    fn open_files(&self, append: bool) -> Result<Vec<(Format, String, std::fs::File)>> {
         let mut seen = std::collections::HashSet::new();
-        for path in self.files() {
-            let file = std::fs::OpenOptions::new()
-                .write(true)
-                .create(true)
-                .truncate(false)
-                .open(path)
-                .with_context(|| format!("opening {path}"))?;
-            #[cfg(unix)]
-            let id = {
-                use std::os::unix::fs::MetadataExt;
-                let m = file.metadata().with_context(|| format!("reading {path}"))?;
-                (m.dev(), m.ino())
-            };
-            #[cfg(not(unix))]
-            let id = {
-                drop(file);
-                std::fs::canonicalize(path).with_context(|| format!("resolving {path}"))?
-            };
-            if !seen.insert(id) {
-                bail!("two reports would be written to {path}; give each its own file");
+        let mut files = Vec::new();
+        for (format, paths) in self.by_format() {
+            for path in paths.iter().filter(|p| *p != "-") {
+                let file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .append(append)
+                    .create(true)
+                    .truncate(false)
+                    .open(path)
+                    .with_context(|| format!("opening {path}"))?;
+                #[cfg(unix)]
+                let id = {
+                    use std::os::unix::fs::MetadataExt;
+                    let m = file.metadata().with_context(|| format!("reading {path}"))?;
+                    (m.dev(), m.ino())
+                };
+                #[cfg(not(unix))]
+                let id =
+                    std::fs::canonicalize(path).with_context(|| format!("resolving {path}"))?;
+                if !seen.insert(id) {
+                    bail!("two reports would be written to {path}; give each its own file");
+                }
+                files.push((format, path.clone(), file));
             }
         }
-        Ok(())
+        // Only now that no two reports share a file.
+        if !append {
+            for (_, path, file) in &files {
+                file.set_len(0)
+                    .with_context(|| format!("emptying {path}"))?;
+            }
+        }
+        Ok(files)
+    }
+
+    /// The report paths, by format.
+    fn by_format(&self) -> [(Format, &Vec<String>); 4] {
+        [
+            (Format::Table, &self.normal),
+            (Format::Xml, &self.xml),
+            (Format::Grepable, &self.grep),
+            (Format::Json, &self.json),
+        ]
     }
 
     /// Whether some -o option took over standard output.
@@ -1911,6 +1945,151 @@ fn is_host_timeout(e: &anyhow::Error) -> bool {
     })
 }
 
+/// What every host group of a run shares.
+struct GroupRun<'a> {
+    args: &'a Args,
+    plan: &'a Plan,
+    cfg: &'a ScanConfig,
+    job: &'a ScanJob<'a>,
+    trace: bool,
+    trace_fallback: Option<u16>,
+    progress: Progress,
+}
+
+/// Resolve names, port-scan and trace one host group: `targets` and their
+/// discovery results `hosts`, one per target. Returns how many hosts could
+/// not be traced for want of a port.
+async fn scan_group(
+    targets: &[Target],
+    hosts: &mut [HostResult],
+    g: &GroupRun<'_>,
+) -> Result<usize> {
+    let (args, plan, cfg, progress) = (g.args, g.plan, g.cfg, g.progress);
+    if !args.no_resolve {
+        // Like nmap: the hosts that are up (all of them with -Pn), or every
+        // target with -R.
+        let addrs: Vec<IpAddr> = hosts
+            .iter()
+            .filter(|h| args.always_resolve || !plan.discovery || h.is_up())
+            .map(|h| h.addr)
+            .collect();
+        if !addrs.is_empty() {
+            let done = progress.phase("reverse DNS", addrs.len());
+            let names = reverse_lookup(&addrs, &args.dns_servers, cfg)
+                .await
+                .context("reverse DNS failed")?;
+            done(&progress);
+            for h in hosts.iter_mut() {
+                h.rdns = names.get(&h.addr).cloned();
+            }
+        }
+    }
+
+    // Only scan hosts that discovery found (all of them with -Pn).
+    let scanned: Vec<usize> = (0..hosts.len())
+        .filter(|&i| !plan.discovery || hosts[i].is_up())
+        .collect();
+    if !plan.ping_only && !scanned.is_empty() {
+        let live: Vec<Target> = scanned.iter().map(|&i| targets[i].clone()).collect();
+        let mut results: Vec<HostResult> = scanned.iter().map(|&i| hosts[i].clone()).collect();
+        // As in nmap, a host timeout of 0 means none.
+        match args.host_timeout.filter(|d| !d.is_zero()) {
+            None => g.job.run(&live, &mut results, cfg, progress).await?,
+            Some(limit) => {
+                g.job
+                    .run_each(&live, &mut results, cfg, limit, progress)
+                    .await?
+            }
+        }
+        for (&i, h) in scanned.iter().zip(results) {
+            hosts[i] = h;
+        }
+        // A host discovery did not time (-Pn, or a TCP connect that only
+        // got a refusal) gets the latency the scans measured, as in nmap.
+        for h in hosts.iter_mut().filter(|h| h.latency_ms.is_none()) {
+            h.latency_ms = cfg
+                .rtt_state
+                .srtt(h.addr)
+                .map(|d| (d.as_secs_f64() * 1e6).round() / 1000.0);
+        }
+    }
+    let mut untraced = 0;
+    if g.trace {
+        // Hosts without an open or closed TCP port are traced through a
+        // TCP port the command names, or not at all.
+        // Hosts given up on by --host-timeout are not traced either.
+        let keep: Vec<usize> = (0..hosts.len()).filter(|&i| !hosts[i].timed_out).collect();
+        let mut traced: Vec<HostResult> = keep.iter().map(|&i| hosts[i].clone()).collect();
+        let done = progress.phase("traceroute", traced.len());
+        untraced = traceroute(&mut traced, cfg, !plan.discovery, g.trace_fallback)
+            .await
+            .context("traceroute failed")?;
+        done(&progress);
+        for (&i, h) in keep.iter().zip(traced) {
+            hosts[i] = h;
+        }
+    }
+    Ok(untraced)
+}
+
+/// `--min-hostgroup` and `--max-hostgroup`, checked as nmap does.
+fn hostgroup_limits(args: &Args) -> Result<(usize, usize)> {
+    let min = args.min_hostgroup.unwrap_or(groups::DEFAULT_MIN);
+    let max = args.max_hostgroup.unwrap_or(groups::DEFAULT_MAX);
+    if max == 0 {
+        bail!("--max-hostgroup must be at least 1");
+    }
+    if min > max {
+        bail!("--min-hostgroup ({min}) may not be greater than --max-hostgroup ({max})");
+    }
+    if min > 100 {
+        eprintln!("Warning: You specified a highly aggressive --min-hostgroup.");
+    }
+    Ok((min, max))
+}
+
+/// `--resume`: drop the targets the aborted run finished, up to and
+/// including the last host its report lists, as nmap does.
+fn resume_targets(
+    path: &str,
+    last: Option<IpAddr>,
+    targets: &mut Vec<Target>,
+    args: &Args,
+    outputs: &Outputs,
+    progress: Progress,
+) {
+    if args.randomize_hosts {
+        eprintln!(
+            "Warning: the scan being resumed used --randomize-hosts, so the targets now come in a different order: \
+             some hosts it finished may be scanned again and some it had not reached may be skipped"
+        );
+    }
+    if !outputs.json.is_empty() {
+        eprintln!(
+            "Warning: the JSON report (-oJ) is written only when a run ends, so it will list only the hosts scanned from here on"
+        );
+    }
+    let Some(last) = last else {
+        eprintln!("Warning: {path} lists no finished host, so the scan starts from the beginning");
+        return;
+    };
+    match resume::skip_finished(targets, last) {
+        Some(n) => progress.say(0, || {
+            format!(
+                "Resuming the scan in {path}: skipping {n} target{} up to {last}, already done",
+                plural(n)
+            )
+        }),
+        None => {
+            // nmap skips every target then too, without saying so.
+            eprintln!(
+                "Warning: the last host {path} lists, {last}, is not among the targets, so none are left to scan"
+            );
+            targets.clear();
+        }
+    }
+}
+
 /// The probe order and follow-up steps a dry run lays out.
 struct DryOrder<'a> {
     tcp: &'a [u16],
@@ -2057,7 +2236,29 @@ fn dry_run(
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let args = Args::parse_from(nmap_style_args(std::env::args()));
+    let raw: Vec<String> = std::env::args().collect();
+    let first = Args::parse_from(nmap_style_args(raw.clone()));
+    // --resume: the rest of the command line comes from the report.
+    let (args, command, resumed) = match &first.resume {
+        None => (first, raw, None),
+        Some(path) => {
+            // Like nmap, --resume takes no other options: the file has them.
+            let alone = raw.len() == 3 || (raw.len() == 2 && raw[1].starts_with("--resume="));
+            if !alone {
+                bail!(
+                    "--resume cannot be combined with other options. Usage: feroprobe --resume FILE"
+                );
+            }
+            let r = resume::read(path)?;
+            let mut command = vec![raw[0].clone()];
+            command.extend(r.args.iter().cloned());
+            let args =
+                Args::try_parse_from(nmap_style_args(command.clone())).with_context(|| {
+                    format!("cannot resume from {path}: its command line no longer parses")
+                })?;
+            (args, command, Some((path.clone(), r.last)))
+        }
+    };
     // Settings files, then the ICS guard: before anything is resolved or sent.
     let settings = config::load()?;
     for w in &settings.warnings {
@@ -2071,9 +2272,13 @@ async fn main() -> Result<()> {
         feroprobe_core::packet_trace::enable();
     }
     // A dry run writes no report, so it does not create the files either.
-    if !args.dry_run {
-        outputs.open_files()?;
-    }
+    // A resumed run appends to the reports of the aborted one.
+    let files = if args.dry_run {
+        Vec::new()
+    } else {
+        outputs.open_files(resumed.is_some())?
+    };
+    let group_limits = hostgroup_limits(&args)?;
     let progress = Progress {
         level: args.verbose,
         track: true,
@@ -2151,6 +2356,9 @@ async fn main() -> Result<()> {
     }
     if args.randomize_hosts {
         shuffle(&mut targets);
+    }
+    if let Some((path, last)) = &resumed {
+        resume_targets(path, *last, &mut targets, &args, &outputs, progress);
     }
     let any_ipv6 = targets.iter().any(|t| t.addr.is_ipv6());
     let syn_ok = raw_sockets_available() && (!any_ipv6 || raw_ipv6_available());
@@ -2369,126 +2577,42 @@ async fn main() -> Result<()> {
             }
         })
     });
-    let mut hosts: Vec<HostResult> = if plan.discovery {
-        let done = progress.phase("host discovery", targets.len());
-        let hosts = discover(&targets, &cfg, &probes)
-            .await
-            .context("host discovery failed")?;
-        done(&progress);
-        let up = hosts.iter().filter(|h| h.is_up()).count();
-        progress.say(1, || {
-            format!("{up} of {} host{} up", hosts.len(), plural(hosts.len()))
-        });
-        hosts
-    } else {
-        // -Pn: every target is scanned, but those on a local network are
-        // still asked for their MAC address, as in nmap.
-        feroprobe_core::discovery::neighbours_only(&targets, &cfg)
-            .await
-            .context("ARP or neighbour discovery failed")?
+    let job = ScanJob {
+        plan: &plan,
+        tcp: &tcp_order,
+        udp: &udp_order,
+        sctp: &sctp_order,
+        protocols: &protocols,
+        scanflags: args.scanflags,
+        version: version_scan.clone(),
+        os,
+        os_opts: os_options(&args, &plan, &probes),
     };
-
-    if !args.no_resolve {
-        // Like nmap: the hosts that are up (all of them with -Pn), or every
-        // target with -R.
-        let addrs: Vec<IpAddr> = hosts
-            .iter()
-            .filter(|h| args.always_resolve || !plan.discovery || h.is_up())
-            .map(|h| h.addr)
-            .collect();
-        if !addrs.is_empty() {
-            let done = progress.phase("reverse DNS", addrs.len());
-            let names = reverse_lookup(&addrs, &args.dns_servers, &cfg)
-                .await
-                .context("reverse DNS failed")?;
-            done(&progress);
-            for h in &mut hosts {
-                h.rdns = names.get(&h.addr).cloned();
-            }
-        }
-    }
-
-    let mut scan_types = Vec::new();
-    if !plan.ping_only {
-        let job = ScanJob {
-            plan: &plan,
-            tcp: &tcp_order,
-            udp: &udp_order,
-            sctp: &sctp_order,
-            protocols: &protocols,
-            scanflags: args.scanflags,
-            version: version_scan.clone(),
-            os,
-            os_opts: os_options(&args, &plan, &probes),
-        };
-        scan_types = job.scan_types();
-        // Only scan hosts that discovery found (all of them with -Pn).
-        let scanned: Vec<usize> = (0..hosts.len())
-            .filter(|&i| !plan.discovery || hosts[i].is_up())
-            .collect();
-        let live: Vec<Target> = scanned.iter().map(|&i| targets[i].clone()).collect();
-        let mut results: Vec<HostResult> = scanned.iter().map(|&i| hosts[i].clone()).collect();
-        // As in nmap, a host timeout of 0 means none.
-        match args.host_timeout.filter(|d| !d.is_zero()) {
-            None => job.run(&live, &mut results, &cfg, progress).await?,
-            Some(limit) => {
-                job.run_each(&live, &mut results, &cfg, limit, progress)
-                    .await?
-            }
-        }
-        for (&i, h) in scanned.iter().zip(results) {
-            hosts[i] = h;
-        }
-        // A host discovery did not time (-Pn, or a TCP connect that only
-        // got a refusal) gets the latency the scans measured, as in nmap.
-        for h in hosts.iter_mut().filter(|h| h.latency_ms.is_none()) {
-            h.latency_ms = cfg
-                .rtt_state
-                .srtt(h.addr)
-                .map(|d| (d.as_secs_f64() * 1e6).round() / 1000.0);
-        }
+    let mut scan_types = if plan.ping_only {
+        vec!["ping"]
     } else {
-        scan_types.push("ping");
-    }
+        job.scan_types()
+    };
     if trace {
         scan_types.push("traceroute");
-        // Hosts without an open or closed TCP port are traced through a
-        // TCP port the command names, or not at all.
-        // Hosts given up on by --host-timeout are not traced either.
-        let keep: Vec<usize> = (0..hosts.len()).filter(|&i| !hosts[i].timed_out).collect();
-        let mut traced: Vec<HostResult> = keep.iter().map(|&i| hosts[i].clone()).collect();
-        let done = progress.phase("traceroute", traced.len());
-        let untraced = traceroute(&mut traced, &cfg, !plan.discovery, trace_fallback)
-            .await
-            .context("traceroute failed")?;
-        if untraced > 0 {
-            // A directly connected host needs no port (it gets no probes),
-            // so only the hosts further away are left untraced.
-            let why = if plan.ping_only {
-                TRACE_NO_PORT_SN
-            } else {
-                TRACE_NO_PORT
-            };
-            eprintln!(
-                "Warning: {untraced} host{} not traced: {why}",
-                if untraced == 1 { "" } else { "s" }
-            );
-        }
-        done(&progress);
-        for (&i, h) in keep.iter().zip(traced) {
-            hosts[i] = h;
-        }
-    }
-
-    if let Some(task) = stats {
-        task.abort();
     }
     let ports_per_host = plan.tcp.map_or(0, |_| tcp_ports.len())
         + if plan.udp { udp_ports.len() } else { 0 }
         + plan.sctp.map_or(0, |_| sctp_ports.len())
         + if plan.ip_proto { protocols.len() } else { 0 };
-    let info = RunInfo {
-        args: std::env::args().collect::<Vec<_>>().join(" "),
+    let group_facts = groups::GroupFacts {
+        tcp_ports: plan
+            .tcp
+            .filter(|_| !plan.ping_only)
+            .map(|_| tcp_ports.len()),
+        udp: plan.udp && !plan.ping_only,
+        sctp: plan.sctp.is_some() && !plan.ping_only,
+        timing_level: cfg.timing_level,
+        min: group_limits.0,
+        max: group_limits.1,
+    };
+    let mut info = RunInfo {
+        args: resume::join_quoted(&command),
         start: start_time,
         scan_types,
         tcp_ports: if plan.tcp.is_some() && !plan.ping_only {
@@ -2508,7 +2632,7 @@ async fn main() -> Result<()> {
             Vec::new()
         },
         ports_per_host,
-        elapsed: started.elapsed(),
+        elapsed: Duration::ZERO,
         only_open: args.open,
         show_reason: args.reason,
         show_version: plan.version,
@@ -2520,27 +2644,96 @@ async fn main() -> Result<()> {
         nmap_label: args.nmap_label,
         verbosity: args.verbose,
     };
+    let mut reports = report::Reports::new(resumed.is_some());
     if !outputs.stdout_taken() {
-        print!("{}", render(args.output, &hosts, &info)?);
+        reports.stdout(args.output);
     }
-    for (format, paths) in [
-        (Format::Table, &outputs.normal),
-        (Format::Xml, &outputs.xml),
-        (Format::Grepable, &outputs.grep),
-        (Format::Json, &outputs.json),
-    ] {
-        if paths.is_empty() {
-            continue;
+    for (format, paths) in outputs.by_format() {
+        if paths.iter().any(|p| p == "-") {
+            reports.stdout(format);
         }
-        let text = render(format, &hosts, &info)?;
-        for path in paths {
-            if path == "-" {
-                print!("{text}");
-            } else {
-                std::fs::write(path, &text).with_context(|| format!("writing {path}"))?;
+    }
+    for (format, path, file) in files {
+        reports.file(format, path, file);
+    }
+    reports.start(&info)?;
+
+    // Like nmap: discovery takes the targets a batch at a time, and the
+    // hosts are then scanned and reported a group at a time.
+    let ping_group = groups::PING_GROUP.max(group_limits.0);
+    let mut done_hosts = 0;
+    let mut untraced = 0;
+    for batch in targets.chunks(ping_group) {
+        let mut hosts: Vec<HostResult> = if plan.discovery {
+            let done = progress.phase("host discovery", batch.len());
+            let hosts = discover(batch, &cfg, &probes)
+                .await
+                .context("host discovery failed")?;
+            done(&progress);
+            let up = hosts.iter().filter(|h| h.is_up()).count();
+            progress.say(1, || {
+                format!("{up} of {} host{} up", hosts.len(), plural(hosts.len()))
+            });
+            hosts
+        } else {
+            // -Pn: every target is scanned, but those on a local network are
+            // still asked for their MAC address, as in nmap.
+            feroprobe_core::discovery::neighbours_only(batch, &cfg)
+                .await
+                .context("ARP or neighbour discovery failed")?
+        };
+        let mut from = 0;
+        while from < batch.len() {
+            // The group: the next `size` hosts to scan, with the hosts
+            // found down among them.
+            let size = groups::scan_group_size(done_hosts, &group_facts);
+            let (mut to, mut n) = (from, 0);
+            while to < batch.len() && n < size {
+                if !plan.discovery || hosts[to].is_up() {
+                    n += 1;
+                }
+                to += 1;
             }
+            let group_start = SystemTime::now();
+            untraced += scan_group(
+                &batch[from..to],
+                &mut hosts[from..to],
+                &GroupRun {
+                    args: &args,
+                    plan: &plan,
+                    cfg: &cfg,
+                    job: &job,
+                    trace,
+                    trace_fallback,
+                    progress,
+                },
+            )
+            .await?;
+            info.elapsed = started.elapsed();
+            reports.group(&hosts[from..to], &info, group_start, SystemTime::now())?;
+            done_hosts += to - from;
+            from = to;
         }
     }
+    if untraced > 0 {
+        // A directly connected host needs no port (it gets no probes),
+        // so only the hosts further away are left untraced.
+        let why = if plan.ping_only {
+            TRACE_NO_PORT_SN
+        } else {
+            TRACE_NO_PORT
+        };
+        eprintln!(
+            "Warning: {untraced} host{} not traced: {why}",
+            if untraced == 1 { "" } else { "s" }
+        );
+    }
+
+    if let Some(task) = stats {
+        task.abort();
+    }
+    info.elapsed = started.elapsed();
+    reports.finish(&info)?;
     Ok(())
 }
 
@@ -2999,15 +3192,19 @@ mod tests {
             let dangling = dir.join("dangling");
             std::os::unix::fs::symlink(dir.join("later"), &dangling).unwrap();
             let o = out(&dangling, &dir.join("later"));
-            assert!(o.open_files().is_err());
+            assert!(o.open_files(false).is_err());
             let hard = dir.join("hard");
             std::fs::hard_link(&plain, &hard).unwrap();
             assert!(
                 out(&hard, std::path::Path::new(&plain))
-                    .open_files()
+                    .open_files(false)
                     .is_err()
             );
-            assert!(out(&dir.join("a"), &dir.join("b")).open_files().is_ok());
+            assert!(
+                out(&dir.join("a"), &dir.join("b"))
+                    .open_files(false)
+                    .is_ok()
+            );
         }
         // Windows file systems ignore case: report and REPORT are one file.
         #[cfg(windows)]
@@ -3017,7 +3214,7 @@ mod tests {
                 xml: vec![dir.join("REPORT").display().to_string()],
                 ..Default::default()
             };
-            assert!(o.open_files().is_err());
+            assert!(o.open_files(false).is_err());
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
