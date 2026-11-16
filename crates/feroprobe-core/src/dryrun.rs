@@ -173,8 +173,9 @@ fn packet_options_note() -> Option<String> {
     let mut parts = Vec::new();
     if let Some(d) = &opts.data {
         parts.push(format!(
-            "{} byte{} of --data after each raw TCP, SCTP, ICMP and IP protocol probe, \
-             instead of the usual UDP and ICMP echo payloads",
+            "{} byte{} of data (--data, --data-string or --data-length) in every raw \
+             probe: after the TCP, SCTP and IP protocol headers, and in place of the usual \
+             UDP and ICMP echo payloads",
             d.len(),
             if d.len() == 1 { "" } else { "s" }
         ));
