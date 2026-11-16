@@ -225,11 +225,19 @@ impl RateSchedule {
     pub(crate) fn book(&self, interval: Duration) -> std::time::Instant {
         let mut next = self.0.lock().unwrap_or_else(|e| e.into_inner());
         let now = std::time::Instant::now();
-        let due = next.map_or(now, |n| n.max(now));
+        // A sender that overslept may catch up on the slots it missed in
+        // the last CATCH_UP, so sleeps that overshoot (often by most of a
+        // millisecond) do not lower the rate. Slots older than that are
+        // gone: an idle scan does not save up a burst.
+        let floor = now.checked_sub(CATCH_UP).unwrap_or(now);
+        let due = next.map_or(now, |n| n.max(floor));
         *next = Some(due + interval);
         due
     }
 }
+
+/// How far behind its schedule a [`RateSchedule`] lets senders catch up.
+const CATCH_UP: Duration = Duration::from_millis(10);
 
 /// How often a cancellable wait looks at its cancel flag.
 pub(crate) const CANCEL_POLL: Duration = Duration::from_millis(100);
@@ -322,6 +330,23 @@ mod tests {
         assert!(schedule.book(gap) >= first + gap * 2);
         // Another schedule is independent.
         assert!(RateSchedule::new().book(gap) < first + gap);
+    }
+
+    #[test]
+    fn an_oversleeping_sender_catches_up() {
+        let schedule = RateSchedule::new();
+        let gap = Duration::from_micros(200);
+        schedule.book(gap);
+        // The sender overslept by 3 ms: the missed slots are due at once,
+        // not one gap after now.
+        std::thread::sleep(Duration::from_millis(3));
+        let now = std::time::Instant::now();
+        assert!(schedule.book(gap) < now);
+        assert!(schedule.book(gap) < now);
+        // After a long idle spell only CATCH_UP's worth is left to catch up.
+        std::thread::sleep(CATCH_UP * 3);
+        let now = std::time::Instant::now();
+        assert!(schedule.book(gap) >= now - CATCH_UP - Duration::from_millis(1));
     }
 
     #[tokio::test]
