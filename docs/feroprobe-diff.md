@@ -221,8 +221,9 @@ feroprobe -T4 -F -sV 10.0.0.0/24 -oA scan-$date > /dev/null || exit 1
 if [ -e scan-prev.xml ]; then
     status=0
     feroprobe-diff scan-prev.xml scan-$date.xml > diff-$date || status=$?
-    # 2: a report could not be read; keep the baseline and stop.
-    [ $status -eq 2 ] && exit 2
+    # 0 same, 1 changed; anything else (2: a report could not be read)
+    # keeps the baseline and stops.
+    [ $status -gt 1 ] && exit $status
     [ $status -eq 1 ] && mail -s "Network changes $date" admin < diff-$date
 fi
 ln -sf scan-$date.xml scan-prev.xml
