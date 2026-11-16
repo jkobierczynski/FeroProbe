@@ -51,7 +51,7 @@ cargo install --git https://github.com/jkobierczynski/FeroProbe feroprobe
 ```sh
 cargo build --release
 
-# Discover hosts, then scan the top 100 ports (SYN scan when root on Linux,
+# Discover hosts, then scan the top 1000 ports (SYN scan when root on Linux,
 # connect scan otherwise)
 ./target/release/feroprobe 192.168.1.0/24
 
@@ -427,7 +427,7 @@ feroprobe -v -oG - 192.168.1.0/24 | grep '/open/'
 | --- | --- |
 | `-p 22,80,1000-2000` | These ports; `-p-` is all 65535 |
 | `-p 22,U:53,161,T:80` | `T:` and `U:` apply to the ports after them; ports before any prefix are both TCP and UDP. Here TCP gets 22 and 80, UDP gets 22, 53 and 161 |
-| `--top-ports N` | The N most common ports (by default 100 for TCP and 20 for UDP) |
+| `--top-ports N` | The N most common ports of each protocol, from FeroProbe's own ranking (by default 1000 for TCP and UDP, as in nmap, and 50 for SCTP) |
 | `-F` | Fast: the 100 most common TCP and UDP ports |
 | `--exclude-ports SPEC` | Leave these out, written like `-p`. As in nmap, this also removes them from the discovery probes (`-PS`, `-PA`, `-PU` and the default TCP pings to 443 and 80) |
 | `-r` | Probe ports in order; by default the order is shuffled, like nmap's (reports are always sorted) |

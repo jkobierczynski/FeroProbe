@@ -707,10 +707,29 @@ see Service and version detection.
 .SH PORT SPECIFICATION AND SCAN ORDER
 .PP
 Without \f[V]-p\f[R], \f[V]-F\f[R] or \f[V]--top-ports\f[R], FeroProbe
-scans the 100 most common TCP ports, the 20 most common UDP ports, the
-50 most common SCTP ports (from its own list), and, with \f[V]-sO\f[R],
+scans the 1000 most common TCP ports and the 1000 most common UDP ports,
+as nmap does, the 50 most common SCTP ports, and, with \f[V]-sO\f[R],
 all 256 IP protocols.
-These lists are FeroProbe\[aq]s own rankings.
+.PP
+The port lists are FeroProbe\[aq]s own rankings, not nmap\[aq]s:
+nmap\[aq]s port data is under its own licence, so FeroProbe does not
+copy it.
+The count matches nmap, but the ports differ, so on the same host the
+two can scan different ports beyond the most common ones.
+Each list is ranked in three tiers:
+.IP "1." 3
+The most common services, ranked by hand.
+\f[V]-F\f[R] scans the first 100.
+.IP "2." 3
+Services commonly exposed on networks today: remote administration,
+alternative web ports, databases, message queues, container and
+monitoring tools, Windows, printing, media, industrial and game ports.
+.IP "3." 3
+The rest of the 1000, filled with the IANA-registered ports in ascending
+order, which covers most of the well-known range (1-1023).
+.PP
+To compare with nmap on exactly the same ports, give them with
+\f[V]-p\f[R]; \f[V]-p-\f[R] scans all 65535.
 .SS \f[V]-p <port ranges>\f[R], \f[V]--ports <port ranges>\f[R]
 .PP
 Scan only these ports.
@@ -760,7 +779,10 @@ failing.
 Cannot be combined with \f[V]--top-ports\f[R] or \f[V]-F\f[R].
 .SS \f[V]--top-ports <n>\f[R]
 .PP
-Scan the \f[V]n\f[R] most common ports of each protocol scanned.
+Scan the \f[V]n\f[R] most common ports of each protocol scanned, from
+the ranked lists above.
+Past the end of a list (1000 TCP, 1000 UDP, 52 SCTP ports) the remaining
+ports are added in ascending order.
 Without it the defaults above apply.
 .SS \f[V]-F\f[R] (fast mode)
 .PP
@@ -1973,6 +1995,12 @@ T}@T{
 Only TCP connects to 80 and 443, no ICMP echo
 T}
 T{
+No \f[V]-p\f[R], or \f[V]-F\f[R], \f[V]--top-ports\f[R]
+T}@T{
+Scans the same number of ports from its own ranking (nmap-services), so
+some ports differ beyond the most common ones
+T}
+T{
 Any scan
 T}@T{
 Up to 10 resends as losses show up, instead of a fixed
@@ -2310,6 +2338,16 @@ offset, so the uptime nmap prints for them is wrong; sequence
 predictability is left out with it
 T}
 T{
+Default ports, \f[V]-F\f[R], \f[V]--top-ports\f[R]
+T}@T{
+The 1000 (or \f[V]n\f[R], or 100) most common ports in nmap-services
+T}@T{
+The same counts, from FeroProbe\[aq]s own ranking: the most common
+services agree, the rest of the 1000 partly differ.
+nmap-services cannot be redistributed; give \f[V]-p\f[R] to scan an
+exact set
+T}
+T{
 Port names
 T}@T{
 nmap-services
@@ -2496,7 +2534,7 @@ and OS signatures are built into the binary.
 .IP
 .nf
 \f[C]
-# Discover hosts on a network, then scan their 100 most common TCP ports
+# Discover hosts on a network, then scan their 1000 most common TCP ports
 feroprobe 192.168.1.0/24
 
 # Ping sweep only

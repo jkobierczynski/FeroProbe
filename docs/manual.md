@@ -438,10 +438,24 @@ Listed with the scan types because it is given as `-s` option; see
 
 ## Port specification and scan order
 
-Without `-p`, `-F` or `--top-ports`, FeroProbe scans the 100 most common TCP
-ports, the 20 most common UDP ports, the 50 most common SCTP ports (from
-its own list), and, with `-sO`, all 256 IP protocols. These lists are
-FeroProbe's own rankings.
+Without `-p`, `-F` or `--top-ports`, FeroProbe scans the 1000 most common
+TCP ports and the 1000 most common UDP ports, as nmap does, the 50 most
+common SCTP ports, and, with `-sO`, all 256 IP protocols.
+
+The port lists are FeroProbe's own rankings, not nmap's: nmap's port data
+is under its own licence, so FeroProbe does not copy it. The count matches
+nmap, but the ports differ, so on the same host the two can scan different
+ports beyond the most common ones. Each list is ranked in three tiers:
+
+1. The most common services, ranked by hand. `-F` scans the first 100.
+2. Services commonly exposed on networks today: remote administration,
+   alternative web ports, databases, message queues, container and
+   monitoring tools, Windows, printing, media, industrial and game ports.
+3. The rest of the 1000, filled with the IANA-registered ports in
+   ascending order, which covers most of the well-known range (1-1023).
+
+To compare with nmap on exactly the same ports, give them with `-p`;
+`-p-` scans all 65535.
 
 #### `-p <port ranges>`, `--ports <port ranges>`
 
@@ -466,8 +480,10 @@ warning rather than failing. Cannot be combined with `--top-ports` or
 
 #### `--top-ports <n>`
 
-Scan the `n` most common ports of each protocol scanned. Without it the
-defaults above apply.
+Scan the `n` most common ports of each protocol scanned, from the ranked
+lists above. Past the end of a list (1000 TCP, 1000 UDP, 52 SCTP ports)
+the remaining ports are added in ascending order. Without it the defaults
+above apply.
 
 #### `-F` (fast mode)
 
@@ -1310,6 +1326,7 @@ per option:
 | `-g` with `-O` | Sends its OS detection probes from a run of source ports starting at the `-g` port, not all from it |
 | `-g 0` with `-sU` or `-PU` | Sends the UDP probes from port 0 (FeroProbe cannot, and uses a random port, with a warning) |
 | Default discovery without root | Only TCP connects to 80 and 443, no ICMP echo |
+| No `-p`, or `-F`, `--top-ports` | Scans the same number of ports from its own ranking (nmap-services), so some ports differ beyond the most common ones |
 | Any scan | Up to 10 resends as losses show up, instead of a fixed `--retries`; raises its scan delay on its own when many probes are lost |
 
 These come from nmap 7.99's source.
@@ -1480,6 +1497,7 @@ safeguard calls for a difference. The deliberate differences are:
 | UDP service payloads (`-sU`) | nmap's payload database: several probes per port (two DNS queries to 53, two NTP versions to 123, SNMPv1 and v3 to 161, three NetBIOS queries to 137), up to dozens with `-sV` | FeroProbe's own, one per port: DNS (53, 5353), NTP (123), SNMP (161) and SSDP (1900); every other port gets `FeroProbeScan/1\n`. nmap's payloads cannot be redistributed; one payload per service is enough to make it answer |
 | OS detection probes (`-O`) | About 16 probes per try (6 SYNs with varied options, ECN, T2-T7 to open and closed ports, 2 ICMP echoes, a UDP probe to a closed port), with closed ports picked at random outside the scan when none was found, and hosts without an open port probed too | At most 9 probes per try (4 SYNs, ECN and an ACK to the open port; a SYN and an ACK to a closed port the scan found; an ICMP echo only if discovery sends echo requests). No UDP probe, no T3/T5-T7-style odd flag combinations, no random ports, and hosts without an open TCP port are not probed. The price: fewer tests, so some systems nmap tells apart look alike |
 | OS uptime and TCP sequence lines (`-O -v`) | `Uptime guess` from the TCP timestamps, `TCP Sequence Prediction` difficulty | Not printed. Most current systems give each connection its own random timestamp offset, so the uptime nmap prints for them is wrong; sequence predictability is left out with it |
+| Default ports, `-F`, `--top-ports` | The 1000 (or `n`, or 100) most common ports in nmap-services | The same counts, from FeroProbe's own ranking: the most common services agree, the rest of the 1000 partly differ. nmap-services cannot be redistributed; give `-p` to scan an exact set |
 | Port names | nmap-services | The same names for the common ports, from the IANA registry, and `unknown` for the rest. nmap-services cannot be redistributed |
 | Timeouts | Adapt to measured round-trip times | The same (nmap's formula, limits and template values); `--timeout` fixes them, an option nmap does not have |
 | Congestion control and `--max-retries` | Windows per host and group between `--min-parallelism` and `--max-parallelism`; resends up to `--max-retries` times, fewer on a network that loses nothing; raises the scan delay when many probes are lost | The same windows and limits; a fixed number of resends (`--retries`), and the scan delay only changes when asked |
@@ -1541,7 +1559,7 @@ OS signatures are built into the binary.
 ## Examples
 
 ```sh
-# Discover hosts on a network, then scan their 100 most common TCP ports
+# Discover hosts on a network, then scan their 1000 most common TCP ports
 feroprobe 192.168.1.0/24
 
 # Ping sweep only
