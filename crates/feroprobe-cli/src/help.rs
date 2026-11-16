@@ -41,6 +41,7 @@ FIREWALL/IDS EVASION AND SPOOFING:
   -f, --mtu <n>: Fragment raw IPv4 probes (8-byte pieces, or <n> per fragment)
   -D, --decoys <a,b,ME,c>: Cloak the scan among decoy source addresses
   -S, --source <addr>: Spoof the source address of raw IPv4 probes
+  --spoof-mac <mac address/prefix/vendor name>: Spoof your MAC address
   --allow-public-evasion: Authorize the above against public targets you may test
   --data <hex string>: Add these bytes to raw probes (ex: 0xdeadbeef)
   --data-string <string>: Add this text to raw probes

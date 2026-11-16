@@ -116,7 +116,7 @@ pub(crate) async fn connected_socket(
     addr: SocketAddr,
     sport: Option<u16>,
 ) -> io::Result<UdpSocket> {
-    let sock = crate::netif::udp_socket(addr.is_ipv6())?;
+    let sock = crate::netif::udp_receiver(addr.is_ipv6())?;
     #[cfg(target_os = "linux")]
     enable_recverr(&sock, addr.is_ipv4())?;
     // nmap's raw UDP probes: no "don't fragment", random TTL.
@@ -143,6 +143,17 @@ pub(crate) async fn connected_socket(
             Ok(ip) => SocketAddr::new(ip, p),
             Err(_) => crate::netif::any_addr(addr.ip(), p),
         },
+        // Not bound to the -e interface under --spoof-mac (see
+        // netif::udp_receiver): its address still picks the source.
+        None if addr.is_ipv4()
+            && crate::spoofmac::get().is_some()
+            && crate::netif::interface().is_some() =>
+        {
+            crate::netif::route_source(addr.ip()).map_or_else(
+                |_| crate::netif::any_addr(addr.ip(), 0),
+                |ip| SocketAddr::new(ip, 0),
+            )
+        }
         None => crate::netif::any_addr(addr.ip(), 0),
     };
     sock.bind(&bind.into()).map_err(|e| match sport {
@@ -188,15 +199,17 @@ fn enable_recverr(sock: &Socket, ipv4: bool) -> io::Result<()> {
     }
 }
 
-/// Send a `--badsum` UDP probe to `addr` from `sock`'s address and port, on
-/// a raw socket, with the checksum spoiled.
+/// Send a UDP probe to `addr` from `sock`'s address and port on a raw
+/// socket, with the checksum spoiled for `--badsum`.
 #[cfg(target_os = "linux")]
-fn send_badsum(sock: &UdpSocket, addr: SocketAddr, payload: &[u8]) -> io::Result<()> {
+fn send_raw(sock: &UdpSocket, addr: SocketAddr, payload: &[u8], badsum: bool) -> io::Result<()> {
     use socket2::{Domain, Protocol as SockProto};
     let local = sock.local_addr()?;
     let mut seg =
         crate::packet::udp_packet(local.ip(), addr.ip(), local.port(), addr.port(), payload);
-    crate::packet_opts::spoil_checksum(crate::packet::IPPROTO_UDP, &mut seg);
+    if badsum {
+        crate::packet_opts::spoil_checksum(crate::packet::IPPROTO_UDP, &mut seg);
+    }
     let domain = if addr.is_ipv6() {
         Domain::IPV6
     } else {
@@ -209,10 +222,10 @@ fn send_badsum(sock: &UdpSocket, addr: SocketAddr, payload: &[u8]) -> io::Result
 }
 
 #[cfg(not(target_os = "linux"))]
-fn send_badsum(_: &UdpSocket, _: SocketAddr, _: &[u8]) -> io::Result<()> {
+fn send_raw(_: &UdpSocket, _: SocketAddr, _: &[u8], _: bool) -> io::Result<()> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
-        "--badsum UDP probes are only supported on Linux",
+        "--badsum and --spoof-mac UDP probes are only supported on Linux",
     ))
 }
 
@@ -291,11 +304,12 @@ async fn probe_udp_tries(
         };
         pace(cfg.scan_delay).await;
         let start = Instant::now();
-        if opts.badsum {
-            // The system's UDP socket always writes a correct checksum, so
-            // a --badsum probe goes out on a raw socket from the same port;
-            // answers and ICMP errors still reach the connected socket.
-            if let Err(e) = send_badsum(&sock, addr, payload) {
+        if opts.badsum || (addr.is_ipv4() && crate::spoofmac::get().is_some()) {
+            // The system's UDP socket always writes a correct checksum and
+            // its own Ethernet header, so a --badsum or --spoof-mac probe
+            // goes out on a raw socket from the same port; answers and ICMP
+            // errors still reach the connected socket.
+            if let Err(e) = send_raw(&sock, addr, payload, opts.badsum) {
                 return classify(e, None);
             }
         } else {

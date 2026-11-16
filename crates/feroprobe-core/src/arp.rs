@@ -124,6 +124,11 @@ pub fn vendor(mac: MacAddr) -> Option<&'static str> {
     crate::oui::lookup(mac).or_else(|| builtin_vendor(mac))
 }
 
+/// The built-in table of vendor prefixes, for `--spoof-mac <vendor>`.
+pub(crate) fn builtin_vendors() -> &'static [([u8; 3], &'static str)] {
+    VENDORS
+}
+
 /// [`vendor`] with only the built-in table.
 pub fn builtin_vendor(mac: MacAddr) -> Option<&'static str> {
     let oui = mac.oui();
@@ -431,6 +436,9 @@ mod linux {
             return Ok(());
         }
         let fd = Arc::new(open(net.ifindex)?);
+        // --spoof-mac: ask from that address, and hear the replies to it.
+        let mac = crate::spoofmac::get().unwrap_or(net.mac);
+        crate::spoofmac::listen_on(net.ifindex)?;
         let receive = {
             let fd = Arc::clone(&fd);
             let mut buf = [0u8; 2048];
@@ -451,11 +459,20 @@ mod linux {
             }
         };
         let send_one = |ip: Ipv4Addr| {
-            send(&fd, net.ifindex, &arp_request(net.mac, net.addr, ip))?;
-            crate::packet_trace::log("SENT", || format!("ARP who-has {ip} tell {}", net.addr));
+            send(&fd, net.ifindex, &arp_request(mac, net.addr, ip))?;
+            crate::packet_trace::log("SENT", || match crate::spoofmac::get() {
+                Some(m) => format!("ARP who-has {ip} tell {} (from {m})", net.addr),
+                None => format!("ARP who-has {ip} tell {}", net.addr),
+            });
             Ok(())
         };
-        request_sweep(targets, cfg, cancel, send_one, receive, on_reply)
+        // Only targets of this sweep that answered: unasked replies are
+        // not kept.
+        let mut on_reply = |ip: Ipv4Addr, m: MacAddr, rtt: f64| {
+            crate::spoofmac::remember(net.ifindex, ip, m);
+            on_reply(ip, m, rtt);
+        };
+        request_sweep(targets, cfg, cancel, send_one, receive, &mut on_reply)
     }
 }
 
