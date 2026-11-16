@@ -131,6 +131,10 @@ the SCTP, IP protocol, IPv6 OS detection and probe-signature work).
 | Grepable output | `-o grepable`, `-oG` | One line per host, like nmap's (`grep.rs`) |
 | JSON output | `-o json`, `-oJ` | FeroProbe's own format |
 | All formats at once | `-oA` | `.nmap`, `.xml`, `.gnmap` |
+| Script kiddie output | `-oS` | The normal report with nmap's random look-alike letters and case flips (`output::skid`); fingerprint lines untouched |
+| Append to reports | `--append-output` | Every report file is opened once before the scan (`O_APPEND` with this option) and written through that handle; XML and JSON files then hold one document per run, as nmap's XML does |
+| XML stylesheet | `--stylesheet`, `--webxml`, `--no-stylesheet` | `<?xml-stylesheet?>` after the DOCTYPE, last option wins. Default: our own `docs/feroprobe.xsl` (not nmap's `nmap.xsl`), found next to the binary (release archives ship it) or in `share/feroprobe`, else the bare name. `--webxml` links the GitHub Pages copy (`xml::WEB_STYLESHEET`) |
+| Safe report files | | As root, a report path that is a symbolic link owned by another user in a sticky world-writable directory is refused (like Linux's `protected_symlinks`, on every system); paths are never reopened after the up-front check |
 | Port state reasons | `--reason` | |
 | Open ports only | `--open` | Keeps `open`, `open\|filtered` and `unfiltered` ports, like nmap |
 | Packet trace | `--packet-trace` | `SENT`/`RCVD`/`CONN` lines like nmap's; with `-f`/`--mtu` it shows each fragment actually sent (see [Deliberate differences](#deliberate-differences-from-nmap)) |
@@ -166,6 +170,8 @@ the SCTP, IP protocol, IPv6 OS detection and probe-signature work).
 | `--packet-trace` with `-f`/`--mtu` | Prints one `SENT` line for the whole, unfragmented probe, although the fragments are what goes on the wire | Prints one `SENT` line per fragment actually sent (`TCP ... (frag)`, then `IP ... frag offset=N`) | The trace should show what is sent; nmap's display is treated as a bug and not copied (Jurgen, 2026-11-15). `--dry-run` shows fragments the same way |
 | Evasion against public addresses | Allowed | Needs `--allow-public-evasion` | Anti-abuse safeguard, see `docs/responsible-use.md` |
 | Probes outside the requested ports | `-A`'s scripts probe other ports (`ms-sql-info` sends a 1-byte UDP datagram to 1434 on every host, seen in Jurgen's tcpdump of `nmap -A -p 502,102`); `-O` picks a random UDP port, and for IPv4 also TCP (30000-44780, regardless of `-p`), when the scan found no closed or unfiltered one | Never. `-sV` probes only open ports the scan found; `-O` probes an open TCP port the scan found and, when it found one, a closed TCP port (plus an ICMP echo only when discovery sends echo requests); there are no scripts. Traceroute falls back to a TCP port of the command: a scanned port, the `-p` port with `-sn` (even with `-Pn`, where nothing else probes it), or a discovery port, else skips the host with a warning (it used to fall back to port 80) | An OT operator must be able to rely on the command's ports (`-p` plus the documented host-discovery ports, which `-Pn` or `-P*` control) being the whole scope (Jurgen, 2026-11-15). When script scanning is added, scripts must default to the scanned ports (like nmap's `mssql.scanned-ports-only`) |
+| Report files as root | Written through any symbolic link (`fopen`) | Refuses a link owned by another user in a sticky world-writable directory such as `/tmp` | Reports are often written under `sudo`; a planted link would let another user aim root's write at a system file. Confirmed by Jurgen, 2026-11-16 |
+| XML stylesheet | Links `nmap.xsl`, `--webxml` nmap.org's copy | Links our own `feroprobe.xsl`, `--webxml` our GitHub Pages copy | nmap's stylesheet is under the NPSL and cannot be shipped |
 | `-A` without root | Silently drops `-O` and traceroute | Drops them too, with a warning naming them and why | No silent downgrade (Jurgen, 2026-11-15) |
 | UDP service payloads (`-sU`) | nmap's payload database: several probes per port (two DNS queries to 53, two NTP versions to 123, SNMPv1 and v3 to 161, three NetBIOS queries to 137) | FeroProbe's own, one per port (DNS, NTP, SNMP, SSDP), else `FeroProbeScan/1\n` | nmap's payloads cannot be redistributed; found by `scripts/nmap-diff` and kept (Jurgen, 2026-11-15) |
 | ICMP echo payload | Empty | The 9 bytes `feroprobe` | Part of the probe signature, so defenders can match discovery pings; found by `scripts/nmap-diff` and kept (Jurgen, 2026-11-15) |
@@ -189,6 +195,11 @@ the scope rule (no probes outside the command's ports and protocols, see
 
 ### Phase 5: v0.4.0
 
+Released as v0.4.0 (2026-11-16) with 5.1 (first pull request), 5.2, 5.3,
+5.4 and the tuning names of 5.5, plus nmap's default port lists and top-ports
+order. Still open from this phase: more `-sV` protocol batches (5.1) and host
+groups (5.5), which ships with `--resume` in v0.5.0.
+
 | Step | Feature | nmap options | Plan |
 | --- | --- | --- | --- |
 | 5.1 | Deeper version detection | `--version-intensity`, `--version-light`, `--version-all`, `--version-trace` | Move the rules in `service/rules.rs` into a data file in our own format (probe, ports, rarity 1-9, match and soft-match patterns, version and CPE fields), compiled into the binary and overridable with a file, like `--oui-file`. Intensity picks probes by rarity, as nmap does. `--version-trace` prints each probe and reply. Then grow the rule set protocol by protocol from public protocol documentation and our own captures (never from `nmap-service-probes`). Several pull requests: the format and options first, then batches of protocols. **First pull request done:** the format, the options, `--service-rules`, the Service Info line and CPEs, `open\|filtered` UDP probing, and a first batch (37 probes, about 150 rules). Next: more protocol batches |
@@ -206,7 +217,7 @@ the scope rule (no probes outside the command's ports and protocols, see
 | 6.3 | List scan | `-sL` | Lists the targets with reverse DNS (unless `-n`), sends nothing to them, as nmap does. Stays separate from `--dry-run` |
 | 6.4 | More ping types | `-PR`, `-PO`, `-PY` | `-PR` asks for ARP/NDP alone; `-PO` sends IP protocol pings (ICMP, IGMP, IP-in-IP by default, like nmap) through `ipproto.rs`; `-PY` sends SCTP INIT through `sctp.rs` |
 | 6.5 | Debug output and interactive keys | `-d`, `-d1`…`-d9`, `--iflist`, keys `v`/`V`, `d`/`D`, `p`/`P`, `?`, any other key for a status line | **Done** (see [Timing and performance](#timing-and-performance) and [Output](#output)). `-d` levels on top of `-v` with nmap's parsing; `--iflist` prints interfaces and routes (`iflist.rs`); keys read from the controlling terminal (`/dev/tty`, as nmap does, so `-iL -` keeps standard input) while the scan runs, plus `--noninteractive`. Still open: keys on Windows, routes on macOS, more `-d` messages as they prove useful |
-| 6.6 | Output extras | `--append-output`, `-oS`, `--stylesheet`, `--webxml`, `--no-stylesheet` | Append mode for every format; `-oS` for parity; an XML stylesheet of our own (nmap's `nmap.xsl` is not reused), referenced by default, `--webxml` points at a published copy |
+| 6.6 | Output extras | `--append-output`, `-oS`, `--stylesheet`, `--webxml`, `--no-stylesheet` | **Done** (see [Output](#output)). Append mode for every format; `-oS` for parity; an XML stylesheet of our own (nmap's `nmap.xsl` is not reused), referenced by default, `--webxml` points at a published copy |
 | 6.7 | Small options | `--data-length`, `--data`, `--data-string`, `--ttl`, `--ip-options`, `--badsum`, `--spoof-mac`, `-b`, `--privileged`, `--unprivileged`, `--system-dns`, `--port-ratio`, `--defeat-rst-ratelimit` | One pull request per group: payload options; IP header options; `--badsum`; `--spoof-mac` (behind the same private-range / `--allow-public-evasion` gate as the evasion options); FTP bounce `-b` (also behind that gate, since it scans a third party through someone else's server); the rest. Open question for each payload option: whether the probe signature is kept when the user supplies the payload (see `docs/responsible-use.md`) |
 
 ### Phase 7: script engine (v0.6.0)
