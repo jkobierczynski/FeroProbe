@@ -18,7 +18,7 @@ use std::fmt::Write;
 
 use feroprobe_core::{HostResult, PortResult, service_name};
 
-use crate::output::{RunInfo, port_rows, reported};
+use crate::output::{RunInfo, counted_up, port_rows, reported};
 use crate::xml::time_str;
 
 /// Make a value safe inside a `/`-separated, `,`-joined port entry.
@@ -60,7 +60,9 @@ pub fn render(hosts: &[HostResult], info: &RunInfo) -> String {
     );
     let mut up = 0;
     for host in hosts.iter().filter(|h| reported(h, info)) {
-        up += 1;
+        if counted_up(host, info) {
+            up += 1;
+        }
         let name = host
             .hostname
             .as_deref()
@@ -69,6 +71,10 @@ pub fn render(hosts: &[HostResult], info: &RunInfo) -> String {
         let head = format!("Host: {} ({name})", host.addr);
         if host.timed_out {
             let _ = writeln!(x, "{head}\tStatus: Timeout");
+            continue;
+        }
+        if info.list_scan {
+            let _ = writeln!(x, "{head}\tStatus: Unknown");
             continue;
         }
         let _ = writeln!(x, "{head}\tStatus: Up");

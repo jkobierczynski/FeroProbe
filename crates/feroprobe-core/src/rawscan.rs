@@ -22,6 +22,7 @@ use crate::connect::is_network_error;
 use crate::model::{HostResult, PortResult, PortState, Protocol, ScanConfig, reason};
 use crate::raw::{Pacer, source_addr_for};
 use crate::rtt::{Flight, Next};
+use crate::syn::HostsDone;
 use crate::target::Target;
 
 /// What a received packet says about one probe.
@@ -47,6 +48,13 @@ const QUEUE_CAP: usize = 8192;
 /// `classify` reads each captured packet, on its own thread, and returns
 /// the answers it gives (the IP protocol scan can learn about two probes
 /// from one packet). Probes that never got an answer get `no_answer`.
+///
+/// As a host-discovery probe (`done` given), the scan sends nothing more to
+/// a host that `done` marks as up, and an answer that is neither `no_answer`
+/// nor filtered proves its host up and marks it so (see
+/// [`crate::discovery`]). The probes skipped that way come back as no
+/// answer.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn run(
     targets: &[Target],
     keys: &[u16],
@@ -55,7 +63,9 @@ pub(crate) fn run(
     no_answer: PortState,
     mut send: impl FnMut(usize, u16, IpAddr, IpAddr) -> io::Result<()>,
     classify: impl Fn(&Packet<'_>, &Index) -> Vec<Answer> + Send + 'static,
+    done: Option<&HostsDone>,
 ) -> io::Result<Vec<HostResult>> {
+    let is_done = |h: usize| done.is_some_and(|d| d.is_done(h));
     let addrs: Vec<IpAddr> = targets.iter().map(|t| t.addr).collect();
     let index: Arc<Index> = Arc::new(addrs.iter().enumerate().map(|(i, a)| (*a, i)).collect());
     let result = |key: u16, state, why, rtt_ms| PortResult {
@@ -126,6 +136,12 @@ pub(crate) fn run(
         };
         let rtt = (rtt.as_secs_f64() * 1e6).round() / 1000.0;
         results.insert((a.host, a.key), result(a.key, a.state, a.reason, Some(rtt)));
+        if let Some(d) = done
+            && a.state != no_answer
+            && a.state != PortState::Filtered
+        {
+            d.mark(a.host);
+        }
         true
     };
 
@@ -183,7 +199,7 @@ pub(crate) fn run(
                 flight.settle(h, k);
                 continue;
             };
-            if results.contains_key(&(h, k)) {
+            if results.contains_key(&(h, k)) || is_done(h) {
                 flight.settle(h, k);
                 continue;
             }

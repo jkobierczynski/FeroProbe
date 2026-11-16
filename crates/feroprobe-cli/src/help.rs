@@ -13,10 +13,13 @@ TARGET SPECIFICATION:
   --exclude <host1[,host2][,host3],...>: Leave out these hosts/networks
   --excludefile <exclude_file>: Leave out the hosts listed in a file
 HOST DISCOVERY:
+  -sL: List Scan - simply list the targets (with reverse DNS), send nothing
   -sn: Ping scan - find the hosts that are up, no port scan
   -Pn: Skip host discovery - treat every target as up
-  -PS/PA/PU[portlist]: TCP SYN/connect, TCP ACK or UDP probes to these ports
+  -PS/PA/PU/PY[portlist]: TCP SYN/connect, TCP ACK, UDP or SCTP INIT probes
   -PE/PP/PM: ICMP echo, timestamp and address mask request probes
+  -PO[protocol list]: IP protocol ping (default ICMP, IGMP, IP-in-IP)
+  -PR: Accepted for nmap compatibility; ARP is always used where it can be
   -n/-R: Never resolve names / resolve every target [default: hosts that are up]
   --dns-servers <serv1[,serv2],...>: Ask these servers for reverse DNS
   --disable-arp-ping, --send-ip: No ARP or neighbour discovery on the local link

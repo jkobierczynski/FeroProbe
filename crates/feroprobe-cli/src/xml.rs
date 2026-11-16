@@ -7,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use feroprobe_core::{HostResult, PortResult, PortState, Protocol, service_name};
 
-use crate::output::{RunInfo, port_rows, reported};
+use crate::output::{RunInfo, counted_up, port_rows, reported};
 
 /// Escape text for an XML attribute value.
 fn esc(s: &str) -> String {
@@ -164,7 +164,7 @@ fn write_port(x: &mut String, p: &PortResult) {
 }
 
 fn write_host(x: &mut String, host: &HostResult, info: &RunInfo, start: u64, end: u64) {
-    let up = reported(host, info);
+    let up = counted_up(host, info);
     let timedout = if host.timed_out {
         " timedout=\"true\""
     } else {
@@ -174,15 +174,22 @@ fn write_host(x: &mut String, host: &HostResult, info: &RunInfo, start: u64, end
         x,
         "<host starttime=\"{start}\" endtime=\"{end}\"{timedout}>"
     );
-    let reason = host.up_reason.unwrap_or(if info.assume_up {
-        "user-set"
-    } else {
-        "no-response"
-    });
+    let reason = host
+        .up_reason
+        .unwrap_or(if info.assume_up || info.list_scan {
+            "user-set"
+        } else {
+            "no-response"
+        });
+    // A list scan never asks, so nmap writes "unknown".
+    let state = match (info.list_scan, up) {
+        (true, _) => "unknown",
+        (false, true) => "up",
+        (false, false) => "down",
+    };
     let _ = writeln!(
         x,
-        "<status state=\"{}\" reason=\"{}\" reason_ttl=\"0\"/>",
-        if up { "up" } else { "down" },
+        "<status state=\"{state}\" reason=\"{}\" reason_ttl=\"0\"/>",
         esc(reason)
     );
     let addrtype = match host.addr {
@@ -312,7 +319,9 @@ pub fn render(hosts: &[HostResult], info: &RunInfo) -> String {
     );
     let mut up = 0;
     for host in hosts.iter().filter(|h| reported(h, info)) {
-        up += 1;
+        if counted_up(host, info) {
+            up += 1;
+        }
         write_host(&mut x, host, info, start, end);
     }
     let elapsed = info.elapsed.as_secs_f64();

@@ -14,7 +14,7 @@ teams can flag FeroProbe scans without writing their own.
 |-------|--------|
 | Raw-socket TCP scans (SYN, FIN, NULL, Xmas, ACK, Window, Maimon) | TCP window `65109` (`0xFE55`) |
 | UDP scans to ports with no service-specific probe | payload `FeroProbeScan/1` |
-| ICMP / ICMPv6 echo requests (host discovery) | payload `feroprobe` (9 bytes) |
+| ICMP / ICMPv6 echo requests (host discovery, `-PE`, `-PO` and the defaults) | payload `feroprobe` (9 bytes) |
 
 The TCP window of a scan probe is otherwise meaningless, because the scan
 never completes a handshake, so the fixed window does not change how the

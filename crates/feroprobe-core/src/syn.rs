@@ -268,8 +268,9 @@ pub async fn raw_tcp_scan(
 /// Hosts already proven up, so a raw scan used as a discovery probe sends
 /// them nothing more. Target `h` of the scan is done once `flags[index[h]]`
 /// (set by other probes, such as ICMP) or `tcp[index[h]]` (set when a raw
-/// TCP probe draws an answer) is set. The two are kept apart so a TCP
-/// answer does not stop an ICMP reply from being reported as the reason.
+/// TCP, SCTP or IP protocol probe draws an answer) is set. The two are kept
+/// apart so such an answer does not stop an ICMP reply from being reported
+/// as the reason.
 #[derive(Clone)]
 pub(crate) struct HostsDone {
     pub flags: std::sync::Arc<Vec<std::sync::atomic::AtomicBool>>,
@@ -279,15 +280,16 @@ pub(crate) struct HostsDone {
 
 impl HostsDone {
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-    fn is_done(&self, h: usize) -> bool {
+    pub(crate) fn is_done(&self, h: usize) -> bool {
         use std::sync::atomic::Ordering::Relaxed;
         let i = self.index[h];
         self.flags[i].load(Relaxed) || self.tcp[i].load(Relaxed)
     }
 
-    /// Mark target `h` of the scan done: it answered a raw TCP probe.
+    /// Mark target `h` of the scan done: it answered a raw probe (TCP,
+    /// SCTP or IP protocol).
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-    fn mark(&self, h: usize) {
+    pub(crate) fn mark(&self, h: usize) {
         self.tcp[self.index[h]].store(true, std::sync::atomic::Ordering::Relaxed);
     }
 }

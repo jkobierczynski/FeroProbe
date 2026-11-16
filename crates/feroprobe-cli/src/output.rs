@@ -45,6 +45,9 @@ pub struct RunInfo {
     pub assume_up: bool,
     /// `-sn`: discovery only, no port table.
     pub ping_only: bool,
+    /// `-sL`: the targets were only listed, nothing was sent to them, so
+    /// every one is reported, none as up (nmap's "Status: Unknown").
+    pub list_scan: bool,
     /// `--nmap-label`: the XML report says `scanner="nmap"`.
     pub nmap_label: bool,
     /// How many `-v` were given.
@@ -73,7 +76,13 @@ fn service_label(p: &PortResult) -> String {
 }
 
 pub(crate) fn reported(host: &HostResult, info: &RunInfo) -> bool {
-    info.assume_up || host.is_up()
+    info.list_scan || info.assume_up || host.is_up()
+}
+
+/// Whether `host` counts as up in the totals: a list scan finds no host up,
+/// as in nmap, since it never asks.
+pub(crate) fn counted_up(host: &HostResult, info: &RunInfo) -> bool {
+    !info.list_scan && reported(host, info)
 }
 
 /// The most ports of one non-open state nmap lists before it collapses
@@ -124,10 +133,21 @@ pub fn render_table(hosts: &[HostResult], info: &RunInfo) -> String {
     w!(out, "Starting FeroProbe {}", env!("CARGO_PKG_VERSION"));
     let mut up = 0;
     for host in hosts.iter().filter(|h| reported(h, info)) {
-        up += 1;
+        if counted_up(host, info) {
+            up += 1;
+        }
         match host.hostname.as_ref().or(host.rdns.as_ref()) {
             Some(name) => w!(out, "\nScan report for {name} ({})", host.addr),
             None => w!(out, "\nScan report for {}", host.addr),
+        }
+        if info.list_scan {
+            // nmap's list scan: the name and address, nothing more.
+            if let (Some(given), Some(rdns)) = (&host.hostname, &host.rdns)
+                && !given.eq_ignore_ascii_case(rdns)
+            {
+                w!(out, "rDNS record for {}: {rdns}", host.addr);
+            }
+            continue;
         }
         match (host.latency_ms, host.up_reason) {
             (Some(ms), Some(why)) => w!(out, "Host is up, {why} ({ms:.2} ms latency)."),
@@ -163,7 +183,7 @@ pub fn render_table(hosts: &[HostResult], info: &RunInfo) -> String {
             print_trace(out, host);
         }
     }
-    if hosts.len() == 1 && up == 0 && !info.assume_up {
+    if hosts.len() == 1 && up == 0 && !info.assume_up && !info.list_scan {
         w!(
             out,
             "Note: the host seems down. If it is up but blocks our ping probes, try -Pn"
@@ -606,7 +626,7 @@ pub fn render_json(hosts: &[HostResult], info: &RunInfo) -> Result<String> {
                     latency_ms: h.latency_ms,
                     mac: h.mac.as_ref(),
                 },
-                up: reported(h, info),
+                up: counted_up(h, info),
                 timed_out: h.timed_out,
                 os: h.os.as_ref(),
                 trace: h.trace.as_ref(),
@@ -642,6 +662,7 @@ pub(crate) mod tests {
             show_trace: false,
             assume_up: false,
             ping_only: false,
+            list_scan: false,
             nmap_label: false,
             verbosity: 0,
         }

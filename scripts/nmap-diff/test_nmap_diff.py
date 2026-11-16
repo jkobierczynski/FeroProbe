@@ -124,6 +124,16 @@ class Scope(unittest.TestCase):
         self.assertIsNone(nd.scope_of(["-F"], "lan", True))
         self.assertIsNone(nd.scope_of(["-sS"], "lan", True))
 
+    def test_new_ping_types_and_list_scan_scope(self):
+        self.assertEqual(nd.scope_of(["-sn", "-PY80,2905"], "routed", True), {"sctp": {80, 2905}})
+        scope = nd.scope_of(["-sn", "-PO6,17"], "routed", True)
+        self.assertTrue(nd.in_scope("tcp/80", scope))
+        self.assertTrue(nd.in_scope("udp/40125", scope))
+        self.assertFalse(nd.in_scope("sctp/80", scope))
+        # -sL may send nothing at all, whatever else is given.
+        self.assertEqual(nd.scope_of(["-sL"], "lan", True), {})
+        self.assertEqual(nd.scope_of(["-sL", "-PE"], "routed", True), {})
+
     def test_ip_protocol_scan_scope(self):
         scope = nd.scope_of(["-sO", "-p", "1,6"], "lan", True)
         self.assertTrue(nd.in_scope("tcp/80", scope))
