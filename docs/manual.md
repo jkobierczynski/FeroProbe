@@ -1174,7 +1174,7 @@ the unfragmented probe there; see [Differences from nmap](#differences-from-nmap
 The default report on standard output is nmap's "normal" layout:
 
 ```
-Starting FeroProbe 0.3.0
+Starting FeroProbe 0.4.0
 
 Scan report for example.org (203.0.113.5)
 Host is up, syn-ack (0.85 ms latency).
