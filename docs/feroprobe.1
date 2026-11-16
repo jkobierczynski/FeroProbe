@@ -15,7 +15,7 @@
 . ftr VB CB
 . ftr VBI CBI
 .\}
-.TH "FEROPROBE" "1" "" "FeroProbe 0.3.0" "FeroProbe Reference Manual"
+.TH "FEROPROBE" "1" "" "FeroProbe 0.4.0" "FeroProbe Reference Manual"
 .hy
 .SH NAME
 .PP
@@ -71,9 +71,9 @@ space (\f[V]-p22\f[R] or \f[V]-p 22\f[R]), except the \f[V]-P\f[R] ping
 options and \f[V]-s\f[R] scan types, whose value is always run on
 (\f[V]-PS22\f[R], \f[V]-sS\f[R]).
 nmap\[aq]s two-letter options \f[V]-iL\f[R], \f[V]-oN\f[R],
-\f[V]-oX\f[R], \f[V]-oG\f[R], \f[V]-oA\f[R] (and FeroProbe\[aq]s
-\f[V]-oJ\f[R]) are written exactly as in nmap, as a separate word
-followed by their value.
+\f[V]-oX\f[R], \f[V]-oS\f[R], \f[V]-oG\f[R], \f[V]-oA\f[R] (and
+FeroProbe\[aq]s \f[V]-oJ\f[R]) are written exactly as in nmap, as a
+separate word followed by their value.
 .PP
 Durations (\f[V]<time>\f[R]) are in seconds unless they end in
 \f[V]ms\f[R], \f[V]s\f[R], \f[V]m\f[R] or \f[V]h\f[R]: \f[V]500ms\f[R],
@@ -1784,7 +1784,7 @@ layout:
 .IP
 .nf
 \f[C]
-Starting FeroProbe 0.3.0
+Starting FeroProbe 0.4.0
 
 Scan report for example.org (203.0.113.5)
 Host is up, syn-ack (0.85 ms latency).
@@ -1841,6 +1841,17 @@ Also write the XML report to a file, in nmap\[aq]s \f[V]-oX\f[R] layout
 XML can read it.
 The root element says \f[V]scanner=\[dq]feroprobe\[dq]\f[R]; see
 \f[V]--nmap-label\f[R].
+.SS \f[V]-oS <file>\f[R]
+.PP
+Also write the normal report to a file in \[dq]script kiddie\[dq]
+spelling, as nmap\[aq]s \f[V]-oS\f[R] does: at random, letters become
+look-alikes (\f[V]4\f[R] for \f[V]A\f[R], \f[V]3\f[R] for \f[V]e\f[R],
+\f[V]0\f[R] for \f[V]o\f[R], \f[V]$\f[R] or \f[V]z\f[R] for \f[V]s\f[R],
+\f[V]!\f[R], \f[V]|\f[R] or \f[V]1\f[R] for \f[V]i\f[R], and \f[V]s\f[R]
+for \f[V]z\f[R]) or change case.
+Fingerprint lines (the \f[V]OS:\f[R] lines and the unrecognized service
+replies) are left as they are, so they can still be copied.
+It exists for parity with nmap; \f[V]-oA\f[R] does not include it.
 .SS \f[V]-oG <file>\f[R]
 .PP
 Also write the grepable report to a file: one line per host, like
@@ -1864,14 +1875,86 @@ of the usual report there; only one report can go to standard output.
 Two reports cannot share a file (FeroProbe checks the real files, so
 links and other spellings of the same path are caught), and
 \f[V]-oA -\f[R] is refused.
-All report files are opened and emptied before the scan starts, so an
-unwritable path fails at once, as in nmap.
-The normal, XML and grepable reports are then written a host group at a
-time as the scan goes (see \f[V]--max-hostgroup\f[R]), so an aborted
-scan leaves reports of the hosts it finished, which \f[V]--resume\f[R]
-can carry on from.
+All report files are opened (created, not truncated) before the scan
+starts, so an unwritable path fails at once, as in nmap.
+A file\[aq]s old content is replaced when the first part of the new
+report is written, just before the first host group is scanned, so a
+command that fails before scanning leaves the previous report in place.
+The normal, XML, grepable and \f[V]-oS\f[R] reports are then written a
+host group at a time as the scan goes (see \f[V]--max-hostgroup\f[R]),
+so an aborted scan leaves reports of the hosts it finished, which
+\f[V]--resume\f[R] can carry on from.
 The JSON report is a single document and is written when the scan ends.
 A \f[V]--dry-run\f[R] writes no reports and creates no files.
+.PP
+Report files are written through the handles opened at the start, so the
+paths are not looked up again: replacing a report path with a link while
+the scan runs does not redirect the report.
+When FeroProbe runs as root (for example under \f[V]sudo\f[R]), it also
+refuses to write a report through a symbolic link that another user owns
+in a shared directory with the sticky bit, such as \f[V]/tmp\f[R] (for
+example \f[V]sudo feroprobe -oN /tmp/scan.txt\f[R] when someone else has
+made \f[V]/tmp/scan.txt\f[R] a link to a system file).
+Linux refuses this too when \f[V]fs.protected_symlinks\f[R] is on;
+FeroProbe checks it on every system.
+The files are created with the usual permissions from the umask and
+owned by root, as with nmap.
+.SS \f[V]--append-output\f[R]
+.PP
+Add the reports to the end of the \f[V]-oN\f[R], \f[V]-oX\f[R],
+\f[V]-oS\f[R], \f[V]-oG\f[R], \f[V]-oJ\f[R] and \f[V]-oA\f[R] files
+instead of replacing them, as nmap\[aq]s \f[V]--append-output\f[R] does.
+Each run adds a complete report, so a normal or grepable file collects
+one report after another.
+An XML file then holds several \f[V]<nmaprun>\f[R] documents one after
+another, each with its own \f[V]<?xml ...?>\f[R] header, which XML
+parsers refuse as one document until it is split, just as with nmap; a
+JSON file likewise holds one JSON document per run.
+Reports written to standard output (\f[V]-\f[R]) are not affected.
+.SS \f[V]--stylesheet <path or URL>\f[R]
+.PP
+Link this XSL stylesheet from the XML report, through an
+\f[V]<?xml-stylesheet href=\[dq]...\[dq] type=\[dq]text/xsl\[dq]?>\f[R]
+line after the \f[V]<!DOCTYPE>\f[R] line, as nmap does.
+A browser that opens the report applies the stylesheet and shows the
+report as a web page.
+The value is written as given, so give a URL or a path that is valid
+where the report will be opened.
+.PP
+Without \f[V]--stylesheet\f[R], \f[V]--webxml\f[R] or
+\f[V]--no-stylesheet\f[R], the report links FeroProbe\[aq]s own
+stylesheet, \f[V]feroprobe.xsl\f[R]: the copy installed with FeroProbe
+as a \f[V]file://\f[R] URL (next to the binary, as in the release
+archives, then \f[V]../share/feroprobe/\f[R] from the binary, then
+\f[V]/usr/local/share/feroprobe/\f[R] and
+\f[V]/usr/share/feroprobe/\f[R]), or the bare name
+\f[V]feroprobe.xsl\f[R] when no copy is found, as nmap does with
+\f[V]nmap.xsl\f[R].
+The stylesheet is \f[V]docs/feroprobe.xsl\f[R] in the source; it is
+written for FeroProbe (nmap\[aq]s \f[V]nmap.xsl\f[R] is not reused) and
+also shows nmap\[aq]s own XML reports.
+Most browsers refuse to apply a stylesheet to a local file or from
+another site, so the reliable way to get a web page is to convert the
+report:
+.IP
+.nf
+\f[C]
+xsltproc -o report.html /usr/share/feroprobe/feroprobe.xsl report.xml
+\f[R]
+.fi
+.PP
+Of \f[V]--stylesheet\f[R], \f[V]--webxml\f[R] and
+\f[V]--no-stylesheet\f[R], the last one given wins, as in nmap.
+.SS \f[V]--webxml\f[R]
+.PP
+Link the published copy of FeroProbe\[aq]s stylesheet,
+\f[V]https://jkobierczynski.github.io/feroprobe/feroprobe.xsl\f[R],
+instead of the installed one, so the link works on machines where
+FeroProbe is not installed.
+Short for \f[V]--stylesheet\f[R] with that URL.
+.SS \f[V]--no-stylesheet\f[R]
+.PP
+Leave the \f[V]xml-stylesheet\f[R] line out of the XML report.
 .SS \f[V]--resume <filename>\f[R]
 .PP
 Carry on with a scan that was aborted (with Ctrl-C, a lost connection, a
@@ -1890,9 +1973,10 @@ The command line is read back from the report, so the resumed scan runs
 with the same options, targets and report files.
 Every target up to and including the last host the report lists is
 skipped, and the scan continues with the next one, appending to the
-existing reports: the normal and grepable files get a second
-\f[V]scan initiated\f[R] line, and the XML document is continued, so
-that it ends up complete.
+existing reports (the command line is run with \f[V]--append-output\f[R]
+added, as nmap does): the normal and grepable files get a second
+\f[V]scan initiated\f[R] line, and the XML document is continued rather
+than started again, so that it ends up complete.
 Like nmap, the file is searched for grepable \f[V]Host:\f[R] lines
 first, then XML \f[V]<address>\f[R] elements, then normal
 \f[V]Scan report for\f[R] lines.
@@ -1914,8 +1998,9 @@ With \f[V]--randomize-hosts\f[R] the targets come in a different order
 each time, so some hosts may be scanned twice and others missed; a
 warning says so, as in nmap.
 .IP \[bu] 2
-The JSON report (\f[V]-oJ\f[R]) is written only when a scan ends, so
-after resuming it lists only the hosts scanned since; a warning says so.
+The JSON report (\f[V]-oJ\f[R]) is written only when a scan ends, so the
+aborted run left none, and the one written after resuming lists only the
+hosts scanned since; a warning says so.
 .IP \[bu] 2
 The settings files and ICS protection apply to the resumed scan as they
 would to the command typed again.
@@ -1946,11 +2031,149 @@ excluded hosts, and each open port as a scan finds it
 (\f[V]Discovered open port 22/tcp on 10.0.0.5\f[R]).
 \f[V]-vv\f[R] adds more notes, such as resolver hints.
 Each \f[V]-v\f[R] also raises the Not shown limit.
+When a host loses so many probes that FeroProbe slows down for it,
+\f[V]-v\f[R] says so, as nmap does
+(\f[V]Increasing send delay for 10.0.0.5 from 0 to 5 due to 11 out of 30 dropped probes since last increase.\f[R]).
+The verbosity can be changed while the scan runs; see Runtime
+interaction.
+.SS \f[V]-d\f[R], \f[V]-dd\f[R], \f[V]-d<level>\f[R], \f[V]--debug[=<level>]\f[R]
+.PP
+Raise the debugging level, as nmap\[aq]s \f[V]-d\f[R] does: each
+\f[V]-d\f[R] (or each extra \f[V]d\f[R], as in \f[V]-ddd\f[R]) raises
+the debugging level and the verbosity by one; \f[V]-d<level>\f[R] (or
+\f[V]--debug=<level>\f[R]) sets both to \f[V]<level>\f[R], from 0 to 10.
+Options apply in command-line order, so \f[V]-v -d\f[R] gives verbosity
+2 and debugging 1, while \f[V]-vv -d1\f[R] gives 1 and 1.
+The level must be attached: \f[V]-d 3\f[R] is \f[V]-d\f[R] followed by
+the target \f[V]3\f[R].
+Like nmap\[aq]s, \f[V]-d\f[R] also turns on \f[V]--reason\f[R].
+The output goes to standard error, with the \f[V]-v\f[R] progress:
+.IP \[bu] 2
+\f[V]-d\f[R]: a timing report before the scan
+(\f[V]--------------- Timing report ---------------\f[R], with the host
+group size, the RTT timeouts in milliseconds, \f[V]--max-scan-delay\f[R]
+for TCP, UDP and SCTP, \f[V]--min-parallelism\f[R] and the parallelism
+cap, \f[V]--max-retries\f[R], \f[V]--host-timeout\f[R],
+\f[V]--min-rate\f[R] and \f[V]--max-rate\f[R]; 0 means not set),
+\f[V]Increased max_successful_tryno for <host> to <n> (packet drop)\f[R]
+each time a host answers only a resent probe, which lets its probes be
+sent once more, and after the port scan
+\f[V]Final times for host <address>: srtt: <us> rttvar: <us>  to: <us>\f[R]
+with the host\[aq]s smoothed round-trip time, its variance and its probe
+timeout in microseconds.
+.IP \[bu] 2
+\f[V]-d2\f[R]:
+\f[V]Discovered <state> port <port>/<protocol> on <host>\f[R] for ports
+in every state, not only open ones.
+.IP \[bu] 2
+With \f[V]--iflist\f[R], the reason a table could not be read.
+.PP
+nmap prints much more at high debugging levels (its scan engine\[aq]s
+internal state); FeroProbe prints the messages above and adds more where
+they help.
 .SS \f[V]--stats-every <time>\f[R]
 .PP
 Print a progress line to standard error at this interval, for example
 \f[V]Stats: 0:01:05 elapsed; TCP SYN scan: 45.20% done (4520 of 10000 probes)\f[R].
 \f[V]0\f[R] turns it off.
+Pressing a key during the scan prints the same line once; see Runtime
+interaction.
+.SS \f[V]--iflist\f[R]
+.PP
+Print the host\[aq]s network interfaces and routes, then stop, in
+nmap\[aq]s layout.
+The interface table has one row per address of each interface (an
+interface without addresses shows \f[V](none)/0\f[R]), with its type
+(\f[V]ethernet\f[R], \f[V]loopback\f[R], \f[V]point2point\f[R] or
+\f[V]other\f[R]), whether it is up, its MTU and, for Ethernet, its MAC
+address.
+The route table lists each route that goes through a listed interface,
+IPv4 first, then the longest prefixes first, with its metric and
+gateway.
+.IP
+.nf
+\f[C]
+************************INTERFACES************************
+DEV  (SHORT) IP/MASK        TYPE     UP MTU   MAC
+lo   (lo)    127.0.0.1/8    loopback up 65536
+eth0 (eth0)  192.168.0.5/24 ethernet up 1500  00:1A:2B:3C:4D:5E
+eth0 (eth0)  fe80::5/64     ethernet up 1500  00:1A:2B:3C:4D:5E
+
+**************************ROUTES**************************
+DST/MASK       DEV  METRIC GATEWAY
+192.168.0.0/24 eth0 100
+0.0.0.0/0      eth0 100    192.168.0.1
+fe80::/64      eth0 256
+\f[R]
+.fi
+.PP
+Needs no root and no target.
+The routes are read on Linux only for now; elsewhere the route table
+shows \f[V]ROUTES: NONE FOUND(!)\f[R] (with \f[V]-d\f[R], the reason).
+On Windows neither table is available yet.
+.SS \f[V]--noninteractive\f[R]
+.PP
+Do not read keys from the terminal during the scan; see Runtime
+interaction.
+.SS Runtime interaction
+.PP
+While a scan runs in a terminal, FeroProbe reads single keys from it, as
+nmap does:
+.PP
+.TS
+tab(@);
+l l.
+T{
+Key
+T}@T{
+Effect
+T}
+_
+T{
+\f[V]v\f[R] / \f[V]V\f[R]
+T}@T{
+Raise / lower the verbosity by one (\f[V]Verbosity Increased to 2.\f[R])
+T}
+T{
+\f[V]d\f[R] / \f[V]D\f[R]
+T}@T{
+Raise / lower the debugging level by one
+(\f[V]Debugging Increased to 1.\f[R])
+T}
+T{
+\f[V]p\f[R] / \f[V]P\f[R]
+T}@T{
+Turn the packet trace on / off (\f[V]Packet Tracing enabled.\f[R])
+T}
+T{
+\f[V]?\f[R]
+T}@T{
+List these keys
+T}
+T{
+any other key
+T}@T{
+Print a status line, as \f[V]--stats-every\f[R] does
+T}
+.TE
+.PP
+The keys take effect at once: a higher verbosity also lists more ports
+in the final report.
+Their messages go to standard error, like the rest of the progress
+output (nmap writes them to standard output).
+Keys are read from the controlling terminal (\f[V]/dev/tty\f[R]), not
+standard input, so they work with \f[V]-iL -\f[R]; only while FeroProbe
+is the terminal\[aq]s foreground job, so a scan started in the
+background with \f[V]&\f[R] reads nothing; and only during the scan
+itself, not during \f[V]--dry-run\f[R] or after the scan.
+Line editing and echo are turned off on the terminal while keys are read
+and are restored when the scan ends, when FeroProbe exits, and on
+Ctrl-C.
+Keys are not read when FeroProbe was started with SIGTTOU ignored or
+blocked: the terminal could then not keep a scan that was moved to the
+background from changing another job\[aq]s settings.
+\f[V]--noninteractive\f[R] turns key reading off.
+Not available on Windows yet.
 .SH CHECKING A SCAN BEFORE AND WHILE IT RUNS
 .PP
 These options show what FeroProbe will do or is doing.
@@ -2148,9 +2371,9 @@ T}
 These come from nmap 7.99\[aq]s source.
 .PP
 A dry run needs no root, writes no report files (it warns if
-\f[V]-oN\f[R], \f[V]-oX\f[R], \f[V]-oG\f[R], \f[V]-oJ\f[R] or
-\f[V]-oA\f[R] were given), and notes when a real run of the same command
-would need raw-socket privileges.
+\f[V]-oN\f[R], \f[V]-oX\f[R], \f[V]-oS\f[R], \f[V]-oG\f[R],
+\f[V]-oJ\f[R] or \f[V]-oA\f[R] were given), and notes when a real run of
+the same command would need raw-socket privileges.
 The evasion address check still applies: a public address with
 \f[V]-f\f[R], \f[V]--mtu\f[R], \f[V]-D\f[R] or \f[V]-S\f[R] is refused
 unless \f[V]--allow-public-evasion\f[R] is given.
@@ -2425,6 +2648,22 @@ T}@T{
 \f[V]nmap\f[R]
 T}@T{
 \f[V]feroprobe\f[R], unless \f[V]--nmap-label\f[R]
+T}
+T{
+XML stylesheet
+T}@T{
+Links \f[V]nmap.xsl\f[R]; \f[V]--webxml\f[R] links nmap.org\[aq]s copy
+T}@T{
+Links FeroProbe\[aq]s own \f[V]feroprobe.xsl\f[R]; \f[V]--webxml\f[R]
+links FeroProbe\[aq]s published copy
+T}
+T{
+Report files as root
+T}@T{
+Written through any symbolic link
+T}@T{
+A link another user owns in a sticky shared directory such as
+\f[V]/tmp\f[R] is refused (see \f[V]-oA\f[R] under Output options)
 T}
 T{
 Service and OS signatures

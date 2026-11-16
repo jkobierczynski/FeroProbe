@@ -81,7 +81,7 @@ Options can come in any order, before or after the targets. Single-letter
 options that take a value accept it with or without a space (`-p22` or
 `-p 22`), except the `-P` ping options and `-s` scan types, whose value is
 always run on (`-PS22`, `-sS`). nmap's two-letter options `-iL`, `-oN`,
-`-oX`, `-oG`, `-oA` (and FeroProbe's `-oJ`) are written exactly as in nmap,
+`-oX`, `-oS`, `-oG`, `-oA` (and FeroProbe's `-oJ`) are written exactly as in nmap,
 as a separate word followed by their value.
 
 Durations (`<time>`) are in seconds unless they end in `ms`, `s`, `m` or
@@ -1187,7 +1187,7 @@ the unfragmented probe there; see [Differences from nmap](#differences-from-nmap
 The default report on standard output is nmap's "normal" layout:
 
 ```
-Starting FeroProbe 0.3.0
+Starting FeroProbe 0.4.0
 
 Scan report for example.org (203.0.113.5)
 Host is up, syn-ack (0.85 ms latency).
@@ -1238,6 +1238,15 @@ Also write the XML report to a file, in nmap's `-oX` layout (including
 `<trace>` for traceroute), so tools that import nmap XML can read it. The
 root element says `scanner="feroprobe"`; see `--nmap-label`.
 
+#### `-oS <file>`
+
+Also write the normal report to a file in "script kiddie" spelling, as
+nmap's `-oS` does: at random, letters become look-alikes (`4` for `A`, `3`
+for `e`, `0` for `o`, `$` or `z` for `s`, `!`, `|` or `1` for `i`, and `s`
+for `z`) or change case. Fingerprint lines (the `OS:` lines and the
+unrecognized service replies) are left as they are, so they can still be
+copied. It exists for parity with nmap; `-oA` does not include it.
+
 #### `-oG <file>`
 
 Also write the grepable report to a file: one line per host, like nmap's
@@ -1260,12 +1269,77 @@ A file name of `-` sends that report to standard output in place of the
 usual report there; only one report can go to standard output. Two reports
 cannot share a file (FeroProbe checks the real files, so links and other
 spellings of the same path are caught), and `-oA -` is refused. All report
-files are opened and emptied before the scan starts, so an unwritable path
-fails at once, as in nmap. The normal, XML and grepable reports are then
-written a host group at a time as the scan goes (see `--max-hostgroup`), so
-an aborted scan leaves reports of the hosts it finished, which `--resume`
-can carry on from. The JSON report is a single document and is written when
-the scan ends. A `--dry-run` writes no reports and creates no files.
+files are opened (created, not truncated) before the scan starts, so an
+unwritable path fails at once, as in nmap. A file's old content is
+replaced when the first part of the new report is written, just before
+the first host group is scanned, so a command that fails before scanning
+leaves the previous report in place. The normal, XML, grepable and `-oS`
+reports are then written a host group at a time as the scan goes (see
+`--max-hostgroup`), so an aborted scan leaves reports of the hosts it
+finished, which `--resume` can carry on from. The JSON report is a single
+document and is written when the scan ends. A `--dry-run` writes no
+reports and creates no files.
+
+Report files are written through the handles opened at the start, so the
+paths are not looked up again: replacing a report path with a link while
+the scan runs does not redirect the report. When FeroProbe runs as root
+(for example under `sudo`), it also refuses to write a report through a
+symbolic link that another user owns in a shared directory with the sticky
+bit, such as `/tmp` (for example `sudo feroprobe -oN /tmp/scan.txt` when
+someone else has made `/tmp/scan.txt` a link to a system file). Linux
+refuses this too when `fs.protected_symlinks` is on; FeroProbe checks it
+on every system. The files are created with the usual permissions from the
+umask and owned by root, as with nmap.
+
+#### `--append-output`
+
+Add the reports to the end of the `-oN`, `-oX`, `-oS`, `-oG`, `-oJ` and
+`-oA` files instead of replacing them, as nmap's `--append-output` does.
+Each run adds a complete report, so a normal or grepable file collects one
+report after another. An XML file then holds several `<nmaprun>`
+documents one after another, each with its own `<?xml ...?>` header, which
+XML parsers refuse as one document until it is split, just as with nmap;
+a JSON file likewise holds one JSON document per run. Reports written to
+standard output (`-`) are not affected.
+
+#### `--stylesheet <path or URL>`
+
+Link this XSL stylesheet from the XML report, through an
+`<?xml-stylesheet href="..." type="text/xsl"?>` line after the
+`<!DOCTYPE>` line, as nmap does. A browser that opens the report applies
+the stylesheet and shows the report as a web page. The value is written as
+given, so give a URL or a path that is valid where the report will be
+opened.
+
+Without `--stylesheet`, `--webxml` or `--no-stylesheet`, the report links
+FeroProbe's own stylesheet, `feroprobe.xsl`: the copy installed with
+FeroProbe as a `file://` URL (next to the binary, as in the release
+archives, then `../share/feroprobe/` from the binary, then
+`/usr/local/share/feroprobe/` and `/usr/share/feroprobe/`), or the bare
+name `feroprobe.xsl` when no copy is found, as nmap does with `nmap.xsl`.
+The stylesheet is `docs/feroprobe.xsl` in the source; it is written for
+FeroProbe (nmap's `nmap.xsl` is not reused) and also shows nmap's own XML
+reports. Most browsers refuse to apply a stylesheet to a local file or
+from another site, so the reliable way to get a web page is to convert the
+report:
+
+```sh
+xsltproc -o report.html /usr/share/feroprobe/feroprobe.xsl report.xml
+```
+
+Of `--stylesheet`, `--webxml` and `--no-stylesheet`, the last one given
+wins, as in nmap.
+
+#### `--webxml`
+
+Link the published copy of FeroProbe's stylesheet,
+`https://jkobierczynski.github.io/feroprobe/feroprobe.xsl`, instead of the
+installed one, so the link works on machines where FeroProbe is not
+installed. Short for `--stylesheet` with that URL.
+
+#### `--no-stylesheet`
+
+Leave the `xml-stylesheet` line out of the XML report.
 
 #### `--resume <filename>`
 
@@ -1280,9 +1354,10 @@ feroprobe --resume scan.gnmap
 The command line is read back from the report, so the resumed scan runs
 with the same options, targets and report files. Every target up to and
 including the last host the report lists is skipped, and the scan continues
-with the next one, appending to the existing reports: the normal and
-grepable files get a second `scan initiated` line, and the XML document is
-continued, so that it ends up complete. Like nmap, the file is searched
+with the next one, appending to the existing reports (the command line is
+run with `--append-output` added, as nmap does): the normal and grepable
+files get a second `scan initiated` line, and the XML document is
+continued rather than started again, so that it ends up complete. Like nmap, the file is searched
 for grepable `Host:` lines first, then XML `<address>` elements, then normal
 `Scan report for` lines.
 
@@ -1299,8 +1374,9 @@ probed again too. Other things to know:
 - With `--randomize-hosts` the targets come in a different order each
   time, so some hosts may be scanned twice and others missed; a warning
   says so, as in nmap.
-- The JSON report (`-oJ`) is written only when a scan ends, so after
-  resuming it lists only the hosts scanned since; a warning says so.
+- The JSON report (`-oJ`) is written only when a scan ends, so the
+  aborted run left none, and the one written after resuming lists only
+  the hosts scanned since; a warning says so.
 - The settings files and ICS protection apply to the resumed scan as they
   would to the command typed again.
 
@@ -1329,13 +1405,107 @@ its time (`Initiating TCP SYN scan of 4 hosts`, `Completed TCP SYN scan in
 1.21s`), how many hosts are up, excluded hosts, and each open port as a
 scan finds it (`Discovered open port 22/tcp on 10.0.0.5`). `-vv` adds
 more notes, such as resolver hints. Each `-v` also raises the
-[Not shown](#normal-output) limit.
+[Not shown](#normal-output) limit. When a host loses so many probes that
+FeroProbe slows down for it, `-v` says so, as nmap does (`Increasing send
+delay for 10.0.0.5 from 0 to 5 due to 11 out of 30 dropped probes since
+last increase.`). The verbosity can be changed while the scan runs; see
+[Runtime interaction](#runtime-interaction).
+
+#### `-d`, `-dd`, `-d<level>`, `--debug[=<level>]`
+
+Raise the debugging level, as nmap's `-d` does: each `-d` (or each extra
+`d`, as in `-ddd`) raises the debugging level and the verbosity by one;
+`-d<level>` (or `--debug=<level>`) sets both to `<level>`, from 0 to 10.
+Options apply in command-line order, so `-v -d` gives verbosity 2 and
+debugging 1, while `-vv -d1` gives 1 and 1. The level must be attached:
+`-d 3` is `-d` followed by the target `3`. Like nmap's, `-d` also turns
+on [`--reason`](#--reason). The output goes to standard error, with the
+`-v` progress:
+
+- `-d`: a timing report before the scan (`--------------- Timing report
+  ---------------`, with the host group size, the RTT timeouts in
+  milliseconds, `--max-scan-delay` for TCP, UDP and SCTP,
+  `--min-parallelism` and the parallelism cap, `--max-retries`,
+  `--host-timeout`, `--min-rate` and `--max-rate`; 0 means not set),
+  `Increased max_successful_tryno for <host> to <n> (packet drop)` each
+  time a host answers only a resent probe, which lets its probes be sent
+  once more, and after the port scan `Final times for host <address>:
+  srtt: <us> rttvar: <us>  to: <us>` with the host's smoothed round-trip
+  time, its variance and its probe timeout in microseconds.
+- `-d2`: `Discovered <state> port <port>/<protocol> on <host>` for ports
+  in every state, not only open ones.
+- With [`--iflist`](#--iflist), the reason a table could not be read.
+
+nmap prints much more at high debugging levels (its scan engine's
+internal state); FeroProbe prints the messages above and adds more where
+they help.
 
 #### `--stats-every <time>`
 
 Print a progress line to standard error at this interval, for example
 `Stats: 0:01:05 elapsed; TCP SYN scan: 45.20% done (4520 of 10000
-probes)`. `0` turns it off.
+probes)`. `0` turns it off. Pressing a key during the scan prints the same
+line once; see [Runtime interaction](#runtime-interaction).
+
+#### `--iflist`
+
+Print the host's network interfaces and routes, then stop, in nmap's
+layout. The interface table has one row per address of each interface
+(an interface without addresses shows `(none)/0`), with its type
+(`ethernet`, `loopback`, `point2point` or `other`), whether it is up, its
+MTU and, for Ethernet, its MAC address. The route table lists each route
+that goes through a listed interface, IPv4 first, then the longest
+prefixes first, with its metric and gateway.
+
+```
+************************INTERFACES************************
+DEV  (SHORT) IP/MASK        TYPE     UP MTU   MAC
+lo   (lo)    127.0.0.1/8    loopback up 65536
+eth0 (eth0)  192.168.0.5/24 ethernet up 1500  00:1A:2B:3C:4D:5E
+eth0 (eth0)  fe80::5/64     ethernet up 1500  00:1A:2B:3C:4D:5E
+
+**************************ROUTES**************************
+DST/MASK       DEV  METRIC GATEWAY
+192.168.0.0/24 eth0 100
+0.0.0.0/0      eth0 100    192.168.0.1
+fe80::/64      eth0 256
+```
+
+Needs no root and no target. The routes are read on Linux only for now;
+elsewhere the route table shows `ROUTES: NONE FOUND(!)` (with `-d`, the
+reason). On Windows neither table is available yet.
+
+#### `--noninteractive`
+
+Do not read keys from the terminal during the scan; see
+[Runtime interaction](#runtime-interaction).
+
+### Runtime interaction
+
+While a scan runs in a terminal, FeroProbe reads single keys from it, as
+nmap does:
+
+| Key | Effect |
+| --- | --- |
+| `v` / `V` | Raise / lower the verbosity by one (`Verbosity Increased to 2.`) |
+| `d` / `D` | Raise / lower the debugging level by one (`Debugging Increased to 1.`) |
+| `p` / `P` | Turn the [packet trace](#--packet-trace) on / off (`Packet Tracing enabled.`) |
+| `?` | List these keys |
+| any other key | Print a status line, as [`--stats-every`](#--stats-every-time) does |
+
+The keys take effect at once: a higher verbosity also lists more ports in
+the final report. Their messages go to standard error, like the rest of
+the progress output (nmap writes them to standard output). Keys are read
+from the controlling terminal (`/dev/tty`), not standard input, so they
+work with `-iL -`; only while FeroProbe is the terminal's foreground job,
+so a scan started in the background with `&` reads nothing; and only
+during the scan itself, not during `--dry-run` or after the scan. Line
+editing and echo are turned off on the terminal while keys are read and
+are restored when the scan ends, when FeroProbe exits, and on Ctrl-C.
+Keys are not read when FeroProbe was started with SIGTTOU ignored or
+blocked: the terminal could then not keep a scan that was moved to the
+background from changing another job's settings.
+`--noninteractive` turns key reading off. Not available on Windows yet.
 
 ## Checking a scan before and while it runs
 
@@ -1439,7 +1609,7 @@ per option:
 These come from nmap 7.99's source.
 
 A dry run needs no root, writes no report files (it warns if `-oN`,
-`-oX`, `-oG`, `-oJ` or `-oA` were given), and notes when a real run of the
+`-oX`, `-oS`, `-oG`, `-oJ` or `-oA` were given), and notes when a real run of the
 same command would need raw-socket privileges. The evasion address check
 still applies: a public address with `-f`, `--mtu`, `-D` or `-S` is
 refused unless `--allow-public-evasion` is given.
@@ -1600,6 +1770,8 @@ safeguard calls for a difference. The deliberate differences are:
 | Settings files, `ics_protection`, `--override-ics-protection` | No equivalent | FeroProbe's own; off by default, so default behaviour is unchanged |
 | JSON output (`-oJ`) | No equivalent | FeroProbe's own format |
 | XML `scanner` attribute | `nmap` | `feroprobe`, unless `--nmap-label` |
+| XML stylesheet | Links `nmap.xsl`; `--webxml` links nmap.org's copy | Links FeroProbe's own `feroprobe.xsl`; `--webxml` links FeroProbe's published copy |
+| Report files as root | Written through any symbolic link | A link another user owns in a sticky shared directory such as `/tmp` is refused (see `-oA` under Output options) |
 | Service and OS signatures | nmap's databases | FeroProbe's own (nmap's cannot be redistributed); the OS database is much smaller than nmap's, so fewer hosts get a perfect match |
 | UDP service payloads (`-sU`) | nmap's payload database: several probes per port (two DNS queries to 53, two NTP versions to 123, SNMPv1 and v3 to 161, three NetBIOS queries to 137), up to dozens with `-sV` | FeroProbe's own, one per port: DNS (53, 5353), NTP (123), SNMP (161) and SSDP (1900); every other port gets `FeroProbeScan/1\n`. nmap's payloads cannot be redistributed; one payload per service is enough to make it answer |
 | OS detection probes (`-O`) | About 16 probes per try (6 SYNs with varied options, ECN, T2-T7 to open and closed ports, 2 ICMP echoes, a UDP probe to a closed port), with closed ports picked at random outside the scan when none was found, and hosts without an open port probed too | At most 9 probes per try (4 SYNs, ECN and an ACK to the open port; a SYN and an ACK to a closed port the scan found; an ICMP echo only if discovery sends echo requests). No UDP probe, no T3/T5-T7-style odd flag combinations, no random ports, and hosts without an open TCP port are not probed. The price: fewer tests, so some systems nmap tells apart look alike |

@@ -221,7 +221,8 @@ pub async fn connect_scan(
 
     // Congestion control, as in nmap: how many probes may wait for an
     // answer at once grows with the answers and shrinks on losses.
-    let window = AsyncWindow::new(cfg, vec![ports.len(); targets.len()]);
+    let window = AsyncWindow::new(cfg, vec![ports.len(); targets.len()])
+        .with_addrs(targets.iter().map(|t| t.addr).collect());
     let window = &window;
     let mut results = stream::iter(jobs)
         .map(|(host_idx, port)| {

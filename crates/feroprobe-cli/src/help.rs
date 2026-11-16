@@ -74,10 +74,16 @@ TIMING AND PERFORMANCE:
   --max-scan-delay <time>: Longest delay the scan may add for a lossy host
   --host-timeout <time>: Give up on a host after <time>
 OUTPUT:
-  -oN/-oX/-oG/-oJ <file>: Write normal, XML, grepable or JSON output to <file>
+  -oN/-oX/-oS/-oG/-oJ <file>: Write normal, XML, script kiddie, grepable
+     or JSON output to <file>
   -oA <basename>: Write normal, XML and grepable output at once
+  --append-output: Add to the output files instead of overwriting them
+  --stylesheet <path/URL>: Link this XSL stylesheet from the XML output
+  --webxml: Link the published FeroProbe stylesheet, for more portable XML
+  --no-stylesheet: Link no XSL stylesheet from the XML output
   -o, --output <table|json|xml|grepable>: Format on standard output
   -v: More progress output (-vv for even more)
+  -d, --debug: More debugging output (-dd or -d<level> for more)
   --reason: Show why each port got its state
   --packet-trace: Show every packet sent and received
   --explain: Before scanning, show the plan and the reason for each step
@@ -85,6 +91,8 @@ OUTPUT:
   --open: Show only open (or possibly open) ports
   --stats-every <time>: Print a progress line every <time>
   --nmap-label: Write scanner=\"nmap\" in XML, for tools that need it
+  --iflist: Print host interfaces and routes (for debugging)
+  --noninteractive: No keys during the scan (v/V, d/D, p/P, ?, status)
   --resume <filename>: Resume an aborted scan
 MISC:
   -6: Scan the IPv6 address of hostnames
@@ -117,9 +125,10 @@ mod tests {
             // the rewritten long options.
             let shown = match arg.get_long() {
                 Some("input-file") => "-iL".to_string(),
-                Some("output-normal" | "output-xml" | "output-grepable" | "output-json") => {
-                    "-oN/-oX/-oG/-oJ".to_string()
-                }
+                Some(
+                    "output-normal" | "output-xml" | "output-skid" | "output-grepable"
+                    | "output-json",
+                ) => "-oN/-oX/-oS/-oG/-oJ".to_string(),
                 Some("output-all") => "-oA".to_string(),
                 // nmap's single-letter names for the evasion options.
                 Some("decoys") => "-D".to_string(),
@@ -164,6 +173,7 @@ mod tests {
                 Some("output-grepable") => "-oG".to_string(),
                 Some("output-json") => "-oJ".to_string(),
                 Some("output-all") => "-oA".to_string(),
+                Some("output-skid") => "-oS".to_string(),
                 Some(long) => format!("--{long}"),
                 None => format!("-{}", arg.get_short().unwrap()),
             };
