@@ -314,12 +314,20 @@ fn installed_stylesheet() -> Option<std::path::PathBuf> {
 /// A `file://` URL for an absolute path.
 fn file_url(path: &std::path::Path) -> String {
     let text = path.to_string_lossy();
-    // Windows: C:\x\y.xsl → file:///C:/x/y.xsl (and no \\?\ prefix).
-    let text = text
-        .strip_prefix(r"\\?\")
-        .unwrap_or(&text)
-        .replace('\\', "/");
-    let mut url = String::from(if text.starts_with('/') {
+    // Windows: C:\x\y.xsl → file:///C:/x/y.xsl (and no \\?\ prefix); a
+    // share, \\server\share\y.xsl or \\?\UNC\server\share\y.xsl, becomes
+    // file://server/share/y.xsl (RFC 8089).
+    let (text, share) = if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        (rest, true)
+    } else if let Some(rest) = text.strip_prefix(r"\\?\") {
+        (rest, false)
+    } else if let Some(rest) = text.strip_prefix(r"\\") {
+        (rest, true)
+    } else {
+        (&*text, false)
+    };
+    let text = text.replace('\\', "/");
+    let mut url = String::from(if share || text.starts_with('/') {
         "file://"
     } else {
         "file:///"
@@ -580,6 +588,12 @@ mod tests {
             file_url(std::path::Path::new("/opt/my tools/a#b.xsl")),
             "file:///opt/my%20tools/a%23b.xsl"
         );
+        // Windows paths, spelled out so the test runs everywhere.
+        let win = |p: &str| file_url(std::path::Path::new(p));
+        assert_eq!(win(r"C:\x\f.xsl"), "file:///C:/x/f.xsl");
+        assert_eq!(win(r"\\?\C:\x\f.xsl"), "file:///C:/x/f.xsl");
+        assert_eq!(win(r"\\?\UNC\srv\share\f.xsl"), "file://srv/share/f.xsl");
+        assert_eq!(win(r"\\srv\share\f.xsl"), "file://srv/share/f.xsl");
     }
 
     #[test]

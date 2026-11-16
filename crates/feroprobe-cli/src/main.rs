@@ -835,7 +835,10 @@ impl ReportFiles {
             .handles
             .get_mut(path)
             .with_context(|| format!("{path} was not opened"))?;
-        if !self.append {
+        // Only a regular file can be emptied: /dev/null, a named pipe or a
+        // terminal is written to as it is.
+        let regular = file.metadata().is_ok_and(|m| m.is_file());
+        if !self.append && regular {
             file.set_len(0)
                 .with_context(|| format!("emptying {path}"))?;
             file.rewind().with_context(|| format!("writing {path}"))?;
@@ -3134,6 +3137,16 @@ mod tests {
             std::fs::read_to_string(dir.join("moved")).unwrap(),
             "new\nmore\nlast\n"
         );
+        // Not a regular file: written as it is, not emptied first.
+        #[cfg(unix)]
+        {
+            let null = Outputs {
+                normal: vec!["/dev/null".into()],
+                ..Default::default()
+            };
+            let mut files = null.open_files().unwrap();
+            files.write("/dev/null", "report\n").unwrap();
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
