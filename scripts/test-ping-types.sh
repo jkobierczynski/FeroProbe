@@ -116,6 +116,11 @@ check "exit status" "$RC" 0
 check_true "warns that -PE is ignored" output_has "-PE is ignored"
 check "packets to the target" "$(to_target "")" 0
 
+echo "== -sL -Pn -PE (the -P options are not checked against each other) =="
+fero_captured -sL -Pn -PE "$TGT_A"
+check "exit status" "$RC" 0
+check_true "lists the target" output_has "Scan report for $TGT_A"
+
 echo "== -sL -p 80 (refused, as in nmap) =="
 fero -sL -p 80 "$TGT_A"
 check_true "rejected with a non-zero exit ($RC)" test "$RC" -ne 0

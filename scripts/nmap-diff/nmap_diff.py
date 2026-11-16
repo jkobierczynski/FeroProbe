@@ -570,8 +570,8 @@ def load_sent(files, scanner_macs):
 # --------------------------------------------------------------------------
 
 
-def expand_ports(spec):
-    """'22,80-82' -> {22,80,81,82}"""
+def expand_ports(spec, lo=1, hi=65535):
+    """'22,80-82' -> {22,80,81,82}; an open end of a range is lo or hi"""
     out = set()
     for part in spec.split(","):
         part = part.strip()
@@ -579,7 +579,7 @@ def expand_ports(spec):
             continue
         if "-" in part:
             a, b = part.split("-", 1)
-            out.update(range(int(a or 1), int(b or 65535) + 1))
+            out.update(range(int(a or lo), int(b or hi) + 1))
         else:
             out.add(int(part))
     return out
@@ -655,7 +655,7 @@ def scope_of(argv, target_kind, privileged):
         if m:
             # IP protocol ping: protocol numbers (nmap's default 1,2,4).
             explicit_ping = True
-            ping["ip"] |= expand_ports(m.group(1) or "1,2,4")
+            ping["ip"] |= expand_ports(m.group(1) or "1,2,4", 0, 255)
         if re.match(r"^-P[EPM]$", a):
             explicit_ping = True
             icmp_types.add({"E": "echo-request", "P": "timestamp-request", "M": "mask-request"}[a[2]])

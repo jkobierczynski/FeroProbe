@@ -165,6 +165,20 @@ pub(crate) fn run(
         // Resends go out as their probes time out, as often as each host's
         // losses call for, up to cfg.retries (see Flight).
         flight.start(pending.iter().copied());
+        // As a discovery probe, stop waiting on and resending to hosts
+        // proven up, by this scan or by another discovery probe.
+        let mut retired = vec![false; addrs.len()];
+        let mut retire_done = |flight: &mut Flight<u16>| {
+            if done.is_none() {
+                return;
+            }
+            for (h, r) in retired.iter_mut().enumerate() {
+                if !*r && is_done(h) {
+                    *r = true;
+                    flight.retire_host(h);
+                }
+            }
+        };
         loop {
             if cfg.expired() {
                 return Err(ScanConfig::timed_out());
@@ -174,6 +188,7 @@ pub(crate) fn run(
             while let Ok(a) = rx.try_recv() {
                 record(&mut results, &mut flight, a);
             }
+            retire_done(&mut flight);
             let (h, k) = match flight.next(Instant::now()) {
                 Next::Idle => break,
                 Next::Send(h, k) => (h, k),
@@ -209,7 +224,9 @@ pub(crate) fn run(
             while let Ok(a) = rx.try_recv() {
                 record(&mut results, &mut flight, a);
             }
-            if results.contains_key(&(h, k)) {
+            // The wait may have let an answer prove the host up.
+            if results.contains_key(&(h, k)) || is_done(h) {
+                flight.settle(h, k);
                 continue;
             }
             flight.sent(h, k, Instant::now());

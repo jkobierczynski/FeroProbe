@@ -130,6 +130,10 @@ class Scope(unittest.TestCase):
         self.assertTrue(nd.in_scope("tcp/80", scope))
         self.assertTrue(nd.in_scope("udp/40125", scope))
         self.assertFalse(nd.in_scope("sctp/80", scope))
+        # Open-ended -PO ranges stay within the protocol numbers 0-255.
+        self.assertEqual(nd.scope_of(["-sn", "-PO-"], "routed", True)["ip"], set(range(256)))
+        self.assertTrue(nd.in_scope("ip proto 0", nd.scope_of(["-sn", "-PO-"], "routed", True)))
+        self.assertEqual(nd.scope_of(["-sn", "-PO250-"], "routed", True)["ip"], set(range(250, 256)))
         # -sL may send nothing at all, whatever else is given.
         self.assertEqual(nd.scope_of(["-sL"], "lan", True), {})
         self.assertEqual(nd.scope_of(["-sL", "-PE"], "routed", True), {})

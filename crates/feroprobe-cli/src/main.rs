@@ -2314,10 +2314,15 @@ async fn main() -> Result<()> {
     // nmap's default probes depend on privileges: raw SYN/ACK plus ICMP
     // echo and timestamp as root, TCP connects otherwise.
     let raw_pings = feroprobe_core::raw_tcp_pings(&targets);
-    let mut probes =
-        ping_probes(&args.ping)?.unwrap_or_else(|| PingProbes::nmap_default(raw_pings));
     let skip_discovery = args.ping.contains(&PingArg::Skip);
     let mut plan = plan(&args.scan, skip_discovery, syn_ok, args.scanflags.is_some())?;
+    // -sL sends nothing, so its -P options are only warned about (in
+    // list_scan_checks), never checked against each other.
+    let mut probes = if plan.list {
+        PingProbes::none()
+    } else {
+        ping_probes(&args.ping)?.unwrap_or_else(|| PingProbes::nmap_default(raw_pings))
+    };
     if plan.list {
         for w in list_scan_checks(&args)? {
             eprintln!("Warning: {w}");
