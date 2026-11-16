@@ -104,9 +104,11 @@ mod unix {
     /// mask calls and tcsetattr on a saved copy. SIGTTOU is blocked
     /// meanwhile, so a scan moved to the background (Ctrl-Z, `bg`) is not
     /// stopped by the kernel for changing the terminal.
+    /// Only while FeroProbe is still the terminal's foreground job: once
+    /// another job has the terminal, its settings are its own.
     fn restore() {
         let fd = TTY.load(Ordering::SeqCst);
-        if let (true, Some(saved)) = (fd >= 0, SAVED.get()) {
+        if let (true, Some(saved)) = (fd >= 0 && foreground(fd), SAVED.get()) {
             // SAFETY: plain signal-set and mask calls on local sets, and
             // tcsetattr on our own descriptor with a valid termios.
             unsafe {

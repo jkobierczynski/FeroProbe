@@ -382,6 +382,8 @@ pub fn render(
             ];
             for i in ifs {
                 names.insert(i.name.as_str());
+                // Routes name the interface, never its aliases.
+                names.insert(i.name.split(':').next().unwrap_or(&i.name));
                 let short = i.name.split(':').next().unwrap_or(&i.name);
                 let addr = i
                     .addr
@@ -580,6 +582,22 @@ fe80::/64      eth0 256
 
 "
         );
+    }
+
+    #[test]
+    fn routes_of_an_interface_listed_only_by_alias_are_kept() {
+        let mut alias = eth("10.0.0.5", 24);
+        alias.name = "eth0:1".into();
+        let routes = Ok(vec![Route {
+            dst: "10.0.0.0".parse().unwrap(),
+            prefix: 24,
+            dev: "eth0".into(),
+            metric: 0,
+            gateway: None,
+        }]);
+        let text = render(&Ok(vec![alias]), &routes, false);
+        assert!(text.contains("eth0:1 (eth0)"), "{text}");
+        assert!(text.contains("10.0.0.0/24 eth0"), "{text}");
     }
 
     #[test]

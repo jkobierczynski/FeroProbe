@@ -868,13 +868,14 @@ impl Progress {
         }
         // nmap: open ports at -v, every port at -d2, whatever the other
         // level (the keys change them independently).
-        let every = feroprobe_core::debug::debugging() > 1;
-        let open = feroprobe_core::debug::verbosity() > 0;
+        // Read per port, so a key pressed meanwhile takes effect at once.
+        let every = || feroprobe_core::debug::debugging() > 1;
+        let open = || feroprobe_core::debug::verbosity() > 0;
         for h in results {
             for p in h
                 .ports
                 .iter()
-                .filter(|p| every || (open && p.state == feroprobe_core::PortState::Open))
+                .filter(|p| every() || (open() && p.state == feroprobe_core::PortState::Open))
             {
                 eprintln!(
                     "Discovered {} port {}/{} on {}",

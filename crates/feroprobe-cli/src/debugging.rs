@@ -39,6 +39,18 @@ enum Level<'a> {
 /// every `-d` form is a `--debug` argument; clap has already accepted it,
 /// so a `-v...` argument is the flag, never another option's value.
 fn levels(argv: &[String]) -> Result<(u8, u8), String> {
+    // Short options that take no value can be grouped (`-nv`): a group of
+    // only those counts each `v` in it.
+    let flags: Vec<char> = Args::command()
+        .get_arguments()
+        .filter(|a| {
+            matches!(
+                a.get_action(),
+                clap::ArgAction::SetTrue | clap::ArgAction::Count
+            )
+        })
+        .filter_map(clap::Arg::get_short)
+        .collect();
     let seen = argv
         .iter()
         .skip(1)
@@ -48,8 +60,12 @@ fn levels(argv: &[String]) -> Result<(u8, u8), String> {
                 vec![Level::Debug("")]
             } else if let Some(v) = a.strip_prefix("--debug=") {
                 vec![Level::Debug(v)]
-            } else if a.len() > 1 && a.starts_with('-') && a[1..].bytes().all(|b| b == b'v') {
-                vec![Level::Verbose; a.len() - 1]
+            } else if a.len() > 1
+                && a.starts_with('-')
+                && !a.starts_with("--")
+                && a[1..].chars().all(|c| flags.contains(&c))
+            {
+                vec![Level::Verbose; a[1..].matches('v').count()]
             } else {
                 Vec::new()
             }
@@ -150,6 +166,10 @@ mod tests {
         assert_eq!(run(&["-vv", "-d1", "h"]), Ok((1, 1)));
         assert_eq!(run(&["-d1", "-vv", "h"]), Ok((3, 1)));
         assert_eq!(run(&["-d", "-d", "h"]), Ok((2, 2)));
+        // -v grouped with other flags, as in nmap's common -nv.
+        assert_eq!(run(&["-nv", "h"]), Ok((1, 0)));
+        assert_eq!(run(&["-vnv", "h"]), Ok((2, 0)));
+        assert_eq!(run(&["-n", "h"]), Ok((0, 0)));
         assert!(
             run(&["-dx", "h"])
                 .unwrap_err()
