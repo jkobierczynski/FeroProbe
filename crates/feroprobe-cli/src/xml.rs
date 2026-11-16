@@ -228,19 +228,7 @@ fn write_host(x: &mut String, host: &HostResult, info: &RunInfo, start: u64, end
         x.push_str("</ports>\n");
     }
     if let Some(os) = &host.os {
-        let _ = writeln!(
-            x,
-            "<os><portused state=\"open\" proto=\"tcp\" portid=\"{}\"/>\n<osmatch name=\"{}\" accuracy=\"{}\" line=\"0\"><osclass type=\"{}\" vendor=\"{}\" osfamily=\"{}\" accuracy=\"{}\"/></osmatch>\n<osfingerprint fingerprint=\"{}\"/>\n</os>",
-            os.port,
-            esc(&os.name),
-            os.accuracy,
-            os.device_type,
-            esc(os.vendor),
-            esc(os.family),
-            os.accuracy,
-            esc(&os.traits.fingerprint())
-        );
-        let _ = writeln!(x, "<distance value=\"{}\"/>", os.distance);
+        write_os(x, os);
     }
     if let Some(t) = &host.trace
         && !t.hops.is_empty()
@@ -338,6 +326,70 @@ pub fn render(hosts: &[HostResult], info: &RunInfo) -> String {
     );
     x.push_str("</nmaprun>\n");
     x
+}
+
+/// The `<os>` element and what follows it, in nmap's layout: the ports
+/// used, the matches (the perfect ones, else the guesses) with their
+/// classes and CPEs, the fingerprint, the distance and the IP ID sequence.
+fn write_os(x: &mut String, os: &feroprobe_core::OsResult) {
+    x.push_str("<os>");
+    let _ = writeln!(
+        x,
+        "<portused state=\"open\" proto=\"tcp\" portid=\"{}\"/>",
+        os.open_port
+    );
+    if let Some(closed) = os.closed_port {
+        let _ = writeln!(
+            x,
+            "<portused state=\"closed\" proto=\"tcp\" portid=\"{closed}\"/>"
+        );
+    }
+    let shown = if os.perfect > 0 {
+        &os.matches[..os.perfect]
+    } else {
+        &os.matches[..]
+    };
+    for m in shown {
+        let _ = writeln!(
+            x,
+            "<osmatch name=\"{}\" accuracy=\"{}\" line=\"{}\">",
+            esc(&m.name),
+            m.accuracy,
+            m.line
+        );
+        let _ = write!(
+            x,
+            "<osclass type=\"{}\" vendor=\"{}\" osfamily=\"{}\"",
+            esc(&m.device_type),
+            esc(&m.vendor),
+            esc(&m.family)
+        );
+        if !m.generation.is_empty() {
+            let _ = write!(x, " osgen=\"{}\"", esc(&m.generation));
+        }
+        let _ = write!(x, " accuracy=\"{}\">", m.accuracy);
+        for c in &m.cpe {
+            let _ = write!(x, "<cpe>{}</cpe>", esc(c));
+        }
+        x.push_str("</osclass>\n</osmatch>\n");
+    }
+    let _ = writeln!(
+        x,
+        "<osfingerprint fingerprint=\"{}\"/>\n</os>",
+        esc(&os.fingerprint)
+    );
+    if let Some(d) = os.distance {
+        let _ = writeln!(x, "<distance value=\"{d}\"/>");
+    }
+    if let Some(class) = &os.ipid_class {
+        let values: Vec<String> = os.ipids.iter().map(|v| format!("{v:X}")).collect();
+        let _ = writeln!(
+            x,
+            "<ipidsequence class=\"{}\" values=\"{}\"/>",
+            feroprobe_core::os::fingerprint::ipid_class_words(class),
+            values.join(",")
+        );
+    }
 }
 
 #[cfg(test)]

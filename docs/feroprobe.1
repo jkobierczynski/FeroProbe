@@ -1046,37 +1046,152 @@ T}
 .SH OS DETECTION
 .SS \f[V]-O\f[R]
 .PP
-Guess each host\[aq]s operating system family.
-FeroProbe sends one TCP SYN that offers every common TCP option to an
-open port, and reads the SYN-ACK: the initial TTL (64, 128 or 255; for
-IPv6 the hop limit), the order of the TCP options that come back, the
-\[dq]don\[aq]t fragment\[dq] bit and the window.
-The TTL also gives the network distance in hops.
+Enable OS detection.
+For every host where the port scan found an open TCP port, FeroProbe
+sends a small set of probes, reads how the host\[aq]s TCP/IP stack
+answers, and matches that fingerprint against its own OS database, which
+names OS versions where the probes can tell them apart (for example
+Linux 4.19 - 6.x against Linux 3.x - 4.18, or Windows 10 - 11 against
+Windows 7).
+.PP
+One try sends a host at most 9 probes, all to ports and protocols the
+command already probes:
+.PP
+.TS
+tab(@);
+l l l.
+T{
+Probe
+T}@T{
+Sent to
+T}@T{
+What it is
+T}
+_
+T{
+\f[V]s1\f[R]-\f[V]s4\f[R]
+T}@T{
+the open TCP port
+T}@T{
+four SYNs with different TCP option sets, 100 ms apart
+T}
+T{
+\f[V]e\f[R]
+T}@T{
+the open TCP port
+T}@T{
+a SYN with ECE and CWR (asks for ECN)
+T}
+T{
+\f[V]a\f[R]
+T}@T{
+the open TCP port
+T}@T{
+an ACK outside any connection
+T}
+T{
+\f[V]c1\f[R], \f[V]c2\f[R]
+T}@T{
+a closed TCP port, if the scan found one
+T}@T{
+a SYN and an ACK
+T}
+T{
+\f[V]ie\f[R]
+T}@T{
+the host, only if the command\[aq]s host discovery sends ICMP echo
+requests (the default as root, or \f[V]-PE\f[R])
+T}@T{
+an ICMP or ICMPv6 echo request with the \f[V]feroprobe\f[R] payload
+T}
+.TE
+.PP
+The fingerprint records, per probe, whether it was answered, the TCP
+flags, window, option layout and \[dq]don\[aq]t fragment\[dq] bit of the
+answer, and across probes the initial TTL (IPv6: hop limit), the window
+scale, the IP ID sequence (IPv4), how the TCP timestamp clock runs, and
+whether the host answers ECN.
+Each signature in the database lists the values it expects; its accuracy
+is the share of its tests (weighted) that match.
+A signature that matches every test the fingerprint has is a perfect
+match, reported as the OS:
 .IP
 .nf
 \f[C]
-OS guess: Linux 3.x - 6.x (90%), from 22/tcp
-OS fingerprint: ttl=64 df=1 win=65483 opts=M,S,T,N,W mss=65495 ws=7
-Network distance: 1 hop
+Device type: general purpose
+Running: Linux 4.X|5.X|6.X
+OS CPE: cpe:/o:linux:linux_kernel:4 cpe:/o:linux:linux_kernel:5 cpe:/o:linux:linux_kernel:6
+OS details: Linux 4.19 - 6.x
+Network Distance: 1 hop
 \f[R]
 .fi
 .PP
-The signatures are FeroProbe\[aq]s own, in
-\f[V]crates/feroprobe-core/src/os.rs\f[R], not nmap\[aq]s database, so
-the guess names a family (Linux, Windows, macOS, FreeBSD, OpenBSD,
-network devices) rather than an exact version.
-The fingerprint line shows the raw traits, from which new signatures are
-written.
-IPv4 and IPv6 hosts are both covered; IPv6 replies are read from a
-packet capture so that the hop limit is visible.
+Without a perfect match FeroProbe prints
+\f[V]No exact OS matches for host\f[R] and the fingerprint (lines
+starting with \f[V]OS:\f[R]), so it can be added to the database, see
+docs/os-fingerprints.md.
+Signatures that match at 85% or better are shown as
+\f[V]Aggressive OS guesses\f[R] with \f[V]--osscan-guess\f[R], or when
+the conditions were not ideal (for example no closed port), as in nmap.
+With \f[V]-v\f[R] the IP ID sequence class is shown
+(\f[V]IP ID Sequence Generation: All zeros\f[R]); with \f[V]-vv\f[R] the
+fingerprint is shown even for a perfect match.
+The network distance is 0 for this machine, 1 for a host whose MAC
+address discovery found, and otherwise counted from the TTL.
+.PP
+As in nmap, a host without a perfect match is tried again, up to
+\f[V]--max-os-tries\f[R] times (default 5), or at most twice when the
+conditions make a match unlikely: no closed TCP port, a host more than
+five hops away, or a \f[V]--scan-delay\f[R] above 500 ms.
+A host with an open but no closed TCP port gets the warning
+\f[V]OSScan results may be unreliable because we could not find at least 1 open and 1 closed port\f[R].
+A host without an open TCP port gets no OS probes at all (nmap would
+probe its closed port and random closed ports outside the scan, see
+Differences from nmap).
+.PP
+The XML report has nmap\[aq]s \f[V]<os>\f[R] element
+(\f[V]<portused>\f[R], \f[V]<osmatch>\f[R] with \f[V]<osclass>\f[R] and
+\f[V]<cpe>\f[R], \f[V]<osfingerprint>\f[R]), then \f[V]<distance>\f[R]
+and \f[V]<ipidsequence>\f[R]; the grepable report lists perfect matches
+after \f[V]OS:\f[R]; the JSON report has the full result under
+\f[V]os\f[R].
 .PP
 \f[V]-O\f[R] needs raw sockets (Linux, root or \f[V]CAP_NET_RAW\f[R])
-and a port scan that finds at least one open TCP port; it is an error
-without raw sockets and cannot be combined with \f[V]-sn\f[R].
+and a port scan; it is an error without raw sockets and cannot be
+combined with \f[V]-sn\f[R].
 If no port scan is left to run (every scan type lost its ports), OS
 detection is skipped with a warning.
-Its probes deliberately carry no FeroProbe signature, since they must
-look like a real operating system\[aq]s.
+IPv4 and IPv6 hosts are both covered; the answers are read from a packet
+capture, which shows the IP header of both.
+The TCP probes deliberately carry no FeroProbe window marker, since they
+must look like a real client\[aq]s SYNs; the echo request carries the
+usual \f[V]feroprobe\f[R] payload.
+\f[V]--packet-trace\f[R] and \f[V]--dry-run\f[R] show each probe\[aq]s
+TCP options (\f[V]<mss 1460,sackOK,timestamp ...>\f[R]).
+With \f[V]ics_protection\f[R] on, \f[V]-O\f[R] is refused (see ICS
+protection).
+.SS \f[V]--osscan-limit\f[R]
+.PP
+Only run OS detection against hosts where the scan found at least one
+open and one closed (or unfiltered) TCP port, as in nmap.
+Other hosts are skipped (with \f[V]-v\f[R], a line says so), which saves
+time on many hosts.
+No effect without \f[V]-O\f[R] or \f[V]-A\f[R] (a warning says so).
+.SS \f[V]--osscan-guess\f[R], \f[V]--fuzzy\f[R]
+.PP
+When no signature matches perfectly, also print the near matches (85% or
+better) as \f[V]Aggressive OS guesses: Linux 4.19 - 6.x (93%), ...\f[R]
+and the \f[V]Running (JUST GUESSING)\f[R] line, as in nmap.
+No effect without \f[V]-O\f[R] or \f[V]-A\f[R].
+.SS \f[V]--max-os-tries <tries>\f[R]
+.PP
+How many tries a host without a perfect match gets (default 5, at least
+1).
+Each try sends the probe set again.
+A lower value is faster and gentler on hosts the database does not know;
+it does not raise the limit of two tries for hosts without a closed
+port.
+No effect without \f[V]-O\f[R] or \f[V]-A\f[R].
 .SH TRACEROUTE AND AGGRESSIVE MODE
 .SS \f[V]--traceroute\f[R]
 .PP
@@ -1732,8 +1847,14 @@ A dry run therefore assumes every target is up and lists the port-scan
 probes for all of them (a real run scans only the hosts discovery
 finds), lists only the first attempt of each probe (a real run resends
 unanswered ones up to \f[V]--retries\f[R] times), and only names the
-steps that depend on answers (\f[V]-sV\f[R], \f[V]-O\f[R],
-\f[V]--traceroute\f[R], reverse DNS) instead of listing their probes.
+steps that depend on answers (\f[V]-sV\f[R], \f[V]--traceroute\f[R],
+reverse DNS) instead of listing their probes.
+OS detection (\f[V]-O\f[R]) is listed probe by probe for one try, with
+\f[V]<open>\f[R] and \f[V]<closed>\f[R] in place of the ports the scan
+would find, and a count of its own in the last line.
+When the scan covers a single TCP port it cannot find both an open and a
+closed one, so the \f[V]<closed>\f[R] probes are left out (and with
+\f[V]--osscan-limit\f[R] no OS probes are listed at all).
 Target hostnames are still resolved through the system resolver, even
 with \f[V]-n\f[R] (give numeric addresses when no DNS traffic is
 allowed), so the addresses shown are the real ones, and the routing
@@ -1792,7 +1913,10 @@ Sends 16 probes per host to an open TCP port, a closed TCP port and a
 closed UDP port.
 A closed port is one the scan found closed, else unfiltered; without one
 it picks a random TCP or UDP port between 30000 and 44780, regardless of
-\f[V]-p\f[R]
+\f[V]-p\f[R].
+It also probes hosts without an open TCP port, and sends 2 ICMP echo
+requests even when discovery sends none.
+FeroProbe sends at most 9 probes per try, to scanned ports only
 T}
 T{
 \f[V]-O\f[R], IPv6
@@ -2143,8 +2267,9 @@ Service and OS signatures
 T}@T{
 nmap\[aq]s databases
 T}@T{
-FeroProbe\[aq]s own (nmap\[aq]s cannot be redistributed); OS detection
-names the family, not the version
+FeroProbe\[aq]s own (nmap\[aq]s cannot be redistributed); the OS
+database is much smaller than nmap\[aq]s, so fewer hosts get a perfect
+match
 T}
 T{
 UDP service payloads (\f[V]-sU\f[R])
@@ -2161,14 +2286,28 @@ T}
 T{
 OS detection probes (\f[V]-O\f[R])
 T}@T{
-About 16 probes per host (6 SYNs with varied options, ECN, T2-T7 to open
-and closed ports, 2 ICMP echoes, a UDP probe to a closed port), sent
-several times: about 150 packets
+About 16 probes per try (6 SYNs with varied options, ECN, T2-T7 to open
+and closed ports, 2 ICMP echoes, a UDP probe to a closed port), with
+closed ports picked at random outside the scan when none was found, and
+hosts without an open port probed too
 T}@T{
-One TCP SYN to an open port, offering every common option, plus the
-scan\[aq]s own probes: a handful of packets.
-Lighter on the target, and no probes outside the scanned ports; the
-price is a family rather than an exact version
+At most 9 probes per try (4 SYNs, ECN and an ACK to the open port; a SYN
+and an ACK to a closed port the scan found; an ICMP echo only if
+discovery sends echo requests).
+No UDP probe, no T3/T5-T7-style odd flag combinations, no random ports,
+and hosts without an open TCP port are not probed.
+The price: fewer tests, so some systems nmap tells apart look alike
+T}
+T{
+OS uptime and TCP sequence lines (\f[V]-O -v\f[R])
+T}@T{
+\f[V]Uptime guess\f[R] from the TCP timestamps,
+\f[V]TCP Sequence Prediction\f[R] difficulty
+T}@T{
+Not printed.
+Most current systems give each connection its own random timestamp
+offset, so the uptime nmap prints for them is wrong; sequence
+predictability is left out with it
 T}
 T{
 Port names
@@ -2224,10 +2363,11 @@ IPv4 also TCP), regardless of \f[V]-p\f[R], when the scan found no
 closed or unfiltered one
 T}@T{
 Never beyond the command\[aq]s own ports (\f[V]-p\f[R] plus the
-host-discovery ports): \f[V]-sV\f[R] and \f[V]-O\f[R] probe only open
-ports the scan found, traceroute only a scanned port, a discovery port,
-or (with \f[V]-sn\f[R]) the \f[V]-p\f[R] port, and FeroProbe has no
-scripts
+host-discovery ports): \f[V]-sV\f[R] probes only open ports the scan
+found, \f[V]-O\f[R] an open TCP port the scan found and, when it found
+one, a closed one (and ICMP echo only when discovery sends it),
+traceroute only a scanned port, a discovery port, or (with
+\f[V]-sn\f[R]) the \f[V]-p\f[R] port, and FeroProbe has no scripts
 T}
 T{
 Traceroute port
@@ -2267,9 +2407,6 @@ scan, not planned), \f[V]-b\f[R] (FTP bounce), \f[V]-PO\f[R],
 .IP \[bu] 2
 Scripting: \f[V]-sC\f[R], \f[V]--script\f[R] and related options
 (nmap\[aq]s scripts cannot be shipped under their licence).
-.IP \[bu] 2
-OS detection tuning: \f[V]--osscan-limit\f[R], \f[V]--osscan-guess\f[R],
-\f[V]--max-os-tries\f[R].
 .IP \[bu] 2
 Timing: \f[V]--min-hostgroup\f[R], \f[V]--max-hostgroup\f[R],
 \f[V]--max-scan-delay\f[R], \f[V]--defeat-rst-ratelimit\f[R].

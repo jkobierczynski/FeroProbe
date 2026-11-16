@@ -53,7 +53,10 @@ SERVICE/VERSION DETECTION:
   --version-trace: Print each service probe, reply and matching rule
   --service-rules <file>: Use these probes and rules instead of the built-in ones
 OS DETECTION:
-  -O: Guess the operating system
+  -O: Enable OS detection
+  --osscan-limit: Limit OS detection to promising targets
+  --osscan-guess: Guess OS more aggressively
+  --max-os-tries <tries>: OS detection tries per host (default 5)
 TIMING AND PERFORMANCE:
   A <time> is in seconds unless it ends in ms, s, m or h (e.g. 500ms, 30m).
   -T<0-5>: Timing template, from paranoid (0) to insane (5)

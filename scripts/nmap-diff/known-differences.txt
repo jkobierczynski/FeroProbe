@@ -24,3 +24,13 @@ os | ^tcp/\d+ \[[A-Za-z]+\]: only nmap sent these | nmap's OS detection TCP prob
 os | ^tcp/\d+ \[S\] (opts|win|df): nmap \[.*(M265|M1400|M536|M640|31337) | nmap's OS detection TCP probes (OS detection probes)
 *aggressive* | ^tcp/\d+ \[S\] (opts|win|df): nmap \[.*(M265|M1400|M536|M640|31337) | nmap's OS detection TCP probes (OS detection probes)
 
+
+# FeroProbe's own OS probe set (roadmap 5.2, DEVELOPMENT.md "OS detection probes"):
+# realistic client SYNs (window 64240, own option sets), a bare ACK, an ECN SYN
+# with its own options, and one plain echo request instead of nmap's two.
+os | ^tcp/.*\[(A|SEC)\] (win|df|opts): nmap \[.*\] vs FeroProbe \[ | own OS probe set (OS detection probes)
+*aggressive* | ^tcp/.*\[(A|SEC)\] (win|df|opts): nmap \[.*\] vs FeroProbe \[ | own OS probe set (OS detection probes)
+os | ^tcp/.*\[S\] win: nmap \[.*\] vs FeroProbe \[.*64240 | own OS probe set (OS detection probes)
+*aggressive* | ^tcp/.*\[S\] win: nmap \[.*\] vs FeroProbe \[.*64240 | own OS probe set (OS detection probes)
+os | ^icmp echo-request (code|df): | own OS probe set: one plain echo request (OS detection probes)
+*aggressive* | ^icmp echo-request (code|df): | own OS probe set: one plain echo request (OS detection probes)

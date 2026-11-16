@@ -11,7 +11,7 @@ macro_rules! w {
 }
 
 use anyhow::Result;
-use feroprobe_core::{HostResult, PortResult, PortState, Protocol, service_name};
+use feroprobe_core::{HostResult, OsResult, PortResult, PortState, Protocol, service_name};
 use serde::Serialize;
 
 /// Everything about the run that the renderers need besides the hosts.
@@ -37,6 +37,8 @@ pub struct RunInfo {
     pub show_version: bool,
     /// `-O` ran: show each host's OS guess.
     pub show_os: bool,
+    /// `--osscan-guess`: show near OS matches too.
+    pub os_guess: bool,
     /// `--traceroute` ran: show each host's route.
     pub show_trace: bool,
     /// `-Pn`: discovery was skipped, so report every host.
@@ -150,7 +152,7 @@ pub fn render_table(hosts: &[HostResult], info: &RunInfo) -> String {
             print_ports(out, host, info);
         }
         if info.show_os && !host.timed_out {
-            print_os(out, host);
+            print_os(out, host, info);
         }
         if info.show_version && !host.timed_out {
             print_service_info(out, host);
@@ -286,36 +288,182 @@ fn print_service_info(out: &mut String, host: &HostResult) {
     }
 }
 
-/// The OS guess for one host, after `-O`.
-fn print_os(out: &mut String, host: &HostResult) {
-    match &host.os {
-        Some(os) => {
-            w!(
-                out,
-                "OS guess: {} ({}%), from {}/tcp",
-                os.name,
-                os.accuracy,
-                os.port
-            );
-            w!(out, "OS fingerprint: {}", os.traits.fingerprint());
-            let hops = if os.distance == 1 { "hop" } else { "hops" };
-            w!(out, "Network distance: {} {hops}", os.distance);
-            let tcp = |state| {
-                host.ports
-                    .iter()
-                    .any(|p| p.protocol == Protocol::Tcp && p.state == state)
-            };
-            if !(tcp(PortState::Open) && tcp(PortState::Closed)) {
-                w!(
-                    out,
-                    "Warning: the OS guess may be unreliable, because the scan did not find at least 1 open and 1 closed TCP port"
-                );
+/// nmap's "Device type", "Running" and "OS CPE" lines for the matches
+/// shown: the perfect ones, or with `guess` the near ones too.
+fn print_os_classes(out: &mut String, os: &OsResult, guess: bool) {
+    let shown = if os.perfect > 0 {
+        &os.matches[..os.perfect]
+    } else if guess {
+        &os.matches[..]
+    } else {
+        return;
+    };
+    if shown.is_empty() {
+        return;
+    }
+    let mut types: Vec<&str> = Vec::new();
+    let mut cpes: Vec<&str> = Vec::new();
+    // "vendor family", its generations, its best accuracy.
+    let mut families: Vec<(String, String, u8)> = Vec::new();
+    for m in shown {
+        if !types.contains(&m.device_type.as_str()) {
+            types.push(&m.device_type);
+        }
+        for c in &m.cpe {
+            if !cpes.contains(&c.as_str()) {
+                cpes.push(c);
             }
         }
-        None => w!(
+        let name = if m.vendor == m.family {
+            m.family.clone()
+        } else {
+            format!("{} {}", m.vendor, m.family)
+        };
+        match families.iter_mut().find(|(n, _, _)| *n == name) {
+            Some((_, gens, _)) => {
+                if !m.generation.is_empty() && !gens.contains(&m.generation) {
+                    if !gens.is_empty() {
+                        gens.push('|');
+                    }
+                    gens.push_str(&m.generation);
+                }
+            }
+            None => families.push((name, m.generation.clone(), m.accuracy)),
+        }
+    }
+    w!(out, "Device type: {}", types.join("|"));
+    let running: Vec<String> = families
+        .iter()
+        .map(|(name, gens, acc)| {
+            let mut s = name.clone();
+            if !gens.is_empty() {
+                s.push(' ');
+                s.push_str(gens);
+            }
+            if os.perfect == 0 {
+                s.push_str(&format!(" ({acc}%)"));
+            }
+            s
+        })
+        .collect();
+    w!(
+        out,
+        "Running{}: {}",
+        if os.perfect == 0 {
+            " (JUST GUESSING)"
+        } else {
+            ""
+        },
+        running.join(", ")
+    );
+    if !cpes.is_empty() {
+        w!(out, "OS CPE: {}", cpes.join(" "));
+    }
+}
+
+/// The fingerprint block, for adding the host to the database.
+fn print_fingerprint(out: &mut String, os: &OsResult) {
+    w!(out, "TCP/IP fingerprint:");
+    let fp = feroprobe_core::os::Fingerprint {
+        tests: os
+            .fingerprint
+            .split(' ')
+            .filter_map(|t| t.split_once('='))
+            .map(|(t, v)| (t.to_string(), v.to_string()))
+            .collect(),
+    };
+    for line in fp.wrapped(72) {
+        w!(out, "OS:{line}");
+    }
+}
+
+/// Where to send a fingerprint FeroProbe could not match.
+const OS_SUBMIT: &str = "If you know what OS is running on it, see docs/os-fingerprints.md";
+
+/// The OS detection results for one host, after `-O`, in nmap's layout.
+fn print_os(out: &mut String, host: &HostResult, info: &RunInfo) {
+    let Some(os) = &host.os else {
+        let open = host
+            .ports
+            .iter()
+            .any(|p| p.protocol == Protocol::Tcp && p.state == PortState::Open);
+        if open {
+            w!(
+                out,
+                "OS detection skipped: --osscan-limit needs an open and a closed TCP port"
+            );
+        } else {
+            w!(
+                out,
+                "OS detection skipped: no open TCP port found (OS probes only go to ports the scan found)"
+            );
+        }
+        return;
+    };
+    if os.closed_port.is_none() {
+        w!(
             out,
-            "OS guess: none (needs an open TCP port that answers a SYN)"
-        ),
+            "Warning: OSScan results may be unreliable because we could not find at least 1 open and 1 closed port"
+        );
+    }
+    let guess = info.os_guess || os.not_ideal.is_some();
+    print_os_classes(out, os, guess);
+    let suffix = if os.not_ideal.is_some() {
+        "(test conditions non-ideal)".to_string()
+    } else {
+        format!("({OS_SUBMIT})")
+    };
+    if os.perfect > 0 {
+        let names: Vec<&str> = os.matches[..os.perfect]
+            .iter()
+            .map(|m| m.name.as_str())
+            .collect();
+        w!(out, "OS details: {}", names.join(", "));
+        if info.verbosity > 1 {
+            print_fingerprint(out, os);
+        }
+    } else if !os.matches.is_empty() {
+        if let (true, Some(reason)) = (info.verbosity > 1, &os.not_ideal) {
+            w!(out, "OS fingerprint not ideal because: {reason}");
+        }
+        if guess {
+            let list: Vec<String> = os
+                .matches
+                .iter()
+                .map(|m| format!("{} ({}%)", m.name, m.accuracy))
+                .collect();
+            w!(out, "Aggressive OS guesses: {}", list.join(", "));
+        }
+        w!(out, "No exact OS matches for host {suffix}.");
+        if os.not_ideal.is_none() || info.verbosity > 1 {
+            print_fingerprint(out, os);
+        }
+    } else {
+        if let Some(reason) = &os.not_ideal {
+            w!(out, "OS fingerprint not ideal because: {reason}");
+            w!(out, "No OS matches for host");
+        } else {
+            w!(out, "No OS matches for host ({OS_SUBMIT}).");
+        }
+        if os.not_ideal.is_none() || info.verbosity > 1 {
+            print_fingerprint(out, os);
+        }
+    }
+    if let Some(d) = os.distance {
+        w!(
+            out,
+            "Network Distance: {d} hop{}",
+            if d == 1 { "" } else { "s" }
+        );
+    }
+    if info.verbosity > 0
+        && let Some(class) = &os.ipid_class
+    {
+        w!(
+            out,
+            "IP ID Sequence Generation: {}",
+            feroprobe_core::os::fingerprint::ipid_class_words(class)
+        );
     }
 }
 
@@ -363,7 +511,7 @@ struct JsonHost<'a> {
     timed_out: bool,
     ports: Vec<JsonPort<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    os: Option<&'a feroprobe_core::OsMatch>,
+    os: Option<&'a OsResult>,
     #[serde(skip_serializing_if = "Option::is_none")]
     trace: Option<&'a feroprobe_core::Trace>,
 }
@@ -488,6 +636,7 @@ pub(crate) mod tests {
             show_reason: false,
             show_version: true,
             show_os: false,
+            os_guess: false,
             show_trace: false,
             assume_up: false,
             ping_only: false,
