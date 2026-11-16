@@ -1070,7 +1070,6 @@ fn scan_config(args: &Args) -> ScanConfig {
         // Like nmap: an explicit --scan-delay above the template's cap
         // raises it, and --max-scan-delay replaces it. The scan never goes
         // below --scan-delay whatever the cap.
-        // Never below --scan-delay, even when given explicitly.
         max_scan_delay: args
             .max_scan_delay
             .unwrap_or(base.max_scan_delay)
@@ -1214,6 +1213,12 @@ fn apply_min_rate(
         }
         // A template's delay gives way, as in nmap.
         cfg.scan_delay = gap;
+        // An explicit cap was floored at the template's delay: floor it
+        // at the lowered one instead.
+        if let Some(cap) = args.max_scan_delay {
+            cfg.max_scan_delay = cap.max(gap);
+            cfg.max_udp_scan_delay = cap.max(gap);
+        }
     }
     let mut warnings = Vec::new();
     // A silent port holds its place for a whole wait: the initial timeout,
@@ -3437,6 +3442,14 @@ mod tests {
         // A template's scan delay gives way; an explicit one is an error.
         let (cfg, _) = tuned(&["-T2", "--min-rate", "100"], None).unwrap();
         assert_eq!(cfg.scan_delay, Duration::from_millis(10));
+        // An explicit --max-scan-delay below the template's delay then holds.
+        let (cfg, _) = tuned(
+            &["-T2", "--min-rate", "100", "--max-scan-delay", "10ms"],
+            None,
+        )
+        .unwrap();
+        assert_eq!(cfg.max_scan_delay, Duration::from_millis(10));
+        assert_eq!(cfg.max_udp_scan_delay, Duration::from_millis(10));
         assert!(tuned(&["--scan-delay", "1s", "--min-rate", "10"], None).is_err());
         assert!(tuned(&["--max-rate", "10", "--min-rate", "20"], None).is_err());
         assert!(tuned(&["--min-rate", "0"], None).is_err());
