@@ -433,8 +433,9 @@ mod imp {
         let record = |results: &mut HashMap<(usize, u16), PortResult>,
                       flight: &mut Flight<u16>,
                       a: Answer| {
+            let proof = done.is_some() && a.2 != PortState::Filtered;
             if let Some(d) = done
-                && a.2 != PortState::Filtered
+                && proof
             {
                 d.mark(a.0);
                 // As a discovery probe, a TCP answer is proof of life, so it
@@ -446,7 +447,12 @@ mod imp {
                     results.remove(&(a.0, a.1));
                 }
             }
-            record(results, flight, no_answer, a)
+            let host = a.0;
+            let recorded = record(results, flight, no_answer, a);
+            if proof {
+                flight.retire_host(host);
+            }
+            recorded
         };
         let addrs: Vec<IpAddr> = targets.iter().map(|t| t.addr).collect();
         let index: Arc<HashMap<IpAddr, usize>> =
@@ -588,10 +594,14 @@ mod imp {
         // proved up. Checked on a timer, not per answer, to stay cheap on
         // large sweeps.
         let mut retired = vec![false; addrs.len()];
+        // Looking costs a pass over the targets: at most every
+        // RETIRE_EVERY (this scan's own answers retire their host at once).
+        let mut looked = Instant::now();
         let mut retire_done = |flight: &mut Flight<u16>| {
-            if done.is_none() {
+            if done.is_none() || looked.elapsed() < crate::rawscan::RETIRE_EVERY {
                 return;
             }
+            looked = Instant::now();
             for (h, r) in retired.iter_mut().enumerate() {
                 if !*r && is_done(h) {
                     *r = true;

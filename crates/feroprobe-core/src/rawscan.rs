@@ -15,7 +15,7 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::capture::{self, Packet};
 use crate::connect::is_network_error;
@@ -54,6 +54,10 @@ const QUEUE_CAP: usize = 8192;
 /// nor filtered proves its host up and marks it so (see
 /// [`crate::discovery`]). The probes skipped that way come back as no
 /// answer.
+/// How often a discovery probe looks for hosts that other probes proved
+/// up (see [`run`]).
+pub(crate) const RETIRE_EVERY: Duration = Duration::from_millis(100);
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run(
     targets: &[Target],
@@ -141,6 +145,7 @@ pub(crate) fn run(
             && a.state != PortState::Filtered
         {
             d.mark(a.host);
+            flight.retire_host(a.host);
         }
         true
     };
@@ -166,12 +171,16 @@ pub(crate) fn run(
         // losses call for, up to cfg.retries (see Flight).
         flight.start(pending.iter().copied());
         // As a discovery probe, stop waiting on and resending to hosts
-        // proven up, by this scan or by another discovery probe.
+        // proven up by another discovery probe (this scan's own answers
+        // retire their host at once, in `record`). Looking costs a pass
+        // over the targets, so it is done at most every RETIRE_EVERY.
         let mut retired = vec![false; addrs.len()];
+        let mut looked = Instant::now();
         let mut retire_done = |flight: &mut Flight<u16>| {
-            if done.is_none() {
+            if done.is_none() || looked.elapsed() < RETIRE_EVERY {
                 return;
             }
+            looked = Instant::now();
             for (h, r) in retired.iter_mut().enumerate() {
                 if !*r && is_done(h) {
                     *r = true;
@@ -193,10 +202,14 @@ pub(crate) fn run(
                 Next::Idle => break,
                 Next::Send(h, k) => (h, k),
                 // Every window is full, or only probes waiting for their
-                // answers are left: wait for an answer or a timeout.
+                // answers are left: wait for an answer or a timeout or (as
+                // a discovery probe) for the host to be proven up.
                 Next::Wait(until) => {
                     let until = cfg.deadline.map_or(until, |d| until.min(d));
-                    let left = until.saturating_duration_since(Instant::now());
+                    let mut left = until.saturating_duration_since(Instant::now());
+                    if done.is_some() {
+                        left = left.min(RETIRE_EVERY);
+                    }
                     match rx.recv_timeout(left) {
                         Ok(a) => {
                             record(&mut results, &mut flight, a);
