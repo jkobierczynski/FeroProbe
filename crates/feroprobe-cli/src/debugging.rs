@@ -39,18 +39,33 @@ enum Level<'a> {
 /// every `-d` form is a `--debug` argument; clap has already accepted it,
 /// so a `-v...` argument is the flag, never another option's value.
 fn levels(argv: &[String]) -> Result<(u8, u8), String> {
-    // Short options that take no value can be grouped (`-nv`): a group of
-    // only those counts each `v` in it.
-    let flags: Vec<char> = Args::command()
+    // Short options can be grouped (`-nv`, `-vp22`): each `v` among the
+    // flags counts, up to the first option that takes a value, as the rest
+    // of the group is that option's value.
+    let (flags, valued): (Vec<_>, Vec<_>) = Args::command()
         .get_arguments()
-        .filter(|a| {
-            matches!(
+        .filter_map(|a| {
+            let flag = matches!(
                 a.get_action(),
                 clap::ArgAction::SetTrue | clap::ArgAction::Count
-            )
+            );
+            a.get_short().map(|c| (c, flag))
         })
-        .filter_map(clap::Arg::get_short)
-        .collect();
+        .partition(|(_, flag)| *flag);
+    let is = |set: &[(char, bool)], c: char| set.iter().any(|(s, _)| *s == c);
+    let group = |g: &str| -> usize {
+        let mut n = 0;
+        for c in g.chars() {
+            if is(&valued, c) {
+                break;
+            }
+            if !is(&flags, c) {
+                return 0;
+            }
+            n += usize::from(c == 'v');
+        }
+        n
+    };
     let seen = argv
         .iter()
         .skip(1)
@@ -60,12 +75,8 @@ fn levels(argv: &[String]) -> Result<(u8, u8), String> {
                 vec![Level::Debug("")]
             } else if let Some(v) = a.strip_prefix("--debug=") {
                 vec![Level::Debug(v)]
-            } else if a.len() > 1
-                && a.starts_with('-')
-                && !a.starts_with("--")
-                && a[1..].chars().all(|c| flags.contains(&c))
-            {
-                vec![Level::Verbose; a[1..].matches('v').count()]
+            } else if a.len() > 1 && a.starts_with('-') && !a.starts_with("--") {
+                vec![Level::Verbose; group(&a[1..])]
             } else {
                 Vec::new()
             }
@@ -170,6 +181,9 @@ mod tests {
         assert_eq!(run(&["-nv", "h"]), Ok((1, 0)));
         assert_eq!(run(&["-vnv", "h"]), Ok((2, 0)));
         assert_eq!(run(&["-n", "h"]), Ok((0, 0)));
+        // Up to an option that takes a value; its value is not counted.
+        assert_eq!(run(&["-vp22", "h"]), Ok((1, 0)));
+        assert_eq!(run(&["-vvpv", "h"]), Ok((2, 0)));
         assert!(
             run(&["-dx", "h"])
                 .unwrap_err()
