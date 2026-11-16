@@ -424,7 +424,8 @@ struct Args {
     #[arg(short = 'p', long, conflicts_with = "top_ports")]
     ports: Option<String>,
 
-    /// Scan the N most common ports (default 1000, as in nmap)
+    /// Scan the N most common ports (default 1000 for TCP and UDP, as in
+    /// nmap, and 50 for SCTP)
     #[arg(long, value_name = "N")]
     top_ports: Option<usize>,
 
