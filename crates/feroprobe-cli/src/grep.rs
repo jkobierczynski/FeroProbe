@@ -18,7 +18,7 @@ use std::fmt::Write;
 
 use feroprobe_core::{HostResult, PortResult, service_name};
 
-use crate::output::{RunInfo, counted_up, port_rows, reported};
+use crate::output::{RunInfo, port_rows, reported};
 use crate::xml::time_str;
 
 /// Make a value safe inside a `/`-separated, `,`-joined port entry.
@@ -48,21 +48,21 @@ fn port_entry(p: &PortResult) -> String {
     )
 }
 
-/// The whole report in nmap's grepable layout.
-pub fn render(hosts: &[HostResult], info: &RunInfo) -> String {
-    let mut x = String::new();
-    let _ = writeln!(
-        x,
-        "# FeroProbe {} scan initiated {} as: {}",
+/// The first line: the version, start time and command line (which
+/// `--resume` reads).
+pub fn header(info: &RunInfo) -> String {
+    format!(
+        "# FeroProbe {} scan initiated {} as: {}\n",
         env!("CARGO_PKG_VERSION"),
         time_str(info.start),
         info.args.replace('\n', " ")
-    );
-    let mut up = 0;
+    )
+}
+
+/// The lines of the reported hosts among `hosts`.
+pub fn hosts(hosts: &[HostResult], info: &RunInfo) -> String {
+    let mut x = String::new();
     for host in hosts.iter().filter(|h| reported(h, info)) {
-        if counted_up(host, info) {
-            up += 1;
-        }
         let name = host
             .hostname
             .as_deref()
@@ -104,16 +104,25 @@ pub fn render(hosts: &[HostResult], info: &RunInfo) -> String {
         }
         let _ = writeln!(x, "{line}");
     }
-    let n = hosts.len();
-    let _ = writeln!(
-        x,
-        "# FeroProbe done at {} -- {n} IP address{} ({up} host{} up) scanned in {:.2} seconds",
+    x
+}
+
+/// The last line: `n` hosts, `up` of them up.
+pub fn footer(n: usize, up: usize, info: &RunInfo) -> String {
+    format!(
+        "# FeroProbe done at {} -- {n} IP address{} ({up} host{} up) scanned in {:.2} seconds\n",
         time_str(info.start + info.elapsed),
         if n == 1 { "" } else { "es" },
         if up == 1 { "" } else { "s" },
         info.elapsed.as_secs_f64()
-    );
-    x
+    )
+}
+
+/// The whole report in nmap's grepable layout.
+#[cfg(test)]
+pub fn render(all: &[HostResult], info: &RunInfo) -> String {
+    let up = all.iter().filter(|h| reported(h, info)).count();
+    header(info) + &hosts(all, info) + &footer(all.len(), up, info)
 }
 
 #[cfg(test)]
