@@ -27,6 +27,10 @@ jobs:
       - run: cargo test --all
       # The hardened build (ICS protection compiled in) must build and pass too.
       - run: cargo test -p feroprobe --features ics-protection-default
+      # Every feroprobe-diff feature end to end (bash and python3, no root).
+      - name: feroprobe-diff test script
+        if: runner.os != 'Windows'
+        run: ./scripts/test-feroprobe-diff.sh -v
 
   # The SYN scan and ICMP discovery need raw sockets, so run the whole test
   # suite again as root on Linux. FEROPROBE_REQUIRE_RAW makes the raw-socket

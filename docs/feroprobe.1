@@ -2174,6 +2174,18 @@ blocked: the terminal could then not keep a scan that was moved to the
 background from changing another job\[aq]s settings.
 \f[V]--noninteractive\f[R] turns key reading off.
 Not available on Windows yet.
+.SS Comparing two scans
+.PP
+\f[V]feroprobe-diff FILE1 FILE2\f[R] compares two XML reports
+(\f[V]-oX\f[R]) and shows what changed between them: hosts that came up
+or went away, ports that opened or closed, and changed services,
+versions, OS matches and script output.
+It is FeroProbe\[aq]s counterpart of nmap\[aq]s \f[V]ndiff\f[R], with
+the same options (\f[V]-v\f[R], \f[V]--text\f[R], \f[V]--xml\f[R]),
+output and exit status (0 same, 1 different, 2 error), and reads
+nmap\[aq]s reports too.
+It is a separate program, installed next to \f[V]feroprobe\f[R]; see
+feroprobe-diff(1) or docs/feroprobe-diff.md.
 .SH CHECKING A SCAN BEFORE AND WHILE IT RUNS
 .PP
 These options show what FeroProbe will do or is doing.
@@ -2947,6 +2959,8 @@ README.md: overview, installation and quick start
 DEVELOPMENT.md: implemented features and the gap to nmap parity
 .IP \[bu] 2
 docs/responsible-use.md: the safeguards and why they exist
+.IP \[bu] 2
+feroprobe-diff(1), docs/feroprobe-diff.md: compare two scan reports
 .IP \[bu] 2
 \f[V]rules/\f[R]: Suricata and Snort rules that detect FeroProbe\[aq]s
 probes

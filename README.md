@@ -25,6 +25,7 @@ no external binaries.
 | nmap-style `-p` port specs with `T:`/`U:`/`S:` and `P:` (IP protocols for `-sO`), top ports, `-F`, `--exclude-ports`, shuffled port order (`-r` keeps it) | ✅ |
 | Table, JSON, nmap-style XML and grepable output, `--reason`, `--open`, `--packet-trace` | ✅ |
 | Report files `-oN`, `-oX`, `-oS`, `-oG`, `-oJ`, `-oA`, `--append-output`, XML stylesheet options; target lists `-iL`; `--exclude`, `--excludefile`; progress with `-v` | ✅ |
+| `feroprobe-diff`: compare two XML reports (FeroProbe's or nmap's) and show what changed, like nmap's `ndiff` | ✅ |
 | Service and version detection, `-sV`, with our own probes and rules | ✅ |
 | OS detection, `-O`, a multi-probe fingerprint matched against our own OS database, with `--osscan-limit`, `--osscan-guess`, `--max-os-tries`, IPv4 and IPv6 (Linux, root) | ✅ |
 | Traceroute, `--traceroute`, IPv4 and IPv6 (Linux, root), and `-A` (`-sV -O --traceroute`) | ✅ |
@@ -84,6 +85,9 @@ sudo ./target/release/feroprobe -sn 2001:db8::/120 fe80::1%eth0
 ./target/release/feroprobe -sV -o xml 10.0.0.0/24 > scan.xml
 # The report says scanner="feroprobe". Add --nmap-label for importers
 # that only accept scanner="nmap"; a comment still names FeroProbe.
+
+# What changed since the last scan (exit status 1 if anything did)
+./target/release/feroprobe-diff scan-monday.xml scan-tuesday.xml
 ```
 
 Run `feroprobe --help` (or `feroprobe` alone) for all options, on one page
