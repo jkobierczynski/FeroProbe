@@ -1878,6 +1878,18 @@ Each \f[V]-v\f[R] also raises the Not shown limit.
 Print a progress line to standard error at this interval, for example
 \f[V]Stats: 0:01:05 elapsed; TCP SYN scan: 45.20% done (4520 of 10000 probes)\f[R].
 \f[V]0\f[R] turns it off.
+.SS Comparing two scans
+.PP
+\f[V]feroprobe-diff FILE1 FILE2\f[R] compares two XML reports
+(\f[V]-oX\f[R]) and shows what changed between them: hosts that came up
+or went away, ports that opened or closed, and changed services,
+versions, OS matches and script output.
+It is FeroProbe\[aq]s counterpart of nmap\[aq]s \f[V]ndiff\f[R], with
+the same options (\f[V]-v\f[R], \f[V]--text\f[R], \f[V]--xml\f[R]),
+output and exit status (0 same, 1 different, 2 error), and reads
+nmap\[aq]s reports too.
+It is a separate program, installed next to \f[V]feroprobe\f[R]; see
+feroprobe-diff(1) or docs/feroprobe-diff.md.
 .SH CHECKING A SCAN BEFORE AND WHILE IT RUNS
 .PP
 These options show what FeroProbe will do or is doing.
@@ -2636,6 +2648,8 @@ README.md: overview, installation and quick start
 DEVELOPMENT.md: implemented features and the gap to nmap parity
 .IP \[bu] 2
 docs/responsible-use.md: the safeguards and why they exist
+.IP \[bu] 2
+feroprobe-diff(1), docs/feroprobe-diff.md: compare two scan reports
 .IP \[bu] 2
 \f[V]rules/\f[R]: Suricata and Snort rules that detect FeroProbe\[aq]s
 probes

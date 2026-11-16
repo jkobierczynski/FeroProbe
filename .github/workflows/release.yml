@@ -57,10 +57,12 @@ jobs:
           cp README.md LICENSE "$name"/
           if [[ "${{ matrix.target }}" == *windows* ]]; then
             cp "target/${{ matrix.target }}/release/feroprobe.exe" "$name"/
+            cp "target/${{ matrix.target }}/release/feroprobe-diff.exe" "$name"/
             7z a "$name.zip" "$name" > /dev/null
             archive="$name.zip"
           else
             cp "target/${{ matrix.target }}/release/feroprobe" "$name"/
+            cp "target/${{ matrix.target }}/release/feroprobe-diff" "$name"/
             tar czf "$name.tar.gz" "$name"
             archive="$name.tar.gz"
           fi
@@ -78,6 +80,7 @@ jobs:
           bin="target/${{ matrix.target }}/release/feroprobe"
           "$bin" --version
           "$bin" -Pn -sT -p 1 127.0.0.1
+          "$bin-diff" --version
       # A cross-built binary can't run here: check it is built for the
       # right CPU instead.
       - name: Check architecture

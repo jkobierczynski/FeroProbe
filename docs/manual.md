@@ -1280,6 +1280,17 @@ Print a progress line to standard error at this interval, for example
 `Stats: 0:01:05 elapsed; TCP SYN scan: 45.20% done (4520 of 10000
 probes)`. `0` turns it off.
 
+### Comparing two scans
+
+`feroprobe-diff FILE1 FILE2` compares two XML reports (`-oX`) and shows
+what changed between them: hosts that came up or went away, ports that
+opened or closed, and changed services, versions, OS matches and script
+output. It is FeroProbe's counterpart of nmap's `ndiff`, with the same
+options (`-v`, `--text`, `--xml`), output and exit status (0 same, 1
+different, 2 error), and reads nmap's reports too. It is a separate program,
+installed next to `feroprobe`; see feroprobe-diff(1) or
+[docs/feroprobe-diff.md](feroprobe-diff.md).
+
 ## Checking a scan before and while it runs
 
 These options show what FeroProbe will do or is doing. `--explain` and
@@ -1655,5 +1666,7 @@ feroprobe -oG - 192.168.1.0/24 | grep '/open/'
   nmap parity
 - [docs/responsible-use.md](responsible-use.md): the safeguards and why
   they exist
+- feroprobe-diff(1), [docs/feroprobe-diff.md](feroprobe-diff.md): compare
+  two scan reports
 - `rules/`: Suricata and Snort rules that detect FeroProbe's probes
 - nmap(1)
