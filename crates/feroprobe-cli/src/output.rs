@@ -52,6 +52,8 @@ pub struct RunInfo {
     pub nmap_label: bool,
     /// How many `-v` were given.
     pub verbosity: u8,
+    /// The `xml-stylesheet` reference for the XML report, if any.
+    pub stylesheet: Option<String>,
 }
 
 pub(crate) fn is_openish(state: PortState) -> bool {
@@ -637,10 +639,116 @@ pub fn render_json(hosts: &[HostResult], info: &RunInfo) -> Result<String> {
     Ok(serde_json::to_string_pretty(&report)? + "\n")
 }
 
+/// `-oS`: the normal report in "script kiddie" spelling, as nmap's `-oS`
+/// writes it. Each letter has an even chance of a look-alike (`A`→`4`,
+/// `e`→`3`, `i`→`!`, `|` or `1`, `o`→`0`, `s`→`$`, or `z` before a
+/// non-alphanumeric, `z`→`s`); letters left alone flip case one time in
+/// three. Fingerprint lines stay as they are, since they are meant to be
+/// copied: the `OS:` lines and the replies under "Unrecognized service
+/// replies:".
+pub fn skid(text: &str) -> String {
+    skid_with(text, &mut Rng::seeded())
+}
+
+fn skid_with(text: &str, rng: &mut Rng) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut in_replies = false;
+    for line in text.split_inclusive('\n') {
+        if line.starts_with("Unrecognized service replies:") {
+            in_replies = true;
+        } else if in_replies && !line.starts_with("  ") {
+            in_replies = false;
+        }
+        if in_replies || line.starts_with("OS:") {
+            out.push_str(line);
+            continue;
+        }
+        let chars: Vec<char> = line.chars().collect();
+        for (i, &c) in chars.iter().enumerate() {
+            let next = chars.get(i + 1).copied();
+            out.push(skid_char(c, next, rng));
+        }
+    }
+    out
+}
+
+fn skid_char(c: char, next: Option<char>, rng: &mut Rng) -> char {
+    if rng.next() & 1 == 0 {
+        match c {
+            'A' => '4',
+            'e' | 'E' => '3',
+            'i' | 'I' => ['!', '|', '1'][(rng.next() % 3) as usize],
+            'o' | 'O' => '0',
+            // The end of a word reads better as a z.
+            's' | 'S' if next.is_some_and(|n| !n.is_ascii_alphanumeric()) => 'z',
+            's' | 'S' => '$',
+            'z' => 's',
+            'Z' => 'S',
+            c => c,
+        }
+    } else if c.is_ascii_alphabetic() && rng.next().is_multiple_of(3) {
+        if c.is_ascii_uppercase() {
+            c.to_ascii_lowercase()
+        } else {
+            c.to_ascii_uppercase()
+        }
+    } else {
+        c
+    }
+}
+
+/// A small generator for `-oS` (splitmix64): the spelling only has to
+/// vary, not be unpredictable.
+struct Rng(u64);
+
+impl Rng {
+    fn seeded() -> Self {
+        let nanos = SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos() as u64);
+        Rng(nanos ^ u64::from(std::process::id()).rotate_left(32))
+    }
+
+    fn next(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
     use std::time::UNIX_EPOCH;
+
+    #[test]
+    fn skid_spelling() {
+        let text = "Starting FeroProbe 0.5.0\nNot shown: 999 closed ports\nOS:SEQ(SP=1)\n\
+                    Unrecognized service replies:\n  9999/tcp: \"Hello\"\nDone, 1 host up\n";
+        let mut rng = Rng(7);
+        let out = skid_with(text, &mut rng);
+        // Same lines, and nothing outside the letters changes.
+        assert_eq!(out.lines().count(), text.lines().count());
+        for (a, b) in text.lines().zip(out.lines()) {
+            assert_eq!(a.chars().count(), b.chars().count(), "{a} / {b}");
+        }
+        // Fingerprints are left alone.
+        assert!(out.contains("\nOS:SEQ(SP=1)\n"));
+        assert!(out.contains("\n  9999/tcp: \"Hello\"\n"));
+        // Digits and punctuation survive; the rest of the text changes.
+        assert!(out.contains("999"));
+        assert_ne!(out, text);
+        // Over many runs, every look-alike shows up.
+        let many: String = (0..50)
+            .map(|_| skid_with("Seas AIZE oz", &mut rng))
+            .collect();
+        for c in ['$', 'z', '4', '3', '0', 's', 'S'] {
+            assert!(many.contains(c), "{c} never appeared");
+        }
+        assert!(many.contains(['!', '|', '1']));
+    }
 
     /// A run description for renderer tests.
     pub(crate) fn info() -> RunInfo {
@@ -665,6 +773,7 @@ pub(crate) mod tests {
             list_scan: false,
             nmap_label: false,
             verbosity: 0,
+            stylesheet: None,
         }
     }
 
