@@ -305,3 +305,5 @@ structured results in JSON.
   PR #23) was incorrectly flagged by the assistant's safety safeguards, and
   the session was switched to another model to continue. The work itself
   was the authorization-gated evasion feature described above.
+- 2026-11-16: development is again using the original AI model, the one
+  that built FeroProbe before the 2026-11-15 switch noted above.
