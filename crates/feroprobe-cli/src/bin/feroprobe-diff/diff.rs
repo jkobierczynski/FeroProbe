@@ -36,10 +36,15 @@ pub fn opcodes<T: PartialEq>(a: &[T], b: &[T]) -> Vec<(Op, usize, usize, usize, 
     if pre > 0 {
         ops.push((Op::Equal, 0, pre, 0, pre));
     }
-    let middle = if am.len().saturating_mul(bm.len()) > MAX_LCS_CELLS {
-        vec![(Op::Replace, 0, am.len(), 0, bm.len())]
-    } else {
-        lcs_opcodes(am, bm)
+    let middle = match (am.len(), bm.len()) {
+        (0, 0) => Vec::new(),
+        (n, 0) => vec![(Op::Delete, 0, n, 0, 0)],
+        (0, m) => vec![(Op::Insert, 0, 0, 0, m)],
+        // The table has (n + 1) x (m + 1) cells.
+        (n, m) if (n + 1).saturating_mul(m + 1) > MAX_LCS_CELLS => {
+            vec![(Op::Replace, 0, n, 0, m)]
+        }
+        _ => lcs_opcodes(am, bm),
     };
     ops.extend(
         middle
@@ -381,6 +386,16 @@ mod tests {
         let a: Vec<u32> = (0..3000).map(|i| i * 2).collect();
         let b: Vec<u32> = (0..3000).map(|i| i * 2 + 1).collect();
         assert_eq!(opcodes(&a, &b), [(Op::Replace, 0, 3000, 0, 3000)]);
+        // A long block removed or added needs no table at all.
+        let long: Vec<u32> = (0..5_000_000).collect();
+        assert_eq!(
+            opcodes(&long, &long[..1]),
+            [(Op::Equal, 0, 1, 0, 1), (Op::Delete, 1, 5_000_000, 1, 1)]
+        );
+        assert_eq!(
+            opcodes(&long[..1], &long),
+            [(Op::Equal, 0, 1, 0, 1), (Op::Insert, 1, 1, 1, 5_000_000)]
+        );
     }
 
     #[test]
