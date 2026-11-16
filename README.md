@@ -517,6 +517,13 @@ value, so `-T4 --max-rate 2000` is aggressive with a lower packet rate.
 | `--host-timeout TIME` | Give up on a host whose port scans and detection take longer than TIME (`30s`, `5m`). Hosts then run on their own clocks, up to 32 at once, sharing the parallelism and packet rate. A timed-out host is reported without ports: "Skipping host … due to host timeout", `Status: Timeout` in `-oG`, `timedout="true"` in XML |
 | `--stats-every TIME` | Print a progress line to standard error at this interval: `Stats: 0:01:05 elapsed; TCP SYN scan: 45.20% done (4520 of 10000 probes)` |
 
+While a scan runs in a terminal, keys work as in nmap: `v`/`V` and `d`/`D`
+raise or lower the verbosity and debugging level, `p`/`P` turn the packet
+trace on or off, `?` lists the keys and any other key prints the status line
+(`--noninteractive` turns this off). `-d` (`-dd`, `-d<level>`) adds nmap's
+debugging output, such as the timing report, and `--iflist` prints the
+interfaces and routes FeroProbe sees.
+
 ### MAC vendor names
 
 ARP discovery shows each local host's MAC address and its maker. FeroProbe does
