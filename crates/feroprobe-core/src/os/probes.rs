@@ -132,11 +132,15 @@ pub fn flags(i: usize) -> u8 {
 }
 
 /// Per-try values that tie answers to probes: probe `i` leaves from
-/// `sport + i` with sequence number `seq + i`; the ACK probes acknowledge
-/// `ack`; the echo request has identifier `icmp_id`.
+/// `sport + i` (from `sport` itself with `-g`, see [`Keys::fixed`]) with
+/// sequence number `seq + i`; the ACK probes acknowledge `ack`; the echo
+/// request has identifier `icmp_id`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Keys {
     pub sport: u16,
+    /// Every probe leaves from `sport` (`-g`): answers are then told apart
+    /// by the port they come from and the sequence number they acknowledge.
+    pub fixed: bool,
     pub seq: u32,
     pub ack: u32,
     pub tsval: u32,
@@ -149,6 +153,7 @@ impl Keys {
         Self {
             // Room for PROBES consecutive ports below 65536.
             sport: 40000 + (next() % 20000) as u16,
+            fixed: false,
             seq: next(),
             ack: next(),
             tsval: next(),
@@ -156,9 +161,25 @@ impl Keys {
         }
     }
 
+    /// The same keys with every probe leaving from `port` (`-g`), if given.
+    pub fn with_source_port(self, port: Option<u16>) -> Self {
+        match port {
+            Some(sport) => Self {
+                sport,
+                fixed: true,
+                ..self
+            },
+            None => self,
+        }
+    }
+
     /// The source port of probe `i`.
     pub fn sport_of(&self, i: usize) -> u16 {
-        self.sport + i as u16
+        if self.fixed {
+            self.sport
+        } else {
+            self.sport + i as u16
+        }
     }
 
     /// The sequence number of probe `i`.
@@ -166,10 +187,46 @@ impl Keys {
         self.seq.wrapping_add(i as u32)
     }
 
-    /// Which TCP probe a segment to our port `dport` answers, if any.
+    /// Which TCP probe a segment to our port `dport` answers, if any. With
+    /// a fixed source port see [`Keys::probe_for`].
     pub fn probe_for_port(&self, dport: u16) -> Option<usize> {
+        if self.fixed {
+            return None;
+        }
         let i = usize::from(dport.checked_sub(self.sport)?);
         (i < IE).then_some(i)
+    }
+
+    /// Which TCP probe a segment answers: one to our port `dport`, from the
+    /// target's port `from` (the `open` or the `closed` one), acknowledging
+    /// `ack`, a reset when `rst`.
+    pub fn probe_for(
+        &self,
+        dport: u16,
+        from: u16,
+        ack: u32,
+        rst: bool,
+        open: u16,
+        closed: Option<u16>,
+    ) -> Option<usize> {
+        if !self.fixed {
+            return self.probe_for_port(dport);
+        }
+        if dport != self.sport {
+            return None;
+        }
+        let (syns, ack_probe) = if from == open {
+            (S1..=E, A)
+        } else if Some(from) == closed {
+            (C1..=C1, C2)
+        } else {
+            return None;
+        };
+        // A SYN's answer acknowledges its sequence number plus one; a reset
+        // that does not is the answer to the ACK probe.
+        syns.into_iter()
+            .find(|&i| ack == self.seq_of(i).wrapping_add(1))
+            .or(rst.then_some(ack_probe))
     }
 }
 
@@ -276,5 +333,27 @@ mod tests {
         assert_eq!(k.probe_for_port(k.sport + 7), Some(C2));
         assert_eq!(k.probe_for_port(k.sport + 8), None);
         assert_eq!(k.probe_for_port(k.sport - 1), None);
+
+        // -g: every probe from one port, told apart by what they acknowledge.
+        let k = k.with_source_port(Some(53));
+        assert_eq!((k.sport_of(0), k.sport_of(C2)), (53, 53));
+        assert_eq!(
+            k.probe_for(53, 22, k.seq_of(2) + 1, false, 22, Some(81)),
+            Some(2)
+        );
+        assert_eq!(k.probe_for(53, 22, 0, true, 22, Some(81)), Some(A));
+        assert_eq!(
+            k.probe_for(53, 81, k.seq_of(C1) + 1, true, 22, Some(81)),
+            Some(C1)
+        );
+        assert_eq!(k.probe_for(53, 81, 0, true, 22, Some(81)), Some(C2));
+        assert_eq!(
+            k.probe_for(54, 22, k.seq_of(0) + 1, false, 22, Some(81)),
+            None
+        );
+        assert_eq!(
+            k.probe_for(53, 23, k.seq_of(0) + 1, false, 22, Some(81)),
+            None
+        );
     }
 }

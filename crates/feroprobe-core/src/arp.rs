@@ -315,6 +315,10 @@ mod linux {
             .into_iter()
             .filter_map(|(ifname, addr, prefix)| {
                 let &(ifindex, mac) = macs.get(&ifname)?;
+                // With -e, only that interface's networks are local.
+                if !crate::netif::allowed(ifindex) {
+                    return None;
+                }
                 Some(LocalNet {
                     ifname,
                     ifindex,
@@ -574,7 +578,7 @@ mod tests {
             return;
         }
         let cfg = crate::model::ScanConfig {
-            timeout: std::time::Duration::from_secs(1),
+            rtt: crate::rtt::RttTimeouts::fixed(std::time::Duration::from_secs(1)),
             retries: 2,
             ..Default::default()
         };

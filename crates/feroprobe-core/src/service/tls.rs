@@ -15,6 +15,9 @@ use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 use tokio_rustls::client::TlsStream;
 
+/// A TLS session over TCP.
+pub(super) type Stream = TlsStream<TcpStream>;
+
 #[derive(Debug)]
 struct AcceptAnyCert(Vec<SignatureScheme>);
 
@@ -78,7 +81,7 @@ pub(super) async fn connect(
     timeout: Duration,
     wait: Duration,
 ) -> Option<(TlsStream<TcpStream>, Option<String>)> {
-    let tcp = tokio::time::timeout(timeout, TcpStream::connect(addr))
+    let tcp = tokio::time::timeout(timeout, crate::netif::connect_tcp(addr))
         .await
         .ok()?
         .ok()?;

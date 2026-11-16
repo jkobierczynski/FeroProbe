@@ -37,7 +37,8 @@ pub(super) fn match_reply(
     match pkt.protocol {
         packet::IPPROTO_TCP => {
             let tcp = packet::parse_tcp(pkt.payload)?;
-            let i = keys.probe_for_port(tcp.dport)?;
+            let rst = tcp.flags & packet::TCP_RST != 0;
+            let i = keys.probe_for(tcp.dport, tcp.sport, tcp.ack, rst, open, closed)?;
             let from = match probes::target_of(i) {
                 Target::Closed => closed?,
                 _ => open,
@@ -45,7 +46,6 @@ pub(super) fn match_reply(
             if tcp.sport != from {
                 return None;
             }
-            let rst = tcp.flags & packet::TCP_RST != 0;
             let syn_ack = tcp.flags & (packet::TCP_SYN | packet::TCP_ACK)
                 == packet::TCP_SYN | packet::TCP_ACK;
             let fits = if probes::is_ack(i) {
@@ -181,7 +181,7 @@ pub(super) fn probe_blocking(
     let db = db::built_in();
     loop {
         let mut slots: Vec<Slot> = Vec::new();
-        let keys = Keys::new(|| rng.next_u32());
+        let keys = Keys::new(|| rng.next_u32()).with_source_port(cfg.source_port);
         for (j, job) in jobs.iter().enumerate() {
             let Some(src) = sources[j] else { continue };
             if done[j] || tries[j].len() as u32 >= limits[j] {
@@ -297,7 +297,13 @@ fn run_try(
                 drain(slots);
             }
         }
-        wait(slots, Instant::now() + cfg.timeout, true);
+        // Up to the longest adaptive timeout among the hosts of this try.
+        let longest = slots
+            .iter()
+            .map(|s| cfg.probe_timeout(s.dst))
+            .max()
+            .unwrap_or(cfg.rtt.initial);
+        wait(slots, Instant::now() + longest, true);
         if cfg.expired() {
             return Err(ScanConfig::timed_out());
         }

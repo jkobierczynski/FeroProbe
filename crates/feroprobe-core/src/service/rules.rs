@@ -1,466 +1,101 @@
-//! Probes and match rules for service detection.
-//!
-//! These are FeroProbe's own, written from the protocols' public
-//! specifications and from banners that real servers send. nmap's
-//! `nmap-service-probes` database is deliberately not used: its license does
-//! not allow redistributing it here.
-//!
-//! A rule is a byte regex run against a service's response. `${n}` in the
-//! product, version and info templates is replaced by capture group `n`.
-//! Rules are tried in order and the first match wins, so specific rules come
-//! before generic ones.
+//! Matching service replies against the rules in the rules file
+//! ([`super::db`]), plus FeroProbe's built-in readers: the binary parsers in
+//! [`super::parsers`] and a generic HTTP/RTSP/SIP header reader used when
+//! no rule names the product.
 
 use std::sync::LazyLock;
 
-use regex::bytes::{Captures, Regex, RegexBuilder};
+use regex::bytes::Regex;
 
+use super::db::{Rule, ServiceDb};
 use super::{ServiceInfo, printable};
 
-/// Data sent to a service to make it answer.
-#[derive(Debug)]
-pub(super) struct Probe {
-    pub name: &'static str,
-    pub payload: &'static [u8],
-    /// Ports where this probe is tried first.
-    pub ports: &'static [u16],
+/// What matched a reply.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum Found {
+    /// The service is identified; probing stops.
+    Hard(Box<ServiceInfo>),
+    /// Only the service name; probing goes on with probes that can tell
+    /// more.
+    Soft(String),
 }
 
-/// Send nothing and wait: services that talk first (SSH, FTP, SMTP, ...).
-pub(super) const NULL: Probe = Probe {
-    name: "null",
-    payload: b"",
-    ports: &[],
-};
-
-pub(super) const HTTP: Probe = Probe {
-    name: "http",
-    payload: b"GET / HTTP/1.0\r\n\r\n",
-    ports: &[
-        80, 81, 591, 2375, 3000, 5000, 5601, 7001, 8000, 8008, 8080, 8081, 8088, 8888, 9000, 9090,
-        9200,
-    ],
-};
-
-/// Probes for services that stay silent until asked in their own protocol.
-/// They are only sent to their usual ports, to keep scans quick.
-pub(super) const PROBES: &[Probe] = &[
-    HTTP,
-    Probe {
-        name: "redis",
-        // RESP array: INFO server
-        payload: b"*2\r\n$4\r\nINFO\r\n$6\r\nserver\r\n",
-        ports: &[6379, 6380],
-    },
-    Probe {
-        name: "memcached",
-        payload: b"version\r\n",
-        ports: &[11211],
-    },
-    Probe {
-        name: "pgsql",
-        // SSLRequest: length 8, code 80877103.
-        payload: &[0x00, 0x00, 0x00, 0x08, 0x04, 0xd2, 0x16, 0x2f],
-        ports: &[5432],
-    },
-    Probe {
-        name: "amqp",
-        // AMQP 0-9-1 protocol header.
-        payload: b"AMQP\x00\x00\x09\x01",
-        ports: &[5671, 5672],
-    },
-    Probe {
-        name: "mqtt",
-        // MQTT 3.1.1 CONNECT, clean session, keepalive 60, client id "feroprobe".
-        payload: b"\x10\x15\x00\x04MQTT\x04\x02\x00\x3c\x00\x09feroprobe",
-        ports: &[1883],
-    },
-    Probe {
-        name: "rdp",
-        // TPKT + X.224 Connection Request with an RDP negotiation request
-        // offering TLS and CredSSP.
-        payload: b"\x03\x00\x00\x13\x0e\xe0\x00\x00\x00\x00\x00\x01\x00\x08\x00\x03\x00\x00\x00",
-        ports: &[3389],
-    },
-    Probe {
-        name: "mssql",
-        // TDS PRELOGIN: VERSION, ENCRYPTION, INSTOPT, THREADID and MARS.
-        payload: b"\x12\x01\x00\x2f\x00\x00\x01\x00\
-            \x00\x00\x1a\x00\x06\x01\x00\x20\x00\x01\x02\x00\x21\x00\x01\
-            \x03\x00\x22\x00\x04\x04\x00\x26\x00\x01\xff\
-            \x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00",
-        ports: &[1433],
-    },
-    Probe {
-        name: "smb",
-        // NetBIOS session header + SMB2 NEGOTIATE offering 2.0.2 to 3.0.2.
-        payload: b"\x00\x00\x00\x6c\xfeSMB\x40\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01\x00\
-            \x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\
-            \x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\
-            \x00\x00\x00\x00\x00\x00\x00\x00\x24\x00\x04\x00\x01\x00\x00\x00\x00\x00\x00\x00\
-            \x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\
-            \x00\x00\x00\x00\x02\x02\x10\x02\x00\x03\x02\x03",
-        ports: &[445],
-    },
-    Probe {
-        name: "ldap",
-        // SearchRequest for the rootDSE: base "", scope base,
-        // (objectClass=*), asking for the vendor, host and naming context.
-        payload: b"\x30\x79\x02\x01\x01\x63\x74\x04\x00\x0a\x01\x00\x0a\x01\x00\x02\x01\x00\
-            \x02\x01\x00\x01\x01\x00\x87\x0bobjectClass\x30\x54\x04\x01*\x04\x01+\
-            \x04\x0avendorName\x04\x0dvendorVersion\x04\x14defaultNamingContext\
-            \x04\x0bdnsHostName\x04\x0enamingContexts",
-        ports: &[389, 636, 3268, 3269],
-    },
-    Probe {
-        name: "mongodb",
-        // OP_MSG {buildinfo: 1, $db: "admin"}, which needs no login.
-        payload: b"\x38\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00\xdd\x07\x00\x00\
-            \x00\x00\x00\x00\x00\x23\x00\x00\x00\x10buildinfo\x00\x01\x00\x00\x00\
-            \x02$db\x00\x06\x00\x00\x00admin\x00\x00",
-        ports: &[27017, 27018, 27019],
-    },
-    Probe {
-        name: "zookeeper",
-        // The "srvr" four-letter command, allowed by default.
-        payload: b"srvr\n",
-        ports: &[2181],
-    },
-    Probe {
-        name: "rtsp",
-        payload: b"OPTIONS * RTSP/1.0\r\nCSeq: 1\r\n\r\n",
-        ports: &[554, 8554],
-    },
-    Probe {
-        name: "sip",
-        payload: b"OPTIONS sip:feroprobe.invalid SIP/2.0\r\n\
-            Via: SIP/2.0/TCP feroprobe.invalid;branch=z9hG4bKferoprobe\r\n\
-            From: <sip:feroprobe@feroprobe.invalid>;tag=feroprobe\r\n\
-            To: <sip:feroprobe.invalid>\r\n\
-            Call-ID: feroprobe@feroprobe.invalid\r\nCSeq: 1 OPTIONS\r\n\
-            Max-Forwards: 70\r\nContent-Length: 0\r\n\r\n",
-        ports: &[5060, 5061],
-    },
-];
-
-/// Ports where TLS is tried before anything else.
-pub(super) const TLS_PORTS: &[u16] = &[
-    443, 465, 636, 853, 990, 992, 993, 994, 995, 2376, 5061, 5671, 6443, 8443, 8883, 9443, 10250,
-];
-
-/// TLS ports whose service talks first, so we listen before sending HTTP.
-pub(super) const TLS_BANNER_PORTS: &[u16] = &[465, 990, 992, 993, 994, 995];
-
-/// One match rule. Build them with [`r`] and the setters below.
-#[derive(Debug)]
-pub(super) struct Rule {
-    service: &'static str,
-    /// Only match responses to this probe (for short, ambiguous replies).
-    probe: Option<&'static str>,
-    pattern: &'static str,
-    product: &'static str,
-    version: &'static str,
-    info: &'static [&'static str],
+/// A match and what made it, for `--version-trace`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Matched {
+    pub found: Found,
+    /// `rules line 42`, `built-in parser smb`, ...
+    pub by: String,
 }
 
-const fn r(service: &'static str, pattern: &'static str) -> Rule {
-    Rule {
-        service,
-        probe: None,
-        pattern,
-        product: "",
-        version: "",
-        info: &[],
-    }
-}
-
-impl Rule {
-    const fn product(mut self, p: &'static str) -> Self {
-        self.product = p;
-        self
-    }
-    const fn version(mut self, v: &'static str) -> Self {
-        self.version = v;
-        self
-    }
-    const fn info(mut self, i: &'static [&'static str]) -> Self {
-        self.info = i;
-        self
-    }
-    const fn probe(mut self, p: &'static str) -> Self {
-        self.probe = Some(p);
-        self
-    }
-}
-
-/// Patterns run on raw bytes with `(?s-u)`: `.` matches any byte, including
-/// newlines, and `\xNN` matches the byte NN.
-static RULES: &[Rule] = &[
-    // SSH
-    r("ssh", r"^SSH-([\d.]+)-OpenSSH_for_Windows_([\w.]+)")
-        .product("OpenSSH for Windows")
-        .version("${2}")
-        .info(&["protocol ${1}"]),
-    r("ssh", r"^SSH-([\d.]+)-OpenSSH_([\w.]+)[ -]([^\r\n]+)")
-        .product("OpenSSH")
-        .version("${2}")
-        .info(&["${3}", "protocol ${1}"]),
-    r("ssh", r"^SSH-([\d.]+)-OpenSSH_([\w.]+)")
-        .product("OpenSSH")
-        .version("${2}")
-        .info(&["protocol ${1}"]),
-    r("ssh", r"^SSH-([\d.]+)-dropbear_([\w.]+)")
-        .product("Dropbear sshd")
-        .version("${2}")
-        .info(&["protocol ${1}"]),
-    r("ssh", r"^SSH-([\d.]+)-libssh[_-]([\d.]+)")
-        .product("libssh")
-        .version("${2}")
-        .info(&["protocol ${1}"]),
-    r("ssh", r"^SSH-([\d.]+)-Cisco-([\d.]+)")
-        .product("Cisco SSH")
-        .version("${2}")
-        .info(&["protocol ${1}"]),
-    r("ssh", r"^SSH-([\d.]+)-ROSSSH")
-        .product("MikroTik RouterOS sshd")
-        .info(&["protocol ${1}"]),
-    r("ssh", r"^SSH-([\d.]+)-paramiko_([\d.]+)")
-        .product("Paramiko")
-        .version("${2}")
-        .info(&["protocol ${1}"]),
-    r("ssh", r"^SSH-([\d.]+)-AsyncSSH_([\d.]+)")
-        .product("AsyncSSH")
-        .version("${2}")
-        .info(&["protocol ${1}"]),
-    r("ssh", r"^SSH-([\d.]+)-Erlang/([\d.]+)")
-        .product("Erlang sshd")
-        .version("${2}")
-        .info(&["protocol ${1}"]),
-    r("ssh", r"^SSH-([\d.]+)-Go\r?\n")
-        .product("Go x/crypto/ssh")
-        .info(&["protocol ${1}"]),
-    r("ssh", r"^SSH-([\d.]+)-mod_sftp")
-        .product("ProFTPD mod_sftp")
-        .info(&["protocol ${1}"]),
-    r(
-        "ssh",
-        r"^SSH-([\d.]+)-[\d.]+ FlowSsh: Bitvise SSH Server \(WinSSHD\) ([\d.]+)",
-    )
-    .product("Bitvise WinSSHD")
-    .version("${2}")
-    .info(&["protocol ${1}"]),
-    r("ssh", r"^SSH-([\d.]+)-([^\r\n]+)")
-        .product("${2}")
-        .info(&["protocol ${1}"]),
-    // SMTP, before FTP: both greet with 220.
-    r("smtp", r"^220[ -](\S+) ESMTP Postfix")
-        .product("Postfix smtpd")
-        .info(&["host: ${1}"]),
-    r("smtp", r"^220[ -](\S+) ESMTP Exim ([\d.]+)")
-        .product("Exim smtpd")
-        .version("${2}")
-        .info(&["host: ${1}"]),
-    r("smtp", r"^220[ -](\S+) ESMTP Sendmail ([\w.]+)")
-        .product("Sendmail")
-        .version("${2}")
-        .info(&["host: ${1}"]),
-    r("smtp", r"^220[ -](\S+) ESMTP OpenSMTPD")
-        .product("OpenSMTPD")
-        .info(&["host: ${1}"]),
-    r("smtp", r"^220[ -](\S+) Microsoft ESMTP MAIL Service")
-        .product("Microsoft ESMTP")
-        .info(&["host: ${1}"]),
-    r("smtp", r"^220[ -](\S+) ESMTP Haraka[/ ]([\d.]+)")
-        .product("Haraka smtpd")
-        .version("${2}")
-        .info(&["host: ${1}"]),
-    r("smtp", r"^220[ -](\S+) [^\r\n]*\bE?SMTP\b").info(&["host: ${1}"]),
-    // FTP
-    r("ftp", r"^220[ -][^\r\n]*\(vsFTPd ([\w.]+)\)")
-        .product("vsftpd")
-        .version("${1}"),
-    r("ftp", r"^220[ -]ProFTPD ([\d.]+\w*) Server")
-        .product("ProFTPD")
-        .version("${1}"),
-    r("ftp", r"^220[ -]ProFTPD").product("ProFTPD"),
-    r("ftp", r"^220-+ Welcome to Pure-FTPd").product("Pure-FTPd"),
-    r("ftp", r"^220[ -]FileZilla Server(?: version)? ([\w.]+)")
-        .product("FileZilla ftpd")
-        .version("${1}"),
-    r("ftp", r"^220[ -]Microsoft FTP Service").product("Microsoft ftpd"),
-    r("ftp", r"^220[ -]Serv-U FTP Server v([\d.]+)")
-        .product("Serv-U ftpd")
-        .version("${1}"),
-    r("ftp", r"^220[ -](\S+) FTP server \(MikroTik ([\d.]+)\)")
-        .product("MikroTik RouterOS ftpd")
-        .version("${2}")
-        .info(&["host: ${1}"]),
-    r("ftp", r"^220[ -]bftpd ([\d.]+)")
-        .product("bftpd")
-        .version("${1}"),
-    r("ftp", r"^220[ -][^\r\n]*\bFTP\b"),
-    // POP3 and IMAP
-    r("pop3", r"^\+OK [^\r\n]*Dovecot").product("Dovecot pop3d"),
-    r(
-        "pop3",
-        r"^\+OK The Microsoft Exchange POP3 service is ready",
-    )
-    .product("Microsoft Exchange pop3d"),
-    r("pop3", r"^\+OK [^\r\n]*Cyrus POP3 v?([\w.\-]+)")
-        .product("Cyrus pop3d")
-        .version("${1}"),
-    r("pop3", r"^\+OK Hello there").product("Courier pop3d"),
-    r("pop3", r"^\+OK [^\r\n]*POP3"),
-    r("imap", r"^\* OK [^\r\n]*Dovecot").product("Dovecot imapd"),
-    r(
-        "imap",
-        r"^\* OK The Microsoft Exchange IMAP4 service is ready",
-    )
-    .product("Microsoft Exchange imapd"),
-    r("imap", r"^\* OK [^\r\n]*Cyrus IMAP[^\r\n]*? v?(\d[\w.\-]*)")
-        .product("Cyrus imapd")
-        .version("${1}"),
-    r("imap", r"^\* OK [^\r\n]*Courier-IMAP").product("Courier imapd"),
-    r("imap", r"^\* OK [^\r\n]*IMAP"),
-    // MySQL and MariaDB: a handshake packet, protocol version 10.
-    r("mysql", r"^.\x00\x00\x00\x0a5\.5\.5-([\d.]+)-MariaDB")
-        .product("MariaDB")
-        .version("${1}"),
-    r("mysql", r"^.\x00\x00\x00\x0a([\d.]+)-MariaDB")
-        .product("MariaDB")
-        .version("${1}"),
-    r("mysql", r"^.\x00\x00\x00\x0a(\d[\w.\-]*)\x00")
-        .product("MySQL")
-        .version("${1}"),
-    r(
-        "mysql",
-        r"^.\x00\x00\x00\xff..Host .* is not allowed to connect to this (MySQL|MariaDB) server",
-    )
-    .product("${1}")
-    .info(&["unauthorized"]),
-    // Redis
-    r("redis", r"redis_version:([\d.]+)")
-        .product("Redis key-value store")
-        .version("${1}"),
-    r("redis", r"^-NOAUTH ")
-        .product("Redis key-value store")
-        .info(&["authentication required"]),
-    // Redis reading our HTTP probe as a GET command.
-    r(
-        "redis",
-        r"^-ERR wrong number of arguments for 'get' command\r\n",
-    )
-    .product("Redis key-value store"),
-    r("redis", r"^-DENIED Redis is running in protected mode")
-        .product("Redis key-value store")
-        .info(&["protected mode"]),
-    // memcached
-    r("memcache", r"^VERSION ([\d.]+)\r\n")
-        .product("Memcached")
-        .version("${1}"),
-    // PostgreSQL answers an SSLRequest with a single S (yes) or N (no).
-    r("postgresql", r"^[SN]\z")
-        .probe("pgsql")
-        .product("PostgreSQL DB"),
-    // AMQP: Connection.Start lists the broker's product and version.
-    r(
-        "amqp",
-        r"^\x01\x00\x00.*\x07productS....RabbitMQ.*\x07versionS....([\d.]+)",
-    )
-    .product("RabbitMQ")
-    .version("${1}"),
-    r("amqp", r"^\x01\x00\x00\x00").probe("amqp"),
-    r("amqp", r"^AMQP\x00\x00\x09\x01").probe("amqp"),
-    // MQTT: CONNACK.
-    r("mqtt", r"^\x20\x02\x00[\x00-\x05]").probe("mqtt"),
-    // MongoDB: an OP_MSG reply (opcode 2013) to buildinfo.
-    r(
-        "mongodb",
-        r"^.{12}\xdd\x07\x00\x00.*\x02version\x00....(\d[\w.\-]*)\x00",
-    )
-    .probe("mongodb")
-    .product("MongoDB")
-    .version("${1}"),
-    r("mongodb", r"^.{12}\xdd\x07\x00\x00")
-        .probe("mongodb")
-        .product("MongoDB"),
-    // ZooKeeper: the version, without the build hash after it.
-    r("zookeeper", r"^Zookeeper version: ([\w.]+)")
-        .product("Apache ZooKeeper")
-        .version("${1}"),
-    r(
-        "zookeeper",
-        r"^srvr is not executed because it is not in the whitelist",
-    )
-    .product("Apache ZooKeeper")
-    .info(&["four-letter commands restricted"]),
-    // Talk-first services.
-    r("rsync", r"^@RSYNCD: ([\d.]+)").info(&["protocol ${1}"]),
-    r("nntp", r"^20[01] [^\r\n]*InterNetNews server INN ([\d.]+)")
-        .product("INN")
-        .version("${1}"),
-    r("nntp", r"^20[01] [^\r\n]*\b(?i:nntp|news)\b"),
-    r(
-        "irc",
-        r"^:\S+ NOTICE (?:AUTH|\*) :\*\*\* (?:Looking up|Checking|Processing)",
-    ),
-    // Others
-    r("vnc", r"^RFB (\d{3})\.(\d{3})\n")
-        .product("VNC")
-        .info(&["protocol ${1}.${2}"]),
-    r("rtsp", r"^RTSP/1\.0 \d{3}"),
-    r("telnet", r"^\xff[\xfb-\xfe]"),
-];
-
-static COMPILED: LazyLock<Vec<(&'static Rule, Regex)>> = LazyLock::new(|| {
-    RULES
-        .iter()
-        .map(|rule| {
-            let re = RegexBuilder::new(&format!("(?s-u){}", rule.pattern))
-                .build()
-                .unwrap_or_else(|e| panic!("bad service rule {:?}: {e}", rule.pattern));
-            (rule, re)
-        })
-        .collect()
-});
-
-/// Identify the service that sent `data` in reply to `probe`.
-pub(super) fn match_response(probe: &str, data: &[u8]) -> Option<ServiceInfo> {
+/// Identify the service that sent `data` in reply to `probe`. Order: the
+/// built-in parser for the probe, the hard rules in file order, the
+/// generic header reader, then the soft rules.
+pub(super) fn match_response(db: &ServiceDb, probe: &str, data: &[u8]) -> Option<Matched> {
     if data.is_empty() {
         return None;
     }
-    if let Some(info) = parse_headers(data) {
-        return Some(info);
-    }
     if let Some(info) = super::parsers::parse(probe, data) {
-        return Some(info);
+        return Some(Matched {
+            found: Found::Hard(Box::new(info)),
+            by: format!("built-in parser {probe}"),
+        });
     }
-    COMPILED.iter().find_map(|(rule, re)| {
-        if rule.probe.is_some_and(|p| p != probe) {
-            return None;
+    let applicable = || db.rules.iter().filter(|r| r.applies_to(probe));
+    for rule in applicable().filter(|r| !r.soft) {
+        if let Some(caps) = rule.regex.captures(data) {
+            return Some(Matched {
+                found: Found::Hard(Box::new(fill_info(rule, &caps))),
+                by: format!("{} line {}", rules_name(db), rule.line),
+            });
         }
-        let caps = re.captures(data)?;
-        let info = rule
-            .info
-            .iter()
-            .filter_map(|t| fill(&caps, t))
-            .collect::<Vec<_>>();
-        Some(ServiceInfo {
-            name: rule.service.to_string(),
-            product: fill(&caps, rule.product),
-            version: fill(&caps, rule.version),
-            extra_info: (!info.is_empty()).then(|| info.join("; ")),
-            ..Default::default()
+    }
+    if let Some(info) = parse_headers(data) {
+        return Some(Matched {
+            found: Found::Hard(Box::new(info)),
+            by: "built-in header reader".into(),
+        });
+    }
+    applicable()
+        .filter(|r| r.soft)
+        .find(|r| r.regex.is_match(data))
+        .map(|rule| Matched {
+            found: Found::Soft(rule.service.clone()),
+            by: format!("{} line {}", rules_name(db), rule.line),
         })
-    })
 }
 
-fn fill(caps: &Captures, template: &str) -> Option<String> {
-    if template.is_empty() {
-        return None;
+fn rules_name(db: &ServiceDb) -> String {
+    if db.source == "built-in" {
+        "built-in rules".into()
+    } else {
+        db.source.clone()
     }
-    let mut out = Vec::new();
-    caps.expand(template.as_bytes(), &mut out);
-    clean(&out)
+}
+
+fn fill_info(rule: &Rule, caps: &regex::bytes::Captures) -> ServiceInfo {
+    let info: Vec<String> = rule
+        .info
+        .iter()
+        .filter_map(|t| Rule::fill(caps, t))
+        .collect();
+    ServiceInfo {
+        name: rule.service.clone(),
+        product: Rule::fill(caps, &rule.product),
+        version: Rule::fill(caps, &rule.version),
+        extra_info: (!info.is_empty()).then(|| info.join("; ")),
+        hostname: Rule::fill(caps, &rule.host),
+        os_type: Rule::fill(caps, &rule.os),
+        device_type: Rule::fill(caps, &rule.device),
+        cpe: rule
+            .cpe
+            .iter()
+            .filter_map(|t| Rule::fill(caps, t))
+            // A version group that matched nothing leaves a trailing colon.
+            .map(|c| c.trim_end_matches(':').to_string())
+            .collect(),
+        ..Default::default()
+    }
 }
 
 /// Text from a response, made safe to print: control characters dropped,
@@ -477,13 +112,6 @@ pub(super) fn clean(bytes: &[u8]) -> Option<String> {
 
 static STATUS_LINE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?-u)^(HTTP|RTSP|SIP)/\d(?:\.\d)? \d{3}").expect("valid regex"));
-static ES_VERSION: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r#"(?-u)"number"\s*:\s*"([\w.\-]+)""#).expect("valid regex"));
-static COUCHDB_VERSION: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?-u)"couchdb"\s*:\s*"Welcome".*?"version"\s*:\s*"([\w.\-]+)""#)
-        .expect("valid regex")
-});
-
 /// HTTP, RTSP and SIP responses, which share a header format. The product
 /// comes from the Server header (or SIP's User-Agent).
 fn parse_headers(data: &[u8]) -> Option<ServiceInfo> {
@@ -492,7 +120,7 @@ fn parse_headers(data: &[u8]) -> Option<ServiceInfo> {
         .windows(4)
         .position(|w| w == b"\r\n\r\n")
         .unwrap_or(data.len());
-    let (head, body) = data.split_at(split);
+    let head = &data[..split];
     let mut info = ServiceInfo::named(match &caps[1] {
         b"RTSP" => "rtsp",
         b"SIP" => "sip",
@@ -503,15 +131,6 @@ fn parse_headers(data: &[u8]) -> Option<ServiceInfo> {
         info.product = Some(product);
         info.version = version;
         info.extra_info = extra;
-    }
-    // Some HTTP APIs describe themselves in a JSON body at /.
-    let body_has = |s: &[u8]| body.windows(s.len()).any(|w| w == s);
-    if body_has(b"\"cluster_name\"") && body_has(b"\"lucene_version\"") {
-        info.product = Some("Elasticsearch REST API".into());
-        info.version = ES_VERSION.captures(body).and_then(|c| clean(&c[1]));
-    } else if let Some(c) = COUCHDB_VERSION.captures(body) {
-        info.product = Some("CouchDB httpd".into());
-        info.version = clean(&c[1]);
     }
     Some(info)
 }
@@ -579,13 +198,18 @@ pub(super) fn unrecognized(data: &[u8], guess: &str) -> ServiceInfo {
 mod tests {
     use super::*;
 
-    fn m(data: &[u8]) -> ServiceInfo {
-        match_response("null", data).unwrap_or_else(|| panic!("no match for {data:?}"))
+    use crate::service::db::ServiceDb;
+
+    /// The hard match for a reply to `probe`, with the built-in rules.
+    fn mr(probe: &str, data: &[u8]) -> Option<ServiceInfo> {
+        match match_response(&ServiceDb::builtin(), probe, data)?.found {
+            Found::Hard(info) => Some(*info),
+            Found::Soft(_) => None,
+        }
     }
 
-    #[test]
-    fn all_rules_compile() {
-        assert_eq!(COMPILED.len(), RULES.len());
+    fn m(data: &[u8]) -> ServiceInfo {
+        mr("null", data).unwrap_or_else(|| panic!("no match for {data:?}"))
     }
 
     #[test]
@@ -616,7 +240,9 @@ mod tests {
             (i.name.as_str(), i.product.as_deref()),
             ("smtp", Some("Postfix smtpd"))
         );
-        assert_eq!(i.extra_info.as_deref(), Some("host: mail.example.org"));
+        assert_eq!(i.hostname.as_deref(), Some("mail.example.org"));
+        assert_eq!(i.extra_info.as_deref(), Some("Debian/GNU"));
+        assert_eq!(i.cpe, vec!["cpe:/a:postfix:postfix"]);
         let i = m(b"220 (vsFTPd 3.0.5)\r\n");
         assert_eq!(
             (i.name.as_str(), i.version.as_deref()),
@@ -663,15 +289,15 @@ mod tests {
 
     #[test]
     fn probe_specific_rules() {
-        assert!(match_response("null", b"N").is_none());
-        let i = match_response("pgsql", b"N").unwrap();
+        assert!(mr("null", b"N").is_none());
+        let i = mr("pgsql", b"N").unwrap();
         assert_eq!(i.name, "postgresql");
-        let i = match_response("redis", b"$300\r\n# Server\r\nredis_version:7.2.4\r\n").unwrap();
+        let i = mr("redis", b"$300\r\n# Server\r\nredis_version:7.2.4\r\n").unwrap();
         assert_eq!(
             (i.name.as_str(), i.version.as_deref()),
             ("redis", Some("7.2.4"))
         );
-        let i = match_response("memcached", b"VERSION 1.6.21\r\n").unwrap();
+        let i = mr("memcached", b"VERSION 1.6.21\r\n").unwrap();
         assert_eq!(i.version.as_deref(), Some("1.6.21"));
     }
 
@@ -682,32 +308,10 @@ mod tests {
         frame.extend_from_slice(b"\x00\x00\x00\x40");
         frame.extend_from_slice(b"\x07productS\x00\x00\x00\x08RabbitMQ");
         frame.extend_from_slice(b"\x07versionS\x00\x00\x00\x0612.0.3");
-        let i = match_response("amqp", &frame).unwrap();
+        let i = mr("amqp", &frame).unwrap();
         assert_eq!(i.name, "amqp");
         assert_eq!(i.product.as_deref(), Some("RabbitMQ"));
         assert_eq!(i.version.as_deref(), Some("12.0.3"));
-    }
-
-    #[test]
-    fn probe_payload_lengths() {
-        let len = |name: &str| {
-            PROBES
-                .iter()
-                .find(|p| p.name == name)
-                .unwrap()
-                .payload
-                .len()
-        };
-        // Each length matches the one written inside the payload.
-        assert_eq!(len("rdp"), 0x13);
-        assert_eq!(len("mssql"), 0x2f);
-        assert_eq!(len("smb"), 4 + 0x6c);
-        assert_eq!(len("ldap"), 2 + 0x79);
-        assert_eq!(len("mongodb"), 0x38);
-        let names: Vec<_> = PROBES.iter().map(|p| p.name).collect();
-        let mut unique = names.clone();
-        unique.dedup();
-        assert_eq!(names, unique);
     }
 
     #[test]
@@ -765,14 +369,14 @@ mod tests {
         let mut reply = vec![0u8; 12];
         reply.extend_from_slice(b"\xdd\x07\x00\x00\x00\x00\x00\x00\x00");
         reply.extend_from_slice(b"\x40\x00\x00\x00\x02version\x00\x06\x00\x00\x007.0.5\x00");
-        let i = match_response("mongodb", &reply).unwrap();
+        let i = mr("mongodb", &reply).unwrap();
         assert_eq!(
             (i.name.as_str(), i.version.as_deref()),
             ("mongodb", Some("7.0.5"))
         );
         // Without the probe, those bytes mean nothing.
-        assert!(match_response("null", &reply).is_none());
-        let i = match_response(
+        assert!(mr("null", &reply).is_none());
+        let i = mr(
             "zookeeper",
             b"Zookeeper version: 3.8.4-9316c2a7a97e1666d8f4593f34dd6fc36ecc436c, built on 2024-02-12\n",
         )
@@ -785,7 +389,7 @@ mod tests {
 
     #[test]
     fn rtsp_sip_and_more_http() {
-        let i = match_response(
+        let i = mr(
             "rtsp",
             b"RTSP/1.0 200 OK\r\nCSeq: 1\r\nServer: GStreamer RTSP server\r\n\r\n",
         )
@@ -794,7 +398,7 @@ mod tests {
             (i.name.as_str(), i.product.as_deref()),
             ("rtsp", Some("GStreamer"))
         );
-        let i = match_response(
+        let i = mr(
             "sip",
             b"SIP/2.0 200 OK\r\nUser-Agent: Asterisk PBX 20.5.0\r\n\r\n",
         )
@@ -823,9 +427,274 @@ mod tests {
 
     #[test]
     fn unknown_data() {
-        assert!(match_response("null", b"hello there\r\n").is_none());
+        assert!(mr("null", b"hello there\r\n").is_none());
         let i = unrecognized(b"hi\r\n\x01", "foo");
         assert_eq!(i.name, "foo?");
         assert_eq!(i.fingerprint.as_deref(), Some("hi\\r\\n\\x01"));
+    }
+    /// (service, product, version) of a hard match.
+    fn spv(i: &ServiceInfo) -> (&str, Option<&str>, Option<&str>) {
+        (i.name.as_str(), i.product.as_deref(), i.version.as_deref())
+    }
+
+    #[test]
+    fn host_os_device_and_cpe() {
+        let i = m(b"SSH-2.0-OpenSSH_9.6p1 Ubuntu-3ubuntu13.5\r\n");
+        assert_eq!(i.os_type.as_deref(), Some("Linux"));
+        assert_eq!(
+            i.cpe,
+            vec!["cpe:/a:openbsd:openssh:9.6p1", "cpe:/o:linux:linux_kernel"]
+        );
+        let i = m(b"SSH-2.0-OpenSSH_8.0\r\n");
+        assert_eq!((i.os_type, i.cpe.len()), (None, 1));
+        let i = m(b"SSH-2.0-ROSSSH\r\n");
+        assert_eq!(i.device_type.as_deref(), Some("router"));
+        let i =
+            m(b"220 mx.example.org Microsoft ESMTP MAIL Service, Version: 10.0.17763.1 ready\r\n");
+        assert_eq!(
+            spv(&i),
+            ("smtp", Some("Microsoft ESMTP"), Some("10.0.17763.1"))
+        );
+        assert_eq!(i.hostname.as_deref(), Some("mx.example.org"));
+        assert_eq!(i.os_type.as_deref(), Some("Windows"));
+        // A CPE template whose version group is empty loses its colon.
+        let i = m(b"HTTP/1.1 200 OK\r\nServer: openresty\r\n\r\n");
+        assert_eq!(i.cpe, vec!["cpe:/a:openresty:openresty"]);
+    }
+
+    #[test]
+    fn more_ssh() {
+        let i = m(b"SSH-2.0-dropbear_2022.83\r\n");
+        assert_eq!(spv(&i), ("ssh", Some("Dropbear sshd"), Some("2022.83")));
+        let i = m(b"SSH-2.0-OpenSSH_7.4p1 Debian-10+deb9u7\r\n");
+        assert_eq!(
+            i.extra_info.as_deref(),
+            Some("Debian-10+deb9u7; protocol 2.0")
+        );
+        let i = m(b"SSH-2.0-HUAWEI-1.5\r\n");
+        assert_eq!(spv(&i), ("ssh", Some("Huawei VRP sshd"), Some("1.5")));
+        let i = m(b"SSH-2.0-mpSSH_0.2.1\r\n");
+        assert_eq!(i.device_type.as_deref(), Some("remote management"));
+        let i = m(b"SSH-2.0-Sun_SSH_1.1.4\r\n");
+        assert_eq!(i.os_type.as_deref(), Some("Solaris"));
+        let i = m(b"SSH-2.0-Twisted\r\n");
+        assert_eq!(spv(&i), ("ssh", Some("Twisted Conch sshd"), None));
+    }
+
+    #[test]
+    fn more_mail_and_ftp() {
+        let i = m(b"220 ftp.example.org FTP server (Version wu-2.6.2(1) Mon Jan 1 00:00:00 UTC 2024) ready.\r\n");
+        assert_eq!(spv(&i), ("ftp", Some("WU-FTPD"), Some("wu-2.6.2")));
+        let i = m(b"220 ProFTPD 1.3.8b Server (Debian) [::ffff:10.0.0.5]\r\n");
+        assert_eq!(i.cpe, vec!["cpe:/a:proftpd:proftpd:1.3.8b"]);
+        let i = m(b"* OK [CAPABILITY IMAP4REV1 LITERAL+] localhost IMAP4rev1 2007f.404 at Mon, 1 Jan 2024\r\n");
+        assert_eq!(spv(&i), ("imap", Some("UW imapd"), Some("2007f.404")));
+        let i = m(b"+OK Qpopper (version 4.1.0) at mail starting.\r\n");
+        assert_eq!(spv(&i), ("pop3", Some("Qpopper"), Some("4.1.0")));
+        let i = m(b"220 mail.example.org ESMTP Exim 4.97 Mon, 01 Jan 2024\r\n");
+        assert_eq!(i.cpe, vec!["cpe:/a:exim:exim:4.97"]);
+    }
+
+    #[test]
+    fn soft_matches() {
+        let db = ServiceDb::builtin();
+        let soft =
+            |probe: &str, data: &[u8]| match match_response(&db, probe, data).map(|m| m.found) {
+                Some(Found::Soft(s)) => Some(s),
+                _ => None,
+            };
+        assert_eq!(soft("null", b"+OK ready\r\n").as_deref(), Some("pop3"));
+        assert_eq!(soft("null", b"* OK ready\r\n").as_deref(), Some("imap"));
+        // Only for replies to the listen probe.
+        assert_eq!(soft("http", b"+OK ready\r\n"), None);
+        let by = match_response(&db, "null", b"+OK ready\r\n").unwrap().by;
+        assert!(by.starts_with("built-in rules line "), "{by}");
+    }
+
+    #[test]
+    fn http_rules() {
+        let i = m(b"HTTP/1.1 200 OK\r\nDate: x\r\nServer: Apache/2.4.58 (Ubuntu)\r\n\r\n");
+        assert_eq!(spv(&i), ("http", Some("Apache httpd"), Some("2.4.58")));
+        assert_eq!(i.extra_info.as_deref(), Some("Ubuntu"));
+        assert_eq!(i.cpe, vec!["cpe:/a:apache:http_server:2.4.58"]);
+        let i = m(b"HTTP/1.1 404 Not Found\r\nserver: nginx/1.24.0\r\n\r\n");
+        assert_eq!(spv(&i), ("http", Some("nginx"), Some("1.24.0")));
+        let i = m(b"HTTP/1.1 200 OK\r\nServer: Microsoft-IIS/10.0\r\n\r\n");
+        assert_eq!(i.os_type.as_deref(), Some("Windows"));
+        let i = m(b"HTTP/1.1 400 Bad Request\r\nServer: squid/6.6\r\n\r\n");
+        assert_eq!(
+            spv(&i),
+            ("http-proxy", Some("Squid http proxy"), Some("6.6"))
+        );
+        let i = m(b"HTTP/1.1 403 Forbidden\r\nX-Content-Type-Options: nosniff\r\nX-Jenkins: 2.440.1\r\n\r\n");
+        assert_eq!(spv(&i), ("http", Some("Jenkins"), Some("2.440.1")));
+        // An empty X-Jenkins header does not take a version from the body.
+        let i = m(b"HTTP/1.1 200 OK\r\nX-Jenkins:\r\n\r\n2.440.1");
+        assert_ne!(i.product.as_deref(), Some("Jenkins"));
+        let i = m(b"HTTP/1.1 200 OK\r\nX-Powered-By: Express\r\nContent-Type: text/html\r\n\r\n");
+        assert_eq!(i.product.as_deref(), Some("Node.js Express framework"));
+        let i = m(b"HTTP/1.1 200 OK\r\nServer: Docker/24.0.7 (linux)\r\n\r\n");
+        assert_eq!(spv(&i), ("http", Some("Docker API"), Some("24.0.7")));
+        assert_eq!(i.os_type.as_deref(), Some("linux"));
+        // A Server line in the body does not count.
+        let i = m(b"HTTP/1.1 200 OK\r\nServer: TestServer/1.0\r\n\r\nServer: Apache/2.4.58\r\n");
+        assert_eq!(spv(&i), ("http", Some("TestServer"), Some("1.0")));
+        // No rule for this server: the generic header reader.
+        let i = m(b"HTTP/1.0 200 OK\r\nServer: TestServer/1.2.3 (Test)\r\n\r\n");
+        assert_eq!(spv(&i), ("http", Some("TestServer"), Some("1.2.3")));
+        assert!(i.cpe.is_empty());
+    }
+
+    #[test]
+    fn databases_queues_and_more() {
+        let i = mr(
+            "redis",
+            b"$400\r\n# Server\r\nredis_version:7.2.4\r\nredis_mode:standalone\r\nos:Linux 6.8.0 x86_64\r\n",
+        )
+        .unwrap();
+        assert_eq!(
+            spv(&i),
+            ("redis", Some("Redis key-value store"), Some("7.2.4"))
+        );
+        assert_eq!(i.os_type.as_deref(), Some("Linux"));
+        let i = m(b"INFO {\"server_id\":\"N1\",\"version\":\"2.10.7\",\"go\":\"go1.22\"}\r\n");
+        assert_eq!(spv(&i), ("nats", Some("NATS server"), Some("2.10.7")));
+        let i = m(b"\x00\x00\x01\x0c\x01ActiveMQ\x00\x00\x00\x0c\x01\x00\x00\x00\x00\x0fProviderVersion\x09\x00\x066.0.1\x00");
+        assert_eq!(
+            spv(&i),
+            (
+                "apachemq",
+                Some("ActiveMQ OpenWire transport"),
+                Some("6.0.1")
+            )
+        );
+        let i = mr(
+            "beanstalkd",
+            b"OK 120\r\n---\ncurrent-jobs-urgent: 0\nversion: \"1.13\"\n",
+        )
+        .unwrap();
+        assert_eq!(spv(&i), ("beanstalkd", Some("beanstalkd"), Some("1.13")));
+        let mut sup = b"\x84\x00\x00\x01\x06\x00\x00\x00\x40\x00\x02".to_vec();
+        sup.extend_from_slice(b"\x00\x0bCQL_VERSION\x00\x01\x00\x053.4.7");
+        let i = mr("cassandra", &sup).unwrap();
+        assert_eq!(i.extra_info.as_deref(), Some("CQL 3.4.7"));
+        let i = mr("epmd", b"\x00\x00\x11\x11name rabbit at port 25672\n").unwrap();
+        assert_eq!(i.extra_info.as_deref(), Some("node rabbit at port 25672"));
+        let i = m(b"( success ( 2 2 ( ) ( edit-pipeline svndiff1 ) ) )");
+        assert_eq!(spv(&i), ("svnserve", Some("Subversion svnserve"), None));
+        let i = m(
+            b"220 dict.example.org dictd 1.12.1/rf on Linux 6.1.0-18-amd64 <auth.mime> <1.2@x>\r\n",
+        );
+        assert_eq!(spv(&i), ("dict", Some("dictd"), Some("1.12.1/rf")));
+        assert_eq!(
+            mr("crlf", b"0 , 0 : ERROR : INVALID-PORT\r\n")
+                .unwrap()
+                .name,
+            "auth"
+        );
+        let i = m(b"RFB 003.889\n");
+        assert_eq!(i.os_type.as_deref(), Some("Mac OS X"));
+        let i = m(b"\xff\xfb\x01\xff\xfb\x03\r\n\r\nUser Access Verification\r\n\r\nPassword: ");
+        assert_eq!(i.product.as_deref(), Some("Cisco telnetd"));
+    }
+
+    #[test]
+    fn binary_probe_replies() {
+        let mut x11 = b"\x01\x00\x0b\x00\x00\x00\x10\x00".to_vec();
+        x11.extend_from_slice(&[0; 32]);
+        x11.extend_from_slice(b"The X.Org Foundation\x00\x00");
+        let i = mr("x11", &x11).unwrap();
+        assert_eq!(i.name, "X11");
+        assert_eq!(
+            i.extra_info.as_deref(),
+            Some("vendor: The X.Org Foundation")
+        );
+        let i = mr(
+            "x11",
+            b"\x00\x16\x0b\x00\x00\x00\x06\x00No protocol specified\n\x00\x00",
+        )
+        .unwrap();
+        assert_eq!(i.extra_info.as_deref(), Some("access denied"));
+        // An accepted, successful reply to the portmapper NULL call.
+        let mut rpc = b"\x80\x00\x00\x18FPRO\x00\x00\x00\x01\x00\x00\x00\x00".to_vec();
+        rpc.extend_from_slice(&[0; 8]);
+        rpc.extend_from_slice(&[0; 4]);
+        assert_eq!(mr("rpc", &rpc).unwrap().name, "rpcbind");
+        // Program unavailable: an RPC service, not the portmapper.
+        let mut other = rpc.clone();
+        other[27] = 1;
+        assert_eq!(mr("rpc", &other).unwrap().name, "rpc");
+        assert_eq!(mr("rpc-udp", &rpc[4..]).unwrap().name, "rpcbind");
+        assert!(mr("null", &rpc).is_none());
+        assert_eq!(
+            mr("socks5", b"\x05\x00").unwrap().extra_info.as_deref(),
+            Some("no authentication")
+        );
+        assert_eq!(mr("ajp", b"AB\x00\x01\x09").unwrap().name, "ajp13");
+        assert_eq!(
+            mr("java-rmi", b"\x4e\x00\x09127.0.0.1\x00\x00\xc3\x50")
+                .unwrap()
+                .name,
+            "java-rmi"
+        );
+        let mut pptp = b"\x00\x9c\x00\x01\x1a\x2b\x3c\x4d\x00\x02\x00\x00\x01\x00\x01\x00".to_vec();
+        pptp.extend_from_slice(&[0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 0, 1]);
+        pptp.extend_from_slice(&{
+            let mut h = [0u8; 64];
+            h[..3].copy_from_slice(b"vpn");
+            h
+        });
+        pptp.extend_from_slice(&{
+            let mut v = [0u8; 64];
+            v[..9].copy_from_slice(b"Microsoft");
+            v
+        });
+        let i = mr("pptp", &pptp).unwrap();
+        assert_eq!(
+            (i.product.as_deref(), i.hostname.as_deref()),
+            (Some("Microsoft"), Some("vpn"))
+        );
+        assert_eq!(
+            mr(
+                "git",
+                b"0046ERR access denied or repository not exported: /\n"
+            )
+            .unwrap()
+            .name,
+            "git"
+        );
+        let i = mr("xmpp", b"<?xml version='1.0'?><stream:stream xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' id='1' from='example.org' version='1.0'>").unwrap();
+        assert_eq!(i.extra_info.as_deref(), Some("client stream"));
+    }
+
+    #[test]
+    fn udp_replies() {
+        let i = mr(
+            "openvpn",
+            b"\x40FEDCBA98\x01\x00\x00\x00\x00FEROPROB\x00\x00\x00\x00",
+        )
+        .unwrap();
+        assert_eq!(i.name, "openvpn");
+        let i = mr(
+            "memcached-udp",
+            b"\x00\x01\x00\x00\x00\x01\x00\x00VERSION 1.6.21\r\n",
+        )
+        .unwrap();
+        assert_eq!(spv(&i), ("memcache", Some("Memcached"), Some("1.6.21")));
+        let mut ipmi = b"\x06\x00\xff\x07\x00\x00\x00\x00\x00\x00\x00\x00\x00\x10".to_vec();
+        ipmi.extend_from_slice(b"\x81\x1c\x63\x20\x00\x38\x00\x01\x97\x04\x03\x00\x00\x00\x00\x09");
+        let i = mr("ipmi", &ipmi).unwrap();
+        assert_eq!(spv(&i), ("asf-rmcp", Some("IPMI"), Some("2.0")));
+        ipmi[22] = 0x17;
+        assert_eq!(mr("ipmi", &ipmi).unwrap().version.as_deref(), Some("1.5"));
+        // DNS over TCP goes through the DNS reader.
+        let mut dns = b"\x00\x2c\x13\x38\x84\x00\x00\x01\x00\x01\x00\x00\x00\x00".to_vec();
+        dns.extend_from_slice(b"\x07version\x04bind\x00\x00\x10\x00\x03");
+        dns.extend_from_slice(b"\xc0\x0c\x00\x10\x00\x03\x00\x00\x00\x00\x00\x0a\x099.18.24-1");
+        let i = mr("dns-tcp", &dns).unwrap();
+        assert_eq!(
+            (i.name.as_str(), i.version.as_deref()),
+            ("domain", Some("9.18.24-1"))
+        );
     }
 }

@@ -86,6 +86,29 @@ pub(crate) fn open() -> io::Result<OwnedFd> {
     }
     // SAFETY: fd is a freshly created, owned descriptor.
     let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+    // With -e, only see what arrives on that interface.
+    if let Some(ifc) = crate::netif::interface() {
+        // SAFETY: an all-zero sockaddr_ll is valid; the fields are set below.
+        let mut sll: libc::sockaddr_ll = unsafe { mem::zeroed() };
+        sll.sll_family = libc::AF_PACKET as u16;
+        sll.sll_protocol = proto;
+        sll.sll_ifindex = ifc.index as i32;
+        // SAFETY: bind with a correctly sized sockaddr_ll.
+        let rc = unsafe {
+            libc::bind(
+                fd.as_raw_fd(),
+                (&raw const sll).cast(),
+                mem::size_of::<libc::sockaddr_ll>() as libc::socklen_t,
+            )
+        };
+        if rc != 0 {
+            let e = io::Error::last_os_error();
+            return Err(io::Error::new(
+                e.kind(),
+                format!("binding the capture to interface {} (-e): {e}", ifc.name),
+            ));
+        }
+    }
     let tv = libc::timeval {
         tv_sec: 0,
         tv_usec: 50_000,

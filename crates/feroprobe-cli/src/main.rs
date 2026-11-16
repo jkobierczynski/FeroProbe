@@ -16,9 +16,9 @@ use feroprobe_core::discovery::{DEFAULT_TCP_PING_PORT, DEFAULT_UDP_PING_PORT};
 use feroprobe_core::timing::parse_duration;
 use feroprobe_core::{
     Evasion, Exclusions, Fragment, HostResult, IpVersion, OsOptions, PingProbes, PortLists,
-    RawTcpScan, ScanConfig, SctpScanKind, Target, TcpScanKind, Timing, connect_scan,
-    detect_services, discover, ip_protocol_scan, os_detect, parse_port_lists, parse_ports,
-    parse_scanflags, raw_ipv6_available, raw_sockets_available, raw_tcp_scan,
+    RawTcpScan, RttTimeouts, ScanConfig, SctpScanKind, Target, TcpScanKind, Timing, VersionScan,
+    connect_scan, detect_services, discover, ip_protocol_scan, os_detect, parse_port_lists,
+    parse_ports, parse_scanflags, raw_ipv6_available, raw_sockets_available, raw_tcp_scan,
     resolve_targets_lenient, reverse_lookup, sctp_scan, top_ports, top_sctp_ports, top_udp_ports,
     traceroute, udp_scan,
 };
@@ -327,6 +327,19 @@ struct Args {
     #[arg(long = "allow-public-evasion")]
     allow_public_evasion: bool,
 
+    /// -e IFACE: send and receive on this network interface (nmap's -e):
+    /// every socket of the scan is bound to it, its address is the source,
+    /// and only its networks count as local for ARP and neighbour discovery
+    #[arg(short = 'e', value_name = "IFACE")]
+    interface: Option<String>,
+
+    /// -g PORT: send raw TCP, UDP and SCTP probes (port scan, discovery
+    /// pings, OS detection) and UDP scan probes from this source port, like
+    /// nmap's -g. Connect scans, version detection, traceroute and DNS keep
+    /// their own ports
+    #[arg(short = 'g', long = "source-port", value_name = "PORT")]
+    source_port: Option<u16>,
+
     /// Host discovery, nmap style. -Pn: skip it and scan every target as if
     /// it were up. Otherwise pick the probes (default as nmap's: as root,
     /// ICMP echo and timestamp, a TCP SYN to 443 and an ACK to 80; else TCP
@@ -429,19 +442,51 @@ struct Args {
     ordered_ports: bool,
 
     /// Timing template: 0-5 or paranoid, sneaky, polite, normal, aggressive,
-    /// insane (-T4 = aggressive). Sets timeout, retries, concurrency, rate and
-    /// scan delay; those flags still override it. [default: 3, normal]
+    /// insane (-T4 = aggressive). Sets the RTT timeouts, retries,
+    /// concurrency, rate and scan delay; those flags still override it.
+    /// [default: 3, normal]
     /// Given more than once, the last one wins, as in nmap.
     #[arg(short = 'T', value_name = "0-5", value_parser = parse_timing, overrides_with = "timing")]
     timing: Option<Timing>,
 
-    /// Per-probe timeout in milliseconds [default: from -T; normally 1500, or 3000 on Windows]
+    /// A fixed per-probe timeout in milliseconds: sets the minimum, maximum
+    /// and initial RTT timeouts all to this, so the timeout no longer adapts
+    /// [default: adaptive, see --min-rtt-timeout]
     #[arg(long, value_name = "MS")]
     timeout: Option<u64>,
 
-    /// Maximum connect/UDP probes in flight at once [default: from -T; normally 500]
-    #[arg(short = 'c', long, value_name = "N")]
+    /// The shortest a probe's adaptive timeout may get, e.g. 100ms
+    /// (a bare number is seconds) [default: from -T; normally 100ms]
+    #[arg(long, value_name = "TIME", value_parser = parse_min_rtt)]
+    min_rtt_timeout: Option<Duration>,
+
+    /// The longest a probe's adaptive timeout may get, e.g. 2s
+    /// [default: from -T; normally 10s]
+    #[arg(long, value_name = "TIME", value_parser = parse_max_rtt)]
+    max_rtt_timeout: Option<Duration>,
+
+    /// How long a probe waits before any round-trip time is measured,
+    /// e.g. 500ms [default: from -T; normally 1s]
+    #[arg(long, value_name = "TIME", value_parser = parse_initial_rtt)]
+    initial_rtt_timeout: Option<Duration>,
+
+    /// Most probes waiting for an answer at once, and the ceiling of the
+    /// congestion window [default: from -T; normally 500].
+    /// nmap's names --max-parallelism and -M work too
+    #[arg(
+        short = 'c',
+        long,
+        value_name = "N",
+        short_alias = 'M',
+        visible_alias = "max-parallelism",
+        value_parser = parse_parallelism
+    )]
     concurrency: Option<usize>,
+
+    /// At least this many connect/UDP probes in flight at once: raises the
+    /// template's parallelism (nmap's --min-parallelism)
+    #[arg(long, value_name = "N", value_parser = parse_parallelism)]
+    min_parallelism: Option<usize>,
 
     /// Maximum packets per second for raw-socket probes (SYN, ICMP, ARP, NDP) [default: from -T; normally 5000]
     #[arg(long, value_name = "PPS")]
@@ -471,8 +516,38 @@ struct Args {
     #[arg(long, value_name = "MS", default_value_t = 3000)]
     version_timeout: u64,
 
-    /// Extra attempts for probes that get no answer [default: from -T; normally 1]
-    #[arg(long, value_name = "N")]
+    /// With -sV, how hard to try, 0-9 [default: 7]: probes rarer than this
+    /// are only sent to their own ports. The last of --version-intensity,
+    /// --version-light and --version-all wins, as in nmap
+    #[arg(
+        long,
+        value_name = "0-9",
+        value_parser = clap::value_parser!(u8).range(0..=9),
+        overrides_with_all = ["version_intensity", "version_light", "version_all"]
+    )]
+    version_intensity: Option<u8>,
+
+    /// With -sV, only the most likely probes (intensity 2)
+    #[arg(long, overrides_with_all = ["version_intensity", "version_light", "version_all"])]
+    version_light: bool,
+
+    /// With -sV, try every probe (intensity 9)
+    #[arg(long, overrides_with_all = ["version_intensity", "version_light", "version_all"])]
+    version_all: bool,
+
+    /// With -sV, print each service probe, its reply and the rule that
+    /// matched it
+    #[arg(long)]
+    version_trace: bool,
+
+    /// With -sV, read the probes and match rules from FILE instead of the
+    /// built-in ones (FeroProbe's own format; see the manual)
+    #[arg(long, value_name = "FILE")]
+    service_rules: Option<std::path::PathBuf>,
+
+    /// Extra attempts for probes that get no answer [default: from -T; normally 1].
+    /// nmap's name --max-retries works too
+    #[arg(long, value_name = "N", visible_alias = "max-retries")]
     retries: Option<u32>,
 
     /// Only show open (and open|filtered, unfiltered) ports
@@ -844,11 +919,139 @@ fn parse_timing(s: &str) -> Result<Timing, String> {
     s.parse()
 }
 
+/// A parallelism (`-c`/`-M`/`--max-parallelism`, `--min-parallelism`):
+/// at least 1, as nmap requires.
+fn parse_parallelism(s: &str) -> Result<usize, String> {
+    match s.trim().parse::<usize>() {
+        Ok(0) => Err("must be at least 1".to_string()),
+        Ok(n) => Ok(n),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Apply `--min-parallelism`: raise the parallelism to it, or fail like
+/// nmap when an explicit `-c`/`--max-parallelism` is lower. Returns nmap's
+/// warning for a very high value.
+fn apply_min_parallelism(cfg: &mut ScanConfig, args: &Args) -> Result<Vec<String>> {
+    let Some(min) = args.min_parallelism else {
+        return Ok(Vec::new());
+    };
+    if let Some(max) = args.concurrency
+        && min > max
+    {
+        bail!("--min-parallelism={min} must be less than or equal to --max-parallelism={max}");
+    }
+    cfg.concurrency = cfg.concurrency.max(min);
+    cfg.min_parallelism = min;
+    Ok(if min > 100 {
+        vec![format!(
+            "a --min-parallelism of {min} is pretty high, which can hurt reliability"
+        )]
+    } else {
+        Vec::new()
+    })
+}
+
+/// nmap's warnings for `-g`: a connect scan cannot use it, and port 0 may
+/// not work (UDP probes, which go through the system's sockets, cannot
+/// send from it at all).
+fn source_port_warnings(port: u16, connect_scan: bool, udp: bool) -> Vec<String> {
+    let mut w = Vec::new();
+    if connect_scan {
+        w.push(
+            "-g is incompatible with the connect scan (-sT), which keeps the system's source \
+             ports. Use a raw scan such as -sS if you want to set the source port"
+                .to_string(),
+        );
+    }
+    if udp && cfg!(windows) {
+        w.push(
+            "-g does not apply to UDP probes on Windows, which cannot share a source port \
+             between them; they use random ports"
+                .to_string(),
+        );
+    } else if port == 0 {
+        let udp = if udp {
+            "; UDP probes cannot be sent from port 0 and use a random port instead"
+        } else {
+            ""
+        };
+        w.push(format!(
+            "a source port of zero may not work on all systems{udp}"
+        ));
+    }
+    w
+}
+
+/// An RTT timeout option's value, checked like nmap's: a bare number is
+/// seconds, and one of 50000 or more was almost surely meant as
+/// milliseconds (nmap's unit before 2010), so it is refused with a hint.
+fn parse_rtt(s: &str, name: &str) -> Result<Duration, String> {
+    let d = parse_duration(s)?;
+    let bare = s.trim().chars().all(|c| c.is_ascii_digit() || c == '.');
+    if bare && d >= Duration::from_secs(50_000) {
+        let t = s.trim();
+        return Err(format!(
+            "a bare number is seconds, so {t} is {} seconds; use {t}ms for milliseconds \
+             ({name} follows nmap, whose unit has been seconds since 2010)",
+            d.as_secs()
+        ));
+    }
+    Ok(d)
+}
+
+fn parse_min_rtt(s: &str) -> Result<Duration, String> {
+    parse_rtt(s, "--min-rtt-timeout")
+}
+
+fn parse_max_rtt(s: &str) -> Result<Duration, String> {
+    let d = parse_rtt(s, "--max-rtt-timeout")?;
+    if d < Duration::from_millis(5) {
+        return Err("must be at least 5ms".to_string());
+    }
+    Ok(d)
+}
+
+fn parse_initial_rtt(s: &str) -> Result<Duration, String> {
+    let d = parse_rtt(s, "--initial-rtt-timeout")?;
+    if d.is_zero() {
+        return Err("must be positive".to_string());
+    }
+    Ok(d)
+}
+
+/// The probe timeout limits: the template's, then `--timeout` (all three
+/// fixed), then the three RTT options, applied in nmap's order (initial,
+/// minimum, maximum), each moving the others where they would cross.
+fn rtt_timeouts(args: &Args) -> RttTimeouts {
+    let mut rtt = args.timing.unwrap_or_default().rtt_timeouts();
+    if let Some(ms) = args.timeout {
+        rtt = RttTimeouts::fixed(Duration::from_millis(ms));
+    }
+    if let Some(d) = args.initial_rtt_timeout {
+        rtt.set_initial(d);
+    }
+    if let Some(d) = args.min_rtt_timeout {
+        rtt.set_min(d);
+    }
+    if let Some(d) = args.max_rtt_timeout {
+        rtt.set_max(d);
+    }
+    rtt
+}
+
 /// The timing template's settings, with any explicit flags on top.
 fn scan_config(args: &Args) -> ScanConfig {
     let base = args.timing.unwrap_or_default().config();
     ScanConfig {
-        timeout: args.timeout.map_or(base.timeout, Duration::from_millis),
+        rtt: rtt_timeouts(args),
+        // One set of RTT estimates for the whole run, like nmap's per-target
+        // timing: the port scan starts from what discovery measured.
+        rtt_state: feroprobe_core::RttState::new(),
+        timing_level: base.timing_level,
+        min_rate: args.min_rate.unwrap_or(0),
+        // Set by apply_min_parallelism.
+        min_parallelism: 0,
         concurrency: args.concurrency.unwrap_or(base.concurrency).max(1),
         retries: args.retries.unwrap_or(base.retries),
         max_rate: args.max_rate.unwrap_or(base.max_rate).max(1),
@@ -860,6 +1063,7 @@ fn scan_config(args: &Args) -> ScanConfig {
         rate_schedule: Some(feroprobe_core::timing::RateSchedule::new()),
         // Set later by configure_evasion once the targets are known.
         evasion: Evasion::default(),
+        source_port: args.source_port,
     }
 }
 
@@ -958,7 +1162,9 @@ fn gate_evasion(ev: &Evasion, targets: &[Target], plan: &Plan, allow_public: boo
 /// Apply `--min-rate` on top of the timing settings. Raw-socket scans send
 /// as fast as `max_rate` and the scan delay allow, so those must allow the
 /// minimum; connect and UDP probes need enough of them in flight to keep
-/// the rate up even when every probe waits out its timeout. Returns
+/// the rate up even when every probe waits out its initial timeout. The
+/// congestion window lets probes through past its limit to keep the rate
+/// (see `ScanConfig::min_rate`). Returns
 /// warnings for what cannot be guaranteed.
 fn apply_min_rate(
     cfg: &mut ScanConfig,
@@ -987,7 +1193,16 @@ fn apply_min_rate(
         cfg.scan_delay = gap;
     }
     let mut warnings = Vec::new();
-    let needed = (f64::from(min) * cfg.timeout.as_secs_f64()).ceil() as usize;
+    // A silent port holds its place for a whole wait: the initial timeout,
+    // and on Windows at least the connect scan's longer floor.
+    let wait = if cfg!(windows) {
+        cfg.rtt
+            .initial
+            .max(feroprobe_core::connect::WINDOWS_MIN_CONNECT_WAIT)
+    } else {
+        cfg.rtt.initial
+    };
+    let needed = (f64::from(min) * wait.as_secs_f64()).ceil() as usize;
     if needed > cfg.concurrency {
         if let Some(c) = args.concurrency {
             warnings.push(format!(
@@ -1055,6 +1270,14 @@ fn option_warnings(args: &Args, open_files: Option<u64>) -> Vec<String> {
     {
         warnings.push(format!(
             "a probe timeout of {ms} ms is extraordinarily small; accuracy may suffer"
+        ));
+    }
+    if let Some(d) = args.max_rtt_timeout
+        && d < Duration::from_millis(20)
+    {
+        warnings.push(format!(
+            "a --max-rtt-timeout of {} ms is extraordinarily small; accuracy may suffer",
+            d.as_millis()
         ));
     }
     if let Some(c) = args.concurrency {
@@ -1139,6 +1362,54 @@ fn stats_line(elapsed: Duration) -> String {
         }
     }
     line
+}
+
+/// The `-sV` settings: intensity, trace and rules.
+fn version_scan(args: &Args) -> Result<VersionScan> {
+    let mut vs = VersionScan::new(Duration::from_millis(args.version_timeout));
+    vs.intensity = version_intensity(args);
+    vs.trace = args.version_trace;
+    // nmap prints the trace to standard output; keep it off a
+    // machine-readable report there.
+    let outputs = Outputs::from_args(args)?;
+    vs.trace_to_stderr = if outputs.stdout_taken() {
+        outputs.normal.iter().all(|p| p != "-")
+    } else {
+        !matches!(args.output, Format::Table)
+    };
+    if let Some(path) = &args.service_rules {
+        let db = feroprobe_core::ServiceDb::load(path)
+            .map_err(|e| anyhow::anyhow!("reading service rules {}: {e}", path.display()))?;
+        vs.db = std::sync::Arc::new(db);
+    }
+    Ok(vs)
+}
+
+/// The `-sV` intensity from `--version-intensity`, `--version-light` and
+/// `--version-all`; clap leaves only the last of the three set.
+fn version_intensity(args: &Args) -> u8 {
+    if let Some(level) = args.version_intensity {
+        level
+    } else if args.version_light {
+        VersionScan::LIGHT
+    } else if args.version_all {
+        VersionScan::ALL
+    } else {
+        VersionScan::DEFAULT_INTENSITY
+    }
+}
+
+/// The first `-sV` option given, for the warning when there is no `-sV`.
+fn version_option(args: &Args) -> Option<&'static str> {
+    [
+        (args.version_intensity.is_some(), "--version-intensity"),
+        (args.version_light, "--version-light"),
+        (args.version_all, "--version-all"),
+        (args.version_trace, "--version-trace"),
+        (args.service_rules.is_some(), "--service-rules"),
+    ]
+    .into_iter()
+    .find_map(|(given, name)| given.then_some(name))
 }
 
 /// Apply `-A`: version detection, plus OS detection and traceroute when
@@ -1371,7 +1642,7 @@ struct ScanJob<'a> {
     /// IP protocol numbers for `-sO`.
     protocols: &'a [u8],
     scanflags: Option<u8>,
-    version_wait: Duration,
+    version: VersionScan,
     os: bool,
     os_opts: OsOptions,
 }
@@ -1480,7 +1751,7 @@ impl ScanJob<'_> {
         }
         if self.plan.version {
             let done = progress.phase("service detection", live.len());
-            detect_services(hosts, cfg, self.version_wait).await;
+            detect_services(hosts, cfg, &self.version).await;
             done(&progress);
         }
         if self.os {
@@ -1526,6 +1797,9 @@ impl ScanJob<'_> {
         let group = host_group(live.len(), cfg);
         let mut shared = cfg.clone();
         shared.concurrency = (cfg.concurrency / group).max(1);
+        // Likewise the --min-parallelism floor, which must stay within
+        // each job's share.
+        shared.min_parallelism = cfg.min_parallelism.min(shared.concurrency);
         // The hosts share one --max-rate schedule (set in scan_config), so
         // each may use the whole rate.
         let probes = self.plan.tcp.map_or(0, |_| self.tcp.len())
@@ -1619,6 +1893,8 @@ struct DryOrder<'a> {
     trace: bool,
     /// See [`trace_fallback_port`].
     trace_fallback: Option<u16>,
+    /// The `-sV` settings, to describe its probes.
+    version: &'a VersionScan,
 }
 
 /// The notes a dry run prints above its probes: what it cannot show (steps
@@ -1638,6 +1914,11 @@ fn dry_run_notes(args: &Args, plan: &Plan, d: &DryOrder, privileged: bool) -> Ve
              depend on replies a dry run does not get",
             follow.join(", ")
         ));
+    }
+    if plan.version && !plan.ping_only {
+        let tcp = if plan.tcp.is_some() { d.tcp } else { &[] };
+        let udp = if plan.udp { d.udp } else { &[] };
+        notes.extend(feroprobe_core::service::dry_run_lines(d.version, tcp, udp));
     }
     if d.trace {
         notes.push(match d.trace_fallback {
@@ -1735,6 +2016,7 @@ fn dry_run(
         evasion: &cfg.evasion,
         retries: cfg.retries,
         os: (d.os && scan).then(|| os_options(args, plan, probes)),
+        source_port: cfg.source_port,
         notes: dry_run_notes(args, plan, d, privileged),
     };
     let stdout = std::io::stdout();
@@ -1785,6 +2067,13 @@ async fn main() -> Result<()> {
         };
         format!("ICS protection {ics}; {read}")
     });
+    // -e: every socket from here on is bound to the interface.
+    if let Some(name) = &args.interface {
+        let ifc = feroprobe_core::netif::use_interface(name).context("-e")?;
+        progress.say(1, || {
+            format!("Using interface {} (index {})", ifc.name, ifc.index)
+        });
+    }
     let version = if args.ipv6 {
         IpVersion::V6
     } else {
@@ -1846,6 +2135,13 @@ async fn main() -> Result<()> {
     let (mut os, trace) = aggressive(&mut plan, &args, raw_sockets_available())?;
     for w in os_option_warnings(&args, os) {
         eprintln!("Warning: {w}");
+    }
+    // Read --service-rules now, so a bad file fails before anything is sent.
+    let version_scan = version_scan(&args)?;
+    if !plan.version
+        && let Some(option) = version_option(&args)
+    {
+        eprintln!("Warning: {option} has no effect without -sV or -A");
     }
     if os {
         if plan.ping_only {
@@ -1941,6 +2237,9 @@ async fn main() -> Result<()> {
     }
 
     let mut cfg = scan_config(&args);
+    for w in apply_min_parallelism(&mut cfg, &args)? {
+        eprintln!("Warning: {w}");
+    }
     let warnings = apply_min_rate(&mut cfg, &args, feroprobe_core::connect::open_file_limit())?;
     // Evasion options are refused unless every target is private; see
     // gate_evasion. Parsed and checked before the scan sends anything.
@@ -1952,6 +2251,13 @@ async fn main() -> Result<()> {
         bail!("evasion options send raw packets: run as root or grant CAP_NET_RAW");
     }
     cfg.evasion = evasion;
+    if let Some(port) = args.source_port {
+        let connect = !plan.ping_only && plan.tcp.is_some_and(|t| t.raw_kind().is_none());
+        let udp = (!plan.ping_only && plan.udp) || (plan.discovery && !probes.udp.is_empty());
+        for w in source_port_warnings(port, connect, udp) {
+            eprintln!("Warning: {w}");
+        }
+    }
     // The warnings are about connect and UDP probes.
     let sockets = !plan.ping_only && (plan.udp || plan.tcp.is_some_and(|t| t.raw_kind().is_none()));
     for w in warnings.iter().filter(|_| sockets) {
@@ -2013,6 +2319,7 @@ async fn main() -> Result<()> {
                 os,
                 trace,
                 trace_fallback,
+                version: &version_scan,
             },
         );
     }
@@ -2080,7 +2387,7 @@ async fn main() -> Result<()> {
             sctp: &sctp_order,
             protocols: &protocols,
             scanflags: args.scanflags,
-            version_wait: Duration::from_millis(args.version_timeout),
+            version: version_scan.clone(),
             os,
             os_opts: os_options(&args, &plan, &probes),
         };
@@ -2263,6 +2570,126 @@ mod tests {
     }
 
     #[test]
+    fn nmap_tuning_names() {
+        let parse = |args: &[&str]| {
+            let mut v = vec!["feroprobe"];
+            v.extend_from_slice(args);
+            v.push("10.0.0.1");
+            Args::try_parse_from(v)
+        };
+        let a = parse(&["--max-retries", "4"]).unwrap();
+        assert_eq!(scan_config(&a).retries, 4);
+        for flag in ["-c", "-M", "--concurrency", "--max-parallelism"] {
+            let a = parse(&[flag, "7"]).unwrap();
+            assert_eq!(scan_config(&a).concurrency, 7, "{flag}");
+        }
+        // nmap: the argument to -M must be at least 1.
+        assert!(parse(&["-M", "0"]).is_err());
+        assert!(parse(&["--min-parallelism", "0"]).is_err());
+
+        // --min-parallelism raises the template's parallelism...
+        let a = parse(&["-T2", "--min-parallelism", "40"]).unwrap();
+        let mut cfg = scan_config(&a);
+        assert!(apply_min_parallelism(&mut cfg, &a).unwrap().is_empty());
+        assert_eq!(cfg.concurrency, 40);
+        // ... never lowers it ...
+        let a = parse(&["--min-parallelism", "3"]).unwrap();
+        let mut cfg = scan_config(&a);
+        apply_min_parallelism(&mut cfg, &a).unwrap();
+        assert_eq!(cfg.concurrency, ScanConfig::default().concurrency);
+        // ... warns when very high, like nmap ...
+        let a = parse(&["--min-parallelism", "150"]).unwrap();
+        let mut cfg = scan_config(&a);
+        assert_eq!(apply_min_parallelism(&mut cfg, &a).unwrap().len(), 1);
+        // ... and may not exceed an explicit maximum.
+        let a = parse(&["--min-parallelism", "20", "--max-parallelism", "10"]).unwrap();
+        let mut cfg = scan_config(&a);
+        let e = apply_min_parallelism(&mut cfg, &a).unwrap_err().to_string();
+        assert!(e.contains("--min-parallelism=20"), "{e}");
+    }
+
+    #[test]
+    fn interface_and_source_port_options() {
+        let a = Args::try_parse_from(["feroprobe", "-e", "eth0", "-g", "53", "10.0.0.1"]).unwrap();
+        assert_eq!(a.interface.as_deref(), Some("eth0"));
+        assert_eq!(scan_config(&a).source_port, Some(53));
+        let a = Args::try_parse_from(["feroprobe", "--source-port", "20", "10.0.0.1"]).unwrap();
+        assert_eq!(a.source_port, Some(20));
+        assert!(Args::try_parse_from(["feroprobe", "-g", "70000", "10.0.0.1"]).is_err());
+        assert_eq!(
+            scan_config(&Args::try_parse_from(["feroprobe", "x"]).unwrap()).source_port,
+            None
+        );
+
+        let w = source_port_warnings(53, true, false);
+        assert!(w.len() == 1 && w[0].contains("connect scan"), "{w:?}");
+        let w = source_port_warnings(0, false, true);
+        assert!(w.len() == 1 && w[0].contains("UDP"), "{w:?}");
+        if cfg!(windows) {
+            assert_eq!(source_port_warnings(53, false, true).len(), 1);
+            return;
+        }
+        assert!(source_port_warnings(53, false, true).is_empty());
+        let w = source_port_warnings(0, false, false);
+        assert!(w.len() == 1 && !w[0].contains("UDP"), "{w:?}");
+    }
+
+    #[test]
+    fn rtt_timeout_options() {
+        let ms = Duration::from_millis;
+        let cfg = |args: &[&str]| {
+            let mut all = vec!["feroprobe"];
+            all.extend_from_slice(args);
+            all.push("10.0.0.1");
+            scan_config(&Args::try_parse_from(all).unwrap()).rtt
+        };
+        // The defaults and the templates are nmap's.
+        assert_eq!(cfg(&[]), RttTimeouts::default());
+        assert_eq!(cfg(&["-T5"]), Timing::Insane.rtt_timeouts());
+        // A bare number is seconds, as in nmap.
+        assert_eq!(cfg(&["--initial-rtt-timeout", "2"]).initial, ms(2000));
+        // Each moves the others like nmap's setters, applied in nmap's
+        // order (initial, min, max) whatever the command-line order.
+        let r = cfg(&[
+            "--max-rtt-timeout",
+            "200ms",
+            "--initial-rtt-timeout",
+            "500ms",
+        ]);
+        assert_eq!((r.min, r.max, r.initial), (ms(100), ms(200), ms(200)));
+        let r = cfg(&["-T4", "--min-rtt-timeout", "2s"]);
+        assert_eq!((r.min, r.max, r.initial), (ms(2000), ms(2000), ms(2000)));
+        // --timeout fixes all three; the RTT options still apply on top.
+        assert_eq!(
+            cfg(&["-T5", "--timeout", "800"]),
+            RttTimeouts::fixed(ms(800))
+        );
+        let r = cfg(&["--timeout", "800", "--max-rtt-timeout", "2s"]);
+        assert_eq!((r.min, r.max, r.initial), (ms(800), ms(2000), ms(800)));
+        // nmap's checks.
+        let bad = |args: &[&str]| {
+            let mut all = vec!["feroprobe"];
+            all.extend_from_slice(args);
+            all.push("10.0.0.1");
+            Args::try_parse_from(all).is_err()
+        };
+        assert!(bad(&["--max-rtt-timeout", "4ms"]));
+        assert!(bad(&["--initial-rtt-timeout", "0"]));
+        assert!(bad(&["--min-rtt-timeout", "60000"]));
+        assert!(!bad(&["--min-rtt-timeout", "60000ms"]));
+        let a =
+            Args::try_parse_from(["feroprobe", "--max-rtt-timeout", "10ms", "10.0.0.1"]).unwrap();
+        assert!(
+            option_warnings(&a, None)
+                .iter()
+                .any(|w| w.contains("--max-rtt-timeout of 10 ms"))
+        );
+        // --min-rate reaches the congestion windows.
+        let a = Args::try_parse_from(["feroprobe", "--min-rate", "300", "10.0.0.1"]).unwrap();
+        assert_eq!(scan_config(&a).min_rate, 300);
+    }
+
+    #[test]
     fn timing_templates_and_overrides() {
         let a = Args::try_parse_from(["feroprobe", "-T4", "10.0.0.1"]).unwrap();
         assert_eq!(a.timing, Some(Timing::Aggressive));
@@ -2271,7 +2698,8 @@ mod tests {
         assert_eq!(b.timing, Some(Timing::Aggressive));
         let cfg = scan_config(&a);
         assert_eq!(cfg.concurrency, Timing::Aggressive.config().concurrency);
-        assert_eq!(cfg.timeout, Timing::Aggressive.config().timeout);
+        assert_eq!(cfg.rtt, Timing::Aggressive.config().rtt);
+        assert_eq!(cfg.timing_level, 4);
 
         // Explicit flags win over the template.
         let a = Args::try_parse_from([
@@ -2289,7 +2717,7 @@ mod tests {
         .unwrap();
         let cfg = scan_config(&a);
         assert_eq!(cfg.concurrency, 50);
-        assert_eq!(cfg.timeout, Duration::from_millis(800));
+        assert_eq!(cfg.rtt, RttTimeouts::fixed(Duration::from_millis(800)));
         assert_eq!(cfg.scan_delay, Duration::from_millis(250));
         assert_eq!(cfg.retries, Timing::Sneaky.config().retries);
 
@@ -2298,19 +2726,13 @@ mod tests {
         let (cfg, d) = (scan_config(&a), ScanConfig::default());
         assert_eq!(
             (
-                cfg.timeout,
+                cfg.rtt,
                 cfg.concurrency,
                 cfg.retries,
                 cfg.max_rate,
                 cfg.scan_delay
             ),
-            (
-                d.timeout,
-                d.concurrency,
-                d.retries,
-                d.max_rate,
-                d.scan_delay
-            )
+            (d.rtt, d.concurrency, d.retries, d.max_rate, d.scan_delay)
         );
         // -sT and -T stay distinct.
         let a = Args::try_parse_from(["feroprobe", "-sT", "-T5", "10.0.0.1"]).unwrap();
@@ -2756,7 +3178,36 @@ mod tests {
         assert!(gate_evasion(&ev, &private, &syn, false).is_ok());
     }
 
+    #[test]
+    fn version_intensity_last_one_wins() {
+        let level = |argv: &[&str]| version_intensity(&args(argv));
+        assert_eq!(level(&["-sV"]), 7);
+        assert_eq!(level(&["-sV", "--version-light"]), 2);
+        assert_eq!(
+            level(&["-sV", "--version-all", "--version-intensity", "4"]),
+            4
+        );
+        assert_eq!(
+            level(&["-sV", "--version-intensity", "4", "--version-all"]),
+            9
+        );
+        assert_eq!(level(&["-sV", "--version-all", "--version-light"]), 2);
+        assert!(Args::try_parse_from(["feroprobe", "--version-intensity", "10", "x"]).is_err());
+        assert_eq!(
+            version_option(&args(&["--version-trace"])),
+            Some("--version-trace")
+        );
+        assert_eq!(version_option(&args(&["-sV"])), None);
+        let to_stderr = |argv: &[&str]| version_scan(&args(argv)).unwrap().trace_to_stderr;
+        assert!(!to_stderr(&["-sV", "--version-trace"]));
+        assert!(to_stderr(&["-sV", "--version-trace", "-o", "json"]));
+        assert!(to_stderr(&["-sV", "--version-trace", "-oX", "-"]));
+        assert!(!to_stderr(&["-sV", "--version-trace", "-oN", "-"]));
+    }
+
     fn dry_order() -> DryOrder<'static> {
+        static VERSION: std::sync::LazyLock<VersionScan> =
+            std::sync::LazyLock::new(|| VersionScan::new(Duration::from_secs(3)));
         DryOrder {
             tcp: &[80],
             udp: &[],
@@ -2765,6 +3216,7 @@ mod tests {
             os: false,
             trace: false,
             trace_fallback: Some(80),
+            version: &VERSION,
         }
     }
 
@@ -2842,6 +3294,9 @@ mod tests {
         let notes = dry_run_notes(&a, &plan, &d, false).join("\n");
         // Steps that need replies are named, not listed probe by probe.
         assert!(notes.contains("service detection (-sV)"), "{notes}");
+        // The -sV probes are described, at the intensity in use.
+        assert!(notes.contains("-sV (intensity 7"), "{notes}");
+        assert!(notes.contains("http on 80"), "{notes}");
         // OS detection is listed probe by probe (with port placeholders).
         assert!(!notes.contains("OS detection (-O)"), "{notes}");
         assert!(notes.contains("traceroute"), "{notes}");
@@ -2932,14 +3387,21 @@ mod tests {
             let mut cfg = scan_config(&a);
             apply_min_rate(&mut cfg, &a, files).map(|w| (cfg, w))
         };
-        // 1000 probes/s with 1.5 s timeouts needs 1500 in flight.
+        // 1000 probes/s with 1.5 s timeouts needs 1500 in flight (on
+        // Windows, whose connect tries wait at least 3 s, 3000).
         let (cfg, w) = tuned(&["--min-rate", "1000", "--timeout", "1500"], None).unwrap();
-        assert_eq!(cfg.concurrency, 1500);
+        assert_eq!(cfg.concurrency, if cfg!(windows) { 3000 } else { 1500 });
         assert_eq!(cfg.max_rate, 5000);
         assert!(w.is_empty());
         let (cfg, w) = tuned(&["--min-rate", "9000", "--timeout", "100"], Some(1024)).unwrap();
-        assert_eq!((cfg.max_rate, cfg.concurrency), (9000, 900));
-        assert!(w.is_empty());
+        if cfg!(windows) {
+            // 27000 needed: capped by the open-file limit, with a warning.
+            assert_eq!((cfg.max_rate, cfg.concurrency), (9000, 960));
+            assert_eq!(w.len(), 1, "{w:?}");
+        } else {
+            assert_eq!((cfg.max_rate, cfg.concurrency), (9000, 900));
+            assert!(w.is_empty());
+        }
         // The open-file limit caps the parallelism, with a warning.
         let (cfg, w) = tuned(&["--min-rate", "2000", "--timeout", "1000"], Some(1024)).unwrap();
         assert_eq!(cfg.concurrency, 960);
@@ -3019,7 +3481,7 @@ mod tests {
             sctp: &[],
             protocols: &[],
             scanflags: None,
-            version_wait: Duration::from_secs(1),
+            version: VersionScan::new(Duration::from_secs(1)),
             os: false,
             os_opts: OsOptions::default(),
         };

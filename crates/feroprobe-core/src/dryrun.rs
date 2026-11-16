@@ -19,7 +19,7 @@
 
 use std::collections::HashSet;
 use std::io::{self, Write};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use crate::arp;
 use crate::discovery::PingProbes;
@@ -79,6 +79,8 @@ pub struct DryRun<'a> {
     pub retries: u32,
     /// OS detection (`-O`), if it runs.
     pub os: Option<crate::os::OsOptions>,
+    /// `-g`: the source port of raw and UDP probes (random when `None`).
+    pub source_port: Option<u16>,
     /// Extra lines for the header: steps the dry run cannot show, what a
     /// real run would need, and so on.
     pub notes: Vec<String>,
@@ -106,7 +108,7 @@ struct Values {
 }
 
 impl Values {
-    fn new() -> Self {
+    fn new(source_port: Option<u16>) -> Self {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos() as u64)
@@ -119,7 +121,7 @@ impl Values {
             (x >> 32) as u32
         };
         Self {
-            sport: 40000 + (next() % 20000) as u16,
+            sport: source_port.unwrap_or(40000 + (next() % 20000) as u16),
             cookie: next(),
             icmp_id: (next() as u16) | 1,
             ipid: (next() as u16) | 1,
@@ -127,16 +129,11 @@ impl Values {
     }
 }
 
-/// The local address the OS would use to reach `dst`. Connecting a UDP
-/// socket only consults the routing table; nothing is sent.
+/// The local address the OS would use to reach `dst` (through the `-e`
+/// interface, if one was chosen). Connecting a UDP socket only consults
+/// the routing table; nothing is sent.
 pub fn route_source(dst: IpAddr) -> Option<IpAddr> {
-    let sock = match dst {
-        IpAddr::V4(_) => UdpSocket::bind("0.0.0.0:0"),
-        IpAddr::V6(_) => UdpSocket::bind("[::]:0"),
-    }
-    .ok()?;
-    sock.connect(crate::target::socket_addr(dst, 53)).ok()?;
-    Some(sock.local_addr().ok()?.ip())
+    crate::netif::route_source(dst).ok()
 }
 
 fn host_port(ip: Option<IpAddr>, port: Option<u16>) -> String {
@@ -167,7 +164,7 @@ impl Out<'_> {
 
 /// Write the dry run to `w` and return how many probes it listed.
 pub fn write(run: &DryRun<'_>, w: &mut dyn Write) -> io::Result<Summary> {
-    let v = Values::new();
+    let v = Values::new(run.source_port);
     let sources: Vec<Option<IpAddr>> = run.targets.iter().map(|t| route_source(t.addr)).collect();
     let mut out = Out { w, count: 0 };
     out.note("Dry run (--dry-run): these are the probes the scan would send. Nothing is sent.")?;
@@ -212,7 +209,7 @@ pub fn write(run: &DryRun<'_>, w: &mut dyn Write) -> io::Result<Summary> {
             // Port-major, like the raw scans: spreads the probes over hosts.
             for &port in run.udp {
                 for (t, src) in run.targets.iter().zip(&sources) {
-                    out.probe(&udp_line(*src, t.addr, port))?;
+                    out.probe(&udp_line(*src, run.source_port, t.addr, port))?;
                 }
             }
         }
@@ -359,6 +356,7 @@ fn os_probes(
         ack: v.cookie.rotate_left(16),
         tsval: v.cookie.rotate_left(8),
         icmp_id: v.icmp_id,
+        fixed: run.source_port.is_some(),
     };
     for (t, src) in run.targets.iter().zip(sources) {
         for i in probes::plan(closed, opts.icmp_echo) {
@@ -401,11 +399,13 @@ const NAMES_UPPER: [&str; crate::os::probes::PROBES] = [
     "TCP", "TCP", "TCP", "TCP", "TCP", "TCP", "TCP", "TCP", "ICMP",
 ];
 
-/// The UDP datagram a UDP probe sends; the kernel picks the source port.
-fn udp_line(src: Option<IpAddr>, dst: IpAddr, port: u16) -> String {
+/// The UDP datagram a UDP probe sends; the kernel picks the source port
+/// unless `-g` gave one.
+fn udp_line(src: Option<IpAddr>, sport: Option<u16>, dst: IpAddr, port: u16) -> String {
+    let sport = crate::udp::effective_sport(sport, crate::target::socket_addr(dst, port));
     format!(
         "UDP {} > {} len={}",
-        host_port(src, None),
+        host_port(src, sport),
         host_port(Some(dst), Some(port)),
         payload_for(port).len()
     )
@@ -717,7 +717,7 @@ fn discovery(
     }
     for &port in &p.udp {
         for (t, src) in &rest {
-            out.probe(&udp_line(*src, t.addr, port))?;
+            out.probe(&udp_line(*src, run.source_port, t.addr, port))?;
         }
     }
     out.note("A real run stops probing a host as soon as one probe proves it is up")?;
@@ -751,6 +751,7 @@ mod tests {
             evasion: ev,
             retries: 1,
             os: None,
+            source_port: None,
             notes: Vec::new(),
         }
     }
@@ -812,6 +813,25 @@ mod tests {
         let (text, summary) = run_to_string(&run);
         assert_eq!(summary.os, 0, "{text}");
         assert!(text.contains("no host is fingerprinted"), "{text}");
+    }
+
+    #[test]
+    fn source_port_shows_on_raw_and_udp_probes() {
+        let targets = [target("127.0.0.1")];
+        let ev = Evasion::default();
+        let (tcp, udp) = ([22, 80], [53]);
+        let run = DryRun {
+            tcp: Some((DryTcp::Raw(RawTcpScan::new(TcpScanKind::Syn)), &tcp)),
+            udp: &udp,
+            source_port: Some(53),
+            ..base(&targets, &ev)
+        };
+        let (text, _) = run_to_string(&run);
+        assert!(text.contains("TCP 127.0.0.1:53 > 127.0.0.1:22 S"), "{text}");
+        assert!(text.contains("TCP 127.0.0.1:53 > 127.0.0.1:80 S"), "{text}");
+        // This machine's own -g port is probed from a random port, as in a
+        // real run (and on Windows -g does not apply to UDP at all).
+        assert!(text.contains("UDP 127.0.0.1:* > 127.0.0.1:53"), "{text}");
     }
 
     #[test]

@@ -154,6 +154,9 @@ pub fn render_table(hosts: &[HostResult], info: &RunInfo) -> String {
         if info.show_os && !host.timed_out {
             print_os(out, host, info);
         }
+        if info.show_version && !host.timed_out {
+            print_service_info(out, host);
+        }
         if info.show_trace {
             print_trace(out, host);
         }
@@ -239,6 +242,49 @@ fn print_ports(out: &mut String, host: &HostResult, info: &RunInfo) {
         for u in unrecognized {
             w!(out, "  {u}");
         }
+    }
+}
+
+/// nmap's "Service Info" line: the host names, operating systems, device
+/// types and OS/hardware CPEs that `-sV` learned from this host's services.
+/// Application CPEs only go in the XML and JSON reports, as in nmap.
+fn print_service_info(out: &mut String, host: &HostResult) {
+    let mut hosts: Vec<&str> = Vec::new();
+    let mut oses: Vec<&str> = Vec::new();
+    let mut devices: Vec<&str> = Vec::new();
+    let mut cpes: Vec<&str> = Vec::new();
+    for s in host.ports.iter().filter_map(|p| p.service.as_ref()) {
+        for (list, value) in [
+            (&mut hosts, s.hostname.as_deref()),
+            (&mut oses, s.os_type.as_deref()),
+            (&mut devices, s.device_type.as_deref()),
+        ] {
+            if let Some(v) = value
+                && !list.contains(&v)
+            {
+                list.push(v);
+            }
+        }
+        for c in s.cpe.iter().filter(|c| !c.starts_with("cpe:/a:")) {
+            if !cpes.contains(&c.as_str()) {
+                cpes.push(c);
+            }
+        }
+    }
+    let mut parts = Vec::new();
+    for (one, many, list) in [
+        ("Host", "Hosts", &hosts),
+        ("OS", "OSs", &oses),
+        ("Device", "Devices", &devices),
+        ("CPE", "CPE", &cpes),
+    ] {
+        if !list.is_empty() {
+            let label = if list.len() == 1 { one } else { many };
+            parts.push(format!("{label}: {}", list.join(", ")));
+        }
+    }
+    if !parts.is_empty() {
+        w!(out, "Service Info: {}", parts.join("; "));
     }
 }
 
@@ -501,6 +547,14 @@ struct JsonPort<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     extra_info: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    hostname: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    os_type: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    device_type: Option<&'a str>,
+    #[serde(skip_serializing_if = "<[String]>::is_empty")]
+    cpe: &'a [String],
+    #[serde(skip_serializing_if = "Option::is_none")]
     tunnel: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     fingerprint: Option<&'a str>,
@@ -522,6 +576,10 @@ impl<'a> JsonPort<'a> {
             product: s.and_then(|s| s.product.as_deref()),
             version: s.and_then(|s| s.version.as_deref()),
             extra_info: s.and_then(|s| s.extra_info.as_deref()),
+            hostname: s.and_then(|s| s.hostname.as_deref()),
+            os_type: s.and_then(|s| s.os_type.as_deref()),
+            device_type: s.and_then(|s| s.device_type.as_deref()),
+            cpe: s.map_or(&[][..], |s| &s.cpe[..]),
             tunnel: s.and_then(|s| s.tunnel),
             fingerprint: s.and_then(|s| s.fingerprint.as_deref()),
         }
@@ -736,5 +794,48 @@ pub(crate) mod tests {
         host.timed_out = false;
         let json = render_json(&[host], &info()).unwrap();
         assert!(!json.contains("timed_out"), "{json}");
+    }
+    #[test]
+    fn service_info_line_like_nmap() {
+        use feroprobe_core::ServiceInfo;
+        let mut host = HostResult::new("10.0.0.9".parse().unwrap(), None);
+        host.up_reason = Some("echo-reply");
+        let svc = |name: &str, host: Option<&str>, os: Option<&str>, cpe: &[&str]| ServiceInfo {
+            name: name.into(),
+            hostname: host.map(Into::into),
+            os_type: os.map(Into::into),
+            cpe: cpe.iter().map(|c| c.to_string()).collect(),
+            ..Default::default()
+        };
+        let mut ssh = tcp(22, PortState::Open);
+        ssh.service = Some(svc(
+            "ssh",
+            None,
+            Some("Linux"),
+            &["cpe:/a:openbsd:openssh:9.6p1", "cpe:/o:linux:linux_kernel"],
+        ));
+        let mut smtp = tcp(25, PortState::Open);
+        smtp.service = Some(svc(
+            "smtp",
+            Some("mail.example"),
+            Some("Linux"),
+            &["cpe:/o:linux:linux_kernel"],
+        ));
+        host.ports = vec![ssh, smtp];
+        let table = render_table(std::slice::from_ref(&host), &info());
+        // Application CPEs stay out; repeated values are listed once.
+        assert!(
+            table.contains(
+                "Service Info: Host: mail.example; OS: Linux; CPE: cpe:/o:linux:linux_kernel\n"
+            ),
+            "{table}"
+        );
+        let json = render_json(std::slice::from_ref(&host), &info()).unwrap();
+        assert!(json.contains("\"cpe\": [\n"), "{json}");
+        assert!(json.contains("\"hostname\": \"mail.example\""), "{json}");
+        // Without -sV there is no Service Info.
+        let mut plain = info();
+        plain.show_version = false;
+        assert!(!render_table(&[host], &plain).contains("Service Info"));
     }
 }

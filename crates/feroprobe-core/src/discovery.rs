@@ -39,13 +39,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use futures::stream::{self, StreamExt};
 
 use crate::arp::{self, MacAddr, MacInfo};
-use crate::connect::probe_port;
+use crate::connect::probe_port_in;
 use crate::model::{HostResult, PortState, ScanConfig, reason};
 use crate::ndp;
 use crate::raw::{raw_ipv6_available, raw_sockets_available};
+use crate::rtt::AsyncWindow;
 use crate::syn::{HostsDone, RawTcpScan, TcpScanKind, raw_tcp_scan_until};
 use crate::target::Target;
-use crate::udp::probe_udp;
+use crate::udp::probe_udp_in;
 
 /// TCP ports connected to during default discovery without raw sockets
 /// (nmap's `DEFAULT_PING_CONNECT_PORT_SPEC`).
@@ -309,21 +310,34 @@ async fn discover_with(
     let jobs = port_probes
         .iter()
         .flat_map(|&probe| (0..targets.len()).map(move |h| (h, probe)));
+    // The probes share congestion windows, as in the port scans.
+    // A probe waiting for its place is dropped once its host is proven up
+    // meanwhile, by ICMP or a raw TCP answer, as well as before it starts.
+    let (up_icmp, up_tcp) = (pinged.clone(), done.tcp.clone());
+    let window =
+        AsyncWindow::new(cfg, vec![port_probes.len(); targets.len()]).with_skip(move |h| {
+            up_icmp[h].load(Ordering::Relaxed) || up_tcp[h].load(Ordering::Relaxed)
+        });
+    let window = &window;
     let mut probes = stream::iter(jobs)
         // Checked when a probe is about to start: skip hosts already proven
         // up by ICMP (pinged) or by a raw TCP answer (done.tcp).
         .filter(|&(h, _)| {
-            std::future::ready(
-                !pinged[h].load(Ordering::Relaxed) && !done.tcp[h].load(Ordering::Relaxed),
-            )
+            let up = pinged[h].load(Ordering::Relaxed) || done.tcp[h].load(Ordering::Relaxed);
+            if up {
+                window.settled(h);
+            }
+            std::future::ready(!up)
         })
         .map(|(h, probe)| async move {
             let r = match probe {
                 PortProbe::Tcp(port) => {
-                    probe_port(crate::target::socket_addr(targets[h].addr, port), cfg).await
+                    let addr = crate::target::socket_addr(targets[h].addr, port);
+                    probe_port_in(addr, cfg, Some((window, h))).await
                 }
                 PortProbe::Udp(port) => {
-                    probe_udp(crate::target::socket_addr(targets[h].addr, port), cfg).await
+                    let addr = crate::target::socket_addr(targets[h].addr, port);
+                    probe_udp_in(addr, cfg, Some((window, h))).await
                 }
             };
             (h, r)
@@ -543,12 +557,14 @@ mod icmp {
         } else {
             (Domain::IPV4, Protocol::ICMPV4)
         };
-        match Socket::new(domain, Type::RAW, Some(proto)) {
-            Ok(s) => Ok((s, false)),
+        let (sock, rewrites_id) = match Socket::new(domain, Type::RAW, Some(proto)) {
+            Ok(s) => (s, false),
             Err(raw_err) => Socket::new(domain, Type::DGRAM, Some(proto))
                 .map(|s| (s, true))
-                .map_err(|_| raw_err),
-        }
+                .map_err(|_| raw_err)?,
+        };
+        crate::netif::bind_socket(&sock, v6)?;
+        Ok((sock, rewrites_id))
     }
 
     /// Callback for each host that answered, with its RTT in ms.
@@ -651,22 +667,28 @@ mod icmp {
             })
         };
 
-        let mut sent_at: HashMap<u16, (IpAddr, Instant)> = HashMap::new();
+        let mut sent_at: HashMap<u16, (IpAddr, Instant, bool)> = HashMap::new();
         let mut pending: Vec<(u16, IpAddr)> = addrs
             .iter()
             .enumerate()
             .map(|(i, a)| (i as u16, *a))
             .collect();
         let mut record = |(src, seq, at): (IpAddr, u16, Instant),
-                          sent_at: &HashMap<u16, (IpAddr, Instant)>,
+                          sent_at: &HashMap<u16, (IpAddr, Instant, bool)>,
                           replies: &mut HashMap<IpAddr, f64>| {
             // Only count a reply from the host this sequence number was sent
             // to, so one host cannot vouch for another by echoing its sequence.
-            let Some(&(dst, sent)) = sent_at.get(&seq) else {
+            let Some(&(dst, sent, resent)) = sent_at.get(&seq) else {
                 return;
             };
             if src == dst && !replies.contains_key(&dst) {
-                let rtt = (at.saturating_duration_since(sent).as_secs_f64() * 1e6).round() / 1000.0;
+                let rtt = at.saturating_duration_since(sent);
+                // A reply to a resent request may answer either copy, so
+                // its round trip is left out of the estimate (Karn).
+                if !resent {
+                    cfg.observe_rtt(dst, rtt);
+                }
+                let rtt = (rtt.as_secs_f64() * 1e6).round() / 1000.0;
                 replies.insert(dst, rtt);
                 on_reply(dst, rtt);
             }
@@ -680,7 +702,8 @@ mod icmp {
                     if !pacer.wait_or_cancel(cancel) {
                         return Ok(());
                     }
-                    sent_at.insert(seq, (addr, Instant::now()));
+                    let resent = sent_at.contains_key(&seq);
+                    sent_at.insert(seq, (addr, Instant::now(), resent));
                     nmap_ip_header(&sock, v6);
                     if let Err(e) = send_with_backoff(&sock, &pkt, socket_addr(addr, 0))
                         && !crate::connect::is_network_error(&e)
@@ -691,16 +714,39 @@ mod icmp {
                         record(r, &sent_at, &mut replies);
                     }
                 }
-                // Wait for late replies, but stop once every host has answered.
-                let deadline = Instant::now() + cfg.timeout;
-                while replies.len() < targets.len()
-                    && !cancel.load(Ordering::Relaxed)
-                    && let Some(left) = deadline.checked_duration_since(Instant::now())
-                {
+                // Wait for late replies, but stop once every host has
+                // answered, or each unanswered request has waited out its
+                // host's adaptive timeout (see `crate::rtt`).
+                let last_expiry =
+                    |sent_at: &HashMap<u16, (IpAddr, Instant, bool)>,
+                     replies: &HashMap<IpAddr, f64>| {
+                        pending
+                            .iter()
+                            .filter(|(_, a)| !replies.contains_key(a))
+                            .filter_map(|(seq, _)| sent_at.get(seq))
+                            .map(|&(a, at, _)| at + cfg.probe_timeout(a))
+                            .max()
+                    };
+                let mut deadline = last_expiry(&sent_at, &replies);
+                loop {
+                    if replies.len() >= targets.len() || cancel.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let mut left = deadline.and_then(|d| d.checked_duration_since(Instant::now()));
+                    if left.is_none() {
+                        // A reply since the last look may have lengthened
+                        // the timeouts: look again before giving up.
+                        deadline = last_expiry(&sent_at, &replies);
+                        left = deadline.and_then(|d| d.checked_duration_since(Instant::now()));
+                    }
+                    let Some(left) = left else { break };
                     // Wake up regularly to notice cancellation.
                     match rx.recv_timeout(left.min(Duration::from_millis(100))) {
                         Ok(r) => record(r, &sent_at, &mut replies),
-                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                        // Timeouts move with each reply: look again.
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                            deadline = last_expiry(&sent_at, &replies);
+                        }
                         Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
                     }
                 }
@@ -729,7 +775,7 @@ mod tests {
     #[tokio::test]
     async fn localhost_is_up() {
         let cfg = ScanConfig {
-            timeout: Duration::from_secs(5),
+            rtt: crate::rtt::RttTimeouts::fixed(Duration::from_secs(5)),
             ..Default::default()
         };
         // Long enough for Windows, which reports a refused connect only ~2s
@@ -789,7 +835,7 @@ mod tests {
     #[tokio::test]
     async fn chosen_ping_probes() {
         let cfg = ScanConfig {
-            timeout: Duration::from_secs(5),
+            rtt: crate::rtt::RttTimeouts::fixed(Duration::from_secs(5)),
             ..Default::default()
         };
         let targets = [Target::new("127.0.0.1".parse().unwrap())];
@@ -864,7 +910,7 @@ mod tests {
             return;
         }
         let cfg = ScanConfig {
-            timeout: Duration::from_secs(5),
+            rtt: crate::rtt::RttTimeouts::fixed(Duration::from_secs(5)),
             ..Default::default()
         };
         let targets = [
