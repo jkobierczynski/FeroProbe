@@ -100,26 +100,19 @@ mod unix {
     static SAVED: OnceLock<libc::termios> = OnceLock::new();
     static STOP: AtomicBool = AtomicBool::new(false);
 
-    /// Put the terminal's settings back. Async-signal-safe: only signal
-    /// mask calls and tcsetattr on a saved copy. SIGTTOU is blocked
-    /// meanwhile, so a scan moved to the background (Ctrl-Z, `bg`) is not
-    /// stopped by the kernel for changing the terminal.
-    /// Only while FeroProbe is still the terminal's foreground job: once
-    /// another job has the terminal, its settings are its own.
+    /// Put the terminal's settings back, only while FeroProbe is still
+    /// the terminal's foreground job: once a scan is moved to the
+    /// background (Ctrl-Z, `bg`), the terminal belongs to another job and
+    /// its settings are left alone. Should the scan lose the terminal
+    /// between the check and the write, the kernel stops it with SIGTTOU
+    /// instead of letting the write through, and the write happens once it
+    /// is in the foreground again; SIGTTOU is deliberately not blocked.
+    /// Async-signal-safe: tcgetpgrp, getpgrp and tcsetattr only.
     fn restore() {
         let fd = TTY.load(Ordering::SeqCst);
         if let (true, Some(saved)) = (fd >= 0 && foreground(fd), SAVED.get()) {
-            // SAFETY: plain signal-set and mask calls on local sets, and
-            // tcsetattr on our own descriptor with a valid termios.
-            unsafe {
-                let mut block: libc::sigset_t = std::mem::zeroed();
-                let mut old: libc::sigset_t = std::mem::zeroed();
-                libc::sigemptyset(&mut block);
-                libc::sigaddset(&mut block, libc::SIGTTOU);
-                libc::pthread_sigmask(libc::SIG_BLOCK, &block, &mut old);
-                libc::tcsetattr(fd, libc::TCSANOW, saved);
-                libc::pthread_sigmask(libc::SIG_SETMASK, &old, std::ptr::null_mut());
-            }
+            // SAFETY: tcsetattr on our own descriptor with a valid termios.
+            unsafe { libc::tcsetattr(fd, libc::TCSANOW, saved) };
         }
     }
 
