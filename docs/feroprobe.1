@@ -272,6 +272,14 @@ scanned, and every target is reverse-resolved.
 Cannot be combined with other \f[V]-P\f[R] options.
 \f[V]-sn -Pn\f[R] would do nothing and is refused unless
 \f[V]--traceroute\f[R] is given (trace only).
+.PP
+As in nmap, targets on a local Ethernet network still get one ARP (IPv4)
+or neighbour discovery (IPv6) request when FeroProbe runs with raw
+sockets, unless \f[V]--disable-arp-ping\f[R] is given: the answer gives
+the report\[aq]s MAC address and latency and times the port scan\[aq]s
+first probes.
+Targets that do not answer are scanned all the same.
+Other targets show the latency the port scan measured.
 .SS \f[V]-PS[portlist]\f[R] (TCP SYN ping)
 .PP
 Send a TCP SYN to each port (default port 80).

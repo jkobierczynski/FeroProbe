@@ -50,7 +50,7 @@ the SCTP, IP protocol, IPv6 OS detection and probe-signature work).
 | --- | --- | --- |
 | Default discovery | (none) | nmap's defaults: as root, raw ICMP echo, SYN to 443, ACK to 80 and ICMP timestamp (IPv4); unprivileged, TCP connects to 80 and 443 (plus an ICMP echo over an unprivileged ping socket where the OS has one, which nmap lacks) |
 | Localhost shortcut | default as root | This machine (loopback or one of its own addresses) is up without a probe, reason `localhost-response`, like nmap |
-| Skip discovery | `-Pn` | |
+| Skip discovery | `-Pn` | Still ARP/ND to local-network targets (MAC, latency, first timeouts), as nmap; latency otherwise from the port scan's RTT |
 | Ping probe types | `-PS`, `-PA`, `-PU`, `-PE`, `-PP`, `-PM` | With port lists, repeatable. `-PS`/`-PA` are raw SYN/ACK as root on Linux, connects otherwise |
 | ARP on the local network (IPv4) | default as root, `--disable-arp-ping` / `--send-ip` | MAC address and vendor |
 | Neighbour discovery (IPv6) | default as root | MAC address and vendor (`ndp.rs`) |

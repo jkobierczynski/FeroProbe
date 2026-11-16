@@ -180,6 +180,24 @@ pub async fn discover(
     discover_with(targets, cfg, probes, raw_sockets_available()).await
 }
 
+/// What `-Pn` still does, as nmap does: ask the targets on a local
+/// Ethernet network for their MAC address with ARP or neighbour discovery
+/// (unless `--disable-arp-ping`), for the report's MAC address and latency
+/// and the port scan's first timeouts. Every target is scanned whatever
+/// comes back; those that answer get the answer's reason.
+pub async fn neighbours_only(targets: &[Target], cfg: &ScanConfig) -> io::Result<Vec<HostResult>> {
+    let mut hosts: Vec<HostResult> = targets
+        .iter()
+        .map(|t| HostResult::new(t.addr, t.hostname.clone()))
+        .collect();
+    if cfg.arp_ping && raw_sockets_available() {
+        // This machine itself needs no request.
+        let mut decided: Vec<bool> = targets.iter().map(|t| is_localhost(t.addr)).collect();
+        neighbour_phase(targets, cfg, &mut hosts, &mut decided).await?;
+    }
+    Ok(hosts)
+}
+
 /// [`discover`], with the localhost shortcut on or off (`localhost_up`),
 /// so tests can still send probes to 127.0.0.1 when running as root.
 async fn discover_with(

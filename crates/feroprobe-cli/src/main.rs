@@ -2033,6 +2033,7 @@ fn dry_run(
             icmp: feroprobe_core::icmp_available(),
             arp_ping: cfg.arp_ping,
         }),
+        pn_neighbours: !plan.discovery && cfg.arp_ping && privileged && cfg!(target_os = "linux"),
         tcp: tcp.map(|t| (t, d.tcp)),
         udp: if scan && plan.udp { d.udp } else { &[] },
         sctp: plan.sctp.filter(|_| scan).map(|k| (k, d.sctp)),
@@ -2380,10 +2381,11 @@ async fn main() -> Result<()> {
         });
         hosts
     } else {
-        targets
-            .iter()
-            .map(|t| HostResult::new(t.addr, t.hostname.clone()))
-            .collect()
+        // -Pn: every target is scanned, but those on a local network are
+        // still asked for their MAC address, as in nmap.
+        feroprobe_core::discovery::neighbours_only(&targets, &cfg)
+            .await
+            .context("ARP or neighbour discovery failed")?
     };
 
     if !args.no_resolve {
@@ -2436,6 +2438,14 @@ async fn main() -> Result<()> {
         }
         for (&i, h) in scanned.iter().zip(results) {
             hosts[i] = h;
+        }
+        // A host discovery did not time (-Pn, or a TCP connect that only
+        // got a refusal) gets the latency the scans measured, as in nmap.
+        for h in hosts.iter_mut().filter(|h| h.latency_ms.is_none()) {
+            h.latency_ms = cfg
+                .rtt_state
+                .srtt(h.addr)
+                .map(|d| (d.as_secs_f64() * 1e6).round() / 1000.0);
         }
     } else {
         scan_types.push("ping");
