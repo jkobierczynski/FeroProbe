@@ -503,8 +503,10 @@ pub fn describe_ip_options(opts: &[u8]) -> String {
                 let len = usize::from(opts.get(i + 1).copied().unwrap_or(0)).max(2);
                 let body = opts.get(i + 3..(i + len).min(opts.len())).unwrap_or(&[]);
                 let addrs = || {
-                    body.chunks_exact(4)
-                        .map(|a| Ipv4Addr::new(a[0], a[1], a[2], a[3]).to_string())
+                    body.as_chunks::<4>()
+                        .0
+                        .iter()
+                        .map(|&a| Ipv4Addr::from(a).to_string())
                         .collect::<Vec<_>>()
                         .join(" ")
                 };
