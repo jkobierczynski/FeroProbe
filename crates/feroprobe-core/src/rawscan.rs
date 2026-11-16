@@ -153,6 +153,11 @@ pub(crate) fn run(
             if cfg.expired() {
                 return Err(ScanConfig::timed_out());
             }
+            // Answers already in first: one may raise its host's allowance
+            // before its other probes are timed out and benched.
+            while let Ok(a) = rx.try_recv() {
+                record(&mut results, &mut flight, a);
+            }
             let (h, k) = match flight.next(Instant::now()) {
                 Next::Idle => break,
                 Next::Send(h, k) => (h, k),

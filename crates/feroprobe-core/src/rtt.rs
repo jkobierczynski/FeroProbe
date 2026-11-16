@@ -1004,6 +1004,8 @@ impl<K: Copy + Eq + Hash> Flight<K> {
             .chain(self.queue.front().map(|&(h, _)| h))
             .chain(self.retry.front().map(|&(h, _)| h))
             .filter_map(|h| self.cc.delay_due(h))
+            // One already passed holds nothing back: not a reason to wake.
+            .filter(|&due| due > now)
             .min();
         let due = [self.next_expiry(), self.cc.min_rate_due(), delays]
             .into_iter()
@@ -1250,10 +1252,8 @@ impl AsyncWindow {
                 }
                 // Wake for --min-rate or the host's delay between probes,
                 // whichever comes first; answers wake it sooner.
-                [cc.min_rate_due(), cc.delay_due(h)]
-                    .into_iter()
-                    .flatten()
-                    .min()
+                let delay = cc.delay_due(h).filter(|&due| due > now);
+                [cc.min_rate_due(), delay].into_iter().flatten().min()
             };
             match due {
                 Some(due) => {
@@ -1690,6 +1690,28 @@ mod tests {
         f.sent(0, 1, t2);
         assert_eq!(f.next(t2), Next::Send(0, 2));
         assert!(f.is_resend(0, 2));
+    }
+
+    #[test]
+    fn a_past_pause_does_not_wake_the_scan() {
+        let ms = Duration::from_millis;
+        let cfg = ScanConfig {
+            rtt: RttTimeouts::fixed(ms(100)),
+            ..cfg(1, 3)
+        };
+        let a: IpAddr = "10.0.0.1".parse().unwrap();
+        let mut f: Flight<u16> = Flight::new(&cfg, &[a], vec![2]);
+        let t0 = Instant::now();
+        f.start([(0, 1), (0, 2)]);
+        assert_eq!(f.next(t0), Next::Send(0, 1));
+        f.sent(0, 1, t0);
+        assert!(matches!(f.next(t0 + ms(150)), Next::Wait(_)));
+        let t1 = t0 + ms(150) + RATE_LIMIT_PAUSE;
+        assert_eq!(f.next(t1), Next::Send(0, 1));
+        f.sent(0, 1, t1);
+        // The window is full and the pause is over: wait for the resend's
+        // timeout, not for the pause that already ended.
+        assert_eq!(f.next(t1 + ms(10)), Next::Wait(t1 + ms(100)));
     }
 
     #[test]
