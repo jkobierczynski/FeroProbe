@@ -2,8 +2,9 @@
 //! sit at offsets or carry their own lengths.
 //!
 //! Like the rules, these are written from the public protocol
-//! specifications: MS-TDS (SQL Server), MS-SMB2, MS-RDPBCGR (RDP) and
-//! RFC 4511 (LDAP).
+//! specifications: MS-TDS (SQL Server), MS-SMB2, MS-RDPBCGR (RDP),
+//! RFC 4511 (LDAP), and for UDP the readers in [`super::udp_info`]. Each
+//! runs on the replies to the probe of the same name in the rules file.
 
 use super::ServiceInfo;
 use super::rules::clean;
@@ -16,7 +17,31 @@ pub(super) fn parse(probe: &str, data: &[u8]) -> Option<ServiceInfo> {
         "smb" => smb(data),
         "rdp" => rdp(data),
         "ldap" => ldap(data),
+        "dns-version" => super::udp_info::parse_dns(data),
+        // DNS over TCP: the same reply behind a two-byte length.
+        "dns-tcp" => super::udp_info::parse_dns(data.get(2..)?),
+        "ntp" => super::udp_info::parse_ntp(data),
+        "snmp" => super::udp_info::parse_snmp(data),
+        "ssdp" => super::udp_info::parse_ssdp(data),
+        "nbstat" => super::udp_info::parse_nbstat(data),
         _ => None,
+    }
+}
+
+/// The services the built-in parser for `probe` can name, so that a soft
+/// match can tell which probes may still say more.
+pub(super) fn services(probe: &str) -> &'static [&'static str] {
+    match probe {
+        "mssql" => &["ms-sql-s"],
+        "smb" => &["microsoft-ds"],
+        "rdp" => &["ms-wbt-server"],
+        "ldap" => &["ldap"],
+        "dns-version" | "dns-tcp" => &["domain"],
+        "ntp" => &["ntp"],
+        "snmp" => &["snmp"],
+        "ssdp" => &["upnp"],
+        "nbstat" => &["netbios-ns"],
+        _ => &[],
     }
 }
 
@@ -52,6 +77,10 @@ fn mssql(data: &[u8]) -> Option<ServiceInfo> {
             info.version = Some(format!("{major}.{minor}.{build}"));
             if let Some(name) = mssql_release(major, minor) {
                 info.product = Some(format!("Microsoft SQL Server {name}"));
+                info.cpe = vec![format!(
+                    "cpe:/a:microsoft:sql_server:{}",
+                    name.to_lowercase().replace(' ', "_")
+                )];
             }
         }
         at += 5;
@@ -156,17 +185,14 @@ fn ldap(data: &[u8]) -> Option<ServiceInfo> {
         info.version = attr("vendorVersion");
     } else if data.windows(15).any(|w| w == b"OpenLDAProotDSE") {
         info.product = Some("OpenLDAP".into());
+        info.cpe = vec!["cpe:/a:openldap:openldap".into()];
     } else if attr("domainFunctionality").is_some() || attr("isGlobalCatalogReady").is_some() {
         info.product = Some("Microsoft Windows Active Directory LDAP".into());
+        info.os_type = Some("Windows".into());
+        info.cpe = vec!["cpe:/o:microsoft:windows".into()];
     }
-    let extra: Vec<String> = [
-        attr("dnsHostName").map(|h| format!("host: {h}")),
-        attr("defaultNamingContext").map(|c| format!("context: {c}")),
-    ]
-    .into_iter()
-    .flatten()
-    .collect();
-    info.extra_info = (!extra.is_empty()).then(|| extra.join("; "));
+    info.hostname = attr("dnsHostName");
+    info.extra_info = attr("defaultNamingContext").map(|c| format!("context: {c}"));
     Some(info)
 }
 
@@ -220,6 +246,7 @@ mod tests {
         assert_eq!(i.name, "ms-sql-s");
         assert_eq!(i.product.as_deref(), Some("Microsoft SQL Server 2019"));
         assert_eq!(i.version.as_deref(), Some("15.0.2000"));
+        assert_eq!(i.cpe, vec!["cpe:/a:microsoft:sql_server:2019"]);
         assert!(parse("mssql", b"HTTP/1.1 400").is_none());
     }
 
@@ -311,10 +338,8 @@ mod tests {
             i.product.as_deref(),
             Some("Microsoft Windows Active Directory LDAP")
         );
-        assert_eq!(
-            i.extra_info.as_deref(),
-            Some("host: dc1.corp.example; context: DC=corp,DC=example")
-        );
+        assert_eq!(i.extra_info.as_deref(), Some("context: DC=corp,DC=example"));
+        assert_eq!(i.hostname.as_deref(), Some("dc1.corp.example"));
         let i = parse(
             "ldap",
             &ldap_entry(&[("structuralObjectClass", "OpenLDAProotDSE")]),

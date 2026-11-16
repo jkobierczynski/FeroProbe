@@ -29,6 +29,8 @@ pub(crate) struct Packet<'a> {
     pub ttl: u8,
     /// The IPv4 identification field; `None` for IPv6.
     pub ipid: Option<u16>,
+    /// The IPv4 "don't fragment" flag; `false` for IPv6, which has none.
+    pub df: bool,
     pub payload: &'a [u8],
 }
 
@@ -44,6 +46,7 @@ impl<'a> Packet<'a> {
                     protocol: ip.protocol,
                     ttl: ip.ttl,
                     ipid: Some(ip.id),
+                    df: ip.df,
                     payload: ip.payload,
                 })
             }
@@ -55,6 +58,7 @@ impl<'a> Packet<'a> {
                     protocol: ip.protocol,
                     ttl: ip.hop_limit,
                     ipid: None,
+                    df: false,
                     payload: ip.payload,
                 })
             }

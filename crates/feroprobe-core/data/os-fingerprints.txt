@@ -1,0 +1,351 @@
+# FeroProbe OS fingerprint database
+#
+# FeroProbe's own signatures for OS detection (-O). They are written from
+# how each TCP/IP stack is documented to behave (kernel sources, vendor
+# documentation, RFCs) and from captures of our own machines; nothing here
+# comes from nmap's nmap-os-db, whose license does not allow
+# redistribution. The format and the tests are described in
+# docs/os-fingerprints.md, which also says how to add a signature.
+#
+# Signatures marked "unverified" have not yet been checked against a
+# capture of the real system: send one (feroprobe -O -v prints the
+# fingerprint) so they can be confirmed or corrected.
+#
+# Host firewalls often drop unsolicited ACKs and echo requests, so the
+# signatures accept a missing answer to a, c2 and ie.
+#
+# Block layout:
+#   Fingerprint <name>        a signature reported by name
+#   Template <name>           only for copying with Like
+#   Like <name>               copy an earlier block's tests, class and CPEs
+#   Class <vendor>, <family>, <generation>, <device type>
+#   CPE <cpe>                 one per line
+#   <test> = <alternatives>   alternatives separated by |
+#
+# Windows are matched with m*N (N times the MSS in the answer, or N times
+# the MSS less the 12 bytes of timestamps) and m*max (the largest such
+# multiple up to 65535), so one signature fits every link MTU.
+
+# ---------------------------------------------------------------- Linux
+#
+# Linux writes its SYN-ACK options in a fixed order (MSS, SACK permitted
+# with timestamps, window scale) and pads with no-ops where an option is
+# left out. It sets DF on SYN-ACKs and resets, and gives them IP ID 0.
+# The kernel version shows in the SYN-ACK window: 4 x MSS in 2.6, 10 or
+# 20 x MSS in 3.x to 4.18, and the largest multiple of the MSS up to
+# 65535 since 4.19 ("tcp: up initial rmem to 128KB and SYN rwin to
+# around 64KB"). Timestamps count milliseconds since 4.13; before that
+# they followed the kernel's tick rate (100, 250 or 1000 Hz). Recent
+# kernels give every connection its own random timestamp offset (ts = R).
+
+Template Linux common
+Class Linux, Linux, , general purpose
+ttl = 64
+s1 = Y
+s1.f = SA
+s1.o = M,S,T,N,W
+s1.df = Y
+ws = 2-14
+s2 = Y
+s2.f = SA
+s2.o = M
+s3 = Y
+s3.o = M,N,N,S
+s4 = Y
+s4.o = M,N,N,T,N,W
+e = Y
+e.f = SAE|SA
+e.o = M,N,N,S,N,W
+a = Y|N
+a.f = R
+a.w = 0
+a.seq = A
+a.df = Y
+c1 = Y
+c1.f = AR
+c1.w = 0
+c1.ack = S+
+c1.df = Y
+c2 = Y|N
+c2.f = R
+c2.w = 0
+c2.seq = A
+c2.df = Y
+ipid = Z
+ipid.rst = Z
+ie = Y|N
+
+Fingerprint Linux 4.19 - 6.x
+Like Linux common
+Class Linux, Linux, 4.X|5.X|6.X, general purpose
+CPE cpe:/o:linux:linux_kernel:4
+CPE cpe:/o:linux:linux_kernel:5
+CPE cpe:/o:linux:linux_kernel:6
+s1.w = m*max
+s2.w = m*max
+s3.w = m*max
+e.w = m*max
+ts = 1000|R
+
+Fingerprint Linux 4.19 - 6.x (TCP timestamps disabled)
+Like Linux 4.19 - 6.x
+s1.o = M,N,N,S,N,W
+s4.o = M,N,W
+ts = U
+
+# Verified against a TP-Link home router (kernel 3.x, HZ 100).
+Fingerprint Linux 3.x - 4.18
+Like Linux common
+Class Linux, Linux, 3.X|4.X, general purpose
+CPE cpe:/o:linux:linux_kernel:3
+CPE cpe:/o:linux:linux_kernel:4
+s1.w = m*10|m*20
+s2.w = m*10|m*20
+s3.w = m*10|m*20
+e.w = m*10|m*20
+ts = 100|250|1000|R
+
+# unverified
+Fingerprint Linux 2.6.x
+Like Linux common
+Class Linux, Linux, 2.6.X, general purpose
+CPE cpe:/o:linux:linux_kernel:2.6
+s1.w = m*4
+s2.w = m*4
+s3.w = m*4
+e.w = m*4
+e.f = SA
+ipid = Z|I
+ipid.rst = Z|I
+ts = 100|250|1000
+
+# -------------------------------------------------------------- Windows
+#
+# Windows writes MSS, then window scale, then SACK permitted, with no-ops
+# for alignment, and since Vista leaves TCP timestamps off (it does not
+# echo them). Initial TTL 128. IP IDs come from one incrementing counter
+# shared by SYN-ACKs and resets; resets to closed ports go without DF.
+
+Template Windows common
+Class Microsoft, Windows, , general purpose
+ttl = 128
+s1 = Y
+s1.f = SA
+s1.o = M,N,W,N,N,S
+s1.df = Y
+ws = 8
+s2 = Y
+s2.f = SA
+s2.o = M
+s3 = Y
+s3.o = M,N,N,S
+s4 = Y
+s4.o = M,N,W
+e = Y
+e.f = SA|SAE
+e.o = M,N,W,N,N,S
+a = Y|N
+a.f = R
+a.w = 0
+a.seq = A
+c1 = Y
+c1.f = AR
+c1.w = 0
+c1.ack = S+
+c1.df = N
+c2 = Y|N
+c2.f = R
+c2.w = 0
+c2.seq = A
+ipid = I|RI
+ipid.rst = I|RI
+ipid.shared = Y
+ts = U
+
+# unverified
+Fingerprint Microsoft Windows 10 - 11 or Server 2016 - 2025
+Like Windows common
+Class Microsoft, Windows, 10|11|2016|2019|2022|2025, general purpose
+CPE cpe:/o:microsoft:windows_10
+CPE cpe:/o:microsoft:windows_11
+CPE cpe:/o:microsoft:windows_server_2016
+CPE cpe:/o:microsoft:windows_server_2019
+CPE cpe:/o:microsoft:windows_server_2022
+s1.w = 64240|65535|m*max
+s2.w = 64240|65535|m*max
+s3.w = 64240|65535|m*max
+e.w = 64240|65535|m*max
+
+# unverified
+Fingerprint Microsoft Windows Vista - 8.1 or Server 2008 - 2012 R2
+Like Windows common
+Class Microsoft, Windows, Vista|7|8|2008|2012, general purpose
+CPE cpe:/o:microsoft:windows_vista
+CPE cpe:/o:microsoft:windows_7
+CPE cpe:/o:microsoft:windows_8
+CPE cpe:/o:microsoft:windows_server_2008
+CPE cpe:/o:microsoft:windows_server_2012
+s1.w = 8192
+s2.w = 8192|65535
+s3.w = 8192
+e.w = 8192
+e.f = SA
+
+# unverified
+Fingerprint Microsoft Windows XP or Server 2003
+Like Windows common
+Class Microsoft, Windows, XP|2003, general purpose
+CPE cpe:/o:microsoft:windows_xp
+CPE cpe:/o:microsoft:windows_server_2003
+s1.o = M,N,N,S
+ws = -
+s1.w = 64240|65535|16384|m*max
+s2.w = 64240|65535|16384|m*max
+s3.w = 64240|65535|16384|m*max
+s4.o = M
+e.o = M,N,N,S
+e.w = 64240|65535|16384|m*max
+e.f = SA
+ipid.shared = *
+
+# ------------------------------------------------------------- BSD family
+#
+# The BSD stacks write MSS, window scale, SACK permitted and timestamps
+# each in their own order and pad the end with end-of-list bytes rather
+# than no-ops. Initial TTL 64.
+
+# unverified
+Fingerprint Apple macOS 10.x - 15 or iOS
+Class Apple, macOS, 10.X|11.X|12.X|13.X|14.X|15.X, general purpose
+CPE cpe:/o:apple:mac_os_x
+CPE cpe:/o:apple:macos
+CPE cpe:/o:apple:iphone_os
+ttl = 64
+s1 = Y
+s1.f = SA
+s1.o = M,N,W,N,N,T,S,E
+s1.w = 65535
+s1.df = Y
+ws = 3-8
+s2 = Y
+s2.o = M
+s3 = Y
+s3.o = M,S,E
+s4 = Y
+s4.o = M,N,W,N,N,T
+e = Y
+e.f = SAE|SA
+e.o = M,N,W,S,E
+a.f = R
+a.w = 0
+c1.f = AR
+c1.w = 0
+c2.f = R
+c2.w = 0
+ipid = Z|RI|RD
+ts = 1000|R
+
+# unverified
+Fingerprint FreeBSD 11 - 14
+Class FreeBSD, FreeBSD, 11.X|12.X|13.X|14.X, general purpose
+CPE cpe:/o:freebsd:freebsd
+ttl = 64
+s1 = Y
+s1.f = SA
+s1.o = M,N,W,S,T
+s1.w = 65535
+s1.df = Y
+ws = 3-10
+s2 = Y
+s2.o = M
+s3 = Y
+s3.o = M,S,E
+s4 = Y
+s4.o = M,N,W,N,N,T
+e = Y
+e.f = SAE|SA
+e.o = M,N,W,S,E
+a.f = R
+a.w = 0
+c1.f = AR
+c1.w = 0
+c2.f = R
+c2.w = 0
+ipid = Z|I|RD
+ts = 1000|100|R
+
+# unverified
+Fingerprint OpenBSD 6.x - 7.x
+Class OpenBSD, OpenBSD, 6.X|7.X, general purpose
+CPE cpe:/o:openbsd:openbsd
+ttl = 64
+s1 = Y
+s1.f = SA
+s1.o = M,N,N,S,N,W,N,N,T
+s1.w = 16384
+s1.df = Y
+ws = 3-8
+s2 = Y
+s2.o = M
+s3 = Y
+s3.o = M,N,N,S
+s4 = Y
+s4.o = M,N,W,N,N,T
+e = Y
+e.f = SA
+e.o = M,N,N,S,N,W
+a.f = R
+a.w = 0
+c1.f = AR
+c1.w = 0
+c2.f = R
+c2.w = 0
+ipid = RD|RI
+
+# ------------------------------------------------------ Network devices
+#
+# Classic router and switch stacks answer with the MSS option alone,
+# start at TTL 255 and do not set DF.
+
+# unverified
+Fingerprint Cisco IOS 12.X - 15.X
+Class Cisco, IOS, 12.X|15.X, router
+CPE cpe:/o:cisco:ios
+ttl = 255
+s1 = Y
+s1.f = SA
+s1.o = M
+s1.w = 4128
+s1.df = N
+ws = -
+s2.o = M
+s3.o = M
+s4.o = M
+e.o = M
+e.f = SA
+c1.f = AR
+c1.w = 0
+ipid = I|RI
+ts = U
+
+# Small embedded stacks (lwIP and similar), common in PLCs, gateways and
+# IoT devices: MSS only, no DF, an incrementing IP ID, TTL 255 or 64.
+# unverified
+Fingerprint Embedded TCP/IP stack (lwIP or similar)
+Class lwIP, embedded, , specialized
+CPE cpe:/a:lwip_project:lwip
+ttl = 255|64
+s1 = Y
+s1.f = SA
+s1.o = M
+s1.w = 1-32768
+s1.df = N
+ws = -
+s2.o = M
+s3.o = M
+s4.o = M
+e.o = M
+e.f = SA
+c1.f = AR
+ipid = I
+ts = U

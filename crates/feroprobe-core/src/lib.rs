@@ -52,7 +52,7 @@ pub use dns::reverse_lookup;
 pub use evasion::{Evasion, Fragment};
 pub use ipproto::ip_protocol_scan;
 pub use model::{HostResult, PortResult, PortState, Protocol, ScanConfig};
-pub use os::{OsMatch, TcpTraits, os_detect};
+pub use os::{OsMatch, OsOptions, OsResult, os_detect};
 pub use ports::{
     PortLists, ip_protocol_name, parse_port_lists, parse_ports, parse_protocols, service_name,
     top_ports, top_sctp_ports, top_udp_ports,
@@ -60,7 +60,7 @@ pub use ports::{
 pub use raw::{raw_ipv6_available, raw_sockets_available};
 pub use rtt::{RttState, RttTimeouts};
 pub use sctp::{SctpScanKind, sctp_scan};
-pub use service::{ServiceInfo, detect_services};
+pub use service::{ServiceDb, ServiceInfo, VersionScan, detect_services};
 pub use syn::{RawTcpScan, TcpScanKind, parse_scanflags, raw_tcp_scan, syn_scan};
 pub use target::{
     Exclusions, IpVersion, Target, TargetSpec, parse_target, resolve_targets,

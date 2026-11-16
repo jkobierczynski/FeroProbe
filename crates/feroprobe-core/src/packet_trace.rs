@@ -156,6 +156,46 @@ fn local_for(dst: IpAddr) -> Option<IpAddr> {
 /// ourselves, so the trace must read the IP header, not the socket.
 const IPPROTO_RAW: u8 = 255;
 
+/// A TCP segment's options in nmap's packet-trace style, such as
+/// `<mss 1460,sackOK,timestamp 123 0,nop,wscale 7>`; empty without options.
+pub(crate) fn tcp_options_text(seg: &[u8]) -> String {
+    let opts = packet::tcp_options(seg);
+    let mut parts = Vec::new();
+    let mut i = 0;
+    while i < opts.len() {
+        let kind = opts[i];
+        if kind == 0 {
+            parts.push("eol".to_string());
+            break;
+        }
+        if kind == 1 {
+            parts.push("nop".to_string());
+            i += 1;
+            continue;
+        }
+        let Some(&len) = opts.get(i + 1) else { break };
+        let len = usize::from(len);
+        let Some(body) = opts.get(i + 2..i + len.max(2)) else {
+            break;
+        };
+        let be16 = |b: &[u8]| u16::from_be_bytes([b[0], b[1]]);
+        let be32 = |b: &[u8]| u32::from_be_bytes([b[0], b[1], b[2], b[3]]);
+        parts.push(match (kind, body.len()) {
+            (2, 2) => format!("mss {}", be16(body)),
+            (3, 1) => format!("wscale {}", body[0]),
+            (4, 0) => "sackOK".to_string(),
+            (8, 8) => format!("timestamp {} {}", be32(body), be32(&body[4..])),
+            (k, _) => format!("opt {k}"),
+        });
+        i += len.max(2);
+    }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!("<{}>", parts.join(","))
+    }
+}
+
 /// A sent raw packet: `to` is where it went.
 pub(crate) fn sent(proto: u8, pkt: &[u8], to: SocketAddr) {
     log("SENT", || {

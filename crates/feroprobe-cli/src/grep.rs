@@ -86,8 +86,15 @@ pub fn render(hosts: &[HostResult], info: &RunInfo) -> String {
         if let [(n, state)] = hidden.as_slice() {
             let _ = write!(line, "\tIgnored State: {state} ({n})");
         }
-        if let Some(os) = &host.os {
-            let _ = write!(line, "\tOS: {}", field(&os.name));
+        // Like nmap: only perfect matches, separated by "|".
+        if let Some(os) = &host.os
+            && os.perfect > 0
+        {
+            let names: Vec<String> = os.matches[..os.perfect]
+                .iter()
+                .map(|m| field(&m.name))
+                .collect();
+            let _ = write!(line, "\tOS: {}", names.join("|"));
         }
         let _ = writeln!(x, "{line}");
     }

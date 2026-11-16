@@ -15,10 +15,10 @@ use clap::{Parser, ValueEnum};
 use feroprobe_core::discovery::{DEFAULT_TCP_PING_PORT, DEFAULT_UDP_PING_PORT};
 use feroprobe_core::timing::parse_duration;
 use feroprobe_core::{
-    Evasion, Exclusions, Fragment, HostResult, IpVersion, PingProbes, PortLists, RawTcpScan,
-    RttTimeouts, ScanConfig, SctpScanKind, Target, TcpScanKind, Timing, connect_scan,
-    detect_services, discover, ip_protocol_scan, os_detect, parse_port_lists, parse_ports,
-    parse_scanflags, raw_ipv6_available, raw_sockets_available, raw_tcp_scan,
+    Evasion, Exclusions, Fragment, HostResult, IpVersion, OsOptions, PingProbes, PortLists,
+    RawTcpScan, RttTimeouts, ScanConfig, SctpScanKind, Target, TcpScanKind, Timing, VersionScan,
+    connect_scan, detect_services, discover, ip_protocol_scan, os_detect, parse_port_lists,
+    parse_ports, parse_scanflags, raw_ipv6_available, raw_sockets_available, raw_tcp_scan,
     resolve_targets_lenient, reverse_lookup, sctp_scan, top_ports, top_sctp_ports, top_udp_ports,
     traceroute, udp_scan,
 };
@@ -390,6 +390,18 @@ struct Args {
     #[arg(short = 'O')]
     os: bool,
 
+    /// Limit OS detection to hosts with at least one open and one closed TCP port
+    #[arg(long)]
+    osscan_limit: bool,
+
+    /// Report near OS matches too ("aggressive guesses"); --fuzzy is the same
+    #[arg(long, alias = "fuzzy")]
+    osscan_guess: bool,
+
+    /// OS detection tries for a host without a perfect match (default 5)
+    #[arg(long, value_name = "tries", value_parser = clap::value_parser!(u32).range(1..))]
+    max_os_tries: Option<u32>,
+
     /// Trace the route to each host that is up, after the port scan
     /// (raw sockets: Linux, root or CAP_NET_RAW)
     #[arg(long)]
@@ -503,6 +515,35 @@ struct Args {
     /// With -sV, how long to wait for each service reply, in milliseconds
     #[arg(long, value_name = "MS", default_value_t = 3000)]
     version_timeout: u64,
+
+    /// With -sV, how hard to try, 0-9 [default: 7]: probes rarer than this
+    /// are only sent to their own ports. The last of --version-intensity,
+    /// --version-light and --version-all wins, as in nmap
+    #[arg(
+        long,
+        value_name = "0-9",
+        value_parser = clap::value_parser!(u8).range(0..=9),
+        overrides_with_all = ["version_intensity", "version_light", "version_all"]
+    )]
+    version_intensity: Option<u8>,
+
+    /// With -sV, only the most likely probes (intensity 2)
+    #[arg(long, overrides_with_all = ["version_intensity", "version_light", "version_all"])]
+    version_light: bool,
+
+    /// With -sV, try every probe (intensity 9)
+    #[arg(long, overrides_with_all = ["version_intensity", "version_light", "version_all"])]
+    version_all: bool,
+
+    /// With -sV, print each service probe, its reply and the rule that
+    /// matched it
+    #[arg(long)]
+    version_trace: bool,
+
+    /// With -sV, read the probes and match rules from FILE instead of the
+    /// built-in ones (FeroProbe's own format; see the manual)
+    #[arg(long, value_name = "FILE")]
+    service_rules: Option<std::path::PathBuf>,
 
     /// Extra attempts for probes that get no answer [default: from -T; normally 1].
     /// nmap's name --max-retries works too
@@ -1323,6 +1364,54 @@ fn stats_line(elapsed: Duration) -> String {
     line
 }
 
+/// The `-sV` settings: intensity, trace and rules.
+fn version_scan(args: &Args) -> Result<VersionScan> {
+    let mut vs = VersionScan::new(Duration::from_millis(args.version_timeout));
+    vs.intensity = version_intensity(args);
+    vs.trace = args.version_trace;
+    // nmap prints the trace to standard output; keep it off a
+    // machine-readable report there.
+    let outputs = Outputs::from_args(args)?;
+    vs.trace_to_stderr = if outputs.stdout_taken() {
+        outputs.normal.iter().all(|p| p != "-")
+    } else {
+        !matches!(args.output, Format::Table)
+    };
+    if let Some(path) = &args.service_rules {
+        let db = feroprobe_core::ServiceDb::load(path)
+            .map_err(|e| anyhow::anyhow!("reading service rules {}: {e}", path.display()))?;
+        vs.db = std::sync::Arc::new(db);
+    }
+    Ok(vs)
+}
+
+/// The `-sV` intensity from `--version-intensity`, `--version-light` and
+/// `--version-all`; clap leaves only the last of the three set.
+fn version_intensity(args: &Args) -> u8 {
+    if let Some(level) = args.version_intensity {
+        level
+    } else if args.version_light {
+        VersionScan::LIGHT
+    } else if args.version_all {
+        VersionScan::ALL
+    } else {
+        VersionScan::DEFAULT_INTENSITY
+    }
+}
+
+/// The first `-sV` option given, for the warning when there is no `-sV`.
+fn version_option(args: &Args) -> Option<&'static str> {
+    [
+        (args.version_intensity.is_some(), "--version-intensity"),
+        (args.version_light, "--version-light"),
+        (args.version_all, "--version-all"),
+        (args.version_trace, "--version-trace"),
+        (args.service_rules.is_some(), "--service-rules"),
+    ]
+    .into_iter()
+    .find_map(|(given, name)| given.then_some(name))
+}
+
 /// Apply `-A`: version detection, plus OS detection and traceroute when
 /// raw sockets are available (with a warning when they are not). Returns
 /// whether OS detection and traceroute run.
@@ -1339,6 +1428,35 @@ fn aggressive(plan: &mut Plan, args: &Args, privileged: bool) -> Result<(bool, b
     }
     eprintln!("Warning: {}", AGGRESSIVE_UNPRIVILEGED);
     Ok((args.os, args.traceroute))
+}
+
+/// The `-O` options. The echo probe is in scope only when the command's
+/// host discovery sends ICMP echo requests (the default as root, or `-PE`).
+fn os_options(args: &Args, plan: &Plan, probes: &PingProbes) -> OsOptions {
+    OsOptions {
+        limit: args.osscan_limit,
+        guess: args.osscan_guess,
+        max_tries: args
+            .max_os_tries
+            .unwrap_or(feroprobe_core::os::DEFAULT_TRIES),
+        icmp_echo: plan.discovery && probes.echo,
+    }
+}
+
+/// Warnings for `-O` options given without `-O`, which do nothing then.
+fn os_option_warnings(args: &Args, os: bool) -> Vec<String> {
+    if os {
+        return Vec::new();
+    }
+    [
+        (args.osscan_limit, "--osscan-limit"),
+        (args.osscan_guess, "--osscan-guess"),
+        (args.max_os_tries.is_some(), "--max-os-tries"),
+    ]
+    .iter()
+    .filter(|(given, _)| *given)
+    .map(|(_, name)| format!("{name} has no effect without OS detection (-O or -A)"))
+    .collect()
 }
 
 /// The options that send probes able to upset fragile OT/ICS devices
@@ -1524,8 +1642,9 @@ struct ScanJob<'a> {
     /// IP protocol numbers for `-sO`.
     protocols: &'a [u8],
     scanflags: Option<u8>,
-    version_wait: Duration,
+    version: VersionScan,
     os: bool,
+    os_opts: OsOptions,
 }
 
 /// How many hosts `--host-timeout` scans at once, each on its own clock.
@@ -1632,12 +1751,32 @@ impl ScanJob<'_> {
         }
         if self.plan.version {
             let done = progress.phase("service detection", live.len());
-            detect_services(hosts, cfg, self.version_wait).await;
+            detect_services(hosts, cfg, &self.version).await;
             done(&progress);
         }
         if self.os {
+            if self.os_opts.limit {
+                let all = OsOptions {
+                    limit: false,
+                    ..self.os_opts
+                };
+                for (i, h) in hosts.iter().enumerate() {
+                    if feroprobe_core::os::job_for(i, h, &self.os_opts).is_none()
+                        && feroprobe_core::os::job_for(i, h, &all).is_some()
+                    {
+                        progress.say(1, || {
+                            format!(
+                                "Skipping OS Scan against {} due to absence of open (or perhaps closed) ports",
+                                h.addr
+                            )
+                        });
+                    }
+                }
+            }
             let done = progress.phase("OS detection", live.len());
-            os_detect(hosts, cfg).await.context("OS detection failed")?;
+            os_detect(hosts, cfg, &self.os_opts)
+                .await
+                .context("OS detection failed")?;
             done(&progress);
         }
         Ok(())
@@ -1754,6 +1893,8 @@ struct DryOrder<'a> {
     trace: bool,
     /// See [`trace_fallback_port`].
     trace_fallback: Option<u16>,
+    /// The `-sV` settings, to describe its probes.
+    version: &'a VersionScan,
 }
 
 /// The notes a dry run prints above its probes: what it cannot show (steps
@@ -1764,9 +1905,6 @@ fn dry_run_notes(args: &Args, plan: &Plan, d: &DryOrder, privileged: bool) -> Ve
     if plan.version && !plan.ping_only {
         follow.push("service detection (-sV)");
     }
-    if d.os {
-        follow.push("OS detection (-O)");
-    }
     if d.trace {
         follow.push("traceroute (--traceroute)");
     }
@@ -1776,6 +1914,11 @@ fn dry_run_notes(args: &Args, plan: &Plan, d: &DryOrder, privileged: bool) -> Ve
              depend on replies a dry run does not get",
             follow.join(", ")
         ));
+    }
+    if plan.version && !plan.ping_only {
+        let tcp = if plan.tcp.is_some() { d.tcp } else { &[] };
+        let udp = if plan.udp { d.udp } else { &[] };
+        notes.extend(feroprobe_core::service::dry_run_lines(d.version, tcp, udp));
     }
     if d.trace {
         notes.push(match d.trace_fallback {
@@ -1872,6 +2015,7 @@ fn dry_run(
         },
         evasion: &cfg.evasion,
         retries: cfg.retries,
+        os: (d.os && scan).then(|| os_options(args, plan, probes)),
         source_port: cfg.source_port,
         notes: dry_run_notes(args, plan, d, privileged),
     };
@@ -1989,6 +2133,16 @@ async fn main() -> Result<()> {
     let skip_discovery = args.ping.contains(&PingArg::Skip);
     let mut plan = plan(&args.scan, skip_discovery, syn_ok, args.scanflags.is_some())?;
     let (mut os, trace) = aggressive(&mut plan, &args, raw_sockets_available())?;
+    for w in os_option_warnings(&args, os) {
+        eprintln!("Warning: {w}");
+    }
+    // Read --service-rules now, so a bad file fails before anything is sent.
+    let version_scan = version_scan(&args)?;
+    if !plan.version
+        && let Some(option) = version_option(&args)
+    {
+        eprintln!("Warning: {option} has no effect without -sV or -A");
+    }
     if os {
         if plan.ping_only {
             bail!("-O needs a port scan, so it cannot be combined with -sn");
@@ -2165,6 +2319,7 @@ async fn main() -> Result<()> {
                 os,
                 trace,
                 trace_fallback,
+                version: &version_scan,
             },
         );
     }
@@ -2232,8 +2387,9 @@ async fn main() -> Result<()> {
             sctp: &sctp_order,
             protocols: &protocols,
             scanflags: args.scanflags,
-            version_wait: Duration::from_millis(args.version_timeout),
+            version: version_scan.clone(),
             os,
+            os_opts: os_options(&args, &plan, &probes),
         };
         scan_types = job.scan_types();
         // Only scan hosts that discovery found (all of them with -Pn).
@@ -2319,6 +2475,7 @@ async fn main() -> Result<()> {
         show_reason: args.reason,
         show_version: plan.version,
         show_os: os,
+        os_guess: args.osscan_guess,
         show_trace: trace,
         assume_up: !plan.discovery,
         ping_only: plan.ping_only,
@@ -3021,7 +3178,36 @@ mod tests {
         assert!(gate_evasion(&ev, &private, &syn, false).is_ok());
     }
 
+    #[test]
+    fn version_intensity_last_one_wins() {
+        let level = |argv: &[&str]| version_intensity(&args(argv));
+        assert_eq!(level(&["-sV"]), 7);
+        assert_eq!(level(&["-sV", "--version-light"]), 2);
+        assert_eq!(
+            level(&["-sV", "--version-all", "--version-intensity", "4"]),
+            4
+        );
+        assert_eq!(
+            level(&["-sV", "--version-intensity", "4", "--version-all"]),
+            9
+        );
+        assert_eq!(level(&["-sV", "--version-all", "--version-light"]), 2);
+        assert!(Args::try_parse_from(["feroprobe", "--version-intensity", "10", "x"]).is_err());
+        assert_eq!(
+            version_option(&args(&["--version-trace"])),
+            Some("--version-trace")
+        );
+        assert_eq!(version_option(&args(&["-sV"])), None);
+        let to_stderr = |argv: &[&str]| version_scan(&args(argv)).unwrap().trace_to_stderr;
+        assert!(!to_stderr(&["-sV", "--version-trace"]));
+        assert!(to_stderr(&["-sV", "--version-trace", "-o", "json"]));
+        assert!(to_stderr(&["-sV", "--version-trace", "-oX", "-"]));
+        assert!(!to_stderr(&["-sV", "--version-trace", "-oN", "-"]));
+    }
+
     fn dry_order() -> DryOrder<'static> {
+        static VERSION: std::sync::LazyLock<VersionScan> =
+            std::sync::LazyLock::new(|| VersionScan::new(Duration::from_secs(3)));
         DryOrder {
             tcp: &[80],
             udp: &[],
@@ -3030,6 +3216,7 @@ mod tests {
             os: false,
             trace: false,
             trace_fallback: Some(80),
+            version: &VERSION,
         }
     }
 
@@ -3107,7 +3294,11 @@ mod tests {
         let notes = dry_run_notes(&a, &plan, &d, false).join("\n");
         // Steps that need replies are named, not listed probe by probe.
         assert!(notes.contains("service detection (-sV)"), "{notes}");
-        assert!(notes.contains("OS detection (-O)"), "{notes}");
+        // The -sV probes are described, at the intensity in use.
+        assert!(notes.contains("-sV (intensity 7"), "{notes}");
+        assert!(notes.contains("http on 80"), "{notes}");
+        // OS detection is listed probe by probe (with port placeholders).
+        assert!(!notes.contains("OS detection (-O)"), "{notes}");
         assert!(notes.contains("traceroute"), "{notes}");
         // -n: no reverse DNS to mention.
         assert!(!notes.contains("reverse DNS"), "{notes}");
@@ -3291,8 +3482,9 @@ mod tests {
             sctp: &[],
             protocols: &[],
             scanflags: None,
-            version_wait: Duration::from_secs(1),
+            version: VersionScan::new(Duration::from_secs(1)),
             os: false,
+            os_opts: OsOptions::default(),
         };
         let target = Target {
             addr: "127.0.0.1".parse().unwrap(),

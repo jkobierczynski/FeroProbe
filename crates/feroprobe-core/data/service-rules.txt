@@ -1,0 +1,1087 @@
+# FeroProbe service rules: the probes -sV sends and the rules that read
+# the replies.
+#
+# FeroProbe's own work, written from public protocol specifications and
+# from banners that real servers send. nmap's nmap-service-probes is NOT
+# used or copied: its licence does not allow redistributing it here. Please
+# keep it that way when adding rules.
+#
+# The format is described in docs/manual.md, "Service rules file". In
+# short:
+#
+#   probe NAME tcp|udp         a probe; its attributes follow, indented:
+#     rarity N                 0-9; sent at --version-intensity N or higher
+#                              (0: always). Always sent to its own ports.
+#     ports LIST               ports the probe is meant for (80,8000-8010)
+#     send "TEXT"              bytes to send; \r \n \t \0 \\ \" \xHH work.
+#                              Several send lines are joined.
+#     pad N                    append N zero bytes to the payload
+#     tls                      a TLS handshake instead of a payload
+#     listen-ports LIST        (tls only) inside TLS, listen first here
+#
+#   match SERVICE REGEX        a rule; the first one that matches wins
+#   softmatch SERVICE REGEX    names the service only; probing goes on with
+#                              the probes that can tell more
+#     probe NAME               only for replies to this probe
+#     product TEXT             ${1}, ${2}, ... are the regex's groups
+#     version TEXT
+#     info TEXT                repeatable; joined with "; "
+#     host TEXT
+#     os TEXT
+#     device TEXT
+#     cpe TEXT                 repeatable, e.g. cpe:/a:openbsd:openssh:${2}
+#
+# A REGEX is the rest of the line, run on the raw reply bytes with
+# (?s-u): "." matches any byte including newlines, \xNN matches byte NN.
+# Use \x20 for a space at either end of a pattern.
+
+feroprobe-service-rules 1
+
+# ---------------------------------------------------------------- probes
+
+# Connect and listen: services that talk first (SSH, FTP, SMTP, ...).
+probe null tcp
+  rarity 0
+
+# A TLS handshake: first on the usual TLS ports (the probes then run inside
+# it), else when a port stays silent or answers with a TLS alert.
+probe tls tcp
+  rarity 1
+  tls
+  ports 443,465,636,853,990,992,993,994,995,2376,5061,5671,6443,8443,8883,9443,10250
+  listen-ports 465,990,992,993,994,995
+
+probe http tcp
+  rarity 1
+  ports 80,81,591,2375,3000,5000,5601,7001,8000,8008,8080,8081,8088,8888,9000,9090,9200
+  send "GET / HTTP/1.0\r\n\r\n"
+
+# Two empty lines: line-based services answer with an error that names them.
+probe crlf tcp
+  rarity 1
+  ports 79,113
+  send "\r\n\r\n"
+
+probe rtsp tcp
+  rarity 5
+  ports 554,8554
+  send "OPTIONS * RTSP/1.0\r\nCSeq: 1\r\n\r\n"
+
+probe sip tcp
+  rarity 5
+  ports 5060,5061
+  send "OPTIONS sip:feroprobe.invalid SIP/2.0\r\n"
+  send "Via: SIP/2.0/TCP feroprobe.invalid;branch=z9hG4bKferoprobe\r\n"
+  send "From: <sip:feroprobe@feroprobe.invalid>;tag=feroprobe\r\n"
+  send "To: <sip:feroprobe.invalid>\r\n"
+  send "Call-ID: feroprobe@feroprobe.invalid\r\nCSeq: 1 OPTIONS\r\n"
+  send "Max-Forwards: 70\r\nContent-Length: 0\r\n\r\n"
+
+# NetBIOS session header + SMB2 NEGOTIATE offering dialects 2.0.2 to 3.0.2.
+probe smb tcp
+  rarity 5
+  ports 445
+  send "\x00\x00\x00\x6c\xfeSMB\x40\x00"
+  pad 58
+  send "\x24\x00\x04\x00\x01\x00"
+  pad 30
+  send "\x02\x02\x10\x02\x00\x03\x02\x03"
+
+# TPKT + X.224 Connection Request with an RDP negotiation request offering
+# TLS and CredSSP (MS-RDPBCGR).
+probe rdp tcp
+  rarity 6
+  ports 3389
+  send "\x03\x00\x00\x13\x0e\xe0\x00\x00\x00\x00\x00\x01\x00\x08\x00\x03\x00\x00\x00"
+
+# RESP array: INFO server.
+probe redis tcp
+  rarity 6
+  ports 6379,6380
+  send "*2\r\n$4\r\nINFO\r\n$6\r\nserver\r\n"
+
+# LDAP SearchRequest for the rootDSE: base "", scope base, (objectClass=*),
+# asking for the vendor, host and naming context (RFC 4511).
+probe ldap tcp
+  rarity 6
+  ports 389,636,3268,3269
+  send "\x30\x79\x02\x01\x01\x63\x74\x04\x00\x0a\x01\x00\x0a\x01\x00\x02\x01\x00"
+  send "\x02\x01\x00\x01\x01\x00\x87\x0bobjectClass\x30\x54\x04\x01*\x04\x01+"
+  send "\x04\x0avendorName\x04\x0dvendorVersion\x04\x14defaultNamingContext"
+  send "\x04\x0bdnsHostName\x04\x0enamingContexts"
+
+# ONC RPC NULL call to the portmapper (program 100000 version 2) with a
+# record mark (RFC 5531). The transaction id is "FPRO".
+probe rpc tcp
+  rarity 6
+  ports 111,2049
+  send "\x80\x00\x00\x28FPRO\x00\x00\x00\x00\x00\x00\x00\x02\x00\x01\x86\xa0"
+  send "\x00\x00\x00\x02"
+  pad 20
+
+# DNS over TCP: CHAOS TXT version.bind, behind its two-byte length.
+probe dns-tcp tcp
+  rarity 6
+  ports 53
+  send "\x00\x1e\x13\x38\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00"
+  send "\x07version\x04bind\x00\x00\x10\x00\x03"
+
+# TDS PRELOGIN: VERSION, ENCRYPTION, INSTOPT, THREADID and MARS (MS-TDS).
+probe mssql tcp
+  rarity 7
+  ports 1433
+  send "\x12\x01\x00\x2f\x00\x00\x01\x00"
+  send "\x00\x00\x1a\x00\x06\x01\x00\x20\x00\x01\x02\x00\x21\x00\x01"
+  send "\x03\x00\x22\x00\x04\x04\x00\x26\x00\x01\xff"
+  pad 13
+
+# PostgreSQL SSLRequest: length 8, code 80877103.
+probe pgsql tcp
+  rarity 7
+  ports 5432
+  send "\x00\x00\x00\x08\x04\xd2\x16\x2f"
+
+# SOCKS5 greeting offering "no authentication" (RFC 1928).
+probe socks5 tcp
+  rarity 7
+  ports 1080
+  send "\x05\x01\x00"
+
+probe memcached tcp
+  rarity 7
+  ports 11211
+  send "version\r\n"
+
+# AMQP 0-9-1 protocol header.
+probe amqp tcp
+  rarity 8
+  ports 5671,5672
+  send "AMQP\x00\x00\x09\x01"
+
+# MQTT 3.1.1 CONNECT, clean session, keepalive 60, client id "feroprobe".
+probe mqtt tcp
+  rarity 8
+  ports 1883,8883
+  send "\x10\x15\x00\x04MQTT\x04\x02\x00\x3c\x00\x09feroprobe"
+
+# MongoDB OP_MSG {buildinfo: 1, $db: "admin"}, which needs no login.
+probe mongodb tcp
+  rarity 8
+  ports 27017,27018,27019
+  send "\x38\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00\xdd\x07\x00\x00"
+  send "\x00\x00\x00\x00\x00\x23\x00\x00\x00\x10buildinfo\x00\x01\x00\x00\x00"
+  send "\x02$db\x00\x06\x00\x00\x00admin\x00\x00"
+
+# The ZooKeeper "srvr" four-letter command, allowed by default.
+probe zookeeper tcp
+  rarity 8
+  ports 2181
+  send "srvr\n"
+
+# X11 connection setup, little-endian, protocol 11.0, no authorization.
+probe x11 tcp
+  rarity 8
+  ports 6000-6009
+  send "l\x00\x0b\x00\x00\x00\x00\x00\x00\x00\x00\x00"
+
+# Java RMI: JRMI header, protocol version 2, StreamProtocol.
+probe java-rmi tcp
+  rarity 8
+  ports 1099
+  send "JRMI\x00\x02\x4b"
+
+# AJP 1.3 CPing.
+probe ajp tcp
+  rarity 8
+  ports 8009
+  send "\x12\x34\x00\x01\x0a"
+
+# XMPP client stream header (RFC 6120).
+probe xmpp tcp
+  rarity 8
+  ports 5222,5269
+  send "<?xml version='1.0'?><stream:stream to='feroprobe.invalid' "
+  send "xmlns='jabber:client' xmlns:stream='http://etherx.jabber.org/streams' "
+  send "version='1.0'>"
+
+# PPTP Start-Control-Connection-Request (RFC 2637), host and vendor
+# "feroprobe" / "FeroProbe".
+probe pptp tcp
+  rarity 8
+  ports 1723
+  send "\x00\x9c\x00\x01\x1a\x2b\x3c\x4d\x00\x01\x00\x00\x01\x00\x00\x00"
+  send "\x00\x00\x00\x01\x00\x00\x00\x01\x00\x00\x00\x00"
+  send "feroprobe"
+  pad 55
+  send "FeroProbe"
+  pad 55
+
+# Erlang Port Mapper NAMES request.
+probe epmd tcp
+  rarity 8
+  ports 4369
+  send "\x00\x01\x6e"
+
+# Cassandra CQL v4 OPTIONS.
+probe cassandra tcp
+  rarity 9
+  ports 9042
+  send "\x04\x00\x00\x01\x05\x00\x00\x00\x00"
+
+probe beanstalkd tcp
+  rarity 9
+  ports 11300
+  send "stats\r\n"
+
+# git daemon: a pkt-line upload-pack request.
+probe git tcp
+  rarity 9
+  ports 9418
+  send "002dgit-upload-pack /\x00host=feroprobe.invalid\x00"
+
+# UDP. DNS: CHAOS TXT version.bind.
+probe dns-version udp
+  rarity 3
+  ports 53
+  send "\x13\x38\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00"
+  send "\x07version\x04bind\x00\x00\x10\x00\x03"
+
+# SNMPv1 GetRequest for sysDescr.0 with community "public".
+probe snmp udp
+  rarity 4
+  ports 161
+  send "\x30\x26\x02\x01\x00\x04\x06public\xa0\x19\x02\x01\x01\x02\x01\x00"
+  send "\x02\x01\x00\x30\x0e\x30\x0c\x06\x08\x2b\x06\x01\x02\x01\x01\x01\x00"
+  send "\x05\x00"
+
+# NetBIOS node status request for the name "*".
+probe nbstat udp
+  rarity 4
+  ports 137
+  send "FP\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x20"
+  send "CKAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\x00\x00\x21\x00\x01"
+
+# NTP version 4 client request.
+probe ntp udp
+  rarity 5
+  ports 123
+  send "\x23"
+  pad 47
+
+probe sip-udp udp
+  rarity 5
+  ports 5060
+  send "OPTIONS sip:feroprobe.invalid SIP/2.0\r\n"
+  send "Via: SIP/2.0/UDP feroprobe.invalid;branch=z9hG4bKferoprobe\r\n"
+  send "From: <sip:feroprobe@feroprobe.invalid>;tag=feroprobe\r\n"
+  send "To: <sip:feroprobe.invalid>\r\n"
+  send "Call-ID: feroprobe@feroprobe.invalid\r\nCSeq: 1 OPTIONS\r\n"
+  send "Max-Forwards: 70\r\nContent-Length: 0\r\n\r\n"
+
+probe rpc-udp udp
+  rarity 6
+  ports 111
+  send "FPRO\x00\x00\x00\x00\x00\x00\x00\x02\x00\x01\x86\xa0\x00\x00\x00\x02"
+  pad 20
+
+# SSDP (UPnP) discovery.
+probe ssdp udp
+  rarity 6
+  ports 1900
+  send "M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\n"
+  send "MAN: \"ssdp:discover\"\r\nMX: 1\r\nST: ssdp:all\r\n\r\n"
+
+# IPMI over RMCP: Get Channel Authentication Capabilities.
+probe ipmi udp
+  rarity 7
+  ports 623
+  send "\x06\x00\xff\x07\x00\x00\x00\x00\x00\x00\x00\x00\x00\x09"
+  send "\x20\x18\xc8\x81\x00\x38\x8e\x04\xb5"
+
+# OpenVPN P_CONTROL_HARD_RESET_CLIENT_V2, session id "FEROPROB".
+probe openvpn udp
+  rarity 8
+  ports 1194
+  send "\x38FEROPROB\x00\x00\x00\x00\x00"
+
+# memcached UDP frame header, then "version".
+probe memcached-udp udp
+  rarity 8
+  ports 11211
+  send "\x00\x01\x00\x00\x00\x01\x00\x00version\r\n"
+
+# ------------------------------------------------------------------ SSH
+
+match ssh ^SSH-([\d.]+)-OpenSSH_for_Windows_([\w.]+)
+  product OpenSSH for Windows
+  version ${2}
+  info protocol ${1}
+  os Windows
+  cpe cpe:/a:openbsd:openssh:${2}
+  cpe cpe:/o:microsoft:windows
+
+match ssh ^SSH-([\d.]+)-OpenSSH_([\w.]+)[ -](Ubuntu[^\r\n]*)
+  product OpenSSH
+  version ${2}
+  info ${3}
+  info protocol ${1}
+  os Linux
+  cpe cpe:/a:openbsd:openssh:${2}
+  cpe cpe:/o:linux:linux_kernel
+
+match ssh ^SSH-([\d.]+)-OpenSSH_([\w.]+)[ -]((?:Debian|Raspbian)[^\r\n]*)
+  product OpenSSH
+  version ${2}
+  info ${3}
+  info protocol ${1}
+  os Linux
+  cpe cpe:/a:openbsd:openssh:${2}
+  cpe cpe:/o:linux:linux_kernel
+
+match ssh ^SSH-([\d.]+)-OpenSSH_([\w.]+)[ -](FreeBSD[^\r\n]*)
+  product OpenSSH
+  version ${2}
+  info ${3}
+  info protocol ${1}
+  os FreeBSD
+  cpe cpe:/a:openbsd:openssh:${2}
+  cpe cpe:/o:freebsd:freebsd
+
+match ssh ^SSH-([\d.]+)-OpenSSH_([\w.]+)[ -]([^\r\n]+)
+  product OpenSSH
+  version ${2}
+  info ${3}
+  info protocol ${1}
+  cpe cpe:/a:openbsd:openssh:${2}
+
+match ssh ^SSH-([\d.]+)-OpenSSH_([\w.]+)
+  product OpenSSH
+  version ${2}
+  info protocol ${1}
+  cpe cpe:/a:openbsd:openssh:${2}
+
+match ssh ^SSH-([\d.]+)-dropbear_([\w.]+)
+  product Dropbear sshd
+  version ${2}
+  info protocol ${1}
+  os Linux
+  cpe cpe:/a:matt_johnston:dropbear_ssh_server:${2}
+  cpe cpe:/o:linux:linux_kernel
+
+match ssh ^SSH-([\d.]+)-libssh[_-]([\d.]+)
+  product libssh
+  version ${2}
+  info protocol ${1}
+  cpe cpe:/a:libssh:libssh:${2}
+
+match ssh ^SSH-([\d.]+)-Cisco-([\d.]+)
+  product Cisco SSH
+  version ${2}
+  info protocol ${1}
+  os IOS
+  cpe cpe:/o:cisco:ios
+
+match ssh ^SSH-([\d.]+)-ROSSSH
+  product MikroTik RouterOS sshd
+  info protocol ${1}
+  os RouterOS
+  device router
+  cpe cpe:/o:mikrotik:routeros
+
+match ssh ^SSH-([\d.]+)-HUAWEI-([\d.]+)
+  product Huawei VRP sshd
+  version ${2}
+  info protocol ${1}
+  os VRP
+  cpe cpe:/o:huawei:vrp
+
+match ssh ^SSH-([\d.]+)-Comware-([\d.]+)
+  product Comware sshd
+  version ${2}
+  info protocol ${1}
+  os Comware
+  device switch
+
+match ssh ^SSH-([\d.]+)-RomSShell_([\d.]+)
+  product Allegro RomSShell sshd
+  version ${2}
+  info protocol ${1}
+
+match ssh ^SSH-([\d.]+)-mpSSH_([\w.]+)
+  product HP Integrated Lights-Out mpSSH
+  version ${2}
+  info protocol ${1}
+  device remote management
+
+match ssh ^SSH-([\d.]+)-Sun_SSH_([\d.]+)
+  product SunSSH
+  version ${2}
+  info protocol ${1}
+  os Solaris
+  cpe cpe:/a:sun:sunssh:${2}
+  cpe cpe:/o:sun:sunos
+
+match ssh ^SSH-([\d.]+)-WeOnlyDo(?:-wodFTPD)? ([\d.]+)
+  product WeOnlyDo sshd
+  version ${2}
+  info protocol ${1}
+  os Windows
+  cpe cpe:/o:microsoft:windows
+
+match ssh ^SSH-([\d.]+)-paramiko_([\d.]+)
+  product Paramiko
+  version ${2}
+  info protocol ${1}
+  cpe cpe:/a:paramiko:paramiko:${2}
+
+match ssh ^SSH-([\d.]+)-AsyncSSH_([\d.]+)
+  product AsyncSSH
+  version ${2}
+  info protocol ${1}
+
+match ssh ^SSH-([\d.]+)-Twisted(?:Conch)?(?:_([\d.]+))?\r?\n
+  product Twisted Conch sshd
+  version ${2}
+  info protocol ${1}
+
+match ssh ^SSH-([\d.]+)-Erlang/([\d.]+)
+  product Erlang sshd
+  version ${2}
+  info protocol ${1}
+
+match ssh ^SSH-([\d.]+)-Go\r?\n
+  product Go x/crypto/ssh
+  info protocol ${1}
+
+match ssh ^SSH-([\d.]+)-mod_sftp
+  product ProFTPD mod_sftp
+  info protocol ${1}
+
+match ssh ^SSH-([\d.]+)-[\d.]+ FlowSsh: Bitvise SSH Server \(WinSSHD\) ([\d.]+)
+  product Bitvise WinSSHD
+  version ${2}
+  info protocol ${1}
+  os Windows
+  cpe cpe:/o:microsoft:windows
+
+match ssh ^SSH-([\d.]+)-([^\r\n]+)
+  product ${2}
+  info protocol ${1}
+
+# ----------------------------------------------------------------- SMTP
+# Before FTP: both greet with 220.
+
+match smtp ^220[ -](\S+) ESMTP Postfix(?: \(([^)\r\n]+)\))?
+  product Postfix smtpd
+  info ${2}
+  host ${1}
+  cpe cpe:/a:postfix:postfix
+
+match smtp ^220[ -](\S+) ESMTP Exim ([\d.]+)
+  product Exim smtpd
+  version ${2}
+  host ${1}
+  cpe cpe:/a:exim:exim:${2}
+
+match smtp ^220[ -](\S+) ESMTP Sendmail ([\w.]+)
+  product Sendmail
+  version ${2}
+  host ${1}
+  cpe cpe:/a:sendmail:sendmail:${2}
+
+match smtp ^220[ -](\S+) ESMTP OpenSMTPD
+  product OpenSMTPD
+  host ${1}
+  cpe cpe:/a:openbsd:opensmtpd
+
+match smtp ^220[ -](\S+) Microsoft ESMTP MAIL Service(?:, Version: ([\d.]+))?
+  product Microsoft ESMTP
+  version ${2}
+  host ${1}
+  os Windows
+  cpe cpe:/o:microsoft:windows
+
+match smtp ^220[ -](\S+) ESMTP MailEnable Service, Version: ([\w.\-]+)
+  product MailEnable smtpd
+  version ${2}
+  host ${1}
+  os Windows
+  cpe cpe:/o:microsoft:windows
+
+match smtp ^220[ -](\S+) ESMTP MDaemon ([\d.]+)
+  product MDaemon smtpd
+  version ${2}
+  host ${1}
+  os Windows
+  cpe cpe:/o:microsoft:windows
+
+match smtp ^220[ -](\S+) Kerio Connect ([\d.]+)
+  product Kerio Connect smtpd
+  version ${2}
+  host ${1}
+
+match smtp ^220[ -](\S+) ESMTP Haraka[/ ]([\d.]+)
+  product Haraka smtpd
+  version ${2}
+  host ${1}
+
+match smtp ^220[ -](\S+) [^\r\n]*\bE?SMTP\b
+  host ${1}
+
+# ------------------------------------------------------------------ FTP
+
+match ftp ^220[ -][^\r\n]*\(vsFTPd ([\w.]+)\)
+  product vsftpd
+  version ${1}
+  cpe cpe:/a:beasts:vsftpd:${1}
+
+match ftp ^220[ -]ProFTPD ([\d.]+\w*) Server
+  product ProFTPD
+  version ${1}
+  cpe cpe:/a:proftpd:proftpd:${1}
+
+match ftp ^220[ -]ProFTPD
+  product ProFTPD
+  cpe cpe:/a:proftpd:proftpd
+
+match ftp ^220-+ Welcome to Pure-FTPd
+  product Pure-FTPd
+  cpe cpe:/a:pureftpd:pure-ftpd
+
+match ftp ^220[ -]FileZilla Server(?: version)? ([\w.]+)
+  product FileZilla ftpd
+  version ${1}
+  os Windows
+  cpe cpe:/a:filezilla-project:filezilla_server:${1}
+  cpe cpe:/o:microsoft:windows
+
+match ftp ^220[ -]Microsoft FTP Service
+  product Microsoft ftpd
+  os Windows
+  cpe cpe:/a:microsoft:internet_information_services
+  cpe cpe:/o:microsoft:windows
+
+match ftp ^220[ -]Serv-U FTP Server v([\d.]+)
+  product Serv-U ftpd
+  version ${1}
+  os Windows
+  cpe cpe:/a:solarwinds:serv-u:${1}
+  cpe cpe:/o:microsoft:windows
+
+match ftp ^220[ -](\S+) FTP server \(MikroTik ([\d.]+)\)
+  product MikroTik RouterOS ftpd
+  version ${2}
+  host ${1}
+  os RouterOS
+  device router
+  cpe cpe:/o:mikrotik:routeros
+
+match ftp ^220[ -](\S+) FTP server \(Version (wu-[\w.\-]+)
+  product WU-FTPD
+  version ${2}
+  host ${1}
+
+match ftp ^220[ -]bftpd ([\d.]+)
+  product bftpd
+  version ${1}
+
+match ftp ^220[ -][^\r\n]*\bFTP\b
+
+# ------------------------------------------------------------- POP3, IMAP
+
+match pop3 ^\+OK [^\r\n]*Dovecot
+  product Dovecot pop3d
+  cpe cpe:/a:dovecot:dovecot
+
+match pop3 ^\+OK The Microsoft Exchange POP3 service is ready
+  product Microsoft Exchange pop3d
+  os Windows
+  cpe cpe:/a:microsoft:exchange_server
+  cpe cpe:/o:microsoft:windows
+
+match pop3 ^\+OK [^\r\n]*Cyrus POP3 v?([\w.\-]+)
+  product Cyrus pop3d
+  version ${1}
+  cpe cpe:/a:cmu:cyrus_imap_server:${1}
+
+match pop3 ^\+OK Qpopper \(version ([\d.]+)\)
+  product Qpopper
+  version ${1}
+
+match pop3 ^\+OK Hello there
+  product Courier pop3d
+
+match pop3 ^\+OK [^\r\n]*POP3
+
+softmatch pop3 ^\+OK\x20
+  probe null
+
+match imap ^\* OK [^\r\n]*Dovecot
+  product Dovecot imapd
+  cpe cpe:/a:dovecot:dovecot
+
+match imap ^\* OK The Microsoft Exchange IMAP4 service is ready
+  product Microsoft Exchange imapd
+  os Windows
+  cpe cpe:/a:microsoft:exchange_server
+  cpe cpe:/o:microsoft:windows
+
+match imap ^\* OK [^\r\n]*Cyrus IMAP[^\r\n]*? v?(\d[\w.\-]*)
+  product Cyrus imapd
+  version ${1}
+  cpe cpe:/a:cmu:cyrus_imap_server:${1}
+
+match imap ^\* OK [^\r\n]*Courier-IMAP
+  product Courier imapd
+
+match imap ^\* OK [^\r\n]* (\S+) IMAP4rev1 (\d{4}[a-z]?\.\d+) at
+  product UW imapd
+  version ${2}
+  host ${1}
+
+match imap ^\* OK [^\r\n]*IMAP
+
+softmatch imap ^\* OK\x20
+  probe null
+
+# ------------------------------------------------------- HTTP and friends
+# Rules run before FeroProbe's generic HTTP reader, which takes the product
+# from the Server header when no rule here matches.
+
+match http ^HTTP/1\.[01] \d{3}.*"cluster_name"\s*:.*"number"\s*:\s*"([\w.\-]+)".*"lucene_version"
+  product Elasticsearch REST API
+  version ${1}
+  cpe cpe:/a:elastic:elasticsearch:${1}
+
+match http ^HTTP/1\.[01] \d{3}.*\{"couchdb"\s*:\s*"Welcome".*?"version"\s*:\s*"([\w.\-]+)"
+  product CouchDB httpd
+  version ${1}
+  cpe cpe:/a:apache:couchdb:${1}
+
+match http ^HTTP/1\.[01] \d{3}[^\r\n]*\r\n(?:[^\r\n]+\r\n)*?(?i:x-jenkins):[ \t]*([\w.\-]+)
+  product Jenkins
+  version ${1}
+  cpe cpe:/a:jenkins:jenkins:${1}
+
+match http ^HTTP/1\.[01] \d{3}[^\r\n]*\r\n(?:[^\r\n]+\r\n)*?(?i:x-influxdb-version):[ \t]*v?([\w.\-]+)
+  product InfluxDB http admin
+  version ${1}
+  cpe cpe:/a:influxdata:influxdb:${1}
+
+match http-proxy ^HTTP/1\.[01] \d{3}[^\r\n]*\r\n(?:[^\r\n]+\r\n)*?(?i:server):[ \t]*squid/([\w.]+)
+  product Squid http proxy
+  version ${1}
+  cpe cpe:/a:squid-cache:squid:${1}
+
+match http ^HTTP/1\.[01] \d{3}[^\r\n]*\r\n(?:[^\r\n]+\r\n)*?(?i:server):[ \t]*Apache/([\d.]+)(?: \(([^)\r\n]+)\))?
+  product Apache httpd
+  version ${1}
+  info ${2}
+  cpe cpe:/a:apache:http_server:${1}
+
+match http ^HTTP/1\.[01] \d{3}[^\r\n]*\r\n(?:[^\r\n]+\r\n)*?(?i:server):[ \t]*nginx/([\d.]+)(?: \(([^)\r\n]+)\))?
+  product nginx
+  version ${1}
+  info ${2}
+  cpe cpe:/a:f5:nginx:${1}
+
+match http ^HTTP/1\.[01] \d{3}[^\r\n]*\r\n(?:[^\r\n]+\r\n)*?(?i:server):[ \t]*Microsoft-IIS/([\d.]+)
+  product Microsoft IIS httpd
+  version ${1}
+  os Windows
+  cpe cpe:/a:microsoft:internet_information_services:${1}
+  cpe cpe:/o:microsoft:windows
+
+match http ^HTTP/1\.[01] \d{3}[^\r\n]*\r\n(?:[^\r\n]+\r\n)*?(?i:server):[ \t]*Microsoft-HTTPAPI/([\d.]+)
+  product Microsoft HTTPAPI httpd
+  version ${1}
+  os Windows
+  cpe cpe:/o:microsoft:windows
+
+match http ^HTTP/1\.[01] \d{3}[^\r\n]*\r\n(?:[^\r\n]+\r\n)*?(?i:server):[ \t]*lighttpd/([\d.]+)
+  product lighttpd
+  version ${1}
+  cpe cpe:/a:lighttpd:lighttpd:${1}
+
+match http ^HTTP/1\.[01] \d{3}[^\r\n]*\r\n(?:[^\r\n]+\r\n)*?(?i:server):[ \t]*Caddy\r\n
+  product Caddy httpd
+  cpe cpe:/a:caddyserver:caddy
+
+match http ^HTTP/1\.[01] \d{3}[^\r\n]*\r\n(?:[^\r\n]+\r\n)*?(?i:server):[ \t]*openresty(?:/([\d.]+))?
+  product OpenResty web app server
+  version ${1}
+  cpe cpe:/a:openresty:openresty:${1}
+
+match http ^HTTP/1\.[01] \d{3}[^\r\n]*\r\n(?:[^\r\n]+\r\n)*?(?i:server):[ \t]*LiteSpeed
+  product LiteSpeed httpd
+  cpe cpe:/a:litespeedtech:litespeed_web_server
+
+match http ^HTTP/1\.[01] \d{3}[^\r\n]*\r\n(?:[^\r\n]+\r\n)*?(?i:server):[ \t]*Jetty\(([\w.\-]+)\)
+  product Jetty
+  version ${1}
+  cpe cpe:/a:eclipse:jetty:${1}
+
+match http ^HTTP/1\.[01] \d{3}[^\r\n]*\r\n(?:[^\r\n]+\r\n)*?(?i:server):[ \t]*Apache-Coyote/([\d.]+)
+  product Apache Tomcat/Coyote JSP engine
+  version ${1}
+  cpe cpe:/a:apache:coyote_http_connector:${1}
+
+match http ^HTTP/1\.[01] \d{3}[^\r\n]*\r\n(?:[^\r\n]+\r\n)*?(?i:server):[ \t]*MiniServ/([\d.]+)
+  product MiniServ
+  version ${1}
+  info Webmin httpd
+  cpe cpe:/a:webmin:webmin
+
+match http ^HTTP/1\.[01] \d{3}[^\r\n]*\r\n(?:[^\r\n]+\r\n)*?(?i:server):[ \t]*Boa/([\w.]+)
+  product Boa httpd
+  version ${1}
+  cpe cpe:/a:boa:boa_web_server:${1}
+
+match http ^HTTP/1\.[01] \d{3}[^\r\n]*\r\n(?:[^\r\n]+\r\n)*?(?i:server):[ \t]*GoAhead-(?:Webs|http)
+  product GoAhead WebServer
+  cpe cpe:/a:embedthis:goahead
+
+match http ^HTTP/1\.[01] \d{3}[^\r\n]*\r\n(?:[^\r\n]+\r\n)*?(?i:server):[ \t]*mini_httpd/([\d.]+)
+  product mini_httpd
+  version ${1}
+  cpe cpe:/a:acme:mini_httpd:${1}
+
+match http ^HTTP/1\.[01] \d{3}[^\r\n]*\r\n(?:[^\r\n]+\r\n)*?(?i:server):[ \t]*thttpd/([\w.]+)
+  product thttpd
+  version ${1}
+  cpe cpe:/a:acme:thttpd:${1}
+
+match http ^HTTP/1\.[01] \d{3}[^\r\n]*\r\n(?:[^\r\n]+\r\n)*?(?i:server):[ \t]*Kestrel
+  product Microsoft Kestrel httpd
+  cpe cpe:/a:microsoft:kestrel
+
+match http ^HTTP/1\.[01] \d{3}[^\r\n]*\r\n(?:[^\r\n]+\r\n)*?(?i:server):[ \t]*Werkzeug/([\d.]+)(?: (Python/[\d.]+))?
+  product Werkzeug httpd
+  version ${1}
+  info ${2}
+  cpe cpe:/a:palletsprojects:werkzeug:${1}
+
+match http ^HTTP/1\.[01] \d{3}[^\r\n]*\r\n(?:[^\r\n]+\r\n)*?(?i:server):[ \t]*SimpleHTTP/([\d.]+) Python/([\d.]+)
+  product Python SimpleHTTPServer
+  version ${1}
+  info Python ${2}
+
+match http ^HTTP/1\.[01] \d{3}[^\r\n]*\r\n(?:[^\r\n]+\r\n)*?(?i:server):[ \t]*gunicorn(?:/([\d.]+))?
+  product Gunicorn
+  version ${1}
+  cpe cpe:/a:gunicorn:gunicorn:${1}
+
+match http ^HTTP/1\.[01] \d{3}[^\r\n]*\r\n(?:[^\r\n]+\r\n)*?(?i:server):[ \t]*uvicorn
+  product Uvicorn
+
+match http ^HTTP/1\.[01] \d{3}[^\r\n]*\r\n(?:[^\r\n]+\r\n)*?(?i:server):[ \t]*TornadoServer/([\d.]+)
+  product Tornado httpd
+  version ${1}
+  cpe cpe:/a:tornadoweb:tornado:${1}
+
+match http ^HTTP/1\.[01] \d{3}[^\r\n]*\r\n(?:[^\r\n]+\r\n)*?(?i:server):[ \t]*CherryPy/([\w.]+)
+  product CherryPy httpd
+  version ${1}
+  cpe cpe:/a:cherrypy:cherrypy:${1}
+
+match http ^HTTP/1\.[01] \d{3}[^\r\n]*\r\n(?:[^\r\n]+\r\n)*?(?i:server):[ \t]*Docker/([\w.\-]+)(?: \((\w+)\))?
+  product Docker API
+  version ${1}
+  os ${2}
+  cpe cpe:/a:docker:docker:${1}
+
+match http ^HTTP/1\.[01] \d{3}[^\r\n]*\r\n(?:[^\r\n]+\r\n)*?(?i:server):[ \t]*MinIO
+  product MinIO object storage
+  cpe cpe:/a:minio:minio
+
+match http ^HTTP/1\.[01] \d{3}[^\r\n]*\r\n(?:[^\r\n]+\r\n)*?(?i:server):[ \t]*Splunkd
+  product Splunkd httpd
+  cpe cpe:/a:splunk:splunk
+
+match http ^HTTP/1\.[01] \d{3}[^\r\n]*\r\n(?:[^\r\n]+\r\n)*?(?i:server):[ \t]*envoy\r\n
+  product Envoy proxy
+  cpe cpe:/a:envoyproxy:envoy
+
+match http ^HTTP/1\.[01] \d{3}[^\r\n]*\r\n(?:[^\r\n]+\r\n)*?(?i:server):[ \t]*CUPS/([\d.]+)
+  product CUPS
+  version ${1}
+  cpe cpe:/a:apple:cups:${1}
+
+match http ^HTTP/1\.[01] \d{3}[^\r\n]*\r\n(?:[^\r\n]+\r\n)*?(?i:x-powered-by):[ \t]*Express\r\n
+  product Node.js Express framework
+  cpe cpe:/a:expressjs:express
+
+# --------------------------------------------------------------- databases
+
+# MySQL and MariaDB: a handshake packet, protocol version 10.
+match mysql ^.\x00\x00\x00\x0a5\.5\.5-([\d.]+)-MariaDB
+  product MariaDB
+  version ${1}
+  cpe cpe:/a:mariadb:mariadb:${1}
+
+match mysql ^.\x00\x00\x00\x0a([\d.]+)-MariaDB
+  product MariaDB
+  version ${1}
+  cpe cpe:/a:mariadb:mariadb:${1}
+
+match mysql ^.\x00\x00\x00\x0a(\d[\w.\-]*)\x00
+  product MySQL
+  version ${1}
+  cpe cpe:/a:mysql:mysql:${1}
+
+match mysql ^.\x00\x00\x00\xff..Host .* is not allowed to connect to this (MySQL|MariaDB) server
+  product ${1}
+  info unauthorized
+
+# Redis: INFO server, with the OS it runs on.
+match redis ^\$\d+\r\n.*?redis_version:([\d.]+)(?:.*?\r\nos:([A-Za-z]+))?
+  product Redis key-value store
+  version ${1}
+  os ${2}
+  cpe cpe:/a:redis:redis:${1}
+
+match redis ^-NOAUTH\x20
+  product Redis key-value store
+  info authentication required
+  cpe cpe:/a:redis:redis
+
+# Redis reading an HTTP probe as a GET command.
+match redis ^-ERR wrong number of arguments for 'get' command\r\n
+  product Redis key-value store
+  cpe cpe:/a:redis:redis
+
+match redis ^-DENIED Redis is running in protected mode
+  product Redis key-value store
+  info protected mode
+  cpe cpe:/a:redis:redis
+
+match memcache ^VERSION ([\d.]+)\r\n
+  product Memcached
+  version ${1}
+  cpe cpe:/a:memcached:memcached:${1}
+
+# PostgreSQL answers an SSLRequest with a single S (yes) or N (no).
+match postgresql ^[SN]\z
+  probe pgsql
+  product PostgreSQL DB
+  cpe cpe:/a:postgresql:postgresql
+
+# MongoDB: an OP_MSG reply (opcode 2013) to buildinfo.
+match mongodb ^.{12}\xdd\x07\x00\x00.*\x02version\x00....(\d[\w.\-]*)\x00
+  probe mongodb
+  product MongoDB
+  version ${1}
+  cpe cpe:/a:mongodb:mongodb:${1}
+
+match mongodb ^.{12}\xdd\x07\x00\x00
+  probe mongodb
+  product MongoDB
+  cpe cpe:/a:mongodb:mongodb
+
+# Cassandra: SUPPORTED lists the CQL versions.
+match cassandra ^[\x83-\x85]\x00\x00\x01\x06.*CQL_VERSION\x00[\x01-\x09]\x00.([\d.]+)
+  probe cassandra
+  product Apache Cassandra
+  info CQL ${1}
+  cpe cpe:/a:apache:cassandra
+
+match cassandra ^[\x81-\x85]\x00\x00\x01[\x00\x06]
+  probe cassandra
+  product Apache Cassandra
+  cpe cpe:/a:apache:cassandra
+
+# ---------------------------------------------------------- message queues
+
+# AMQP: Connection.Start lists the broker's product and version.
+match amqp ^\x01\x00\x00.*\x07productS....RabbitMQ.*\x07versionS....([\d.]+)
+  product RabbitMQ
+  version ${1}
+  cpe cpe:/a:vmware:rabbitmq:${1}
+
+match amqp ^\x01\x00\x00\x00
+  probe amqp
+
+match amqp ^AMQP\x00\x00\x09\x01
+  probe amqp
+
+# MQTT: CONNACK.
+match mqtt ^\x20\x02\x00[\x00-\x05]
+  probe mqtt
+
+# ActiveMQ OpenWire talks first with a WireFormatInfo.
+match apachemq ^\x00\x00..\x01ActiveMQ.*?ProviderVersion\x09..([\d.]+)
+  product ActiveMQ OpenWire transport
+  version ${1}
+  cpe cpe:/a:apache:activemq:${1}
+
+match apachemq ^\x00\x00..\x01ActiveMQ
+  product ActiveMQ OpenWire transport
+  cpe cpe:/a:apache:activemq
+
+# NATS talks first with an INFO line of JSON.
+match nats ^INFO \{[^\r\n]*"version"\s*:\s*"([\w.\-]+)"
+  product NATS server
+  version ${1}
+  cpe cpe:/a:linuxfoundation:nats-server:${1}
+
+match beanstalkd ^OK \d+\r\n---\n.*?\nversion: "?([\d.]+)
+  product beanstalkd
+  version ${1}
+
+# ZooKeeper: the version, without the build hash after it.
+match zookeeper ^Zookeeper version: ([\w.]+)
+  product Apache ZooKeeper
+  version ${1}
+  cpe cpe:/a:apache:zookeeper:${1}
+
+match zookeeper ^srvr is not executed because it is not in the whitelist
+  product Apache ZooKeeper
+  info four-letter commands restricted
+  cpe cpe:/a:apache:zookeeper
+
+# Erlang Port Mapper: its own port number (4369), then the node list.
+match epmd ^\x00\x00\x11\x11name (\S+) at port (\d+)\n
+  probe epmd
+  product Erlang Port Mapper Daemon
+  info node ${1} at port ${2}
+
+match epmd ^\x00\x00\x11\x11
+  probe epmd
+  product Erlang Port Mapper Daemon
+
+# ------------------------------------------------- remote access and RPC
+
+match vnc ^RFB 003\.889\n
+  product Apple remote desktop vnc
+  os Mac OS X
+  cpe cpe:/o:apple:mac_os_x
+
+match vnc ^RFB (\d{3})\.(\d{3})\n
+  product VNC
+  info protocol ${1}.${2}
+
+match telnet ^(?:\xff[\xfb-\xfe].)*[^\xff]*User Access Verification
+  product Cisco telnetd
+  os IOS
+  device router
+  cpe cpe:/o:cisco:ios
+
+match telnet ^\xff[\xfb-\xfe]
+
+# X11 connection setup reply: refused, or accepted with the vendor.
+match X11 ^\x01\x00\x0b\x00\x00\x00.{2}.{32}([\x20-\x7e]+)
+  probe x11
+  info vendor: ${1}
+
+match X11 ^\x00.\x0b\x00\x00\x00
+  probe x11
+  info access denied
+
+# ONC RPC: an accepted reply to our NULL call to program 100000 is the
+# portmapper itself; anything else is some other RPC service.
+match rpcbind ^[\x80-\xff]...FPRO\x00\x00\x00\x01\x00\x00\x00\x00.{8}\x00\x00\x00\x00
+  probe rpc
+  info RPC #100000
+
+match rpc ^[\x80-\xff]...FPRO\x00\x00\x00\x01
+  probe rpc
+
+match rpcbind ^FPRO\x00\x00\x00\x01\x00\x00\x00\x00.{8}\x00\x00\x00\x00
+  probe rpc-udp
+  info RPC #100000
+
+match rpc ^FPRO\x00\x00\x00\x01
+  probe rpc-udp
+
+match java-rmi ^\x4e\x00
+  probe java-rmi
+  product Java RMI
+
+match ajp13 ^AB\x00\x01\x09
+  probe ajp
+  product Apache Jserv
+  info protocol 1.3
+
+match socks5 ^\x05\x00\z
+  probe socks5
+  info no authentication
+
+match socks5 ^\x05\x02\z
+  probe socks5
+  info username/password authentication
+
+match socks5 ^\x05\xff\z
+  probe socks5
+  info no acceptable authentication methods
+
+# PPTP Start-Control-Connection-Reply: host name and vendor.
+match pptp ^\x00\x9c\x00\x01\x1a\x2b\x3c\x4d\x00\x02.{18}(.{64})(.{64})
+  probe pptp
+  product ${2}
+  host ${1}
+
+match xmpp ^(?:<\?xml[^>]*>\s*)?<stream:stream[^>]*jabber:client
+  probe xmpp
+  info client stream
+
+match xmpp ^(?:<\?xml[^>]*>\s*)?<stream:stream
+  probe xmpp
+
+match git ^[0-9a-f]{4}(?:ERR |[0-9a-f]{40}\x20)
+  probe git
+
+match svnserve ^\( success \( (\d) (\d) \(
+  product Subversion svnserve
+  info protocol ${1}-${2}
+  cpe cpe:/a:apache:subversion
+
+match rsync ^@RSYNCD: ([\d.]+)
+  info protocol ${1}
+
+# -------------------------------------------------------- other services
+
+match nntp ^20[01] [^\r\n]*InterNetNews server INN ([\d.]+)
+  product INN
+  version ${1}
+  cpe cpe:/a:isc:inn:${1}
+
+match nntp ^20[01] [^\r\n]*\b(?i:nntp|news)\b
+
+match irc ^:\S+ NOTICE (?:AUTH|\*) :\*\*\* (?:Looking up|Checking|Processing)
+
+match irc ^:(\S+) 020 \* :
+  host ${1}
+
+match dict ^220 (\S+) dictd ([\w./\-]+) on ([^<\r\n]+)
+  product dictd
+  version ${2}
+  info ${3}
+  host ${1}
+
+match auth ^\s*\d+\s*,\s*\d+\s*:\s*ERROR\s*:\s*[A-Z\-]+
+
+# ------------------------------------------------------------------ UDP
+
+match openvpn ^\x40.{8}
+  probe openvpn
+  product OpenVPN
+
+match memcache ^\x00\x01\x00\x00\x00\x01\x00\x00VERSION ([\d.]+)\r\n
+  probe memcached-udp
+  product Memcached
+  version ${1}
+  cpe cpe:/a:memcached:memcached:${1}
+
+# IPMI: a Get Channel Authentication Capabilities response. The high bit of
+# the authentication byte marks IPMI 2.0 extended capabilities.
+match asf-rmcp ^\x06\x00\xff\x07\x00.{9}\x81\x1c.\x20.\x38\x00.[\x80-\xff]
+  probe ipmi
+  product IPMI
+  version 2.0
+  device remote management
+
+match asf-rmcp ^\x06\x00\xff\x07\x00.{9}\x81\x1c.\x20.\x38\x00
+  probe ipmi
+  product IPMI
+  version 1.5
+  device remote management

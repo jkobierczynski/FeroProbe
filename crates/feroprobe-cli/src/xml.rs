@@ -126,18 +126,31 @@ fn write_port(x: &mut String, p: &PortResult) {
                 ("product", &s.product),
                 ("version", &s.version),
                 ("extrainfo", &s.extra_info),
+                ("hostname", &s.hostname),
+                ("ostype", &s.os_type),
+                ("devicetype", &s.device_type),
             ] {
                 if let Some(v) = value {
                     let _ = write!(x, " {key}=\"{}\"", esc(v));
                 }
             }
-            if let Some(t) = s.tunnel {
-                let _ = write!(x, " tunnel=\"{t}\"");
-            }
+            // nmap's attribute order: servicefp before tunnel.
             if let Some(fp) = &s.fingerprint {
                 let _ = write!(x, " servicefp=\"{}\"", esc(fp));
             }
-            x.push_str(" method=\"probed\" conf=\"10\"/>");
+            if let Some(t) = s.tunnel {
+                let _ = write!(x, " tunnel=\"{t}\"");
+            }
+            x.push_str(" method=\"probed\" conf=\"10\"");
+            if s.cpe.is_empty() {
+                x.push_str("/>");
+            } else {
+                x.push('>');
+                for c in &s.cpe {
+                    let _ = write!(x, "<cpe>{}</cpe>", esc(c));
+                }
+                x.push_str("</service>");
+            }
         }
         None => {
             let _ = write!(
@@ -215,19 +228,7 @@ fn write_host(x: &mut String, host: &HostResult, info: &RunInfo, start: u64, end
         x.push_str("</ports>\n");
     }
     if let Some(os) = &host.os {
-        let _ = writeln!(
-            x,
-            "<os><portused state=\"open\" proto=\"tcp\" portid=\"{}\"/>\n<osmatch name=\"{}\" accuracy=\"{}\" line=\"0\"><osclass type=\"{}\" vendor=\"{}\" osfamily=\"{}\" accuracy=\"{}\"/></osmatch>\n<osfingerprint fingerprint=\"{}\"/>\n</os>",
-            os.port,
-            esc(&os.name),
-            os.accuracy,
-            os.device_type,
-            esc(os.vendor),
-            esc(os.family),
-            os.accuracy,
-            esc(&os.traits.fingerprint())
-        );
-        let _ = writeln!(x, "<distance value=\"{}\"/>", os.distance);
+        write_os(x, os);
     }
     if let Some(t) = &host.trace
         && !t.hops.is_empty()
@@ -325,6 +326,70 @@ pub fn render(hosts: &[HostResult], info: &RunInfo) -> String {
     );
     x.push_str("</nmaprun>\n");
     x
+}
+
+/// The `<os>` element and what follows it, in nmap's layout: the ports
+/// used, the matches (the perfect ones, else the guesses) with their
+/// classes and CPEs, the fingerprint, the distance and the IP ID sequence.
+fn write_os(x: &mut String, os: &feroprobe_core::OsResult) {
+    x.push_str("<os>");
+    let _ = writeln!(
+        x,
+        "<portused state=\"open\" proto=\"tcp\" portid=\"{}\"/>",
+        os.open_port
+    );
+    if let Some(closed) = os.closed_port {
+        let _ = writeln!(
+            x,
+            "<portused state=\"closed\" proto=\"tcp\" portid=\"{closed}\"/>"
+        );
+    }
+    let shown = if os.perfect > 0 {
+        &os.matches[..os.perfect]
+    } else {
+        &os.matches[..]
+    };
+    for m in shown {
+        let _ = writeln!(
+            x,
+            "<osmatch name=\"{}\" accuracy=\"{}\" line=\"{}\">",
+            esc(&m.name),
+            m.accuracy,
+            m.line
+        );
+        let _ = write!(
+            x,
+            "<osclass type=\"{}\" vendor=\"{}\" osfamily=\"{}\"",
+            esc(&m.device_type),
+            esc(&m.vendor),
+            esc(&m.family)
+        );
+        if !m.generation.is_empty() {
+            let _ = write!(x, " osgen=\"{}\"", esc(&m.generation));
+        }
+        let _ = write!(x, " accuracy=\"{}\">", m.accuracy);
+        for c in &m.cpe {
+            let _ = write!(x, "<cpe>{}</cpe>", esc(c));
+        }
+        x.push_str("</osclass>\n</osmatch>\n");
+    }
+    let _ = writeln!(
+        x,
+        "<osfingerprint fingerprint=\"{}\"/>\n</os>",
+        esc(&os.fingerprint)
+    );
+    if let Some(d) = os.distance {
+        let _ = writeln!(x, "<distance value=\"{d}\"/>");
+    }
+    if let Some(class) = &os.ipid_class {
+        let values: Vec<String> = os.ipids.iter().map(|v| format!("{v:X}")).collect();
+        let _ = writeln!(
+            x,
+            "<ipidsequence class=\"{}\" values=\"{}\"/>",
+            feroprobe_core::os::fingerprint::ipid_class_words(class),
+            values.join(",")
+        );
+    }
 }
 
 #[cfg(test)]
@@ -442,8 +507,16 @@ mod tests {
             extra_info: Some("a <b> & \"c\"".into()),
             ..Default::default()
         };
+        let smtp = ServiceInfo {
+            name: "smtp".into(),
+            hostname: Some("mail.example".into()),
+            os_type: Some("Linux".into()),
+            cpe: vec!["cpe:/a:postfix:postfix".into()],
+            ..Default::default()
+        };
         host.ports = vec![
             port(22, PortState::Open, Some(ssh)),
+            port(25, PortState::Open, Some(smtp)),
             port(80, PortState::Closed, None),
             port(81, PortState::Closed, None),
             port(443, PortState::Open, None),
@@ -455,6 +528,7 @@ mod tests {
         for want in [
             "args=\"feroprobe -sV &lt;x&gt; &amp; &quot;y&quot;\"",
             "<scaninfo type=\"connect\" protocol=\"tcp\" numservices=\"5\" services=\"22,80-82,443\"/>",
+            "<service name=\"smtp\" hostname=\"mail.example\" ostype=\"Linux\" method=\"probed\" conf=\"10\"><cpe>cpe:/a:postfix:postfix</cpe></service>",
             "<status state=\"up\" reason=\"echo-reply\" reason_ttl=\"0\"/>",
             "<address addr=\"10.0.0.5\" addrtype=\"ipv4\"/>\n<address addr=\"00:50:56:01:02:03\" addrtype=\"mac\" vendor=\"VMware\"/>",
             "<hostnames>\n<hostname name=\"box\" type=\"user\"/>\n<hostname name=\"box.example\" type=\"PTR\"/>\n</hostnames>",

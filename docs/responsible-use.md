@@ -118,8 +118,10 @@ Two scans carry no marker, on purpose:
 - The TCP **connect** scan (`-sT`) completes a normal handshake through the
   operating system's own TCP stack, so it is indistinguishable from an
   ordinary connection.
-- **OS-detection** probes (`-O`) deliberately mimic a real OS stack so the
-  target's response can be read, so they do not carry the window marker.
+- **OS-detection** TCP probes (`-O`) deliberately mimic a real client's
+  SYNs so the target's response can be read, so they do not carry the
+  window marker. The OS-detection echo request, sent only when host
+  discovery sends echo requests too, carries the usual `feroprobe` payload.
 
 ### Detection rules for defenders
 
@@ -135,8 +137,10 @@ Suricata and `rules/feroprobe.snort.rules` for Snort, with setup notes in
 send, one `NOT SENT (dry run)` line per probe in the `--packet-trace` layout,
 and sends nothing: no host discovery, no port scan, no reverse DNS. It does
 not list the probes of steps that depend on replies: service detection
-(`-sV`), OS detection (`-O`) and `--traceroute` run on the hosts and open
-ports a real scan finds, so the dry run only names them. Retransmissions of
+(`-sV`) and `--traceroute` run on the hosts and open ports a real scan
+finds, so the dry run only names them. OS detection (`-O`) is listed probe
+by probe for one try, with `<open>` and `<closed>` standing for the ports
+the scan would find. Retransmissions of
 unanswered probes are not listed either. Since nothing answers, the port-scan
 probes are listed for every target as if each were up; a real scan skips the
 targets host discovery finds down, so it can send fewer.
