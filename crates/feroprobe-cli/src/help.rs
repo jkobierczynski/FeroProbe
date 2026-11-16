@@ -77,6 +77,7 @@ OUTPUT:
   -oA <basename>: Write normal, XML and grepable output at once
   -o, --output <table|json|xml|grepable>: Format on standard output
   -v: More progress output (-vv for even more)
+  -d, --debug: More debugging output (-dd or -d<level> for more)
   --reason: Show why each port got its state
   --packet-trace: Show every packet sent and received
   --explain: Before scanning, show the plan and the reason for each step
@@ -84,6 +85,8 @@ OUTPUT:
   --open: Show only open (or possibly open) ports
   --stats-every <time>: Print a progress line every <time>
   --nmap-label: Write scanner=\"nmap\" in XML, for tools that need it
+  --iflist: Print host interfaces and routes (for debugging)
+  --noninteractive: No keys during the scan (v/V, d/D, p/P, ?, status)
 MISC:
   -6: Scan the IPv6 address of hostnames
   -A: Version and OS detection plus traceroute

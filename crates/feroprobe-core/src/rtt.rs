@@ -236,6 +236,16 @@ impl RttState {
             .update(delta, limits, scan_delay);
     }
 
+    /// nmap's final times for `addr`, in microseconds: smoothed RTT, RTT
+    /// variance and timeout, once it has answered.
+    pub fn times(&self, addr: IpAddr) -> Option<(i64, i64, i64)> {
+        self.lock()
+            .hosts
+            .get(&addr)
+            .filter(|t| t.measured())
+            .map(|t| (t.srtt, t.rttvar, t.timeout))
+    }
+
     /// The smoothed RTT of `addr`, once it has answered.
     pub fn srtt(&self, addr: IpAddr) -> Option<Duration> {
         self.lock()
@@ -410,6 +420,9 @@ pub(crate) struct Congestion {
     /// The share of answers that came only after a resend above which a
     /// host's delay is raised: 30 %, or 40 % with `-T4` and `-T5`.
     drop_ratio: f64,
+    /// Each host's address, for `-v` and `-d` messages (empty when the
+    /// caller did not give them).
+    addrs: Vec<IpAddr>,
 }
 
 /// nmap's per-host retransmission and send-delay state
@@ -474,7 +487,21 @@ impl Congestion {
             first_boost: Duration::from_millis(5),
             boost_after_tryno: if fast { 4 } else { 3 },
             drop_ratio: if fast { 0.40 } else { 0.30 },
+            addrs: Vec::new(),
         }
+    }
+
+    /// Name the hosts in `-v` and `-d` messages by these addresses.
+    pub(crate) fn with_addrs(mut self, addrs: Vec<IpAddr>) -> Self {
+        self.addrs = addrs;
+        self
+    }
+
+    /// Host `h` as messages name it.
+    fn host_name(&self, h: usize) -> String {
+        self.addrs
+            .get(h)
+            .map_or_else(|| format!("host {h}"), ToString::to_string)
     }
 
     /// For a UDP scan: its delay starts higher when raised (50 ms) and may
@@ -655,12 +682,43 @@ impl Congestion {
         }
         if p.dropped > 10 && f64::from(p.dropped) / f64::from(p.dropped + p.good) > self.drop_ratio
         {
+            let (bad, all) = (p.dropped, p.dropped + p.good);
+            let old = p.delay;
             self.boost(h, now);
+            let new = self.pace[h].delay;
+            if new != old {
+                crate::debug::verbose(1, || {
+                    format!(
+                        "Increasing send delay for {} from {} to {} due to {bad} out of {all} dropped probes since last increase.",
+                        self.host_name(h),
+                        old.as_millis(),
+                        new.as_millis()
+                    )
+                });
+            }
         }
         if answered && tryno > self.pace[h].max_successful_tryno {
             self.pace[h].max_successful_tryno = tryno;
+            crate::debug::debug(1, || {
+                format!(
+                    "Increased max_successful_tryno for {} to {tryno} (packet drop)",
+                    self.host_name(h)
+                )
+            });
             if tryno > self.boost_after_tryno {
+                let old = self.pace[h].delay;
                 self.boost(h, now);
+                let new = self.pace[h].delay;
+                if new != old {
+                    crate::debug::verbose(1, || {
+                        format!(
+                            "Increasing send delay for {} from {} to {} due to max_successful_tryno increase to {tryno}",
+                            self.host_name(h),
+                            old.as_millis(),
+                            new.as_millis()
+                        )
+                    });
+                }
             }
         }
     }
@@ -754,7 +812,7 @@ impl<K: Copy + Eq + Hash> Flight<K> {
             limits: cfg.rtt,
             scan_delay: cfg.scan_delay,
             state: cfg.rtt_state.clone(),
-            cc: Congestion::new(cfg, per_host),
+            cc: Congestion::new(cfg, per_host).with_addrs(addrs.to_vec()),
             queue: VecDeque::new(),
             retry: VecDeque::new(),
             held: std::collections::BTreeMap::new(),
@@ -1196,6 +1254,15 @@ impl AsyncWindow {
             cc: Mutex::new(Congestion::new(cfg, per_host)),
             changed: tokio::sync::Notify::new(),
             skip: None,
+        }
+    }
+
+    /// Name the hosts in `-v` and `-d` messages by these addresses.
+    pub(crate) fn with_addrs(self, addrs: Vec<IpAddr>) -> Self {
+        let cc = self.cc.into_inner().unwrap_or_else(|e| e.into_inner());
+        Self {
+            cc: Mutex::new(cc.with_addrs(addrs)),
+            ..self
         }
     }
 
