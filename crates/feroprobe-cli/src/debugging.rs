@@ -44,12 +44,16 @@ fn levels(argv: &[String]) -> Result<(u8, u8), String> {
     // of the group is that option's value.
     let (flags, valued): (Vec<_>, Vec<_>) = Args::command()
         .get_arguments()
-        .filter_map(|a| {
+        .flat_map(|a| {
             let flag = matches!(
                 a.get_action(),
                 clap::ArgAction::SetTrue | clap::ArgAction::Count
             );
-            a.get_short().map(|c| (c, flag))
+            // Short aliases group the same way (`-vM7` is `-v -c 7`).
+            a.get_short()
+                .into_iter()
+                .chain(a.get_all_short_aliases().unwrap_or_default())
+                .map(move |c| (c, flag))
         })
         .partition(|(_, flag)| *flag);
     let is = |set: &[(char, bool)], c: char| set.iter().any(|(s, _)| *s == c);
@@ -184,6 +188,7 @@ mod tests {
         // Up to an option that takes a value; its value is not counted.
         assert_eq!(run(&["-vp22", "h"]), Ok((1, 0)));
         assert_eq!(run(&["-vvpv", "h"]), Ok((2, 0)));
+        assert_eq!(run(&["-vM7", "h"]), Ok((1, 0)));
         assert!(
             run(&["-dx", "h"])
                 .unwrap_err()
