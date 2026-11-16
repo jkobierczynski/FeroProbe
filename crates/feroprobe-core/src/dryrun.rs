@@ -185,7 +185,7 @@ fn packet_options_note() -> Option<String> {
     if !opts.ip_options.is_empty() {
         parts.push(format!(
             "IPv4 options {{{}}} (--ip-options)",
-            packet_opts::describe_ip_options(&opts.ip_options)
+            packet_opts::describe_ip_options(&opts.ip_options).trim_start()
         ));
     }
     if opts.badsum {

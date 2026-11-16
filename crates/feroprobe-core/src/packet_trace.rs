@@ -139,16 +139,30 @@ pub(crate) fn describe(proto: u8, data: &[u8], src: Option<IpAddr>, dst: Option<
 /// with their header, IPv6 ones (and Linux ping sockets) without.
 pub(crate) fn describe_received(proto: u8, data: &[u8], from: IpAddr) -> String {
     match packet::parse_ipv4(data) {
-        Some(ip) if from.is_ipv4() && ip.src == from => format!(
-            "{} ttl={}",
-            describe(
-                ip.protocol,
-                ip.payload,
-                Some(IpAddr::V4(ip.src)),
-                Some(IpAddr::V4(ip.dst))
-            ),
-            ip.ttl
-        ),
+        Some(ip) if from.is_ipv4() && ip.src == from => {
+            // IPv4 options in the reply, such as a filled-in record route,
+            // as nmap shows them.
+            let ihl = usize::from(data[0] & 0x0f) * 4;
+            let opts = data.get(20..ihl).unwrap_or(&[]);
+            let opts = if opts.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    " ipopts={{{}}}",
+                    crate::packet_opts::describe_ip_options(opts)
+                )
+            };
+            format!(
+                "{} ttl={}{opts}",
+                describe(
+                    ip.protocol,
+                    ip.payload,
+                    Some(IpAddr::V4(ip.src)),
+                    Some(IpAddr::V4(ip.dst))
+                ),
+                ip.ttl
+            )
+        }
         // No header: the local address is not in the packet, and shows
         // as `*` when the routing table cannot tell it either.
         _ => describe(proto, data, Some(from), local_for(from)),

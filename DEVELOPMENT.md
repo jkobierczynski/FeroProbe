@@ -133,7 +133,7 @@ the SCTP, IP protocol, IPv6 OS detection and probe-signature work).
 | IP options | `--ip-options` | nmap's notation (`R`, `T`, `U`, `L`/`S` hops, `\x..` bytes, `*N`), padded, at most 40 bytes. `IP_OPTIONS` on kernel-header sockets; written into the header (source route: first hop as destination, target in the last slot) for `IPPROTO_RAW` probes; copied into every fragment with `-f`/`--mtu`. Not for OS detection or traceroute, as nmap. IPv4 only, warns for IPv6 targets. `IP_OPTIONS` is Linux only; elsewhere only whole-packet probes carry the options, with a warning |
 | Bad checksum | `--badsum` | TCP, UDP, SCTP, ICMP, IGMP checksums one less than right, as nmap; UDP scan probes then go out on a raw socket from the connected socket's port. Needs raw sockets (warns and drops it otherwise); OS detection keeps correct checksums (nmap's do not) |
 | Privileges | `--privileged`, `--unprivileged` | Override the raw-socket check (`raw::assume_privileged`); `--unprivileged` also makes raw socket opens fail. Last one wins |
-| Shown as sent | | `--packet-trace` and `--dry-run` add `len=N` (TCP data), `ttl=N`, `ipopts={...}`, `badsum` (checked against the real checksum) and `via <hop>`; the dry run header lists the packet options |
+| Shown as sent | | `--packet-trace` and `--dry-run` add `len=N` (TCP data), `ttl=N`, `ipopts={...}` in nmap's notation (also on received packets, so a record route shows the hops), `badsum` (checked against the real checksum) and `via <hop>`; the options are printed once up front like nmap; the dry run header lists the packet options |
 
 ### Output
 

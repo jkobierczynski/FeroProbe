@@ -522,44 +522,131 @@ pub fn final_destination(opts: &[u8], dst: Ipv4Addr) -> Ipv4Addr {
     dst
 }
 
-/// A short text form of IPv4 options for the packet trace, like nmap's
-/// `ipopts={...}`: the option names, with addresses for routes.
+/// IPv4 header options in nmap's packet-trace notation (its
+/// `format_ip_options`): ` NOP RR{#0.0.0.0 0.0.0.0}` with `#` before the
+/// slot the pointer names, ` LSRR{...}`, ` SSRR{...}`, ` TM{...}` for a
+/// timestamp, ` SI{id=N}`, ` EOL`, and ` ??{\xNN...}` for anything else.
+/// Like nmap's, the text starts with a space.
 pub fn describe_ip_options(opts: &[u8]) -> String {
-    let mut parts = Vec::new();
+    let mut out = String::new();
     let mut i = 0;
     while i < opts.len() {
-        match opts[i] {
+        let kind = opts[i];
+        match kind {
             0 => {
-                parts.push("EOL".to_string());
-                break;
+                out.push_str(" EOL");
+                i += 1;
+                continue;
             }
             OPT_NOP => {
-                parts.push("NOP".to_string());
+                out.push_str(" NOP");
                 i += 1;
+                continue;
             }
-            kind => {
-                let len = usize::from(opts.get(i + 1).copied().unwrap_or(0)).max(2);
-                let body = opts.get(i + 3..(i + len).min(opts.len())).unwrap_or(&[]);
-                let addrs = || {
-                    body.as_chunks::<4>()
-                        .0
-                        .iter()
-                        .map(|&a| Ipv4Addr::from(a).to_string())
-                        .collect::<Vec<_>>()
-                        .join(" ")
+            _ => {}
+        }
+        let Some(&len) = opts.get(i + 1) else {
+            out.push_str(&format!(" ??{{\\x{kind:02x}}}"));
+            break;
+        };
+        let end = (i + usize::from(len)).min(opts.len()).max(i + 2);
+        let body = &opts[i + 2..end];
+        match kind {
+            OPT_RR | OPT_LSRR | OPT_SSRR if !body.is_empty() => {
+                let name = match kind {
+                    OPT_LSRR => "LSRR",
+                    OPT_SSRR => "SSRR",
+                    _ => "RR",
                 };
-                parts.push(match kind {
-                    OPT_RR => "RR".to_string(),
-                    OPT_TS => "TS".to_string(),
-                    OPT_LSRR => format!("LSRR {}", addrs()),
-                    OPT_SSRR => format!("SSRR {}", addrs()),
-                    k => format!("opt {k}"),
-                });
-                i += len;
+                out.push_str(&format!(" {name}{{"));
+                route_slots(&mut out, body[0], &body[1..], 4, 4);
+                out.push('}');
+            }
+            OPT_TS if body.len() >= 2 => {
+                let (ptr, flags) = (body[0], body[1]);
+                out.push_str(" TM{");
+                if ptr % 4 != 1 || usize::from(ptr) > end - i + 1 || ptr < 5 {
+                    out.push_str(&format!(" [bad ptr={ptr:02}]"));
+                }
+                if flags & 0x0c != 0 || flags & 0x03 == 2 {
+                    out.push_str(&format!(" [bad flags=\\x{:x}]", flags & 0x0f));
+                }
+                out.push_str(&format!("[{} hosts not recorded]", flags >> 4));
+                let step = if flags & 0x03 == 0 { 4 } else { 8 };
+                let mut at = 4;
+                for entry in body[2..].chunks_exact(step) {
+                    out.push(if at + 1 == usize::from(ptr) { '#' } else { ' ' });
+                    let stamp = &entry[step - 4..];
+                    if step == 8 {
+                        out.push_str(&format!(
+                            "{}@",
+                            Ipv4Addr::new(entry[0], entry[1], entry[2], entry[3])
+                        ));
+                    }
+                    out.push_str(
+                        &u32::from_be_bytes([stamp[0], stamp[1], stamp[2], stamp[3]]).to_string(),
+                    );
+                    at += step;
+                }
+                if !body[2..].is_empty() {
+                    out.push(if usize::from(ptr) == at + 1 { '#' } else { ' ' });
+                }
+                out.push('}');
+            }
+            136 if body.len() == 2 => {
+                out.push_str(&format!(
+                    " SI{{id={}}}",
+                    u16::from_be_bytes([body[0], body[1]])
+                ));
+            }
+            _ => {
+                out.push_str(&format!(" ??{{\\x{kind:02x}\\x{len:02x}"));
+                for b in body {
+                    out.push_str(&format!("\\x{b:02x}"));
+                }
+                out.push('}');
             }
         }
+        i = end;
     }
-    parts.join(" ")
+    out
+}
+
+/// The addresses of a route option after its pointer, nmap-style: `#`
+/// marks the slot the pointer names (the next one to fill), or comes last
+/// when the route is full.
+fn route_slots(out: &mut String, ptr: u8, addrs: &[u8], first: usize, step: usize) {
+    if usize::from(ptr) % 4 != 0 || usize::from(ptr) > addrs.len() + first || ptr < 4 {
+        out.push_str(&format!(" [bad ptr={ptr:02}]"));
+    }
+    let mut at = first;
+    for a in addrs.chunks_exact(step) {
+        out.push(if at == usize::from(ptr) { '#' } else { ' ' });
+        out.push_str(&Ipv4Addr::new(a[0], a[1], a[2], a[3]).to_string());
+        at += step;
+    }
+    if usize::from(ptr) == at {
+        out.push('#');
+    }
+}
+
+/// nmap's `bintohexstr` dump of the options, 16 bytes a line with a space
+/// after the eighth: `\x01\x07\x27\x04... \x00...`.
+pub fn hex_ip_options(opts: &[u8]) -> String {
+    let mut out = String::new();
+    for (i, b) in opts.iter().enumerate() {
+        out.push_str(&format!("\\x{b:02x}"));
+        if i % 16 == 7 {
+            out.push(' ');
+        }
+        if i % 16 == 15 {
+            out.push('\n');
+        }
+    }
+    if !opts.len().is_multiple_of(16) {
+        out.push('\n');
+    }
+    out
 }
 
 #[cfg(test)]
@@ -746,12 +833,45 @@ mod tests {
     }
 
     #[test]
-    fn options_are_described() {
+    fn options_are_described_like_nmap() {
         let l = parse_ip_options("L 10.0.0.1").unwrap();
-        assert_eq!(describe_ip_options(&l), "NOP LSRR 10.0.0.1 0.0.0.0");
+        assert_eq!(describe_ip_options(&l), " NOP LSRR{#10.0.0.1 0.0.0.0}");
+        // The SENT and RCVD options of nmap's own trace, from a TP-Link router.
+        let zeros = " 0.0.0.0".repeat(8);
         assert_eq!(
             describe_ip_options(&parse_ip_options("R").unwrap()),
-            "NOP RR"
+            format!(" NOP RR{{#0.0.0.0{zeros}}}")
         );
+        let mut got = vec![7, 39, 12, 192, 168, 1, 1, 192, 168, 1, 1];
+        got.resize(39, 0);
+        got.push(0);
+        assert_eq!(
+            describe_ip_options(&got),
+            format!(
+                " RR{{ 192.168.1.1 192.168.1.1#0.0.0.0{}}} EOL",
+                " 0.0.0.0".repeat(6)
+            )
+        );
+        // A full route puts the pointer mark last.
+        assert_eq!(
+            describe_ip_options(&[7, 7, 8, 10, 0, 0, 1]),
+            " RR{ 10.0.0.1#}"
+        );
+        // Timestamps only, one recorded; then an unknown option.
+        assert_eq!(
+            describe_ip_options(&[68, 12, 9, 0, 0, 0, 0, 5, 0, 0, 0, 0]),
+            " TM{[0 hosts not recorded] 5#0 }"
+        );
+        assert_eq!(describe_ip_options(&[136, 4, 0, 7]), " SI{id=7}");
+        assert_eq!(describe_ip_options(&[99, 3, 0xab]), " ??{\\x63\\x03\\xab}");
+    }
+
+    #[test]
+    fn options_hex_dump_like_nmap() {
+        let rr = parse_ip_options("R").unwrap();
+        let dump = hex_ip_options(&rr);
+        assert!(dump.starts_with("\\x01\\x07\\x27\\x04\\x00\\x00\\x00\\x00 \\x00"));
+        assert_eq!(dump.lines().count(), 3);
+        assert!(dump.ends_with("\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00 \n"));
     }
 }

@@ -1873,6 +1873,12 @@ so none of them apply; FeroProbe warns when the TCP scan is
 \f[V]--packet-trace\f[R] and \f[V]--dry-run\f[R] show what was added:
 \f[V]len=N\f[R] for TCP data, \f[V]ttl=N\f[R], \f[V]ipopts={...}\f[R],
 \f[V]badsum\f[R], and \f[V]via <hop>\f[R] for a source route.
+The options read as in nmap, such as
+\f[V]ipopts={ NOP RR{#0.0.0.0 0.0.0.0}}\f[R], with \f[V]#\f[R] before
+the slot the pointer names; received packets show their options too, so
+a record route comes back filled in.
+Like nmap, \f[V]--packet-trace\f[R] and \f[V]-d\f[R] also print the
+options once before the scan, as bytes and as text.
 .SS \f[V]--data <hex string>\f[R]
 .PP
 Add these bytes after the header of each probe, written

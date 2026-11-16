@@ -2478,6 +2478,25 @@ async fn main() -> Result<()> {
     if args.packet_trace {
         feroprobe_core::packet_trace::enable();
     }
+    // Like nmap, packet tracing or debugging shows the IPv4 options up
+    // front: the bytes (once there is room for an address) and their reading.
+    if let Some(o) = args
+        .ip_options
+        .as_ref()
+        .filter(|_| args.packet_trace || feroprobe_core::debug::debugging() > 0)
+    {
+        let o = &o.0;
+        if o.len() >= 8 {
+            eprint!(
+                "Binary ip options to be sent:\n{}",
+                feroprobe_core::packet_opts::hex_ip_options(o)
+            );
+        }
+        eprintln!(
+            "Parsed ip options to be sent:\n{}",
+            feroprobe_core::packet_opts::describe_ip_options(o)
+        );
+    }
     // A dry run writes no report, so it does not create the files either.
     let mut report_files = if args.dry_run {
         ReportFiles::default()

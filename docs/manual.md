@@ -1241,7 +1241,12 @@ scans, the IP protocol scan, the discovery pings and (all but
 version detection use the system's TCP stack, so none of them apply;
 FeroProbe warns when the TCP scan is `-sT`. `--packet-trace` and
 `--dry-run` show what was added: `len=N` for TCP data, `ttl=N`,
-`ipopts={...}`, `badsum`, and `via <hop>` for a source route.
+`ipopts={...}`, `badsum`, and `via <hop>` for a source route. The
+options read as in nmap, such as `ipopts={ NOP RR{#0.0.0.0 0.0.0.0}}`,
+with `#` before the slot the pointer names; received packets show their
+options too, so a record route comes back filled in. Like nmap,
+`--packet-trace` and `-d` also print the options once before the scan,
+as bytes and as text.
 
 #### `--data <hex string>`
 
