@@ -263,14 +263,30 @@ pub fn write(run: &DryRun<'_>, w: &mut dyn Write) -> io::Result<Summary> {
     }
     summary.scan = out.count - before;
     if let Some(opts) = &run.os
-        && let Some((_, ports)) = run.tcp
+        && let Some((tcp, ports)) = &run.tcp
     {
         let before = out.count;
+        // OS detection needs a port the scan reports open: -sA, -sF, -sN,
+        // -sX and -sM never do, so no host would be fingerprinted.
+        let finds_open = match tcp {
+            DryTcp::Connect => true,
+            DryTcp::Raw(scan) => matches!(
+                scan.kind,
+                crate::syn::TcpScanKind::Syn | crate::syn::TcpScanKind::Window
+            ),
+        };
         let distinct = ports
             .iter()
             .collect::<std::collections::BTreeSet<_>>()
             .len();
-        os_probes(&mut out, run, opts, distinct, &sources, &v)?;
+        if finds_open {
+            os_probes(&mut out, run, opts, distinct, &sources, &v)?;
+        } else {
+            out.note(
+                "OS detection (-O): no host is fingerprinted, because this TCP scan type never \
+                 reports a port open and OS detection needs an open one",
+            )?;
+        }
         summary.os = out.count - before;
     }
     let retry = if run.retries > 0 {
@@ -813,6 +829,16 @@ mod tests {
         let (text, summary) = run_to_string(&run);
         assert_eq!(summary.os, 0, "{text}");
         assert!(text.contains("no host is fingerprinted"), "{text}");
+
+        // An ACK scan never finds a port open: nothing to fingerprint.
+        let run = DryRun {
+            tcp: Some((DryTcp::Raw(RawTcpScan::new(TcpScanKind::Ack)), &ports)),
+            os: Some(crate::os::OsOptions::default()),
+            ..base(&targets, &ev)
+        };
+        let (text, summary) = run_to_string(&run);
+        assert_eq!(summary.os, 0, "{text}");
+        assert!(text.contains("never reports a port open"), "{text}");
     }
 
     #[test]

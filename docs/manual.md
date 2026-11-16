@@ -732,7 +732,7 @@ probes deliberately carry no FeroProbe window marker, since they must
 look like a real client's SYNs; the echo request carries the usual
 `feroprobe` payload. `--packet-trace` and `--dry-run` show each probe's
 TCP options (`<mss 1460,sackOK,timestamp ...>`). With `ics_protection`
-on, `-O` is refused (see [ICS protection](#ics-protection)).
+on, `-O` is refused (see [ICS protection](#settings-files-and-ics-protection)).
 
 #### `--osscan-limit`
 
@@ -1485,7 +1485,7 @@ safeguard calls for a difference. The deliberate differences are:
 | Congestion control and `--max-retries` | Windows per host and group between `--min-parallelism` and `--max-parallelism`; resends up to `--max-retries` times, fewer on a network that loses nothing; raises the scan delay when many probes are lost | The same windows and limits; a fixed number of resends (`--retries`), and the scan delay only changes when asked |
 | `-g` with UDP scans | Raw UDP packets from the port, any port including 0 | UDP probes go through the system's sockets, which share the port between them; port 0 cannot be used and falls back to a random port, with a warning |
 | Old-style IPv4 numbers as targets (`2222`, `10.1.2`, `010.0.0.1`) | Passed to the resolver | Refused with an explanation |
-| Probes outside the requested ports | `-A`'s scripts can probe other ports (`ms-sql-info`: UDP 1434 on every host); `-O` picks a random UDP port (and for IPv4 also TCP), regardless of `-p`, when the scan found no closed or unfiltered one | Never beyond the command's own ports (`-p` plus the host-discovery ports): `-sV` and `-O` probe only open ports the scan found, traceroute only a scanned port, a discovery port, or (with `-sn`) the `-p` port, and FeroProbe has no scripts |
+| Probes outside the requested ports | `-A`'s scripts can probe other ports (`ms-sql-info`: UDP 1434 on every host); `-O` picks a random UDP port (and for IPv4 also TCP), regardless of `-p`, when the scan found no closed or unfiltered one | Never beyond the command's own ports (`-p` plus the host-discovery ports): `-sV` probes only open ports the scan found, `-O` an open TCP port the scan found and, when it found one, a closed one (and ICMP echo only when discovery sends it), traceroute only a scanned port, a discovery port, or (with `-sn`) the `-p` port, and FeroProbe has no scripts |
 | Traceroute port | The probe that got the best answer during discovery or the scan, else ICMP echo | TCP SYNs to an open or closed scanned port, else a TCP port the command names (`-p` with `-sn`, or a discovery port), else the host is not traced (FeroProbe used to fall back to port 80) |
 | `-A` without root | Silently drops `-O` and traceroute | Drops them with a warning naming them |
 
