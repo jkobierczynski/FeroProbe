@@ -29,6 +29,7 @@
 #
 # Usage:   sudo ./scripts/test-resume.sh [--bin PATH] [-v]
 #
+set -euo pipefail
 . "$(dirname "$0")/lib/lab.sh"
 lab_usage_args "$@"
 lab_require
@@ -148,7 +149,9 @@ done
 
 # --- refusals and edge cases -------------------------------------------------
 echo "== refusals =="
-fero --resume "$SNAP/scan.gnmap" -p 80
+RC=0
+nsx "$NS_SCAN" "$BIN" --resume "$SNAP/scan.gnmap" -p 80 >"$WORK/out.txt" 2>&1 || RC=$?
+OUT="$WORK/out.txt"
 check_true "--resume with another option refused (exit $RC)" test "$RC" -ne 0
 check_true "  with nmap's reason" output_has "cannot be combined with other options"
 echo "just some text, not a report at all" >"$WORK/notes.txt"
