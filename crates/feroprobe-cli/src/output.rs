@@ -52,6 +52,8 @@ pub struct RunInfo {
     pub nmap_label: bool,
     /// How many `-v` were given.
     pub verbosity: u8,
+    /// `--defeat-rst-ratelimit` (or `--open`) was in effect for a TCP scan.
+    pub defeat_rst: bool,
     /// The `xml-stylesheet` reference for the XML report, if any.
     pub stylesheet: Option<String>,
 }
@@ -248,6 +250,22 @@ fn not_shown(hidden: &[(usize, PortState)]) -> String {
     parts.join(", ")
 }
 
+/// nmap's caveat under the port summary when `--defeat-rst-ratelimit`
+/// may have turned closed ports into filtered ones.
+fn defeat_rst_note(out: &mut String, host: &HostResult, info: &RunInfo) {
+    if info.defeat_rst
+        && host
+            .ports
+            .iter()
+            .any(|p| p.protocol == feroprobe_core::Protocol::Tcp && p.state == PortState::Filtered)
+    {
+        w!(
+            out,
+            "Some closed ports may be reported as filtered due to --defeat-rst-ratelimit"
+        );
+    }
+}
+
 /// The port table for one host.
 fn print_ports(out: &mut String, host: &HostResult, info: &RunInfo) {
     let (hidden, rows) = port_rows(host, info);
@@ -262,11 +280,13 @@ fn print_ports(out: &mut String, host: &HostResult, info: &RunInfo) {
                 w!(out, "Not shown: {}", not_shown(more));
             }
         }
+        defeat_rst_note(out, host, info);
         return;
     }
     if !hidden.is_empty() {
         w!(out, "Not shown: {}", not_shown(&hidden));
     }
+    defeat_rst_note(out, host, info);
     let mut header = vec![format!("{:<10} {:<14} {:<14}", "PORT", "STATE", "SERVICE")];
     if info.show_reason {
         header.push(format!("{:<14}", "REASON"));
@@ -806,6 +826,7 @@ pub(crate) mod tests {
             list_scan: false,
             nmap_label: false,
             verbosity: 0,
+            defeat_rst: false,
             stylesheet: None,
         }
     }

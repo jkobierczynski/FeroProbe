@@ -228,7 +228,7 @@ mod imp {
 
     use crate::connect::is_network_error;
     use crate::packet::{self, TCP_ACK, TCP_RST, TCP_SYN};
-    use crate::raw::{Pacer, Rng, raw_socket_in, receive_loop, send_with_backoff, source_addr_for};
+    use crate::raw::{Pacer, Rng, raw_socket_in, receive_loop, send_with_backoff};
     use crate::target::socket_addr;
 
     /// Job index, TTL, round, who answered, whether it was the host, when.
@@ -302,7 +302,7 @@ mod imp {
         }
         let sources: Vec<Option<IpAddr>> = jobs
             .iter()
-            .map(|j| match source_addr_for(j.1) {
+            .map(|j| match crate::netif::route_source(j.1) {
                 Ok(a) => Ok(Some(a)),
                 Err(e) if is_network_error(&e) => Ok(None),
                 Err(e) => Err(e),
@@ -339,7 +339,13 @@ mod imp {
                     if !answered {
                         return None;
                     }
-                    let r = round_of(cookie, t.ack.wrapping_sub(1), rounds)?;
+                    // A reset also acknowledges the --data bytes.
+                    let data = crate::packet_opts::get()
+                        .data
+                        .as_ref()
+                        .map_or(0, |d| d.len() as u32);
+                    let r = round_of(cookie, t.ack.wrapping_sub(1), rounds)
+                        .or_else(|| round_of(cookie, t.ack.wrapping_sub(1 + data), rounds))?;
                     Some((*index2.get(&src)?, ttl_of(t.dport)?, r, src, true, at))
                 });
             }));
@@ -400,7 +406,15 @@ mod imp {
                             sock.set_ttl_v4(u32::from(ttl))?;
                         }
                         let sport = base + u16::from(ttl);
-                        let pkt = packet::tcp_syn(src, addr, sport, port, seq);
+                        // nmap's traceroute probes carry the --data bytes
+                        // (and --badsum), but not --ip-options.
+                        let pkt = crate::packet_opts::get().finish(
+                            packet::IPPROTO_TCP,
+                            src,
+                            addr,
+                            packet::tcp_syn(src, addr, sport, port, seq).to_vec(),
+                            true,
+                        );
                         sent_at.insert((j, ttl, round), Instant::now());
                         sent_any = true;
                         sent_to[j] = true;

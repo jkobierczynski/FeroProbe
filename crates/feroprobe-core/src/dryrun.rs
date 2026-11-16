@@ -27,11 +27,11 @@ use crate::evasion::Evasion;
 use crate::ipproto::Probe as ProtoProbe;
 use crate::ndp;
 use crate::packet;
+use crate::packet_opts;
 use crate::packet_trace;
 use crate::sctp::SctpScanKind;
 use crate::syn::RawTcpScan;
 use crate::target::Target;
-use crate::udp::payload_for;
 
 /// The prefix of every probe line: nmap's packet trace says `SENT (time)`;
 /// a dry run sends nothing, and says so on every line.
@@ -58,6 +58,8 @@ pub enum DryTcp {
     Connect,
     /// A raw-socket scan (`-sS`, `-sF`, ..., `--scanflags`).
     Raw(RawTcpScan),
+    /// `-b`: an FTP bounce scan through the relay at this address.
+    Bounce(SocketAddr),
 }
 
 /// Everything a dry run lays out, as the scan would run it.
@@ -150,6 +152,51 @@ fn host_port(ip: Option<IpAddr>, port: Option<u16>) -> String {
     }
 }
 
+/// What `--ttl`, `--ip-options` and `--badsum` add to the trace line of a
+/// probe (`seg`, of IP protocol `proto`) whose IP header the kernel writes.
+fn opts_note(proto: u8, src: Option<IpAddr>, dst: IpAddr, seg: &[u8]) -> String {
+    let opts = packet_opts::get();
+    let bad = src.is_some_and(|s| packet_opts::checksum_is_bad(proto, s, dst, seg));
+    packet_trace::kernel_header_note(opts.ttl, &opts.ip_options, dst, bad)
+}
+
+/// A probe line for `seg` with its packet options.
+fn line(proto: u8, seg: &[u8], src: Option<IpAddr>, dst: IpAddr) -> String {
+    format!(
+        "{}{}",
+        packet_trace::describe(proto, seg, src, Some(dst)),
+        opts_note(proto, src, dst, seg)
+    )
+}
+
+/// The packet options in effect, for the header, or `None` without any.
+fn packet_options_note() -> Option<String> {
+    let opts = packet_opts::get();
+    let mut parts = Vec::new();
+    if let Some(d) = &opts.data {
+        parts.push(format!(
+            "{} byte{} of data (--data, --data-string or --data-length) in every raw \
+             probe: after the TCP, SCTP and IP protocol headers, and in place of the usual \
+             UDP and ICMP echo payloads",
+            d.len(),
+            if d.len() == 1 { "" } else { "s" }
+        ));
+    }
+    if let Some(t) = opts.ttl {
+        parts.push(format!("TTL {t} (--ttl)"));
+    }
+    if !opts.ip_options.is_empty() {
+        parts.push(format!(
+            "IPv4 options {{{}}} (--ip-options)",
+            packet_opts::describe_ip_options(&opts.ip_options).trim_start()
+        ));
+    }
+    if opts.badsum {
+        parts.push("wrong checksums (--badsum)".to_string());
+    }
+    (!parts.is_empty()).then(|| format!("Packet options: {}", parts.join("; ")))
+}
+
 /// The dry run's output, with the counts kept as it goes.
 struct Out<'w> {
     w: &'w mut dyn Write,
@@ -175,6 +222,9 @@ pub fn write(run: &DryRun<'_>, w: &mut dyn Write) -> io::Result<Summary> {
     out.note("Dry run (--dry-run): these are the probes the scan would send. Nothing is sent.")?;
     for n in &run.notes {
         out.note(n)?;
+    }
+    if let Some(n) = packet_options_note() {
+        out.note(&n)?;
     }
     for (t, src) in run.targets.iter().zip(&sources) {
         let name = t
@@ -255,12 +305,13 @@ pub fn write(run: &DryRun<'_>, w: &mut dyn Write) -> io::Result<Summary> {
                             packet::sctp_cookie_echo(v.sport, port, v.cookie, v.cookie)
                         }
                     };
-                    out.probe(&packet_trace::describe(
-                        packet::IPPROTO_SCTP,
-                        &chunk,
-                        *src,
-                        Some(t.addr),
-                    ))?;
+                    let chunk = match src {
+                        Some(s) => {
+                            packet_opts::get().finish(packet::IPPROTO_SCTP, *s, t.addr, chunk, true)
+                        }
+                        None => chunk,
+                    };
+                    out.probe(&line(packet::IPPROTO_SCTP, &chunk, *src, t.addr))?;
                 }
             }
         }
@@ -288,7 +339,7 @@ pub fn write(run: &DryRun<'_>, w: &mut dyn Write) -> io::Result<Summary> {
         // OS detection needs a port the scan reports open: -sA, -sF, -sN,
         // -sX and -sM never do, so no host would be fingerprinted.
         let finds_open = match tcp {
-            DryTcp::Connect => true,
+            DryTcp::Connect | DryTcp::Bounce(_) => true,
             DryTcp::Raw(scan) => matches!(
                 scan.kind,
                 crate::syn::TcpScanKind::Syn | crate::syn::TcpScanKind::Window
@@ -341,7 +392,7 @@ fn proto_line(probe: &ProtoProbe, proto: u8, src: Option<IpAddr>, dst: IpAddr) -
     match src {
         Some(s) if s.is_ipv4() == dst.is_ipv4() => {
             let body = probe.body(proto, s, dst);
-            packet_trace::describe(proto, &body, Some(s), Some(dst))
+            line(proto, &body, Some(s), dst)
         }
         _ => format!(
             "{} * > {} (no route)",
@@ -456,11 +507,13 @@ const NAMES_UPPER: [&str; crate::os::probes::PROBES] = [
 /// unless `-g` gave one.
 fn udp_line(src: Option<IpAddr>, sport: Option<u16>, dst: IpAddr, port: u16) -> String {
     let sport = crate::udp::effective_sport(sport, crate::target::socket_addr(dst, port));
+    let opts = packet_opts::get();
     format!(
-        "UDP {} > {} len={}",
+        "UDP {} > {} len={}{}",
         host_port(src, sport),
         host_port(Some(dst), Some(port)),
-        payload_for(port).len()
+        opts.udp_payload(port).len(),
+        packet_trace::kernel_header_note(opts.ttl, &opts.ip_options, dst, opts.badsum)
     )
 }
 
@@ -483,6 +536,29 @@ fn tcp_scan(
             for &port in ports {
                 for t in run.targets {
                     out.probe(&conn_line(t.addr, port))?;
+                }
+            }
+        }
+        DryTcp::Bounce(relay) => {
+            out.note(&format!(
+                "FTP bounce scan (-b) through the FTP server at {relay}: after logging in, one \
+                 PORT command and one LIST per port, sent to the server over a single \
+                 connection; the server, not this machine, connects to the targets"
+            ))?;
+            for t in run.targets {
+                let IpAddr::V4(dst) = t.addr else {
+                    out.note(&format!(
+                        "{} is not IPv4, so the bounce scan skips it",
+                        t.addr
+                    ))?;
+                    continue;
+                };
+                for &port in ports {
+                    out.probe(&format!(
+                        "FTP {relay} {} + LIST (server connects to {})",
+                        crate::ftp_bounce::port_command(dst, port),
+                        host_port(Some(t.addr), Some(port))
+                    ))?;
                 }
             }
         }
@@ -519,12 +595,7 @@ fn tcp_scan(
                         continue;
                     }
                     let seg = tcp_segment(src, t.addr, port, v, ack, scan.flags);
-                    out.probe(&packet_trace::describe(
-                        packet::IPPROTO_TCP,
-                        &seg,
-                        Some(src),
-                        Some(t.addr),
-                    ))?;
+                    out.probe(&line(packet::IPPROTO_TCP, &seg, Some(src), t.addr))?;
                 }
             }
         }
@@ -533,13 +604,15 @@ fn tcp_scan(
 }
 
 /// The segment a raw TCP scan sends, as `syn.rs` builds it: a plain SYN
-/// keeps its MSS option, any other flags get a bare header.
+/// keeps its MSS option, any other flags get a bare header; then the
+/// `--data` bytes and `--badsum`.
 fn tcp_segment(src: IpAddr, dst: IpAddr, port: u16, v: &Values, ack: u32, flags: u8) -> Vec<u8> {
-    if flags == packet::TCP_SYN {
+    let seg = if flags == packet::TCP_SYN {
         packet::tcp_syn(src, dst, v.sport, port, v.cookie).to_vec()
     } else {
         packet::tcp_probe(src, dst, v.sport, port, v.cookie, ack, flags).to_vec()
-    }
+    };
+    packet_opts::get().finish(packet::IPPROTO_TCP, src, dst, seg, true)
 }
 
 fn evasion_note(ev: &Evasion) -> String {
@@ -575,13 +648,13 @@ fn evasion_lines(
     ack: u32,
     flags: u8,
 ) -> Vec<String> {
-    let to = SocketAddr::new(IpAddr::V4(dst), 0);
     let mut lines = Vec::new();
     for (i, source) in ev.source_addrs(real_src).into_iter().enumerate() {
         let IpAddr::V4(src4) = source else { continue };
         let seg = tcp_segment(source, IpAddr::V4(dst), port, v, ack, flags);
         let id = (v.cookie as u16) ^ port ^ (i as u16);
-        let pkt = packet::ipv4_packet(src4, dst, packet::IPPROTO_TCP, 64, id, &seg);
+        let (pkt, hop) = packet_opts::ipv4_probe(src4, dst, packet::IPPROTO_TCP, id, &seg);
+        let to = SocketAddr::new(IpAddr::V4(hop), 0);
         let frags = match ev.fragment {
             Some(f) => crate::evasion::fragment_ipv4(&pkt, f),
             None => vec![pkt],
@@ -698,25 +771,34 @@ fn discovery(
                 continue;
             }
             let seq = seq as u16;
+            // As discovery builds them: --data replaces the echo payload
+            // and follows the timestamp and mask bodies.
+            let opts = packet_opts::get();
+            let icmp = |msg: Vec<u8>, data: bool| {
+                opts.finish(packet::IPPROTO_ICMP, t.addr, t.addr, msg, data)
+            };
             let (proto, msg) = match kind {
                 packet::ICMP_ECHO_REQUEST if v6 => (
                     packet::IPPROTO_ICMPV6,
-                    packet::icmpv6_echo(v.icmp_id, seq, packet::ECHO_MARKER),
+                    packet::icmpv6_echo(v.icmp_id, seq, opts.echo_payload()),
                 ),
                 packet::ICMP_ECHO_REQUEST => (
                     packet::IPPROTO_ICMP,
-                    packet::icmp_echo(v.icmp_id, seq, packet::ECHO_MARKER),
+                    icmp(
+                        packet::icmp_echo(v.icmp_id, seq, opts.echo_payload()),
+                        false,
+                    ),
                 ),
                 packet::ICMP_TIMESTAMP => (
                     packet::IPPROTO_ICMP,
-                    packet::icmp_query(kind, v.icmp_id, seq, 12),
+                    icmp(packet::icmp_query(kind, v.icmp_id, seq, 12), true),
                 ),
                 _ => (
                     packet::IPPROTO_ICMP,
-                    packet::icmp_query(kind, v.icmp_id, seq, 4),
+                    icmp(packet::icmp_query(kind, v.icmp_id, seq, 4), true),
                 ),
             };
-            out.probe(&packet_trace::describe(proto, &msg, *src, Some(t.addr)))?;
+            out.probe(&line(proto, &msg, *src, t.addr))?;
         }
     }
     // With raw sockets on Linux, -PS and -PA send bare SYNs and ACKs, as
@@ -747,12 +829,7 @@ fn discovery(
                     let line = match src {
                         Some(s) => {
                             let seg = tcp_segment(*s, t.addr, port, v, ack, flags);
-                            packet_trace::describe(
-                                packet::IPPROTO_TCP,
-                                &seg,
-                                Some(*s),
-                                Some(t.addr),
-                            )
+                            line(packet::IPPROTO_TCP, &seg, Some(*s), t.addr)
                         }
                         None => format!(
                             "TCP * > {} {} (no route)",

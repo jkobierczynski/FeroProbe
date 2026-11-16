@@ -188,6 +188,34 @@ fn enable_recverr(sock: &Socket, ipv4: bool) -> io::Result<()> {
     }
 }
 
+/// Send a `--badsum` UDP probe to `addr` from `sock`'s address and port, on
+/// a raw socket, with the checksum spoiled.
+#[cfg(target_os = "linux")]
+fn send_badsum(sock: &UdpSocket, addr: SocketAddr, payload: &[u8]) -> io::Result<()> {
+    use socket2::{Domain, Protocol as SockProto};
+    let local = sock.local_addr()?;
+    let mut seg =
+        crate::packet::udp_packet(local.ip(), addr.ip(), local.port(), addr.port(), payload);
+    crate::packet_opts::spoil_checksum(crate::packet::IPPROTO_UDP, &mut seg);
+    let domain = if addr.is_ipv6() {
+        Domain::IPV6
+    } else {
+        Domain::IPV4
+    };
+    let raw = crate::raw::raw_socket_in(domain, SockProto::UDP)?;
+    let _ = raw.set_recv_buffer_size(1);
+    crate::raw::nmap_ip_header(&raw, addr.is_ipv6());
+    crate::raw::send_with_backoff(&raw, &seg, crate::target::socket_addr(addr.ip(), 0))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn send_badsum(_: &UdpSocket, _: SocketAddr, _: &[u8]) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "--badsum UDP probes are only supported on Linux",
+    ))
+}
+
 /// Probe a single UDP port. Each try waits for the host's current adaptive
 /// timeout (see [`crate::rtt`]), and every answer's round-trip time feeds
 /// that estimate.
@@ -242,7 +270,9 @@ async fn probe_udp_tries(
         Err(e) => return classify(e, None),
     };
 
-    let payload = payload_for(addr.port());
+    // --data and friends replace the usual payload, as in nmap.
+    let opts = crate::packet_opts::get();
+    let payload = opts.udp_payload(addr.port());
     let mut buf = [0u8; 2048];
     for tryno in 0..=cfg.retries {
         // cfg.retries is a cap: resend only as often as the host's losses
@@ -261,12 +291,30 @@ async fn probe_udp_tries(
         };
         pace(cfg.scan_delay).await;
         let start = Instant::now();
-        if let Err(e) = sock.send(payload).await {
-            return classify(e, None);
+        if opts.badsum {
+            // The system's UDP socket always writes a correct checksum, so
+            // a --badsum probe goes out on a raw socket from the same port;
+            // answers and ICMP errors still reach the connected socket.
+            if let Err(e) = send_badsum(&sock, addr, payload) {
+                return classify(e, None);
+            }
+        } else {
+            if let Err(e) = sock.send(payload).await {
+                return classify(e, None);
+            }
+            crate::packet_trace::log("SENT", || {
+                format!(
+                    "UDP localhost > {addr} len={}{}",
+                    payload.len(),
+                    crate::packet_trace::kernel_header_note(
+                        opts.ttl,
+                        &opts.ip_options,
+                        addr.ip(),
+                        false
+                    )
+                )
+            });
         }
-        crate::packet_trace::log("SENT", || {
-            format!("UDP localhost > {addr} len={}", payload.len())
-        });
         let outcome = tokio::time::timeout(cfg.probe_timeout(addr.ip()), sock.recv(&mut buf)).await;
         // Data or an ICMP error both answer the probe and time the round
         // trip. As in nmap's UDP scan, where silence means open|filtered,

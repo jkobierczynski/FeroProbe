@@ -23,6 +23,7 @@ pub mod discovery;
 pub mod dns;
 pub mod dryrun;
 pub mod evasion;
+pub mod ftp_bounce;
 pub mod iflist;
 pub mod ipproto;
 pub mod model;
@@ -31,6 +32,7 @@ pub mod netif;
 pub mod os;
 pub mod oui;
 pub mod packet;
+pub mod packet_opts;
 pub mod packet_trace;
 pub mod ports;
 pub mod progress;
@@ -55,11 +57,12 @@ pub use evasion::{Evasion, Fragment};
 pub use ipproto::ip_protocol_scan;
 pub use model::{HostResult, PortResult, PortState, Protocol, ScanConfig};
 pub use os::{OsMatch, OsOptions, OsResult, os_detect};
+pub use packet_opts::PacketOptions;
 pub use ports::{
     PortLists, ip_protocol_name, parse_port_lists, parse_ports, parse_protocols, service_name,
     top_ports, top_sctp_ports, top_udp_ports,
 };
-pub use raw::{raw_ipv6_available, raw_sockets_available};
+pub use raw::{assume_privileged, raw_ipv6_available, raw_sockets_available};
 pub use rtt::{RttState, RttTimeouts};
 pub use sctp::{SctpScanKind, sctp_scan};
 pub use service::{ServiceDb, ServiceInfo, VersionScan, detect_services};

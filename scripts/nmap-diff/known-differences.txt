@@ -34,3 +34,7 @@ os | ^tcp/.*\[S\] win: nmap \[.*\] vs FeroProbe \[.*64240 | own OS probe set (OS
 *aggressive* | ^tcp/.*\[S\] win: nmap \[.*\] vs FeroProbe \[.*64240 | own OS probe set (OS detection probes)
 os | ^icmp echo-request (code|df): | own OS probe set: one plain echo request (OS detection probes)
 *aggressive* | ^icmp echo-request (code|df): | own OS probe set: one plain echo request (OS detection probes)
+
+# Packet contents (v0.5.0): --data-length is random bytes in both tools, so the
+# bytes differ on every run while the length must match.
+data-length | ^tcp/\d+ \[[A-Za-z]+\] payload: nmap \[20B [^]]*\] vs FeroProbe \[20B [^]]*\]$ | random --data-length bytes in both tools (manual, "Packet contents")

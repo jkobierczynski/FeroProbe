@@ -356,6 +356,67 @@ struct Args {
     #[arg(long = "allow-public-evasion")]
     allow_public_evasion: bool,
 
+    /// -b [user[:pass]@]server[:port]: FTP bounce scan: ask this FTP
+    /// server to connect to each target port (default login anonymous,
+    /// port 21). IPv4 only. Private targets and relay, or
+    /// --allow-public-evasion
+    #[arg(short = 'b', value_name = "FTP_RELAY")]
+    bounce: Option<String>,
+
+    /// --data HEX: add these bytes to raw probes (0xAABB, \xAA\xBB or
+    /// AABB). They replace the UDP scan's and ICMP echo's usual payloads
+    #[arg(long = "data", value_name = "HEX", value_parser = parse_data_hex,
+          conflicts_with_all = ["data_string", "data_length"])]
+    data: Option<Bytes>,
+
+    /// --data-string TEXT: add this text to raw probes, like --data
+    #[arg(
+        long = "data-string",
+        value_name = "TEXT",
+        conflicts_with = "data_length"
+    )]
+    data_string: Option<String>,
+
+    /// --data-length N: add N random bytes to raw probes, like --data
+    #[arg(long = "data-length", value_name = "N", value_parser = parse_data_length)]
+    data_length: Option<usize>,
+
+    /// --ttl N: send probes with this IP time-to-live (IPv6 hop limit),
+    /// 0-255, instead of a random one from 37 to 59
+    #[arg(long, value_name = "N")]
+    ttl: Option<u8>,
+
+    /// --ip-options OPTS: IPv4 header options: R (record route), T or U
+    /// (timestamps), L or S followed by hop addresses (loose or strict
+    /// source route), or bytes like \x01\x07 (IPv4 only)
+    #[arg(long = "ip-options", value_name = "OPTS", value_parser = parse_ip_options_arg)]
+    ip_options: Option<Bytes>,
+
+    /// --badsum: send TCP, UDP, SCTP and ICMP probes with a wrong checksum
+    /// (needs raw sockets)
+    #[arg(long)]
+    badsum: bool,
+
+    /// --privileged: assume raw sockets work (for CAP_NET_RAW set up in a
+    /// way FeroProbe cannot detect)
+    #[arg(long, overrides_with = "unprivileged")]
+    privileged: bool,
+
+    /// --unprivileged: act as an ordinary user: no raw sockets, so a connect
+    /// scan and connect pings by default
+    #[arg(long, overrides_with = "privileged")]
+    unprivileged: bool,
+
+    /// --system-dns: resolve names with the system resolver (FeroProbe's
+    /// default already; it also overrides --dns-servers)
+    #[arg(long)]
+    system_dns: bool,
+
+    /// --defeat-rst-ratelimit: in a SYN scan, don't slow down for hosts
+    /// that rate-limit their RSTs; some closed ports may show as filtered
+    #[arg(long)]
+    defeat_rst_ratelimit: bool,
+
     /// -e IFACE: send and receive on this network interface (nmap's -e):
     /// every socket of the scan is bound to it, its address is the source,
     /// and only its networks count as local for ARP and neighbour discovery
@@ -1379,6 +1440,10 @@ fn scan_config(args: &Args) -> ScanConfig {
         // Set later by configure_evasion once the targets are known.
         evasion: Evasion::default(),
         source_port: args.source_port,
+        // nmap's --open implies --defeat-rst-ratelimit: closed and
+        // filtered ports are not shown, so telling them apart is not
+        // worth slowing down for.
+        defeat_rst_ratelimit: args.defeat_rst_ratelimit || args.open,
     }
 }
 
@@ -1424,6 +1489,165 @@ fn evasion_from_args(args: &Args) -> Result<Evasion> {
         ev.spoof_source = Some(IpAddr::V4(ip));
     }
     Ok(ev)
+}
+
+/// Bytes from an option's value (clap would read a bare `Vec<u8>` as a
+/// list of values).
+#[derive(Debug, Clone)]
+struct Bytes(Vec<u8>);
+
+/// `--data`: hex bytes, as nmap reads them.
+fn parse_data_hex(s: &str) -> Result<Bytes, String> {
+    feroprobe_core::packet_opts::parse_hex(s).map(Bytes)
+}
+
+/// `--data-length`: 0 to nmap's maximum payload.
+fn parse_data_length(s: &str) -> Result<usize, String> {
+    let max = feroprobe_core::packet_opts::MAX_PAYLOAD;
+    match s.trim().parse::<usize>() {
+        Ok(n) if n <= max => Ok(n),
+        _ => Err(format!("data-length must be between 0 and {max}")),
+    }
+}
+
+/// `--ip-options`, in nmap's notation.
+fn parse_ip_options_arg(s: &str) -> Result<Bytes, String> {
+    feroprobe_core::packet_opts::parse_ip_options(s).map(Bytes)
+}
+
+/// The packet options from the command line (`--data*`, `--ttl`,
+/// `--ip-options`, `--badsum`).
+fn packet_options(args: &Args) -> Result<feroprobe_core::PacketOptions> {
+    let max = feroprobe_core::packet_opts::MAX_PAYLOAD;
+    let data = if let Some(d) = &args.data {
+        Some(d.0.clone())
+    } else if let Some(text) = &args.data_string {
+        if text.len() > max {
+            bail!("string length must be between 0 and {max}");
+        }
+        Some(text.as_bytes().to_vec())
+    } else {
+        args.data_length
+            .map(feroprobe_core::packet_opts::random_bytes)
+    };
+    Ok(feroprobe_core::PacketOptions {
+        ttl: args.ttl,
+        data,
+        badsum: args.badsum,
+        ip_options: args.ip_options.clone().map(|b| b.0).unwrap_or_default(),
+    })
+}
+
+/// What the packet options cannot do in this scan, as warnings: nmap's
+/// for a large payload and for raw options a connect scan or an
+/// unprivileged run cannot honour, and FeroProbe's for the IPv4-only
+/// `--ip-options` against IPv6 targets. `--badsum` is dropped when it
+/// cannot be honoured, so the dry run does not claim it.
+fn packet_option_warnings(
+    opts: &mut feroprobe_core::PacketOptions,
+    plan: &Plan,
+    targets: &[Target],
+    privileged: bool,
+) -> Vec<String> {
+    let mut w = Vec::new();
+    if opts
+        .data
+        .as_ref()
+        .is_some_and(|d| d.len() > feroprobe_core::packet_opts::PAYLOAD_WARN)
+    {
+        w.push("Payloads bigger than 1400 bytes may not be sent successfully.".to_string());
+    }
+    if !opts.is_active() {
+        return w;
+    }
+    let mut named = Vec::new();
+    if opts.data.is_some() {
+        named.push("--data");
+    }
+    if opts.ttl.is_some() {
+        named.push("--ttl");
+    }
+    if !opts.ip_options.is_empty() {
+        named.push("--ip-options");
+    }
+    if opts.badsum {
+        named.push("--badsum");
+    }
+    if opts.ttl == Some(0) && targets.iter().any(|t| t.addr.is_ipv4()) {
+        w.push(
+            "--ttl 0: the system refuses TTL 0 for IPv4 probes whose header it writes, so those \
+             go with TTL 1; probes FeroProbe builds whole (-sO, -f, --mtu, -D, -S) and IPv6 \
+             probes carry 0"
+                .to_string(),
+        );
+    }
+    if !plan.ping_only && plan.tcp == Some(ScanType::Connect) {
+        w.push(format!(
+            "{} will not be honored for the TCP connect scan (-sT), whose packets the system builds",
+            named.join(", ")
+        ));
+    }
+    if opts.badsum && !privileged {
+        w.push(
+            "--badsum needs raw sockets, so it will not be honored without the necessary \
+             privileges"
+                .to_string(),
+        );
+        opts.badsum = false;
+    }
+    if !opts.ip_options.is_empty()
+        && let Some(t) = targets.iter().find(|t| t.addr.is_ipv6())
+    {
+        w.push(format!(
+            "--ip-options are IPv4 header options, so probes to IPv6 targets such as {} go without them",
+            t.addr
+        ));
+    }
+    if !opts.ip_options.is_empty() && !cfg!(target_os = "linux") {
+        w.push(
+            "--ip-options are set only on Linux for probes whose IP header the system writes; \
+             here only probes FeroProbe builds whole (-sO, -f, --mtu, -D, -S) carry them"
+                .to_string(),
+        );
+    }
+    w
+}
+
+/// The command line for reports, with the password of an FTP bounce
+/// relay (`-b user:pass@server`) masked, so saved output does not carry it.
+/// `secret` is the password the relay login actually uses: wherever it
+/// appears as `:secret@`, in whatever grouping of short options (`-vb`),
+/// it is masked too.
+fn redact_args(args: impl IntoIterator<Item = String>, secret: Option<&str>) -> Vec<String> {
+    let mask = |v: &str| match v.rsplit_once('@') {
+        Some((login, server)) => match login.split_once(':') {
+            Some((user, _)) => format!("{user}:****@{server}"),
+            None => v.to_string(),
+        },
+        None => v.to_string(),
+    };
+    let mut out = Vec::new();
+    let mut relay_next = false;
+    for a in args {
+        if relay_next {
+            out.push(mask(&a));
+            relay_next = false;
+        } else if a == "-b" {
+            out.push(a);
+            relay_next = true;
+        } else if let Some(v) = a.strip_prefix("-b").filter(|v| v.contains('@')) {
+            out.push(format!("-b{}", mask(v)));
+        } else {
+            out.push(a);
+        }
+    }
+    match secret.filter(|s| !s.is_empty()) {
+        Some(s) => out
+            .into_iter()
+            .map(|a| a.replace(&format!(":{s}@"), ":****@"))
+            .collect(),
+        None => out,
+    }
 }
 
 /// Refuse evasion options unless they are allowed: a raw TCP scan, raw
@@ -1988,6 +2212,8 @@ struct ScanJob<'a> {
     version: VersionScan,
     os: bool,
     os_opts: OsOptions,
+    /// `-b`: the FTP relay's address and login.
+    bounce: Option<(SocketAddr, feroprobe_core::ftp_bounce::FtpRelay)>,
 }
 
 /// How many hosts `--host-timeout` scans at once, each on its own clock.
@@ -2000,6 +2226,7 @@ impl ScanJob<'_> {
         match self.plan.tcp.map(|t| t.raw_kind()) {
             Some(Some(kind)) => types.push(tcp_scan_label(kind)),
             Some(None) => types.push("tcp-connect"),
+            None if self.bounce.is_some() => types.push("bounce"),
             None => {}
         }
         if self.plan.udp {
@@ -2058,6 +2285,16 @@ impl ScanJob<'_> {
                 merge(hosts, r);
             }
             None => {}
+        }
+        if let Some((addr, relay)) = &self.bounce {
+            let done =
+                progress.phase_of("FTP bounce scan", live.len(), live.len() * self.tcp.len());
+            let r = feroprobe_core::ftp_bounce::bounce_scan(*addr, relay, live, self.tcp, cfg)
+                .await
+                .context("FTP bounce scan (-b) failed")?;
+            progress.found(&r);
+            done(&progress);
+            merge(hosts, r);
         }
         if self.plan.udp {
             let done = progress.phase_of("UDP scan", live.len(), live.len() * self.udp.len());
@@ -2145,7 +2382,12 @@ impl ScanJob<'_> {
         shared.min_parallelism = cfg.min_parallelism.min(shared.concurrency);
         // The hosts share one --max-rate schedule (set in scan_config), so
         // each may use the whole rate.
-        let probes = self.plan.tcp.map_or(0, |_| self.tcp.len())
+        let probes = self
+            .plan
+            .tcp
+            .map(|_| ())
+            .or(self.bounce.as_ref().map(|_| ()))
+            .map_or(0, |_| self.tcp.len())
             + if self.plan.udp { self.udp.len() } else { 0 }
             + self.plan.sctp.map_or(0, |_| self.sctp.len())
             + if self.plan.ip_proto {
@@ -2256,7 +2498,13 @@ async fn scan_group(
             .collect();
         if !addrs.is_empty() {
             let done = progress.phase("reverse DNS", addrs.len());
-            let names = reverse_lookup(&addrs, &args.dns_servers, cfg)
+            // --system-dns uses the system resolver, not --dns-servers.
+            let servers: &[SocketAddr] = if args.system_dns {
+                &[]
+            } else {
+                &args.dns_servers
+            };
+            let names = reverse_lookup(&addrs, servers, cfg)
                 .await
                 .context("reverse DNS failed")?;
             done(&progress);
@@ -2391,6 +2639,8 @@ struct DryOrder<'a> {
     trace_fallback: Option<u16>,
     /// The `-sV` settings, to describe its probes.
     version: &'a VersionScan,
+    /// `-b`: the FTP relay's address.
+    bounce: Option<SocketAddr>,
 }
 
 /// The notes a dry run prints above its probes: what it cannot show (steps
@@ -2497,7 +2747,8 @@ fn dry_run(
                 }
                 DryTcp::Raw(scan)
             }
-        });
+        })
+        .or(d.bounce.filter(|_| !plan.ping_only).map(DryTcp::Bounce));
     let scan = !plan.ping_only;
     let run = DryRun {
         targets,
@@ -2554,6 +2805,15 @@ async fn main() -> Result<()> {
             let mut command = vec![raw[0].clone(), "--append-output".to_string()];
             command.extend(r.args.iter().filter(|a| *a != "--append-output").cloned());
             let args = debugging::parse_args(nmap_style_args(command.clone()));
+            // Reports mask the FTP relay password, so it cannot be resumed
+            // from them: say so rather than log in with "****".
+            if args.bounce.as_deref().is_some_and(|b| b.contains(":****@")) {
+                bail!(
+                    "{path} records an FTP bounce scan (-b) whose relay password FeroProbe \
+                     masks in its reports, so it cannot be resumed. Run the scan again \
+                     with the password"
+                );
+            }
             (args, command, Some((path.clone(), r.last)))
         }
     };
@@ -2577,6 +2837,25 @@ async fn main() -> Result<()> {
     let outputs = Outputs::from_args(&args)?;
     if args.packet_trace {
         feroprobe_core::packet_trace::enable();
+    }
+    // Like nmap, packet tracing or debugging shows the IPv4 options up
+    // front: the bytes (once there is room for an address) and their reading.
+    if let Some(o) = args
+        .ip_options
+        .as_ref()
+        .filter(|_| args.packet_trace || feroprobe_core::debug::debugging() > 0)
+    {
+        let o = &o.0;
+        if o.len() >= 8 {
+            eprint!(
+                "Binary ip options to be sent:\n{}",
+                feroprobe_core::packet_opts::hex_ip_options(o)
+            );
+        }
+        eprintln!(
+            "Parsed ip options to be sent:\n{}",
+            feroprobe_core::packet_opts::describe_ip_options(o)
+        );
     }
     // A dry run writes no report, so it does not create the files either.
     let report_files = if args.dry_run {
@@ -2607,6 +2886,12 @@ async fn main() -> Result<()> {
         };
         format!("ICS protection {ics}; {read}")
     });
+    // --privileged / --unprivileged: before anything checks for raw sockets.
+    if args.unprivileged {
+        feroprobe_core::assume_privileged(Some(false));
+    } else if args.privileged {
+        feroprobe_core::assume_privileged(Some(true));
+    }
     // -e: every socket from here on is bound to the interface.
     if let Some(name) = &args.interface {
         let ifc = feroprobe_core::netif::use_interface(name).context("-e")?;
@@ -2687,6 +2972,78 @@ async fn main() -> Result<()> {
     } else if args.ping.contains(&PingArg::Arp) {
         eprintln!("Warning: {PR_NOTE}");
     }
+    // -b: the FTP bounce scan is a TCP scan of its own, as in nmap.
+    let bounce = match &args.bounce {
+        Some(spec) => {
+            let explicit_tcp = args.scan.iter().any(|t| ScanType::TCP.contains(t));
+            if explicit_tcp || args.scanflags.is_some() {
+                bail!(
+                    "You specified more than one type of TCP scan. Please choose only one of \
+                     -sA, -b, -sT, -sF, -sM, -sN, -sS, -sW, and -sX"
+                );
+            }
+            if plan.list {
+                bail!("-b is a port scan, so it cannot be combined with -sL");
+            }
+            if plan.ping_only {
+                bail!("-b is a port scan, so it cannot be combined with -sn");
+            }
+            let relay = feroprobe_core::ftp_bounce::FtpRelay::parse(spec)
+                .map_err(|e| anyhow::anyhow!(e))?;
+            let addr = tokio::net::lookup_host((relay.server.as_str(), relay.port))
+                .await
+                .ok()
+                .and_then(|mut a| a.find(SocketAddr::is_ipv4))
+                .with_context(|| {
+                    format!(
+                        "Failed to resolve FTP bounce proxy hostname/IP: {}",
+                        relay.server
+                    )
+                })?;
+            progress.say(1, || {
+                format!(
+                    "Resolved FTP bounce attack proxy to {} ({}).",
+                    relay.server,
+                    addr.ip()
+                )
+            });
+            if let Some(t) = targets.iter().find(|t| t.addr.is_ipv6()) {
+                bail!(
+                    "the FTP bounce scan (-b) is IPv4 only, but target {} is IPv6",
+                    t.addr
+                );
+            }
+            if !args.allow_public_evasion {
+                let addrs: Vec<IpAddr> = targets
+                    .iter()
+                    .map(|t| t.addr)
+                    .chain(std::iter::once(addr.ip()))
+                    .collect();
+                if let Some(public) = feroprobe_core::scope::first_public(&addrs) {
+                    bail!(
+                        "the FTP bounce scan (-b) is refused against public addresses, but \
+                         {public} is a public address (a target or the FTP relay). Pass \
+                         --allow-public-evasion to authorize this against targets and a relay \
+                         you have permission to use. This is a deliberate FeroProbe safeguard: \
+                         see docs/responsible-use.md."
+                    );
+                }
+            }
+            // The default TCP scan gives way to the bounce scan.
+            plan.tcp = None;
+            if plan.discovery {
+                eprintln!(
+                    "Hint: if your bounce scan target hosts aren't reachable from here, remember \
+                     to use -Pn so we don't try and ping them prior to the scan"
+                );
+            }
+            Some((addr, relay))
+        }
+        None => None,
+    };
+    if args.defeat_rst_ratelimit && plan.tcp != Some(ScanType::Syn) && !args.open {
+        bail!("Option --defeat-rst-ratelimit works only with a SYN scan (-sS)");
+    }
     let (mut os, trace) = aggressive(&mut plan, &args, raw_sockets_available())?;
     for w in os_option_warnings(&args, os) {
         eprintln!("Warning: {w}");
@@ -2707,7 +3064,7 @@ async fn main() -> Result<()> {
         }
     }
 
-    let port_scan = plan.tcp.is_some() || plan.udp || plan.sctp.is_some();
+    let port_scan = plan.tcp.is_some() || bounce.is_some() || plan.udp || plan.sctp.is_some();
     let PortLists {
         tcp: tcp_ports,
         udp: udp_ports,
@@ -2749,6 +3106,9 @@ async fn main() -> Result<()> {
     }
     if !plan.ping_only {
         // Like nmap: a scan type left without ports is skipped, not an error.
+        if bounce.is_some() && tcp_ports.is_empty() {
+            bail!("the FTP bounce scan (-b) needs TCP ports, but none were given");
+        }
         if plan.tcp.is_some() && tcp_ports.is_empty() {
             eprintln!(
                 "Warning: a TCP scan was asked for, but no TCP ports were given; skipping it"
@@ -2773,7 +3133,12 @@ async fn main() -> Result<()> {
             );
             plan.ip_proto = false;
         }
-        if plan.tcp.is_none() && !plan.udp && plan.sctp.is_none() && !plan.ip_proto {
+        if plan.tcp.is_none()
+            && bounce.is_none()
+            && !plan.udp
+            && plan.sctp.is_none()
+            && !plan.ip_proto
+        {
             plan.ping_only = true;
             plan.version = false;
             if os {
@@ -2783,7 +3148,11 @@ async fn main() -> Result<()> {
         }
     }
     if settings.settings.ics_protection && !plan.ping_only {
-        let tcp: &[u16] = if plan.tcp.is_some() { &tcp_ports } else { &[] };
+        let tcp: &[u16] = if plan.tcp.is_some() || bounce.is_some() {
+            &tcp_ports
+        } else {
+            &[]
+        };
         let udp: &[u16] = if plan.udp { &udp_ports } else { &[] };
         if let Some(w) = ot_port_warning(tcp, udp) {
             eprintln!("Warning: {w}");
@@ -2813,6 +3182,16 @@ async fn main() -> Result<()> {
         bail!("evasion options send raw packets: run as root or grant CAP_NET_RAW");
     }
     cfg.evasion = evasion;
+    // --data*, --ttl, --ip-options, --badsum: set once for every probe
+    // builder, before anything is sent or shown by --dry-run.
+    let mut packet_opts = packet_options(&args)?;
+    for w in packet_option_warnings(&mut packet_opts, &plan, &targets, raw_sockets_available()) {
+        eprintln!("Warning: {w}");
+    }
+    feroprobe_core::packet_opts::set(packet_opts);
+    if args.system_dns && !args.dns_servers.is_empty() {
+        eprintln!("Warning: --system-dns uses the system resolver, so --dns-servers is ignored");
+    }
     if let Some(port) = args.source_port {
         let connect = !plan.ping_only && plan.tcp.is_some_and(|t| t.raw_kind().is_none());
         let udp = (!plan.ping_only && plan.udp) || (plan.discovery && !probes.udp.is_empty());
@@ -2848,7 +3227,14 @@ async fn main() -> Result<()> {
             } else {
                 Default::default()
             },
-            tcp_ports: if plan.tcp.is_some() { &tcp_ports } else { &[] },
+            tcp_ports: if plan.tcp.is_some() || bounce.is_some() {
+                &tcp_ports
+            } else {
+                &[]
+            },
+            bounce: bounce
+                .as_ref()
+                .map(|(addr, relay)| format!("{}:{} ({})", relay.server, relay.port, addr.ip())),
             udp_ports: if plan.udp { &udp_ports } else { &[] },
             sctp_ports: if plan.sctp.is_some() {
                 &sctp_ports
@@ -2882,6 +3268,7 @@ async fn main() -> Result<()> {
                 trace,
                 trace_fallback,
                 version: &version_scan,
+                bounce: bounce.as_ref().map(|(a, _)| *a),
             },
         );
     }
@@ -2921,6 +3308,7 @@ async fn main() -> Result<()> {
         version: version_scan.clone(),
         os,
         os_opts: os_options(&args, &plan, &probes),
+        bounce: bounce.clone(),
     };
     let mut scan_types = if plan.list {
         vec!["list"]
@@ -2932,7 +3320,10 @@ async fn main() -> Result<()> {
     if trace {
         scan_types.push("traceroute");
     }
-    let ports_per_host = plan.tcp.map_or(0, |_| tcp_ports.len())
+    let ports_per_host = plan
+        .tcp
+        .or(bounce.as_ref().map(|_| ScanType::Connect))
+        .map_or(0, |_| tcp_ports.len())
         + if plan.udp { udp_ports.len() } else { 0 }
         + plan.sctp.map_or(0, |_| sctp_ports.len())
         + if plan.ip_proto { protocols.len() } else { 0 };
@@ -2948,10 +3339,14 @@ async fn main() -> Result<()> {
         max: group_limits.1,
     };
     let mut info = RunInfo {
-        args: resume::join_quoted(&command),
+        // The password of an FTP bounce relay is masked in the reports.
+        args: resume::join_quoted(&redact_args(
+            command.iter().cloned(),
+            bounce.as_ref().map(|(_, relay)| relay.pass.as_str()),
+        )),
         start: start_time,
         scan_types,
-        tcp_ports: if plan.tcp.is_some() && !plan.ping_only {
+        tcp_ports: if (plan.tcp.is_some() || bounce.is_some()) && !plan.ping_only {
             tcp_ports
         } else {
             Vec::new()
@@ -2979,6 +3374,7 @@ async fn main() -> Result<()> {
         ping_only: plan.ping_only,
         list_scan: plan.list,
         nmap_label: args.nmap_label,
+        defeat_rst: cfg.defeat_rst_ratelimit && plan.tcp.is_some(),
         verbosity: feroprobe_core::debug::verbosity(),
         stylesheet: xml::stylesheet(args.stylesheet.as_deref(), args.webxml, args.no_stylesheet),
     };
@@ -3913,6 +4309,99 @@ mod tests {
     }
 
     #[test]
+    fn packet_options_from_the_command_line() {
+        let o = packet_options(&args(&[])).unwrap();
+        assert!(!o.is_active());
+        let o = packet_options(&args(&["--data", "0xdead", "--ttl", "9", "--badsum"])).unwrap();
+        assert_eq!(o.data.as_deref(), Some(&[0xde, 0xad][..]));
+        assert_eq!((o.ttl, o.badsum), (Some(9), true));
+        let o = packet_options(&args(&["--data-string", "hi"])).unwrap();
+        assert_eq!(o.data.as_deref(), Some(&b"hi"[..]));
+        let o = packet_options(&args(&["--data-length", "7"])).unwrap();
+        assert_eq!(o.data.map(|d| d.len()), Some(7));
+        let o = packet_options(&args(&["--ip-options", "R"])).unwrap();
+        assert_eq!(o.ip_options.len(), 40);
+        // Like nmap: one data option at most, and sane values.
+        let bad = |v: &[&str]| {
+            let mut all = vec!["feroprobe"];
+            all.extend_from_slice(v);
+            all.push("10.0.0.1");
+            Args::try_parse_from(all).is_err()
+        };
+        assert!(bad(&["--data", "01", "--data-string", "x"]));
+        assert!(bad(&["--data-string", "x", "--data-length", "1"]));
+        assert!(bad(&["--data", "xyz"]));
+        assert!(bad(&["--data-length", "70000"]));
+        assert!(bad(&["--ttl", "256"]));
+        assert!(bad(&["--ip-options", "Q"]));
+        // The last of --privileged and --unprivileged wins.
+        let a = args(&["--privileged", "--unprivileged"]);
+        assert!(a.unprivileged && !a.privileged);
+    }
+
+    #[test]
+    fn relay_password_is_masked_in_reports() {
+        let a = |v: &[&str]| redact_args(v.iter().map(|s| s.to_string()), None).join(" ");
+        assert_eq!(
+            a(&["feroprobe", "-b", "bob:s3cret@ftp.lan:2121", "10.0.0.1"]),
+            "feroprobe -b bob:****@ftp.lan:2121 10.0.0.1"
+        );
+        assert_eq!(a(&["feroprobe", "-bbob:x@ftp"]), "feroprobe -bbob:****@ftp");
+        assert_eq!(a(&["feroprobe", "-b", "ftp.lan"]), "feroprobe -b ftp.lan");
+        assert_eq!(a(&["feroprobe", "-sS", "a@b"]), "feroprobe -sS a@b");
+        // Grouped short options: masked by the relay's own password.
+        let g = |v: &[&str]| redact_args(v.iter().map(|s| s.to_string()), Some("s3cret")).join(" ");
+        assert_eq!(
+            g(&["feroprobe", "-vb", "bob:s3cret@ftp.lan", "10.0.0.1"]),
+            "feroprobe -vb bob:****@ftp.lan 10.0.0.1"
+        );
+        assert_eq!(
+            g(&["feroprobe", "-vbbob:s3cret@ftp"]),
+            "feroprobe -vbbob:****@ftp"
+        );
+    }
+
+    #[test]
+    fn packet_option_warnings_name_what_is_not_honored() {
+        let t = |s: &str| Target {
+            addr: s.parse().unwrap(),
+            hostname: None,
+        };
+        let mut o = feroprobe_core::PacketOptions {
+            badsum: true,
+            data: Some(vec![0; 1500]),
+            ip_options: vec![1, 1, 1, 1],
+            ..Default::default()
+        };
+        let w = packet_option_warnings(
+            &mut o,
+            &plan_with_tcp(Some(ScanType::Connect)),
+            &[t("10.0.0.1"), t("fd00::1")],
+            false,
+        );
+        let all = w.join("\n");
+        assert!(all.contains("1400 bytes"), "{all}");
+        assert!(all.contains("TCP connect scan"), "{all}");
+        assert!(all.contains("--badsum needs raw sockets"), "{all}");
+        assert!(all.contains("fd00::1"), "{all}");
+        // An unhonoured --badsum is dropped, so the dry run does not claim it.
+        assert!(!o.badsum);
+        let mut o = feroprobe_core::PacketOptions {
+            ttl: Some(3),
+            ..Default::default()
+        };
+        assert!(
+            packet_option_warnings(
+                &mut o,
+                &plan_with_tcp(Some(ScanType::Syn)),
+                &[t("10.0.0.1")],
+                true
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
     fn evasion_parsing() {
         assert!(!evasion_from_args(&args(&[])).unwrap().is_active());
         assert_eq!(
@@ -4045,6 +4534,7 @@ mod tests {
             trace: false,
             trace_fallback: Some(80),
             version: &VERSION,
+            bounce: None,
         }
     }
 
@@ -4322,6 +4812,7 @@ mod tests {
             version: VersionScan::new(Duration::from_secs(1)),
             os: false,
             os_opts: OsOptions::default(),
+            bounce: None,
         };
         let target = Target {
             addr: "127.0.0.1".parse().unwrap(),

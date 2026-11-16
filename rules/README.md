@@ -27,6 +27,10 @@ Two scans carry **no** marker, by design:
 - **OS-detection** probes (`-O`) deliberately mimic a real OS stack to read
   the target's response, so they do not carry the window marker.
 
+A custom payload (`--data`, `--data-string` or `--data-length`) replaces the
+UDP and ICMP echo markers, exactly as it replaces nmap's payloads, so those
+probes then carry only what the user asked for. The TCP window marker stays.
+
 See [`../docs/responsible-use.md`](../docs/responsible-use.md) for the
 rationale.
 

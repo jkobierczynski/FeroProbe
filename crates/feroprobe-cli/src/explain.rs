@@ -27,6 +27,9 @@ pub(crate) struct Facts<'a> {
     /// Targets on a directly connected network, by interface name.
     pub local: BTreeMap<String, usize>,
     pub tcp_ports: &'a [u16],
+    /// The FTP bounce relay (`-b`), as `server:port (address)`, without
+    /// the login.
+    pub bounce: Option<String>,
     pub udp_ports: &'a [u16],
     pub sctp_ports: &'a [u16],
     pub protocols: &'a [u8],
@@ -342,6 +345,17 @@ pub(crate) fn explain(args: &Args, f: &Facts) -> Vec<String> {
                 format!("{} TCP ports: {}", f.tcp_ports.len(), ports(f.tcp_ports)),
             );
         }
+        if let Some(relay) = &f.bounce {
+            say(
+                &mut out,
+                format!(
+                    "FTP bounce scan (-b) through the relay {relay}, which connects to each port \
+                     for us, {} TCP ports: {}",
+                    f.tcp_ports.len(),
+                    ports(f.tcp_ports)
+                ),
+            );
+        }
         if p.udp {
             say(
                 &mut out,
@@ -555,6 +569,7 @@ mod tests {
             localhost: 0,
             local: BTreeMap::new(),
             tcp_ports: &[22, 443],
+            bounce: None,
             udp_ports: &[],
             sctp_ports: &[],
             protocols: &[],

@@ -55,6 +55,18 @@ aggressive-local | local  | root | -T2 -A --max-rate 10 -p 502,102
 fragment         | lan    | root | -sS -f -p @TCP
 mtu16            | lan    | root | -sS --mtu 16 -p @TCP
 
+# --- Packet contents, root (v0.5.0) ------------------------------------------
+data-length      | lan    | root | -sS --data-length 20 -p @TCP
+data-string      | lan    | root | -sU --data-string hello -p @UDP
+data-hex         | routed | root | -sn -PE --data 0xdeadbeef
+ttl              | lan    | root | -sS --ttl 7 -p @TCP
+ip-options-rr    | lan    | root | -sS --ip-options R -p @TCP
+badsum           | lan    | root | -sS --badsum --max-retries 0 -p @TCP
+defeat-rst       | routed | root | -sS --defeat-rst-ratelimit -p @TCP
+unprivileged     | lan    | root | --unprivileged -p @TCP
+# -b (FTP bounce) needs an FTP relay that allows PORT to third parties; the
+# lab has none, so it is covered by the unit tests in ftp_bounce.rs.
+
 # --- Interface and source port, root ----------------------------------------
 source-port      | lan    | root | -sS -g 53 -p @TCP
 source-port-udp  | lan    | root | -sU -g 53 -p @UDP

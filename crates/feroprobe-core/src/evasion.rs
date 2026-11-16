@@ -70,8 +70,9 @@ impl Evasion {
 }
 
 /// Split a complete IPv4 packet into fragments of at most `frag`'s payload
-/// size. Returns the packet unchanged (as a single element) when it has IP
-/// options, is too short, or already fits in one fragment.
+/// size. Returns the packet unchanged (as a single element) when it is too
+/// short or already fits in one fragment. A header with options
+/// (`--ip-options`) is copied whole into every fragment, as nmap does.
 ///
 /// `packet` is a whole IPv4 packet: a 20-byte header followed by the
 /// transport payload, as [`packet::ipv4_packet`] builds it. The transport
@@ -79,12 +80,13 @@ impl Evasion {
 /// receiver restores it on reassembly, so the fragments carry no transport
 /// checksum of their own to recompute.
 pub fn fragment_ipv4(pkt: &[u8], frag: Fragment) -> Vec<Vec<u8>> {
-    // Only fragment a well-formed IPv4 packet with a 20-byte header.
-    if pkt.len() < 20 || (pkt[0] >> 4) != 4 || (pkt[0] & 0x0f) != 5 {
+    // Only fragment a well-formed IPv4 packet.
+    let hlen = usize::from(pkt.first().map_or(0, |b| b & 0x0f)) * 4;
+    if pkt.len() < 20 || (pkt[0] >> 4) != 4 || hlen < 20 || pkt.len() < hlen {
         return vec![pkt.to_vec()];
     }
-    let header = &pkt[..20];
-    let payload = &pkt[20..];
+    let header = &pkt[..hlen];
+    let payload = &pkt[hlen..];
     let size = frag.payload_bytes();
     if payload.len() <= size {
         return vec![pkt.to_vec()];
@@ -97,10 +99,10 @@ pub fn fragment_ipv4(pkt: &[u8], frag: Fragment) -> Vec<Vec<u8>> {
         let chunk = &payload[offset..end];
         let more = end < payload.len();
 
-        let mut p = Vec::with_capacity(20 + chunk.len());
+        let mut p = Vec::with_capacity(hlen + chunk.len());
         p.extend_from_slice(header);
         // Total length = header + this fragment's payload.
-        let total = (20 + chunk.len()) as u16;
+        let total = (hlen + chunk.len()) as u16;
         p[2..4].copy_from_slice(&total.to_be_bytes());
         // Flags (3 bits) + fragment offset (13 bits, in 8-byte units).
         let mut flags_off = ((offset / 8) as u16) & 0x1fff;
@@ -110,7 +112,7 @@ pub fn fragment_ipv4(pkt: &[u8], frag: Fragment) -> Vec<Vec<u8>> {
         p[6..8].copy_from_slice(&flags_off.to_be_bytes());
         // Recompute the header checksum over the changed header.
         p[10..12].copy_from_slice(&[0, 0]);
-        let sum = packet::checksum(&p[..20]);
+        let sum = packet::checksum(&p[..hlen]);
         p[10..12].copy_from_slice(&sum.to_be_bytes());
         p.extend_from_slice(chunk);
 
@@ -189,6 +191,25 @@ mod tests {
         let frags = fragment_ipv4(&pkt, Fragment::Eight);
         assert_eq!(frags.len(), 1);
         assert_eq!(frags[0], pkt);
+    }
+
+    /// Header options travel in every fragment.
+    #[test]
+    fn fragments_keep_ip_options() {
+        let src = Ipv4Addr::new(10, 0, 0, 1);
+        let dst = Ipv4Addr::new(10, 0, 0, 2);
+        let payload: Vec<u8> = (0..16u8).collect();
+        let opts = [1, 1, 1, 1];
+        let pkt =
+            packet::ipv4_packet_with_options(src, dst, packet::IPPROTO_TCP, 64, 3, &opts, &payload);
+        let frags = fragment_ipv4(&pkt, Fragment::Eight);
+        assert_eq!(frags.len(), 2);
+        for f in &frags {
+            assert_eq!(f[0], 0x46);
+            assert_eq!(&f[20..24], &opts);
+            assert_eq!(packet::checksum(&f[..24]), 0);
+            assert_eq!(f.len(), 24 + 8);
+        }
     }
 
     #[test]

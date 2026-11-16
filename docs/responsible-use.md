@@ -64,6 +64,18 @@ With `--packet-trace`, every fragment that `-f`/`--mtu` produces gets its
 own `SENT` line, so you see exactly what went on the wire. nmap prints only
 the unfragmented probe there; FeroProbe does not copy that.
 
+The FTP bounce scan (`-b`) is gated the same way. It asks someone else's
+FTP server to connect to the targets for you, so both the targets and the
+FTP relay must be private addresses unless you pass
+`--allow-public-evasion`. Bouncing through a public FTP server into the
+network behind it is exactly the abuse RFC 2577 warns about.
+
+The packet options `--data`, `--data-string`, `--data-length`, `--ttl`,
+`--ip-options` and `--badsum` are not gated: they change what a probe
+carries, not who appears to send it or where it goes, and nmap users rely
+on them for ordinary firewall and path testing. Source routing through
+`--ip-options L`/`S` reaches only hops you name, and most routers drop it.
+
 The idle scan (`-sI`), which bounces probes off a third "zombie" host, is
 **not** implemented: its only real use is educational, and nmap already
 serves that.
@@ -119,6 +131,12 @@ can tell FeroProbe traffic apart from other traffic. The marks are:
 SCTP probes (`-sY`, `-sZ`, `-PY`) and the other IP protocol probes
 (`-sO`, `-PO`: IGMP, IP-in-IP, bare headers, and their UDP datagram) carry
 no FeroProbe mark yet; they are the same packets nmap sends.
+
+A payload you give with `--data`, `--data-string` or `--data-length`
+replaces the UDP and ICMP echo markers, as nmap's replaces its own
+payloads: a payload typed on the command line is a deliberate choice, and
+the probe carries exactly those bytes. The TCP window marker is not part of
+the payload and stays.
 
 Two scans carry no marker, on purpose:
 
