@@ -24,7 +24,7 @@ no external binaries.
 | Targets: IPv4 and IPv6 addresses, CIDR, `a.b.c.X-Y` ranges, `fe80::1%eth0`, hostnames (`-6` for their IPv6 address) | ✅ |
 | nmap-style `-p` port specs with `T:`/`U:`/`S:` and `P:` (IP protocols for `-sO`), top ports, `-F`, `--exclude-ports`, shuffled port order (`-r` keeps it) | ✅ |
 | Table, JSON, nmap-style XML and grepable output, `--reason`, `--open`, `--packet-trace` | ✅ |
-| Report files `-oN`, `-oX`, `-oG`, `-oJ`, `-oA`; target lists `-iL`; `--exclude`, `--excludefile`; progress with `-v` | ✅ |
+| Report files `-oN`, `-oX`, `-oS`, `-oG`, `-oJ`, `-oA`, `--append-output`, XML stylesheet options; target lists `-iL`; `--exclude`, `--excludefile`; progress with `-v` | ✅ |
 | `feroprobe-diff`: compare two XML reports (FeroProbe's or nmap's) and show what changed, like nmap's `ndiff` | ✅ |
 | Service and version detection, `-sV`, with our own probes and rules | ✅ |
 | OS detection, `-O`, a multi-probe fingerprint matched against our own OS database, with `--osscan-limit`, `--osscan-guess`, `--max-os-tries`, IPv4 and IPv6 (Linux, root) | ✅ |
@@ -408,6 +408,9 @@ These work like nmap's:
 | `-oG FILE` | Also write the grepable report to FILE: one line per host, like nmap's |
 | `-oJ FILE` | Also write the JSON report to FILE (FeroProbe's own) |
 | `-oA BASE` | Write `BASE.nmap`, `BASE.xml` and `BASE.gnmap` at once |
+| `-oS FILE` | Also write the normal report in nmap's "script kiddie" spelling to FILE |
+| `--append-output` | Add to the report files instead of replacing them |
+| `--stylesheet PATH/URL`, `--webxml`, `--no-stylesheet` | Which XSL stylesheet the XML report links: FeroProbe's own `feroprobe.xsl` by default (shipped next to the binary), its published copy, or none |
 | `-v`, `-vv` | Report progress on standard error: each phase with its time, and the open ports each scan found when it finishes |
 
 A target that the system resolver would read as an old-style IPv4 number

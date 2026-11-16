@@ -71,9 +71,9 @@ space (\f[V]-p22\f[R] or \f[V]-p 22\f[R]), except the \f[V]-P\f[R] ping
 options and \f[V]-s\f[R] scan types, whose value is always run on
 (\f[V]-PS22\f[R], \f[V]-sS\f[R]).
 nmap\[aq]s two-letter options \f[V]-iL\f[R], \f[V]-oN\f[R],
-\f[V]-oX\f[R], \f[V]-oG\f[R], \f[V]-oA\f[R] (and FeroProbe\[aq]s
-\f[V]-oJ\f[R]) are written exactly as in nmap, as a separate word
-followed by their value.
+\f[V]-oX\f[R], \f[V]-oS\f[R], \f[V]-oG\f[R], \f[V]-oA\f[R] (and
+FeroProbe\[aq]s \f[V]-oJ\f[R]) are written exactly as in nmap, as a
+separate word followed by their value.
 .PP
 Durations (\f[V]<time>\f[R]) are in seconds unless they end in
 \f[V]ms\f[R], \f[V]s\f[R], \f[V]m\f[R] or \f[V]h\f[R]: \f[V]500ms\f[R],
@@ -1820,6 +1820,17 @@ Also write the XML report to a file, in nmap\[aq]s \f[V]-oX\f[R] layout
 XML can read it.
 The root element says \f[V]scanner=\[dq]feroprobe\[dq]\f[R]; see
 \f[V]--nmap-label\f[R].
+.SS \f[V]-oS <file>\f[R]
+.PP
+Also write the normal report to a file in \[dq]script kiddie\[dq]
+spelling, as nmap\[aq]s \f[V]-oS\f[R] does: at random, letters become
+look-alikes (\f[V]4\f[R] for \f[V]A\f[R], \f[V]3\f[R] for \f[V]e\f[R],
+\f[V]0\f[R] for \f[V]o\f[R], \f[V]$\f[R] or \f[V]z\f[R] for \f[V]s\f[R],
+\f[V]!\f[R], \f[V]|\f[R] or \f[V]1\f[R] for \f[V]i\f[R], and \f[V]s\f[R]
+for \f[V]z\f[R]) or change case.
+Fingerprint lines (the \f[V]OS:\f[R] lines and the unrecognized service
+replies) are left as they are, so they can still be copied.
+It exists for parity with nmap; \f[V]-oA\f[R] does not include it.
 .SS \f[V]-oG <file>\f[R]
 .PP
 Also write the grepable report to a file: one line per host, like
@@ -1845,7 +1856,78 @@ links and other spellings of the same path are caught), and
 \f[V]-oA -\f[R] is refused.
 All report files are opened (created, not truncated) before the scan
 starts, so an unwritable path fails at once, as in nmap.
+A file\[aq]s old content is replaced only when the new report is
+written, so a scan that fails leaves the previous report in place.
 A \f[V]--dry-run\f[R] writes no reports and creates no files.
+.PP
+Report files are written through the handles opened at the start, so the
+paths are not looked up again: replacing a report path with a link while
+the scan runs does not redirect the report.
+When FeroProbe runs as root (for example under \f[V]sudo\f[R]), it also
+refuses to write a report through a symbolic link that another user owns
+in a shared directory with the sticky bit, such as \f[V]/tmp\f[R] (for
+example \f[V]sudo feroprobe -oN /tmp/scan.txt\f[R] when someone else has
+made \f[V]/tmp/scan.txt\f[R] a link to a system file).
+Linux refuses this too when \f[V]fs.protected_symlinks\f[R] is on;
+FeroProbe checks it on every system.
+The files are created with the usual permissions from the umask and
+owned by root, as with nmap.
+.SS \f[V]--append-output\f[R]
+.PP
+Add the reports to the end of the \f[V]-oN\f[R], \f[V]-oX\f[R],
+\f[V]-oS\f[R], \f[V]-oG\f[R], \f[V]-oJ\f[R] and \f[V]-oA\f[R] files
+instead of replacing them, as nmap\[aq]s \f[V]--append-output\f[R] does.
+Each run adds a complete report, so a normal or grepable file collects
+one report after another.
+An XML file then holds several \f[V]<nmaprun>\f[R] documents one after
+another, each with its own \f[V]<?xml ...?>\f[R] header, which XML
+parsers refuse as one document until it is split, just as with nmap; a
+JSON file likewise holds one JSON document per run.
+Reports written to standard output (\f[V]-\f[R]) are not affected.
+.SS \f[V]--stylesheet <path or URL>\f[R]
+.PP
+Link this XSL stylesheet from the XML report, through an
+\f[V]<?xml-stylesheet href=\[dq]...\[dq] type=\[dq]text/xsl\[dq]?>\f[R]
+line after the \f[V]<!DOCTYPE>\f[R] line, as nmap does.
+A browser that opens the report applies the stylesheet and shows the
+report as a web page.
+The value is written as given, so give a URL or a path that is valid
+where the report will be opened.
+.PP
+Without \f[V]--stylesheet\f[R], \f[V]--webxml\f[R] or
+\f[V]--no-stylesheet\f[R], the report links FeroProbe\[aq]s own
+stylesheet, \f[V]feroprobe.xsl\f[R]: the copy installed with FeroProbe
+as a \f[V]file://\f[R] URL (next to the binary, as in the release
+archives, then \f[V]../share/feroprobe/\f[R] from the binary, then
+\f[V]/usr/local/share/feroprobe/\f[R] and
+\f[V]/usr/share/feroprobe/\f[R]), or the bare name
+\f[V]feroprobe.xsl\f[R] when no copy is found, as nmap does with
+\f[V]nmap.xsl\f[R].
+The stylesheet is \f[V]docs/feroprobe.xsl\f[R] in the source; it is
+written for FeroProbe (nmap\[aq]s \f[V]nmap.xsl\f[R] is not reused) and
+also shows nmap\[aq]s own XML reports.
+Most browsers refuse to apply a stylesheet to a local file or from
+another site, so the reliable way to get a web page is to convert the
+report:
+.IP
+.nf
+\f[C]
+xsltproc -o report.html /usr/share/feroprobe/feroprobe.xsl report.xml
+\f[R]
+.fi
+.PP
+Of \f[V]--stylesheet\f[R], \f[V]--webxml\f[R] and
+\f[V]--no-stylesheet\f[R], the last one given wins, as in nmap.
+.SS \f[V]--webxml\f[R]
+.PP
+Link the published copy of FeroProbe\[aq]s stylesheet,
+\f[V]https://jkobierczynski.github.io/feroprobe/feroprobe.xsl\f[R],
+instead of the installed one, so the link works on machines where
+FeroProbe is not installed.
+Short for \f[V]--stylesheet\f[R] with that URL.
+.SS \f[V]--no-stylesheet\f[R]
+.PP
+Leave the \f[V]xml-stylesheet\f[R] line out of the XML report.
 .SS \f[V]--nmap-label\f[R]
 .PP
 Write \f[V]scanner=\[dq]nmap\[dq]\f[R] in the XML report instead of
@@ -2087,9 +2169,9 @@ T}
 These come from nmap 7.99\[aq]s source.
 .PP
 A dry run needs no root, writes no report files (it warns if
-\f[V]-oN\f[R], \f[V]-oX\f[R], \f[V]-oG\f[R], \f[V]-oJ\f[R] or
-\f[V]-oA\f[R] were given), and notes when a real run of the same command
-would need raw-socket privileges.
+\f[V]-oN\f[R], \f[V]-oX\f[R], \f[V]-oS\f[R], \f[V]-oG\f[R],
+\f[V]-oJ\f[R] or \f[V]-oA\f[R] were given), and notes when a real run of
+the same command would need raw-socket privileges.
 The evasion address check still applies: a public address with
 \f[V]-f\f[R], \f[V]--mtu\f[R], \f[V]-D\f[R] or \f[V]-S\f[R] is refused
 unless \f[V]--allow-public-evasion\f[R] is given.
@@ -2364,6 +2446,22 @@ T}@T{
 \f[V]nmap\f[R]
 T}@T{
 \f[V]feroprobe\f[R], unless \f[V]--nmap-label\f[R]
+T}
+T{
+XML stylesheet
+T}@T{
+Links \f[V]nmap.xsl\f[R]; \f[V]--webxml\f[R] links nmap.org\[aq]s copy
+T}@T{
+Links FeroProbe\[aq]s own \f[V]feroprobe.xsl\f[R]; \f[V]--webxml\f[R]
+links FeroProbe\[aq]s published copy
+T}
+T{
+Report files as root
+T}@T{
+Written through any symbolic link
+T}@T{
+A link another user owns in a sticky shared directory such as
+\f[V]/tmp\f[R] is refused (see \f[V]-oA\f[R] under Output options)
 T}
 T{
 Service and OS signatures
