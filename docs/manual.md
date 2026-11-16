@@ -1323,8 +1323,9 @@ port scans, host discovery, OS detection, traceroute), UDP scan probes
 (which then go out on a raw socket) and ARP discovery. It does not cover
 IPv6 probes, the TCP connect scan, version detection or DNS, whose packets
 the system sends; FeroProbe warns when the scan includes any of them.
-`--packet-trace` adds `ether-src=<MAC>` to each probe that really went out
-in a spoofed frame. Like
+`--packet-trace` adds `ether-src=<MAC>` to each probe sent in a spoofed
+frame. Like every SENT line it is printed just before the send, so it shows
+what was handed to the card, not proof that the frame left. Like
 the other evasion options, public targets need `--allow-public-evasion`.
 
 #### `--allow-public-evasion`

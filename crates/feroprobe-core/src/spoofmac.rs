@@ -166,6 +166,26 @@ mod imp {
         relays: HashSet<u32>,
         /// Destinations already warned about (no Ethernet on the way).
         warned: HashSet<IpAddr>,
+        /// Next hops that did not answer ARP, and when: not asked again
+        /// until [`UNANSWERED_FOR`] has passed.
+        unanswered: HashMap<(u32, Ipv4Addr), Instant>,
+        /// One lock per next hop being resolved: others wait for its result
+        /// instead of asking again, and other hops are not held up.
+        resolving: HashMap<(u32, Ipv4Addr), std::sync::Arc<Mutex<()>>>,
+    }
+
+    /// At most this many next hops are remembered (answered or not); once
+    /// full, the answered ones start over, which costs one more ARP request
+    /// each, never a wrong address.
+    const MAX_NEIGHBOURS: usize = 65_536;
+
+    impl State {
+        fn keep_neighbour(&mut self, key: (u32, Ipv4Addr), mac: MacAddr) {
+            if self.neighbours.len() >= MAX_NEIGHBOURS && !self.neighbours.contains_key(&key) {
+                self.neighbours.clear();
+            }
+            self.neighbours.insert(key, mac);
+        }
     }
 
     fn state() -> &'static Mutex<State> {
@@ -448,40 +468,77 @@ mod imp {
         if get().is_some()
             && let Ok(mut s) = state().lock()
         {
-            s.neighbours.insert((ifindex, ip), mac);
+            s.keep_neighbour((ifindex, ip), mac);
         }
     }
 
     /// The MAC address of `hop` on `ifindex`: cached, from the kernel's
     /// neighbour table, or asked for with ARP from the spoofed address.
     fn neighbour(ifindex: u32, hop: Ipv4Addr, mac: MacAddr) -> io::Result<MacAddr> {
-        let cached = || {
-            state()
-                .lock()
-                .ok()
-                .and_then(|s| s.neighbours.get(&(ifindex, hop)).copied())
+        let key = (ifindex, hop);
+        let unanswered = || {
+            io::Error::new(
+                io::ErrorKind::HostUnreachable,
+                format!("--spoof-mac: no ARP answer from the next hop {hop}"),
+            )
         };
-        if let Some(m) = cached() {
-            return Ok(m);
+        let cached = || -> Option<io::Result<MacAddr>> {
+            let s = state().lock().ok()?;
+            if let Some(m) = s.neighbours.get(&key) {
+                return Some(Ok(*m));
+            }
+            s.unanswered
+                .get(&key)
+                .filter(|at| at.elapsed() < UNANSWERED_FOR)
+                .map(|_| Err(unanswered()))
+        };
+        if let Some(r) = cached() {
+            return r;
         }
-        // One resolution at a time, so probes sent together from several
-        // threads ask once.
-        static RESOLVING: Mutex<()> = Mutex::new(());
-        let _one = RESOLVING.lock();
-        if let Some(m) = cached() {
-            return Ok(m);
+        // Probes sent together from several threads to the same hop ask
+        // once: the others wait here and take its result.
+        let lock = state()
+            .lock()
+            .map_err(|_| io::Error::other("--spoof-mac: state lock poisoned"))?
+            .resolving
+            .entry(key)
+            .or_default()
+            .clone();
+        let _one = lock.lock();
+        if let Some(r) = cached() {
+            return r;
         }
         let found = std::fs::read_to_string("/proc/net/arp")
             .ok()
             .and_then(|t| {
                 kernel_neighbour(&t, hop, |dev| crate::netif::index_of(dev) == Some(ifindex))
             })
-            .map_or_else(|| arp(ifindex, hop, mac), Ok)?;
+            .map_or_else(|| arp(ifindex, hop, mac), Ok);
         if let Ok(mut s) = state().lock() {
-            s.neighbours.insert((ifindex, hop), found);
+            match found {
+                Ok(m) => {
+                    s.keep_neighbour(key, m);
+                    s.unanswered.remove(&key);
+                }
+                // No answer (not a local failure): taken as down a while.
+                Err(ref e) if e.kind() == io::ErrorKind::HostUnreachable => {
+                    if s.unanswered.len() >= MAX_NEIGHBOURS {
+                        s.unanswered.retain(|_, at| at.elapsed() < UNANSWERED_FOR);
+                    }
+                    if s.unanswered.len() < MAX_NEIGHBOURS {
+                        s.unanswered.insert(key, Instant::now());
+                    }
+                }
+                Err(_) => {}
+            }
+            // Its result is cached now; waiters still hold the lock's Arc.
+            s.resolving.remove(&key);
         }
-        Ok(found)
+        found
     }
+
+    /// How long a next hop that did not answer ARP is taken as down.
+    const UNANSWERED_FOR: Duration = Duration::from_secs(10);
 
     /// A complete entry for `ip` in `/proc/net/arp`, on a device that
     /// `on_device` accepts.
@@ -594,10 +651,11 @@ mod imp {
             )
         };
         let fd = relay_socket(ifindex, mac).map_err(fail)?;
+        let out = packet_socket(0).map_err(fail)?;
         let lo = crate::netif::index_of("lo").unwrap_or(1);
         std::thread::Builder::new()
             .name("spoof-mac relay".into())
-            .spawn(move || relay(&fd, mac, lo))
+            .spawn(move || relay(&fd, &out, mac, lo))
             .map_err(fail)?;
         // The socket is listening already, so nothing sent from here on is
         // missed.
@@ -663,9 +721,8 @@ mod imp {
 
     /// Pass IP frames for `mac` that the stack would drop to it through
     /// the loopback interface. Runs for the rest of the process.
-    fn relay(fd: &OwnedFd, mac: MacAddr, lo: u32) {
+    fn relay(fd: &OwnedFd, out: &OwnedFd, mac: MacAddr, lo: u32) {
         let mut buf = vec![0u8; 65536];
-        let Ok(out) = packet_socket(0) else { return };
         loop {
             // SAFETY: sockaddr_ll is plain data; all-zero is a valid value.
             let mut from: libc::sockaddr_ll = unsafe { mem::zeroed() };
@@ -720,7 +777,7 @@ mod imp {
                 }
             }
             frame[..12].fill(0);
-            let _ = send_frame(&out, lo, frame);
+            let _ = send_frame(out, lo, frame);
         }
     }
 
@@ -879,12 +936,17 @@ eth1\t0000000A\t00000000\t0001\t0\t0\t0\t000000FF\t0\t0\t0\n";
     fn reads_complete_kernel_neighbours() {
         let t = "IP address       HW type     Flags       HW address            Mask     Device\n\
 192.168.1.1      0x1         0x2         aa:bb:cc:dd:ee:01     *        eth0\n\
-192.168.1.9      0x1         0x0         00:00:00:00:00:00     *        eth0\n";
+192.168.1.9      0x1         0x0         00:00:00:00:00:00     *        eth0\n\
+192.168.1.1      0x1         0x2         aa:bb:cc:dd:ee:02     *        eth2\n";
         assert_eq!(
             imp::kernel_neighbour(t, "192.168.1.1".parse().unwrap(), |d| d == "eth0"),
             Some(MacAddr([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 1]))
         );
         // The same address on another link is another host.
+        assert_eq!(
+            imp::kernel_neighbour(t, "192.168.1.1".parse().unwrap(), |d| d == "eth2"),
+            Some(MacAddr([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 2]))
+        );
         assert_eq!(
             imp::kernel_neighbour(t, "192.168.1.1".parse().unwrap(), |d| d == "eth1"),
             None
