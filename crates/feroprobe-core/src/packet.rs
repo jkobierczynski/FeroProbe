@@ -429,10 +429,7 @@ pub fn parse_icmp_tcp_error(data: &[u8], v6: bool) -> Option<IcmpTcpError> {
             return None;
         }
         let ihl = usize::from(b[0] & 0x0f) * 4;
-        (
-            Ipv4Addr::new(b[16], b[17], b[18], b[19]).into(),
-            b.get(ihl..)?,
-        )
+        (quoted_ipv4_destination(b, ihl).into(), b.get(ihl..)?)
     };
     if tcp.len() < 8 {
         return None;
@@ -745,6 +742,18 @@ pub struct IcmpError<'a> {
     pub quoted: &'a [u8],
 }
 
+/// The destination of the IPv4 header quoted in an ICMP error (`ihl` its
+/// length). A source-routed probe (`--ip-options L`/`S`) is quoted on its
+/// way, with the next hop as destination, so then the target is the
+/// route's last slot.
+fn quoted_ipv4_destination(b: &[u8], ihl: usize) -> Ipv4Addr {
+    let dst = Ipv4Addr::new(b[16], b[17], b[18], b[19]);
+    match b.get(20..ihl.max(20)) {
+        Some(opts) if !opts.is_empty() => crate::packet_opts::final_destination(opts, dst),
+        _ => dst,
+    }
+}
+
 /// Parse an ICMP (`v6` false) or ICMPv6 message, without its IP header,
 /// as an error about a packet we sent: destination unreachable or time
 /// exceeded, and for ICMPv6 also parameter problem.
@@ -777,7 +786,7 @@ pub fn parse_icmp_error(msg: &[u8], v6: bool) -> Option<IcmpError<'_>> {
         let ihl = usize::from(b[0] & 0x0f) * 4;
         (
             b[9],
-            Ipv4Addr::new(b[16], b[17], b[18], b[19]).into(),
+            quoted_ipv4_destination(b, ihl).into(),
             Some(u16::from_be_bytes([b[4], b[5]])),
             b.get(ihl..).unwrap_or(&[]),
         )

@@ -733,6 +733,9 @@ are user \f[V]anonymous\f[R], password \f[V]-wwwuser\[at]\f[R] and port
 21, like nmap\[aq]s.
 The last \f[V]\[at]\f[R] ends the login, so a password may contain
 \f[V]\[at]\f[R].
+Plain FTP sends the login in cleartext, so anyone on the path to the
+relay can read a password given here; reports show the command line with
+it masked (\f[V]user:****\[at]server\f[R]).
 .PP
 .TS
 tab(@);
@@ -762,6 +765,12 @@ T}@T{
 \f[V]filtered\f[R]
 T}
 .TE
+.PP
+After a reply that did not come in time, or an \f[V]ABOR\f[R], FeroProbe
+logs in again before the next port, so a late reply cannot be read as
+the answer about another port.
+\f[V]--scan-delay\f[R] (and the timing templates\[aq] delay) waits
+between ports.
 .PP
 If the relay refuses a \f[V]PORT\f[R] command for a port below 1024
 before any privileged port went through, FeroProbe warns and skips the
@@ -1913,6 +1922,9 @@ On systems other than Linux only the probes FeroProbe builds whole
 .PP
 Send probes with this IP time-to-live (IPv6 hop limit), 0 to 255,
 instead of a random one from 37 to 59.
+The system refuses an IPv4 TTL of 0 on sockets whose header it writes,
+so with \f[V]--ttl 0\f[R] those probes go with TTL 1 (FeroProbe warns);
+probes it builds whole and IPv6 probes carry 0.
 .SS \f[V]--badsum\f[R]
 .PP
 Send TCP, UDP, SCTP, ICMP and IGMP probes with a checksum one less than

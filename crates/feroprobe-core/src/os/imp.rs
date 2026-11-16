@@ -15,7 +15,7 @@ use super::probes::{self, Keys, PROBES, Target};
 use super::{Job, OsOptions, ScanConfig, classify, db, tries_for};
 use crate::capture;
 use crate::packet;
-use crate::raw::{Pacer, Rng, raw_socket, raw_socket_in, send_logged_until, source_addr_for};
+use crate::raw::{Pacer, Rng, raw_socket, raw_socket_in, send_logged_until};
 
 /// Where answers are matched: target address to (slot, open port, closed port).
 pub(super) type Slots = HashMap<IpAddr, (usize, u16, Option<u16>)>;
@@ -166,7 +166,7 @@ pub(super) fn probe_blocking(
     let sources: Vec<Option<IpAddr>> = jobs
         .iter()
         .map(|j| {
-            let src = source_addr_for(j.addr).ok()?;
+            let src = crate::netif::route_source(j.addr).ok()?;
             (src.is_ipv6() == j.addr.is_ipv6() && socks.tcp(j.addr.is_ipv6()).is_some())
                 .then_some(src)
         })

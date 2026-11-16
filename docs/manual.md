@@ -457,13 +457,20 @@ so the result shows what the targets look like from the relay's network.
 
 The argument is `[user[:pass]@]server[:port]`; the defaults are user
 `anonymous`, password `-wwwuser@` and port 21, like nmap's. The last `@`
-ends the login, so a password may contain `@`.
+ends the login, so a password may contain `@`. Plain FTP sends the login
+in cleartext, so anyone on the path to the relay can read a password given
+here; reports show the command line with it masked (`user:****@server`).
 
 | Relay's answer to `LIST` | State |
 | --- | --- |
 | `150`/`125` then `226` (the data connection opened), or a `2xx` | `open` |
 | `425` (can't open data connection), `150` then `426`, anything else | `closed` |
 | Nothing within 12 seconds, or a `150` that never completes (FeroProbe sends `ABOR`) | `filtered` |
+
+After a reply that did not come in time, or an `ABOR`, FeroProbe logs in
+again before the next port, so a late reply cannot be read as the answer
+about another port. `--scan-delay` (and the timing templates' delay) waits
+between ports.
 
 If the relay refuses a `PORT` command for a port below 1024 before any
 privileged port went through, FeroProbe warns and skips the privileged
@@ -1278,7 +1285,9 @@ than Linux only the probes FeroProbe builds whole (`-sO`, `-f`, `--mtu`,
 #### `--ttl <value>`
 
 Send probes with this IP time-to-live (IPv6 hop limit), 0 to 255, instead
-of a random one from 37 to 59.
+of a random one from 37 to 59. The system refuses an IPv4 TTL of 0 on
+sockets whose header it writes, so with `--ttl 0` those probes go with TTL 1
+(FeroProbe warns); probes it builds whole and IPv6 probes carry 0.
 
 #### `--badsum`
 

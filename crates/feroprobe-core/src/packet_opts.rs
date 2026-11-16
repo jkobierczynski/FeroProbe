@@ -223,9 +223,16 @@ pub(crate) fn spoil_checksum(proto: u8, seg: &mut [u8]) {
     if seg.len() < at + 2 {
         return;
     }
-    let mut sum = u16::from_be_bytes([seg[at], seg[at + 1]]).wrapping_sub(1);
+    let right = u16::from_be_bytes([seg[at], seg[at + 1]]);
+    let mut sum = right.wrapping_sub(1);
     if proto == IPPROTO_UDP && sum == 0 {
         sum = 0xffff;
+    }
+    // 0x0000 and 0xffff are the same one's-complement value, so a right
+    // checksum of 0 needs another step down to become wrong (nmap's
+    // decrement misses this).
+    if proto != IPPROTO_UDP && right == 0 {
+        sum = 0xfffe;
     }
     seg[at..at + 2].copy_from_slice(&sum.to_be_bytes());
 }
@@ -460,6 +467,37 @@ fn route_options(opts: &[u8], dst: Ipv4Addr) -> (Vec<u8>, Ipv4Addr) {
     (opts.to_vec(), dst)
 }
 
+/// `opts` as Linux takes them in `IP_OPTIONS`: a source route without the
+/// slot reserved for the target, since the kernel takes the first hop out
+/// and writes the destination into the last slot itself.
+pub(crate) fn kernel_options(opts: &[u8]) -> Vec<u8> {
+    let mut i = 0;
+    while i < opts.len() {
+        match opts[i] {
+            0 => break,
+            OPT_NOP => i += 1,
+            kind => {
+                let len = usize::from(opts.get(i + 1).copied().unwrap_or(0));
+                if len < 2 || i + len > opts.len() {
+                    break;
+                }
+                if (kind == OPT_LSRR || kind == OPT_SSRR) && len >= 3 + 8 {
+                    let mut o = opts[..i].to_vec();
+                    o.extend_from_slice(&[kind, (len - 4) as u8]);
+                    o.extend_from_slice(&opts[i + 2..i + len - 4]);
+                    o.extend_from_slice(&opts[i + len..]);
+                    while !o.len().is_multiple_of(4) {
+                        o.push(0);
+                    }
+                    return o;
+                }
+                i += len;
+            }
+        }
+    }
+    opts.to_vec()
+}
+
 /// The final destination of a packet with header `opts` sent to `dst`:
 /// the last slot of a loose or strict source route, else `dst`.
 pub fn final_destination(opts: &[u8], dst: Ipv4Addr) -> Ipv4Addr {
@@ -584,6 +622,12 @@ mod tests {
         assert_eq!(out.len(), 20 + 5);
         assert_eq!(packet::checksum(&out), 0);
 
+        // A right checksum of 0: 0xffff would still be right.
+        let mut echo = packet::icmp_echo(0xf7ff, 0, &[]);
+        assert_eq!(&echo[2..4], &[0, 0]);
+        spoil_checksum(packet::IPPROTO_ICMP, &mut echo);
+        assert_ne!(packet::checksum(&echo), 0);
+
         let init = packet::sctp_init(40000, 2905, 7, 9);
         let out = opts.finish(IPPROTO_SCTP, s, d, init, true);
         let mut zeroed = out.clone();
@@ -638,6 +682,19 @@ mod tests {
         };
         assert_eq!(some.echo_payload(), &[1, 2]);
         assert_eq!(some.udp_payload(53), &[1, 2]);
+    }
+
+    #[test]
+    fn kernel_options_drop_the_target_slot() {
+        let l = parse_ip_options("L 10.0.0.1 10.0.0.2").unwrap();
+        let k = kernel_options(&l);
+        // [NOP, LSRR, len 11, ptr 4, 10.0.0.1, 10.0.0.2], padded.
+        assert_eq!(&k[..12], &[1, 131, 11, 4, 10, 0, 0, 1, 10, 0, 0, 2]);
+        assert_eq!(k.len() % 4, 0);
+        assert_eq!(
+            kernel_options(&parse_ip_options("R").unwrap()),
+            parse_ip_options("R").unwrap()
+        );
     }
 
     #[test]

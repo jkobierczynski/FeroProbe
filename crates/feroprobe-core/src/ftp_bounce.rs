@@ -119,6 +119,10 @@ struct Control {
     addr: SocketAddr,
     read: BufReader<OwnedReadHalf>,
     write: OwnedWriteHalf,
+    /// A reply may still be on its way (one timed out, or `ABOR` was
+    /// sent), so the next reply read might answer an older command: the
+    /// connection must not be used for another port.
+    out_of_step: bool,
 }
 
 impl Control {
@@ -149,7 +153,10 @@ impl Control {
         };
         match tokio::time::timeout(wait, read).await {
             Ok(r) => r.map(Some),
-            Err(_) => Ok(None),
+            Err(_) => {
+                self.out_of_step = true;
+                Ok(None)
+            }
         }
     }
 
@@ -177,6 +184,7 @@ impl Control {
             addr,
             read: BufReader::new(r),
             write: w,
+            out_of_step: false,
         };
         match c.reply(Duration::from_secs(7)).await? {
             Some(r) if r.class() == 2 => {}
@@ -224,10 +232,11 @@ enum Verdict {
 /// Ask the relay about one port.
 async fn probe(c: &mut Control, target: Ipv4Addr, port: u16) -> io::Result<Verdict> {
     c.send(&port_command(target, port)).await?;
-    let r = c.reply(Duration::from_secs(15)).await?;
-    if let Some(r) = &r
-        && r.class() == 5
-    {
+    let Some(r) = c.reply(Duration::from_secs(15)).await? else {
+        // No answer to PORT: a LIST now would read it late as its own.
+        return Ok(Verdict::State(PortState::Filtered, reason::NO_RESPONSE));
+    };
+    if r.class() == 5 {
         return Ok(Verdict::Refused);
     }
     c.send("LIST").await?;
@@ -251,6 +260,8 @@ async fn probe(c: &mut Control, target: Ipv4Addr, port: u16) -> io::Result<Verdi
             None => {
                 c.send("ABOR").await?;
                 let _ = c.reply(Duration::from_secs(10)).await;
+                // ABOR may draw one reply or two (426 then 226).
+                c.out_of_step = true;
                 return Ok(Verdict::State(PortState::Filtered, reason::NO_RESPONSE));
             }
         }
@@ -304,6 +315,13 @@ pub async fn bounce_scan(
                 i += 1;
                 continue;
             }
+            // A reply still due on this connection would be read as the
+            // answer about the next port: start a fresh one instead.
+            if control.out_of_step {
+                let _ = control.send("QUIT").await;
+                control = Control::login(relay_addr, relay).await?;
+            }
+            crate::timing::pace(cfg.scan_delay).await;
             let verdict = match probe(&mut control, target, port).await {
                 Ok(v) => v,
                 Err(e) if reconnects > 0 => {

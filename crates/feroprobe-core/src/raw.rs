@@ -118,10 +118,11 @@ pub(crate) fn nmap_ip_header(sock: &Socket, ipv6: bool) {
         let _ = sock.set_unicast_hops_v6(ttl);
     } else {
         clear_dont_fragment(sock);
-        let _ = sock.set_ttl_v4(ttl);
+        // Linux refuses an IPv4 TTL of 0 here; 1 is the nearest it takes.
+        let _ = sock.set_ttl_v4(ttl.max(1));
         let opts = &crate::packet_opts::get().ip_options;
         if !opts.is_empty() {
-            set_ip_options(sock, opts);
+            set_ip_options(sock, &crate::packet_opts::kernel_options(opts));
         }
     }
 }
@@ -157,7 +158,8 @@ pub(crate) fn nmap_ip_header_bare(sock: &Socket, ipv6: bool) {
         let _ = sock.set_unicast_hops_v6(ttl);
     } else {
         clear_dont_fragment(sock);
-        let _ = sock.set_ttl_v4(ttl);
+        // Linux refuses an IPv4 TTL of 0 here; 1 is the nearest it takes.
+        let _ = sock.set_ttl_v4(ttl.max(1));
     }
 }
 
@@ -217,7 +219,13 @@ pub(crate) fn clear_dont_fragment(sock: &Socket) {
 /// interface, if one was chosen); see [`crate::netif::route_source`].
 #[cfg(target_os = "linux")]
 pub(crate) fn source_addr_for(dst: IpAddr) -> io::Result<IpAddr> {
-    crate::netif::route_source(dst)
+    // A probe with a source route in --ip-options goes to the route's
+    // first hop, and the system picks the source address for that route.
+    let via = match dst {
+        IpAddr::V4(d) => IpAddr::V4(crate::packet_opts::get().ipv4_header_options(d).1),
+        v6 => v6,
+    };
+    crate::netif::route_source(via)
 }
 
 /// The source port for a raw scan's probes: the `-g` port if one was

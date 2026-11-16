@@ -163,7 +163,7 @@ pub fn raw_tcp_pings(targets: &[Target]) -> bool {
 pub fn is_localhost(addr: IpAddr) -> bool {
     #[cfg(target_os = "linux")]
     let own =
-        || !addr.is_unspecified() && crate::raw::source_addr_for(addr).is_ok_and(|src| src == addr);
+        || !addr.is_unspecified() && crate::netif::route_source(addr).is_ok_and(|src| src == addr);
     // Elsewhere only loopback addresses count.
     #[cfg(not(target_os = "linux"))]
     let own = || false;
@@ -604,7 +604,13 @@ mod icmp {
         } else {
             (Domain::IPV4, Protocol::ICMPV4)
         };
-        let (sock, rewrites_id) = match Socket::new(domain, Type::RAW, Some(proto)) {
+        // --unprivileged: the unprivileged ping socket only.
+        let raw = if crate::raw::privilege_override() == Some(false) {
+            Err(io::Error::from(io::ErrorKind::PermissionDenied))
+        } else {
+            Socket::new(domain, Type::RAW, Some(proto))
+        };
+        let (sock, rewrites_id) = match raw {
             Ok(s) => (s, false),
             Err(raw_err) => Socket::new(domain, Type::DGRAM, Some(proto))
                 .map(|s| (s, true))

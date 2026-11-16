@@ -1280,6 +1280,14 @@ fn packet_option_warnings(
     if opts.badsum {
         named.push("--badsum");
     }
+    if opts.ttl == Some(0) && targets.iter().any(|t| t.addr.is_ipv4()) {
+        w.push(
+            "--ttl 0: the system refuses TTL 0 for IPv4 probes whose header it writes, so those \
+             go with TTL 1; probes FeroProbe builds whole (-sO, -f, --mtu, -D, -S) and IPv6 \
+             probes carry 0"
+                .to_string(),
+        );
+    }
     if !plan.ping_only && plan.tcp == Some(ScanType::Connect) {
         w.push(format!(
             "{} will not be honored for the TCP connect scan (-sT), whose packets the system builds",
@@ -1310,6 +1318,34 @@ fn packet_option_warnings(
         );
     }
     w
+}
+
+/// The command line for reports, with the password of an FTP bounce
+/// relay (`-b user:pass@server`) masked, so saved output does not carry it.
+fn redact_args(args: impl IntoIterator<Item = String>) -> String {
+    let mask = |v: &str| match v.rsplit_once('@') {
+        Some((login, server)) => match login.split_once(':') {
+            Some((user, _)) => format!("{user}:****@{server}"),
+            None => v.to_string(),
+        },
+        None => v.to_string(),
+    };
+    let mut out = Vec::new();
+    let mut relay_next = false;
+    for a in args {
+        if relay_next {
+            out.push(mask(&a));
+            relay_next = false;
+        } else if a == "-b" {
+            out.push(a);
+            relay_next = true;
+        } else if let Some(v) = a.strip_prefix("-b").filter(|v| v.contains('@')) {
+            out.push(format!("-b{}", mask(v)));
+        } else {
+            out.push(a);
+        }
+    }
+    out.join(" ")
 }
 
 /// Refuse evasion options unless they are allowed: a raw TCP scan, raw
@@ -2795,7 +2831,7 @@ async fn main() -> Result<()> {
         + plan.sctp.map_or(0, |_| sctp_ports.len())
         + if plan.ip_proto { protocols.len() } else { 0 };
     let info = RunInfo {
-        args: std::env::args().collect::<Vec<_>>().join(" "),
+        args: redact_args(std::env::args()),
         start: start_time,
         scan_types,
         tcp_ports: if (plan.tcp.is_some() || bounce.is_some()) && !plan.ping_only {
@@ -3459,6 +3495,18 @@ mod tests {
         // The last of --privileged and --unprivileged wins.
         let a = args(&["--privileged", "--unprivileged"]);
         assert!(a.unprivileged && !a.privileged);
+    }
+
+    #[test]
+    fn relay_password_is_masked_in_reports() {
+        let a = |v: &[&str]| redact_args(v.iter().map(|s| s.to_string()));
+        assert_eq!(
+            a(&["feroprobe", "-b", "bob:s3cret@ftp.lan:2121", "10.0.0.1"]),
+            "feroprobe -b bob:****@ftp.lan:2121 10.0.0.1"
+        );
+        assert_eq!(a(&["feroprobe", "-bbob:x@ftp"]), "feroprobe -bbob:****@ftp");
+        assert_eq!(a(&["feroprobe", "-b", "ftp.lan"]), "feroprobe -b ftp.lan");
+        assert_eq!(a(&["feroprobe", "-sS", "a@b"]), "feroprobe -sS a@b");
     }
 
     #[test]

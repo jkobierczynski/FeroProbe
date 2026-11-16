@@ -228,7 +228,7 @@ mod imp {
 
     use crate::connect::is_network_error;
     use crate::packet::{self, TCP_ACK, TCP_RST, TCP_SYN};
-    use crate::raw::{Pacer, Rng, raw_socket_in, receive_loop, send_with_backoff, source_addr_for};
+    use crate::raw::{Pacer, Rng, raw_socket_in, receive_loop, send_with_backoff};
     use crate::target::socket_addr;
 
     /// Job index, TTL, round, who answered, whether it was the host, when.
@@ -302,7 +302,7 @@ mod imp {
         }
         let sources: Vec<Option<IpAddr>> = jobs
             .iter()
-            .map(|j| match source_addr_for(j.1) {
+            .map(|j| match crate::netif::route_source(j.1) {
                 Ok(a) => Ok(Some(a)),
                 Err(e) if is_network_error(&e) => Ok(None),
                 Err(e) => Err(e),
