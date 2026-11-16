@@ -524,3 +524,26 @@ fn matches_a_tp_link_router() {
     assert_eq!(perfect, 1, "{m:?}");
     assert_eq!(m[0].name, "Linux 3.x - 4.18");
 }
+
+/// A real device: a Windows 11 PC with TCP timestamps on (nmap guesses
+/// Windows 11 at 99%), fingerprinted over the LAN with `-O -vv`.
+#[test]
+fn matches_a_windows_11_pc() {
+    let line = "ttl=128 s1=Y s1.f=SA s1.w=65535 s1.m=1460 s1.o=M,N,W,S,T s1.df=Y s2=Y \
+        s2.f=SA s2.w=65535 s2.m=1460 s2.o=M s2.df=Y s3=Y s3.f=SA s3.w=65535 \
+        s3.m=1460 s3.o=M,N,N,S s3.df=Y s4=Y s4.f=SA s4.m=1460 s4.o=M,N,W,N,N,T \
+        s4.df=Y e=Y e.f=SA e.w=65535 e.m=1460 e.o=M,N,W,N,N,S e.df=Y a=N ie=Y \
+        ie.df=N ws=8 ipid=I ts=1000";
+    let fp = Fingerprint {
+        tests: line
+            .split_whitespace()
+            .map(|t| {
+                let (k, v) = t.split_once('=').unwrap();
+                (k.to_string(), v.to_string())
+            })
+            .collect(),
+    };
+    let (m, perfect) = classify(db::built_in(), &fp);
+    assert_eq!(perfect, 1, "{m:?}");
+    assert_eq!(m[0].name, "Microsoft Windows 10 - 11 or Server 2016 - 2025");
+}

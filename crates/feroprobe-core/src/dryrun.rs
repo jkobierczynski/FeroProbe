@@ -66,6 +66,9 @@ pub struct DryRun<'a> {
     pub targets: &'a [Target],
     /// `None` with `-Pn`.
     pub discovery: Option<DryDiscovery>,
+    /// With `-Pn`: targets on a local network still get an ARP or ND
+    /// request, as in nmap (privileged, no `--disable-arp-ping`).
+    pub pn_neighbours: bool,
     /// The TCP scan and its ports, in the order they would go out.
     pub tcp: Option<(DryTcp, &'a [u16])>,
     /// The UDP ports, in the order they would go out.
@@ -75,7 +78,7 @@ pub struct DryRun<'a> {
     /// `-sO`: the IP protocol numbers.
     pub protocols: &'a [u8],
     pub evasion: &'a Evasion,
-    /// Unanswered probes are sent this many more times in a real run.
+    /// The most times unanswered probes are resent in a real run.
     pub retries: u32,
     /// OS detection (`-O`), if it runs.
     pub os: Option<crate::os::OsOptions>,
@@ -185,7 +188,25 @@ pub fn write(run: &DryRun<'_>, w: &mut dyn Write) -> io::Result<Summary> {
 
     let mut summary = Summary::default();
     match &run.discovery {
-        None => out.note("Host discovery: skipped (-Pn), every target is treated as up")?,
+        None => {
+            out.note("Host discovery: skipped (-Pn), every target is treated as up")?;
+            if run.pn_neighbours {
+                let mut decided: Vec<bool> = run
+                    .targets
+                    .iter()
+                    .map(|t| crate::discovery::is_localhost(t.addr))
+                    .collect();
+                let before = decided.clone();
+                neighbour_requests(&mut out, run.targets, &mut decided)?;
+                if decided != before {
+                    out.note(
+                        "As in nmap, targets on a local network still get an ARP/ND request, \
+                         for their MAC address and latency",
+                    )?;
+                }
+                summary.discovery = out.count;
+            }
+        }
         Some(d) => {
             discovery(&mut out, run, d, &sources, &v)?;
             summary.discovery = out.count;
@@ -291,9 +312,12 @@ pub fn write(run: &DryRun<'_>, w: &mut dyn Write) -> io::Result<Summary> {
     }
     let retry = if run.retries > 0 {
         format!(
-            "; a real run resends unanswered probes up to {} more time{}",
-            run.retries,
-            if run.retries == 1 { "" } else { "s" }
+            "; a real run resends unanswered probes once{}",
+            if run.retries > 1 {
+                format!(", or up to {} times to hosts that lose probes", run.retries)
+            } else {
+                String::new()
+            }
         )
     } else {
         String::new()
@@ -556,6 +580,42 @@ fn evasion_lines(
     lines
 }
 
+/// The ARP and ND requests to the targets not yet `decided` that sit on a
+/// local network; marks them decided.
+fn neighbour_requests(
+    out: &mut Out<'_>,
+    targets: &[Target],
+    decided: &mut [bool],
+) -> io::Result<()> {
+    let nets = arp::local_networks().unwrap_or_default();
+    let links = ndp::local_links().unwrap_or_default();
+    let mut seen = HashSet::new();
+    for (i, t) in targets.iter().enumerate() {
+        if decided[i] {
+            continue;
+        }
+        let line = match t.addr {
+            IpAddr::V4(ip) => arp::local_net_for(ip, &nets)
+                .map(|n| format!("ARP who-has {ip} tell {} ({}, {})", n.addr, n.ifname, n.mac)),
+            IpAddr::V6(ip) => ndp::link_for(ip, &links).map(|l| {
+                format!(
+                    "ICMPv6 [{} > {} Neighbor solicitation (type=135/code=0) for {ip}] ({})",
+                    l.addr,
+                    packet::solicited_node(ip),
+                    l.ifname
+                )
+            }),
+        };
+        if let Some(line) = line {
+            decided[i] = true;
+            if seen.insert(t.addr) {
+                out.probe(&line)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Host discovery's probes, as `discovery::discover` would send them.
 fn discovery(
     out: &mut Out<'_>,
@@ -581,38 +641,9 @@ fn discovery(
     // ARP and neighbour discovery settle the targets on local networks; no
     // other probe goes to them. They need raw sockets on Linux.
     let neighbour = d.arp_ping && d.privileged && cfg!(target_os = "linux");
-    let (nets, links) = if neighbour {
-        (
-            arp::local_networks().unwrap_or_default(),
-            ndp::local_links().unwrap_or_default(),
-        )
-    } else {
-        Default::default()
-    };
     let before_neighbour = decided.clone();
-    let mut seen = HashSet::new();
-    for (i, t) in run.targets.iter().enumerate() {
-        if decided[i] {
-            continue;
-        }
-        let line = match t.addr {
-            IpAddr::V4(ip) => arp::local_net_for(ip, &nets)
-                .map(|n| format!("ARP who-has {ip} tell {} ({}, {})", n.addr, n.ifname, n.mac)),
-            IpAddr::V6(ip) => ndp::link_for(ip, &links).map(|l| {
-                format!(
-                    "ICMPv6 [{} > {} Neighbor solicitation (type=135/code=0) for {ip}] ({})",
-                    l.addr,
-                    packet::solicited_node(ip),
-                    l.ifname
-                )
-            }),
-        };
-        if let Some(line) = line {
-            decided[i] = true;
-            if seen.insert(t.addr) {
-                out.probe(&line)?;
-            }
-        }
+    if neighbour {
+        neighbour_requests(out, run.targets, &mut decided)?;
     }
     if decided != before_neighbour {
         out.note(
@@ -760,6 +791,7 @@ mod tests {
         DryRun {
             targets,
             discovery: None,
+            pn_neighbours: false,
             tcp: None,
             udp: &[],
             sctp: None,
@@ -886,7 +918,7 @@ mod tests {
         assert!(probes[0].ends_with("win=65109"), "{text}");
         assert!(text.contains("skipped (-Pn)"), "{text}");
         assert!(text.contains("nothing sent"), "{text}");
-        assert!(text.contains("up to 1 more time"), "{text}");
+        assert!(text.contains("resends unanswered probes once"), "{text}");
         // No receive side at all.
         assert!(!text.contains("RCVD"), "{text}");
     }

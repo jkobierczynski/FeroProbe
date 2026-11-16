@@ -59,21 +59,28 @@ impl Timing {
     /// The scan settings this template stands for.
     pub fn config(self) -> ScanConfig {
         let ms = Duration::from_millis;
-        let (retries, concurrency, max_rate, scan_delay) = match self {
-            Timing::Paranoid => (2, 1, 1, Duration::from_secs(300)),
-            Timing::Sneaky => (2, 1, 1, Duration::from_secs(15)),
-            Timing::Polite => (2, 10, 100, ms(400)),
+        // Retries are a cap, as in nmap: 10 unless -T4 (6) or -T5 (2).
+        // -T4 and -T5 also keep the automatic delay of TCP probes short.
+        // Like nmap, no template limits the packet rate: the scan delay
+        // and the congestion windows pace the probes.
+        let (retries, concurrency, scan_delay, max_scan_delay) = match self {
+            Timing::Paranoid => (10, 1, Duration::from_secs(300), Duration::from_secs(1)),
+            Timing::Sneaky => (10, 1, Duration::from_secs(15), Duration::from_secs(1)),
+            Timing::Polite => (10, 10, ms(400), Duration::from_secs(1)),
             Timing::Normal => return ScanConfig::default(),
-            Timing::Aggressive => (1, 1000, 10_000, Duration::ZERO),
-            Timing::Insane => (0, 2000, 50_000, Duration::ZERO),
+            Timing::Aggressive => (6, 1000, Duration::ZERO, ms(10)),
+            Timing::Insane => (2, 2000, Duration::ZERO, ms(5)),
         };
         ScanConfig {
             rtt: self.rtt_timeouts(),
             timing_level: self.level(),
             retries,
             concurrency,
-            max_rate,
+            max_rate: None,
             scan_delay,
+            // A template's own scan delay raises the cap, as in nmap.
+            max_scan_delay: max_scan_delay.max(scan_delay),
+            max_udp_scan_delay: Duration::from_secs(1).max(scan_delay),
             ..ScanConfig::default()
         }
     }
@@ -220,11 +227,19 @@ impl RateSchedule {
     pub(crate) fn book(&self, interval: Duration) -> std::time::Instant {
         let mut next = self.0.lock().unwrap_or_else(|e| e.into_inner());
         let now = std::time::Instant::now();
-        let due = next.map_or(now, |n| n.max(now));
+        // A sender that overslept may catch up on the slots it missed in
+        // the last CATCH_UP, so sleeps that overshoot (often by most of a
+        // millisecond) do not lower the rate. Slots older than that are
+        // gone: an idle scan does not save up a burst.
+        let floor = now.checked_sub(CATCH_UP).unwrap_or(now);
+        let due = next.map_or(now, |n| n.max(floor));
         *next = Some(due + interval);
         due
     }
 }
+
+/// How far behind its schedule a [`RateSchedule`] lets senders catch up.
+const CATCH_UP: Duration = Duration::from_millis(10);
 
 /// How often a cancellable wait looks at its cancel flag.
 pub(crate) const CANCEL_POLL: Duration = Duration::from_millis(100);
@@ -250,7 +265,7 @@ mod tests {
             let (slow, fast) = (&pair[0], &pair[1]);
             assert!(slow.scan_delay >= fast.scan_delay);
             assert!(slow.concurrency <= fast.concurrency);
-            assert!(slow.max_rate <= fast.max_rate);
+            assert_eq!(slow.max_rate, None);
             if slow.timing_level >= 2 {
                 assert!(slow.rtt.max >= fast.rtt.max);
                 assert!(slow.rtt.initial >= fast.rtt.initial);
@@ -317,6 +332,23 @@ mod tests {
         assert!(schedule.book(gap) >= first + gap * 2);
         // Another schedule is independent.
         assert!(RateSchedule::new().book(gap) < first + gap);
+    }
+
+    #[test]
+    fn an_oversleeping_sender_catches_up() {
+        let schedule = RateSchedule::new();
+        let gap = Duration::from_micros(200);
+        schedule.book(gap);
+        // The sender overslept by 3 ms: the missed slots are due at once,
+        // not one gap after now.
+        std::thread::sleep(Duration::from_millis(3));
+        let now = std::time::Instant::now();
+        assert!(schedule.book(gap) < now);
+        assert!(schedule.book(gap) < now);
+        // After a long idle spell only CATCH_UP's worth is left to catch up.
+        std::thread::sleep(CATCH_UP * 3);
+        let now = std::time::Instant::now();
+        assert!(schedule.book(gap) >= now - CATCH_UP - Duration::from_millis(1));
     }
 
     #[tokio::test]

@@ -132,7 +132,9 @@ pub fn render_table(hosts: &[HostResult], info: &RunInfo) -> String {
         match (host.latency_ms, host.up_reason) {
             (Some(ms), Some(why)) => w!(out, "Host is up, {why} ({ms:.2} ms latency)."),
             (None, Some(why)) => w!(out, "Host is up, {why}."),
-            _ => {}
+            // -Pn without an answer to time it by: nmap's "Host is up".
+            (Some(ms), None) => w!(out, "Host is up ({ms:.2} ms latency)."),
+            (None, None) => w!(out, "Host is up."),
         }
         // A name given on the command line hides the address's own name.
         if let (Some(given), Some(rdns)) = (&host.hostname, &host.rdns)

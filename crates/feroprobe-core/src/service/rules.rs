@@ -217,11 +217,8 @@ mod tests {
         let i = m(b"SSH-2.0-OpenSSH_9.6p1 Ubuntu-3ubuntu13.5\r\n");
         assert_eq!(i.name, "ssh");
         assert_eq!(i.product.as_deref(), Some("OpenSSH"));
-        assert_eq!(i.version.as_deref(), Some("9.6p1"));
-        assert_eq!(
-            i.extra_info.as_deref(),
-            Some("Ubuntu-3ubuntu13.5; protocol 2.0")
-        );
+        assert_eq!(i.version.as_deref(), Some("9.6p1 Ubuntu 3ubuntu13.5"));
+        assert_eq!(i.extra_info.as_deref(), Some("Ubuntu Linux; protocol 2.0"));
         let i = m(b"SSH-2.0-OpenSSH_8.0\r\n");
         assert_eq!(i.extra_info.as_deref(), Some("protocol 2.0"));
         let i = m(b"SSH-2.0-Cisco-1.25\r\n");
@@ -467,10 +464,12 @@ mod tests {
         let i = m(b"SSH-2.0-dropbear_2022.83\r\n");
         assert_eq!(spv(&i), ("ssh", Some("Dropbear sshd"), Some("2022.83")));
         let i = m(b"SSH-2.0-OpenSSH_7.4p1 Debian-10+deb9u7\r\n");
-        assert_eq!(
-            i.extra_info.as_deref(),
-            Some("Debian-10+deb9u7; protocol 2.0")
-        );
+        assert_eq!(i.version.as_deref(), Some("7.4p1 Debian 10+deb9u7"));
+        assert_eq!(i.extra_info.as_deref(), Some("protocol 2.0"));
+        // As nmap prints it.
+        let i = m(b"SSH-2.0-OpenSSH_10.3p1 Debian-4\r\n");
+        assert_eq!(i.version_line(), "OpenSSH 10.3p1 Debian 4 (protocol 2.0)");
+        assert_eq!(i.cpe[0], "cpe:/a:openbsd:openssh:10.3p1");
         let i = m(b"SSH-2.0-HUAWEI-1.5\r\n");
         assert_eq!(spv(&i), ("ssh", Some("Huawei VRP sshd"), Some("1.5")));
         let i = m(b"SSH-2.0-mpSSH_0.2.1\r\n");

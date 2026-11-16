@@ -4,16 +4,19 @@
 #
 # Builds a private two-namespace lab (see scripts/lib/lab.sh) whose target
 # silently drops probes to some ports, then counts on the wire how often
-# FeroProbe probes such a port. A port that never answers gets the first
-# probe plus one per retry; a port that answers gets one probe:
+# FeroProbe probes such a port. As in nmap, --max-retries is a cap: a host
+# that loses nothing (the lab target answers every probe it does not drop)
+# gets one resend per silent port, and more only once it answers a resent
+# probe. A port that answers gets one probe:
 #
 #   -sS --max-retries 0      1 SYN to the filtered port
-#   -sS --max-retries 3      4 SYNs to the filtered port, 1 to the open port
+#   -sS --max-retries 3      2 SYNs to the filtered port (one resend: no
+#                            losses seen), 1 to the open port
 #   -sS --retries 3          the same (FeroProbe's own name)
-#   -sT --max-retries 2      3 connection attempts to the filtered port
-#   -sU --max-retries 2      3 probes to the dropped UDP port, 1 to the
+#   -sT --max-retries 2      2 connection attempts to the filtered port
+#   -sU --max-retries 2      2 probes to the dropped UDP port, 1 to the
 #                            answering one
-#   -T5 --max-retries 2      3 SYNs: the explicit option beats -T5's 0
+#   -T5 --max-retries 1      2 SYNs
 #   --max-retries -1         rejected
 #
 # A short --timeout keeps it quick and below the kernel's own SYN
@@ -45,7 +48,7 @@ for opt in --max-retries --retries; do
     check "exit status" "$RC" 0
     check "open port" "$(state_of tcp "$TCP_OPEN")" open
     check "filtered port" "$(state_of tcp "$TCP_DROP")" filtered
-    check "SYNs to the filtered port" "$(syns_to "$TCP_DROP")" 4
+    check "SYNs to the filtered port" "$(syns_to "$TCP_DROP")" 2
     check "SYNs to the open port" "$(syns_to "$TCP_OPEN")" 1
 done
 
@@ -53,20 +56,20 @@ echo "== -sT --max-retries 2 =="
 fero_captured -Pn -sT "${T[@]}" --max-retries 2 -p "$TCP_DROP" "$TGT_A"
 check "exit status" "$RC" 0
 check "filtered port" "$(state_of tcp "$TCP_DROP")" filtered
-check "connection attempts to the filtered port" "$(syns_to "$TCP_DROP")" 3
+check "connection attempts to the filtered port" "$(syns_to "$TCP_DROP")" 2
 
 echo "== -sU --max-retries 2 =="
 fero_captured -Pn -sU "${T[@]}" --max-retries 2 -p "$UDP_OPEN,$UDP_DROP" "$TGT_A"
 check "exit status" "$RC" 0
 check "UDP echo port" "$(state_of udp "$UDP_OPEN")" open
 check "dropped UDP port" "$(state_of udp "$UDP_DROP")" "open|filtered"
-check "probes to the dropped port" "$(udp_to "$UDP_DROP")" 3
+check "probes to the dropped port" "$(udp_to "$UDP_DROP")" 2
 check "probes to the echo port" "$(udp_to "$UDP_OPEN")" 1
 
-echo "== -T5 --max-retries 2 =="
-fero_captured -Pn -sS -T5 --max-retries 2 -p "$TCP_DROP" "$TGT_A"
+echo "== -T5 --max-retries 1 =="
+fero_captured -Pn -sS -T5 --max-retries 1 -p "$TCP_DROP" "$TGT_A"
 check "exit status" "$RC" 0
-check "SYNs to the filtered port" "$(syns_to "$TCP_DROP")" 3
+check "SYNs to the filtered port" "$(syns_to "$TCP_DROP")" 2
 
 echo "== --max-retries -1 =="
 fero -Pn -sS --max-retries -1 -p "$TCP_DROP" "$TGT_A"

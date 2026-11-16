@@ -504,6 +504,11 @@ struct Args {
     #[arg(long, value_name = "TIME", value_parser = parse_duration)]
     scan_delay: Option<Duration>,
 
+    /// The longest delay between probes the scan may set on its own for a
+    /// host that loses many probes, e.g. 100ms [default: from -T; normally 1s]
+    #[arg(long, value_name = "TIME", value_parser = parse_max_scan_delay)]
+    max_scan_delay: Option<Duration>,
+
     /// Give up on a host whose port scan and detection take longer than
     /// this, e.g. 30s or 5m; it is reported without results
     #[arg(long, value_name = "TIME", value_parser = parse_duration)]
@@ -1001,6 +1006,10 @@ fn parse_rtt(s: &str, name: &str) -> Result<Duration, String> {
     Ok(d)
 }
 
+fn parse_max_scan_delay(s: &str) -> Result<Duration, String> {
+    parse_rtt(s, "--max-scan-delay")
+}
+
 fn parse_min_rtt(s: &str) -> Result<Duration, String> {
     parse_rtt(s, "--min-rtt-timeout")
 }
@@ -1044,6 +1053,7 @@ fn rtt_timeouts(args: &Args) -> RttTimeouts {
 /// The timing template's settings, with any explicit flags on top.
 fn scan_config(args: &Args) -> ScanConfig {
     let base = args.timing.unwrap_or_default().config();
+    let scan_delay = args.scan_delay.unwrap_or(base.scan_delay);
     ScanConfig {
         rtt: rtt_timeouts(args),
         // One set of RTT estimates for the whole run, like nmap's per-target
@@ -1055,8 +1065,19 @@ fn scan_config(args: &Args) -> ScanConfig {
         min_parallelism: 0,
         concurrency: args.concurrency.unwrap_or(base.concurrency).max(1),
         retries: args.retries.unwrap_or(base.retries),
-        max_rate: args.max_rate.unwrap_or(base.max_rate).max(1),
-        scan_delay: args.scan_delay.unwrap_or(base.scan_delay),
+        max_rate: args.max_rate.map(|r| r.max(1)).or(base.max_rate),
+        scan_delay,
+        // Like nmap: an explicit --scan-delay above the template's cap
+        // raises it, and --max-scan-delay replaces it. The scan never goes
+        // below --scan-delay whatever the cap.
+        max_scan_delay: args
+            .max_scan_delay
+            .unwrap_or(base.max_scan_delay)
+            .max(scan_delay),
+        max_udp_scan_delay: args
+            .max_scan_delay
+            .unwrap_or(base.max_udp_scan_delay)
+            .max(scan_delay),
         arp_ping: !args.disable_arp_ping,
         deadline: None,
         // One --max-rate for the whole run, like nmap's, however many scans
@@ -1180,7 +1201,7 @@ fn apply_min_rate(
     }
     match args.max_rate {
         Some(max) if max < min => bail!("--min-rate {min} is above --max-rate {max}"),
-        _ => cfg.max_rate = cfg.max_rate.max(min),
+        _ => cfg.max_rate = cfg.max_rate.map(|r| r.max(min)),
     }
     let gap = Duration::from_secs_f64(1.0 / f64::from(min));
     if cfg.scan_delay > gap {
@@ -1192,6 +1213,12 @@ fn apply_min_rate(
         }
         // A template's delay gives way, as in nmap.
         cfg.scan_delay = gap;
+        // An explicit cap was floored at the template's delay: floor it
+        // at the lowered one instead.
+        if let Some(cap) = args.max_scan_delay {
+            cfg.max_scan_delay = cap.max(gap);
+            cfg.max_udp_scan_delay = cap.max(gap);
+        }
     }
     let mut warnings = Vec::new();
     // A silent port holds its place for a whole wait: the initial timeout,
@@ -1872,7 +1899,7 @@ fn host_group(hosts: usize, cfg: &ScanConfig) -> usize {
     hosts
         .min(HOST_GROUP)
         .min(cfg.concurrency)
-        .min(cfg.max_rate as usize)
+        .min(cfg.max_rate.map_or(usize::MAX, |r| r as usize))
         .max(1)
 }
 
@@ -2006,6 +2033,7 @@ fn dry_run(
             icmp: feroprobe_core::icmp_available(),
             arp_ping: cfg.arp_ping,
         }),
+        pn_neighbours: !plan.discovery && cfg.arp_ping && privileged && cfg!(target_os = "linux"),
         tcp: tcp.map(|t| (t, d.tcp)),
         udp: if scan && plan.udp { d.udp } else { &[] },
         sctp: plan.sctp.filter(|_| scan).map(|k| (k, d.sctp)),
@@ -2353,10 +2381,11 @@ async fn main() -> Result<()> {
         });
         hosts
     } else {
-        targets
-            .iter()
-            .map(|t| HostResult::new(t.addr, t.hostname.clone()))
-            .collect()
+        // -Pn: every target is scanned, but those on a local network are
+        // still asked for their MAC address, as in nmap.
+        feroprobe_core::discovery::neighbours_only(&targets, &cfg)
+            .await
+            .context("ARP or neighbour discovery failed")?
     };
 
     if !args.no_resolve {
@@ -2409,6 +2438,14 @@ async fn main() -> Result<()> {
         }
         for (&i, h) in scanned.iter().zip(results) {
             hosts[i] = h;
+        }
+        // A host discovery did not time (-Pn, or a TCP connect that only
+        // got a refusal) gets the latency the scans measured, as in nmap.
+        for h in hosts.iter_mut().filter(|h| h.latency_ms.is_none()) {
+            h.latency_ms = cfg
+                .rtt_state
+                .srtt(h.addr)
+                .map(|d| (d.as_secs_f64() * 1e6).round() / 1000.0);
         }
     } else {
         scan_types.push("ping");
@@ -3393,15 +3430,15 @@ mod tests {
         // Windows, whose connect tries wait at least 3 s, 3000).
         let (cfg, w) = tuned(&["--min-rate", "1000", "--timeout", "1500"], None).unwrap();
         assert_eq!(cfg.concurrency, if cfg!(windows) { 3000 } else { 1500 });
-        assert_eq!(cfg.max_rate, 5000);
+        assert_eq!(cfg.max_rate, None);
         assert!(w.is_empty());
         let (cfg, w) = tuned(&["--min-rate", "9000", "--timeout", "100"], Some(1024)).unwrap();
         if cfg!(windows) {
             // 27000 needed: capped by the open-file limit, with a warning.
-            assert_eq!((cfg.max_rate, cfg.concurrency), (9000, 960));
+            assert_eq!((cfg.max_rate, cfg.concurrency), (None, 960));
             assert_eq!(w.len(), 1, "{w:?}");
         } else {
-            assert_eq!((cfg.max_rate, cfg.concurrency), (9000, 900));
+            assert_eq!((cfg.max_rate, cfg.concurrency), (None, 900));
             assert!(w.is_empty());
         }
         // The open-file limit caps the parallelism, with a warning.
@@ -3415,6 +3452,14 @@ mod tests {
         // A template's scan delay gives way; an explicit one is an error.
         let (cfg, _) = tuned(&["-T2", "--min-rate", "100"], None).unwrap();
         assert_eq!(cfg.scan_delay, Duration::from_millis(10));
+        // An explicit --max-scan-delay below the template's delay then holds.
+        let (cfg, _) = tuned(
+            &["-T2", "--min-rate", "100", "--max-scan-delay", "10ms"],
+            None,
+        )
+        .unwrap();
+        assert_eq!(cfg.max_scan_delay, Duration::from_millis(10));
+        assert_eq!(cfg.max_udp_scan_delay, Duration::from_millis(10));
         assert!(tuned(&["--scan-delay", "1s", "--min-rate", "10"], None).is_err());
         assert!(tuned(&["--max-rate", "10", "--min-rate", "20"], None).is_err());
         assert!(tuned(&["--min-rate", "0"], None).is_err());
@@ -3446,7 +3491,7 @@ mod tests {
     fn host_groups_keep_the_budgets() {
         let cfg = |concurrency, max_rate| ScanConfig {
             concurrency,
-            max_rate,
+            max_rate: Some(max_rate),
             ..ScanConfig::default()
         };
         assert_eq!(host_group(100, &cfg(500, 5000)), HOST_GROUP);

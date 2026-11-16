@@ -602,7 +602,7 @@ pub async fn detect_udp(
             break;
         };
         let mut data = Vec::new();
-        for _ in 0..=cfg.retries {
+        for _ in 0..=cfg.first_retries() {
             vs.trace(|| {
                 format!(
                     "Service scan sending probe {} to {} (udp)",

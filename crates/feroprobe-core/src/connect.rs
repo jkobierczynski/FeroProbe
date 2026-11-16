@@ -95,8 +95,14 @@ async fn probe_port_tries(
         service: None,
     };
     for tryno in 0..=cfg.retries {
+        // cfg.retries is a cap: resend only as often as the host's losses
+        // call for (see rtt::Congestion::allowed_tryno).
+        let allowed = window.map_or(cfg.first_retries(), |(w, h)| w.allowed_tryno(h));
+        if tryno > allowed {
+            break;
+        }
         let slot = match window {
-            Some((w, h)) => match w.acquire(h).await {
+            Some((w, h)) => match w.acquire(h, tryno).await {
                 Some(slot) => Some(slot),
                 // The host needs no more probes (proven up in discovery).
                 None => break,

@@ -320,6 +320,25 @@ match ssh ^SSH-([\d.]+)-OpenSSH_for_Windows_([\w.]+)
   cpe cpe:/a:openbsd:openssh:${2}
   cpe cpe:/o:microsoft:windows
 
+# Distribution packages: the package revision goes with the version, as
+# nmap shows it ("OpenSSH 10.3p1 Debian 4 (protocol 2.0)").
+match ssh ^SSH-([\d.]+)-OpenSSH_([\w.]+)[ -]Ubuntu-([^\s]+)
+  product OpenSSH
+  version ${2} Ubuntu ${3}
+  info Ubuntu Linux
+  info protocol ${1}
+  os Linux
+  cpe cpe:/a:openbsd:openssh:${2}
+  cpe cpe:/o:linux:linux_kernel
+
+match ssh ^SSH-([\d.]+)-OpenSSH_([\w.]+)[ -](Debian|Raspbian)-([^\s]+)
+  product OpenSSH
+  version ${2} ${3} ${4}
+  info protocol ${1}
+  os Linux
+  cpe cpe:/a:openbsd:openssh:${2}
+  cpe cpe:/o:linux:linux_kernel
+
 match ssh ^SSH-([\d.]+)-OpenSSH_([\w.]+)[ -](Ubuntu[^\r\n]*)
   product OpenSSH
   version ${2}

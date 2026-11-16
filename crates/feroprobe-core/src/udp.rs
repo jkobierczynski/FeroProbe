@@ -245,8 +245,14 @@ async fn probe_udp_tries(
     let payload = payload_for(addr.port());
     let mut buf = [0u8; 2048];
     for tryno in 0..=cfg.retries {
+        // cfg.retries is a cap: resend only as often as the host's losses
+        // call for (see rtt::Congestion::allowed_tryno).
+        let allowed = window.map_or(cfg.first_retries(), |(w, h)| w.allowed_tryno(h));
+        if tryno > allowed {
+            break;
+        }
         let slot = match window {
-            Some((w, h)) => match w.acquire(h).await {
+            Some((w, h)) => match w.acquire(h, tryno).await {
                 Some(slot) => Some(slot),
                 // The host needs no more probes (proven up in discovery).
                 None => break,
@@ -324,7 +330,7 @@ pub async fn udp_scan(
     let jobs = ports
         .iter()
         .flat_map(|&port| (0..targets.len()).map(move |h| (h, port)));
-    let window = AsyncWindow::new(cfg, vec![ports.len(); targets.len()]);
+    let window = AsyncWindow::new(cfg, vec![ports.len(); targets.len()]).for_udp(cfg);
     let window = &window;
     let mut results = stream::iter(jobs)
         .map(|(h, port)| {

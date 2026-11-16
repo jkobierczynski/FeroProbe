@@ -371,12 +371,16 @@ pub(crate) fn explain(args: &Args, f: &Facts) -> Vec<String> {
     say(
         &mut out,
         format!(
-            "{} and retry {} more time{}; at most {} probes waiting for an answer at once and {} packets per second",
+            "{} and resend {}; at most {} probes waiting for an answer at once{}",
             wait_text(&c.rtt),
-            c.retries,
-            if c.retries == 1 { "" } else { "s" },
+            match c.retries {
+                0 => "nothing".to_string(),
+                1 => "once".to_string(),
+                n => format!("once, or up to {n} times to hosts that lose probes"),
+            },
             c.concurrency,
             c.max_rate
+                .map_or(String::new(), |r| format!(" and {r} packets per second"))
         ),
     );
     if let Some(min) = args.min_parallelism {

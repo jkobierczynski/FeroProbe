@@ -203,6 +203,13 @@ scanned, and every target is reverse-resolved. `-P0` is accepted as an
 old spelling. Cannot be combined with other `-P` options. `-sn -Pn` would
 do nothing and is refused unless `--traceroute` is given (trace only).
 
+As in nmap, targets on a local Ethernet network still get one ARP (IPv4)
+or neighbour discovery (IPv6) request when FeroProbe runs with raw
+sockets, unless `--disable-arp-ping` is given: the answer gives the
+report's MAC address and latency and times the port scan's first probes.
+Targets that do not answer are scanned all the same. Other targets show
+the latency the port scan measured.
+
 #### `-PS[portlist]` (TCP SYN ping)
 
 Send a TCP SYN to each port (default port 80). A SYN-ACK or a reset proves
@@ -332,7 +339,8 @@ sets its own TTLs.
 
 Sends a SYN and reads the answer without completing the handshake: a
 SYN-ACK means `open`, a reset `closed`, and no answer or an ICMP unreachable
-error `filtered`. Unanswered probes are retried (`--retries`). This is the
+error `filtered`. Unanswered probes are resent as the host's losses call for, up to
+`--retries` times (see [Resends and delays](#resends-and-delays)). This is the
 default scan as root.
 
 ### TCP connect scan (`-sT`)
@@ -393,10 +401,12 @@ Well-known ports get a payload their service answers: DNS (53, 5353), NTP
 (123), SNMP (161) and SSDP (1900). Every other port gets the payload
 `FeroProbeScan/1\n` (see [Probe signature](#probe-signature)).
 
-Hosts rate-limit their ICMP errors, so a fast scan of many closed UDP ports
-can show some of them as `open|filtered`. Lower `--concurrency` or add a
-`--scan-delay` for more accurate results (`--max-rate` does not pace UDP
-probes).
+Hosts rate-limit their ICMP errors, so many closed UDP ports only answer
+a resent probe. As in nmap, the scan then resends more often and raises its
+delay between probes to that host (see [Resends and delays](#resends-and-delays)),
+which makes UDP scans of closed ports slow but accurate. A scan that gives
+up early (`--max-retries`, or a low `--max-scan-delay`) can show some
+closed ports as `open|filtered` (`--max-rate` does not pace UDP probes).
 
 ### SCTP INIT scan (`-sY`)
 
@@ -442,19 +452,13 @@ Without `-p`, `-F` or `--top-ports`, FeroProbe scans the 1000 most common
 TCP ports and the 1000 most common UDP ports, as nmap does, the 50 most
 common SCTP ports, and, with `-sO`, all 256 IP protocols.
 
-The port lists are FeroProbe's own rankings, not nmap's: nmap's port data
-is under its own licence, so FeroProbe does not copy it. The count matches
-nmap, but the ports differ, so on the same host the two can scan different
-ports beyond the most common ones. Each list is ranked in three tiers:
+The TCP and UDP lists are nmap's: the same ports in the same order as
+nmap's `--top-ports`, ranked by the frequencies in nmap's `nmap-services`
+(nmap 7.94). The default scan, `-F` (the first 100) and `--top-ports N`
+(the first `N`) cover the same ports as nmap's. Only the port numbers and
+their order are taken; the names FeroProbe prints come from the IANA
+registry.
 
-1. The most common services, ranked by hand. `-F` scans the first 100.
-2. Services commonly exposed on networks today: remote administration,
-   alternative web ports, databases, message queues, container and
-   monitoring tools, Windows, printing, media, industrial and game ports.
-3. The rest of the 1000, filled with the IANA-registered ports in
-   ascending order, which covers most of the well-known range (1-1023).
-
-To compare with nmap on exactly the same ports, give them with `-p`;
 `-p-` scans all 65535.
 
 #### `-p <port ranges>`, `--ports <port ranges>`
@@ -833,28 +837,33 @@ scripts. Cannot be combined with `-sn`.
 `-T0` to `-T5`, or `-T` with a name (`-T paranoid` ... `-T insane`), pick a
 bundle of timing settings, as in nmap. `-T3` (normal) is the default. Any of
 `--timeout`, the RTT timeout options, `--retries`, `-c`/`--concurrency`,
-`--min-parallelism`, `--max-rate` and `--scan-delay` given explicitly
+`--min-parallelism`, `--max-rate`, `--scan-delay` and `--max-scan-delay`
+given explicitly
 overrides the template's value for that setting, so `-T4 --max-rate 2000`
 is aggressive with a lower packet rate. Given more than once, the last
 `-T` wins, as in nmap.
 
-| Template | RTT timeouts (initial / min / max) | Retries | Most probes waiting at once | Max rate (packets/s) | Scan delay |
-| --- | --- | --- | --- | --- | --- |
-| `-T0` paranoid | 5 min / 100 ms / 5 min | 2 | 1 | 1 | 5 min |
-| `-T1` sneaky | 15 s / 100 ms / 15 s | 2 | 1 | 1 | 15 s |
-| `-T2` polite | 1 s / 100 ms / 10 s | 2 | 10 | 100 | 0.4 s |
-| `-T3` normal (default) | 1 s / 100 ms / 10 s | 1 | 500 | 5000 | none |
-| `-T4` aggressive | 500 ms / 100 ms / 1.25 s | 1 | 1000 | 10000 | none |
-| `-T5` insane | 250 ms / 50 ms / 300 ms | 0 | 2000 | 50000 | none |
+| Template | RTT timeouts (initial / min / max) | Most retries | Most probes waiting at once | Max rate (packets/s) | Scan delay | Max scan delay (TCP, SCTP, IP / UDP) |
+| --- | --- | --- | --- | --- | --- | --- |
+| `-T0` paranoid | 5 min / 100 ms / 5 min | 10 | 1 | none | 5 min | 5 min / 5 min |
+| `-T1` sneaky | 15 s / 100 ms / 15 s | 10 | 1 | none | 15 s | 15 s / 15 s |
+| `-T2` polite | 1 s / 100 ms / 10 s | 10 | 10 | none | 0.4 s | 1 s / 1 s |
+| `-T3` normal (default) | 1 s / 100 ms / 10 s | 10 | 500 | none | none | 1 s / 1 s |
+| `-T4` aggressive | 500 ms / 100 ms / 1.25 s | 6 | 1000 | none | none | 10 ms / 1 s |
+| `-T5` insane | 250 ms / 50 ms / 300 ms | 2 | 2000 | none | none | 5 ms / 1 s |
 
-The RTT timeouts are nmap's for each template. The scan delay also sets a
+The RTT timeouts, retries and maximum scan delays are nmap's for each
+template. As in nmap, no template limits the packet rate: only an explicit
+`--max-rate` does. Most retries is a cap: a probe is resent once unless its host
+shows losses (see [Resends and delays](#resends-and-delays)). The scan delay also sets a
 floor under every measured timeout, so `-T0` and `-T1` probes wait at least
 their delay.
 
 ### How long a probe waits
 
 Like nmap, FeroProbe adapts its timeouts to the network. Every answer
-(a SYN-ACK, a reset, an ICMP error, a UDP reply, an echo reply) gives a
+(a SYN-ACK, a reset, an ICMP error, a UDP reply, an echo reply, an ARP
+or neighbor discovery reply) gives a
 round-trip time, and each host keeps a smoothed round-trip time and its
 variance, the way TCP does (RFC 6298). A probe to that host waits the
 smoothed time plus four times the variance, kept between
@@ -903,6 +912,38 @@ probes per timeout. A thousand filtered ports with one retry take a few
 minutes at the defaults, as with nmap; `-T4`, `--min-rate`, or `-Pn`
 avoided on dead hosts speed this up.
 
+### Resends and delays
+
+As in nmap, how often a probe without an answer is sent again depends on
+its host. At first a probe is resent once. When a host answers a resent
+probe, the first copy or its answer was lost, so that host's probes may be
+resent one time more than the highest resend it answered, up to
+`--max-retries` (10 by default). Probes still waiting for an answer at that
+point are sent again too. A host that loses nothing costs one resend per
+silent port, and a host that drops packets, or rate-limits its resets or
+ICMP errors, is probed until it answers.
+
+Resends go before new probes. The first time a host has a probe due for a
+higher try than any it was sent before (its first resend, its first second
+resend, and so on), the scan sends that host nothing for one second, as
+nmap does to detect rate limiting: a host that limits how fast it answers
+gets to recover, and answers that were only slow come in before anything
+is resent. A scan of a single probe skips the pause.
+
+A lossy host also gets a delay between its probes. When more than 10 of
+its answers since the delay last changed came only after a resend, and they
+are more than 30 % of its answers (40 % with `-T4` and `-T5`), or when it
+answers only after more than 3 resends (4 with `-T4` and `-T5`), the delay
+goes up: to 5 ms at first (50 ms for UDP), then doubling, up to 1 s and no
+more than `--max-scan-delay`. It never drops below `--scan-delay`. Routers
+and firewalls that rate-limit their resets (closed TCP ports) or ICMP
+errors (closed UDP ports) then get their answers counted instead of being
+reported `filtered` or `open|filtered`, at the price of a slower scan.
+
+This applies to the raw TCP, SCTP, IP protocol, connect and UDP scans and
+their host discovery probes. ARP, ICMP echo, OS detection, traceroute and
+reverse DNS resend once (none with `--max-retries 0`).
+
 ### Timing options
 
 #### `--initial-rtt-timeout <time>`
@@ -939,10 +980,11 @@ timeouts adapted; the RTT options given with it still apply on top. Below
 
 #### `--retries <tries>`, `--max-retries <tries>`
 
-How many more times to send a probe that got no answer. Default from the
-template: 1. `--max-retries` is nmap's name for it and works the same.
-nmap treats the number as a cap and may retry less on a network that
-loses nothing; FeroProbe always sends the retries a silent port needs.
+The most times a probe that got no answer is sent again. Default from the
+template: 10 (6 with `-T4`, 2 with `-T5`). `--max-retries` is nmap's name
+for it and works the same. As in nmap it is a cap: a probe is resent once,
+and more often only to hosts that lose probes (see
+[Resends and delays](#resends-and-delays)). `0` turns resends off.
 
 #### `-c <number>`, `--concurrency <number>`
 
@@ -964,8 +1006,9 @@ at least 1, warns above 100, and is an error above an explicit
 #### `--max-rate <number>`
 
 Send at most this many raw-socket packets per second (SYN and other raw
-TCP probes, SCTP, IP protocol, ICMP, ARP and NDP). Default from the
-template: 5000. One rate holds for the whole run, across all scans and
+TCP probes, SCTP, IP protocol, ICMP, ARP and NDP). By default there is
+no limit, as in nmap: the congestion windows and the scan delay pace the
+probes. One rate holds for the whole run, across all scans and
 hosts. Connect and UDP probes are bounded by the congestion windows,
 `--concurrency` and `--scan-delay` instead.
 
@@ -984,7 +1027,18 @@ when an explicit `--scan-delay` is too long for it.
 
 Wait at least this long between probes, across all scan techniques
 (`500ms`, `2s`, `5m`; a bare number is seconds). Default from the
-template: none for `-T3` and up.
+template: none for `-T3` and up. The scan may raise the delay for a host
+that loses probes (see [Resends and delays](#resends-and-delays)), but
+never lowers it.
+
+#### `--max-scan-delay <time>`
+
+The longest delay between probes the scan may set on its own for a host
+that loses probes (`100ms`, `1s`; a bare number is seconds). Default from
+the template: 1 s, or for TCP, SCTP and IP protocol probes 10 ms with `-T4`
+and 5 ms with `-T5`. An explicit `--scan-delay` above it raises it, as in
+nmap; `--max-scan-delay` given explicitly applies to every scan type. It
+never takes the delay below `--scan-delay`.
 
 #### `--host-timeout <time>`
 
@@ -995,10 +1049,7 @@ without port or OS results: `Skipping host <addr> due to host timeout` in
 normal output, `Status: Timeout` in grepable output and `timedout="true"`
 in XML. It is not traced. `0` means no limit, as in nmap.
 
-nmap's `--max-scan-delay`, `--min-hostgroup` and `--max-hostgroup` are
-not available. FeroProbe also does not raise its scan delay on its own
-when many probes are lost, as nmap does for rate-limited UDP and ICMP; set
-`--scan-delay` for that.
+nmap's `--min-hostgroup` and `--max-hostgroup` are not available.
 
 ## Firewall/IDS evasion and spoofing
 
@@ -1286,7 +1337,8 @@ Because nothing is sent, nothing comes back: there are no `RCVD` lines and
 no port states. A dry run therefore assumes every target is up and lists
 the port-scan probes for all of them (a real run scans only the hosts
 discovery finds), lists only the first attempt of each probe (a real run
-resends unanswered ones up to `--retries` times), and only names the
+resends unanswered ones as its hosts' losses call for, up to `--retries`
+times), and only names the
 steps that depend on answers (`-sV`, `--traceroute`, reverse DNS)
 instead of listing their probes. OS detection (`-O`) is listed probe by
 probe for one try, with `<open>` and `<closed>` in place of the ports the
@@ -1326,8 +1378,6 @@ per option:
 | `-g` with `-O` | Sends its OS detection probes from a run of source ports starting at the `-g` port, not all from it |
 | `-g 0` with `-sU` or `-PU` | Sends the UDP probes from port 0 (FeroProbe cannot, and uses a random port, with a warning) |
 | Default discovery without root | Only TCP connects to 80 and 443, no ICMP echo |
-| No `-p`, or `-F`, `--top-ports` | Scans the same number of ports from its own ranking (nmap-services), so some ports differ beyond the most common ones |
-| Any scan | Up to 10 resends as losses show up, instead of a fixed `--retries`; raises its scan delay on its own when many probes are lost |
 
 These come from nmap 7.99's source.
 
@@ -1497,10 +1547,9 @@ safeguard calls for a difference. The deliberate differences are:
 | UDP service payloads (`-sU`) | nmap's payload database: several probes per port (two DNS queries to 53, two NTP versions to 123, SNMPv1 and v3 to 161, three NetBIOS queries to 137), up to dozens with `-sV` | FeroProbe's own, one per port: DNS (53, 5353), NTP (123), SNMP (161) and SSDP (1900); every other port gets `FeroProbeScan/1\n`. nmap's payloads cannot be redistributed; one payload per service is enough to make it answer |
 | OS detection probes (`-O`) | About 16 probes per try (6 SYNs with varied options, ECN, T2-T7 to open and closed ports, 2 ICMP echoes, a UDP probe to a closed port), with closed ports picked at random outside the scan when none was found, and hosts without an open port probed too | At most 9 probes per try (4 SYNs, ECN and an ACK to the open port; a SYN and an ACK to a closed port the scan found; an ICMP echo only if discovery sends echo requests). No UDP probe, no T3/T5-T7-style odd flag combinations, no random ports, and hosts without an open TCP port are not probed. The price: fewer tests, so some systems nmap tells apart look alike |
 | OS uptime and TCP sequence lines (`-O -v`) | `Uptime guess` from the TCP timestamps, `TCP Sequence Prediction` difficulty | Not printed. Most current systems give each connection its own random timestamp offset, so the uptime nmap prints for them is wrong; sequence predictability is left out with it |
-| Default ports, `-F`, `--top-ports` | The 1000 (or `n`, or 100) most common ports in nmap-services | The same counts, from FeroProbe's own ranking: the most common services agree, the rest of the 1000 partly differ. nmap-services cannot be redistributed; give `-p` to scan an exact set |
 | Port names | nmap-services | The same names for the common ports, from the IANA registry, and `unknown` for the rest. nmap-services cannot be redistributed |
 | Timeouts | Adapt to measured round-trip times | The same (nmap's formula, limits and template values); `--timeout` fixes them, an option nmap does not have |
-| Congestion control and `--max-retries` | Windows per host and group between `--min-parallelism` and `--max-parallelism`; resends up to `--max-retries` times, fewer on a network that loses nothing; raises the scan delay when many probes are lost | The same windows and limits; a fixed number of resends (`--retries`), and the scan delay only changes when asked |
+| Congestion control, `--max-retries`, `--max-scan-delay` | Windows per host and group between `--min-parallelism` and `--max-parallelism`; resends as losses show up, up to `--max-retries`; raises a lossy host's scan delay, saying so with `-v` | The same, except: a connect or UDP probe that already gave up is not sent again when its host's resends go up later; no timing pings to detect losses; the raised delays are not reported |
 | `-g` with UDP scans | Raw UDP packets from the port, any port including 0 | UDP probes go through the system's sockets, which share the port between them; port 0 cannot be used and falls back to a random port, with a warning |
 | Old-style IPv4 numbers as targets (`2222`, `10.1.2`, `010.0.0.1`) | Passed to the resolver | Refused with an explanation |
 | Probes outside the requested ports | `-A`'s scripts can probe other ports (`ms-sql-info`: UDP 1434 on every host); `-O` picks a random UDP port (and for IPv4 also TCP), regardless of `-p`, when the scan found no closed or unfiltered one | Never beyond the command's own ports (`-p` plus the host-discovery ports): `-sV` probes only open ports the scan found, `-O` an open TCP port the scan found and, when it found one, a closed one (and ICMP echo only when discovery sends it), traceroute only a scanned port, a discovery port, or (with `-sn`) the `-p` port, and FeroProbe has no scripts |
@@ -1523,8 +1572,7 @@ with an error naming the supported alternatives:
   `--resolve-all`.
 - Scripting: `-sC`, `--script` and related options (nmap's scripts cannot
   be shipped under their licence).
-- Timing: `--min-hostgroup`, `--max-hostgroup`, `--max-scan-delay`,
-  `--defeat-rst-ratelimit`.
+- Timing: `--min-hostgroup`, `--max-hostgroup`, `--defeat-rst-ratelimit`.
 - Evasion and packet options: `--spoof-mac`, `--data`, `--data-string`, `--data-length`, `--ip-options`, `--ttl`,
   `--badsum`.
 - Output and misc: `-oS`, `--append-output`, `--resume`, `--stylesheet`,

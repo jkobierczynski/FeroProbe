@@ -180,6 +180,24 @@ pub async fn discover(
     discover_with(targets, cfg, probes, raw_sockets_available()).await
 }
 
+/// What `-Pn` still does, as nmap does: ask the targets on a local
+/// Ethernet network for their MAC address with ARP or neighbour discovery
+/// (unless `--disable-arp-ping`), for the report's MAC address and latency
+/// and the port scan's first timeouts. Every target is scanned whatever
+/// comes back; those that answer get the answer's reason.
+pub async fn neighbours_only(targets: &[Target], cfg: &ScanConfig) -> io::Result<Vec<HostResult>> {
+    let mut hosts: Vec<HostResult> = targets
+        .iter()
+        .map(|t| HostResult::new(t.addr, t.hostname.clone()))
+        .collect();
+    if cfg.arp_ping && raw_sockets_available() {
+        // This machine itself needs no request.
+        let mut decided: Vec<bool> = targets.iter().map(|t| is_localhost(t.addr)).collect();
+        neighbour_phase(targets, cfg, &mut hosts, &mut decided).await?;
+    }
+    Ok(hosts)
+}
+
 /// [`discover`], with the localhost shortcut on or off (`localhost_up`),
 /// so tests can still send probes to 127.0.0.1 when running as root.
 async fn discover_with(
@@ -436,6 +454,10 @@ async fn neighbour_phase(
         let mut replies: HashMap<IpAddr, (Option<MacAddr>, f64, &'static str)> = HashMap::new();
         for (net, ips) in &arp_groups {
             let r = arp::sweep(net, ips, &cfg2, &flag, &mut |ip, mac, rtt| {
+                // The round trip times the port scan's first probes, as in
+                // nmap: without it they wait the full initial timeout until
+                // a port answers.
+                cfg2.observe_rtt(ip.into(), std::time::Duration::from_secs_f64(rtt / 1000.0));
                 replies.insert(ip.into(), (Some(mac), rtt, reason::ARP_RESPONSE));
             });
             if r.is_ok() {
@@ -444,6 +466,10 @@ async fn neighbour_phase(
         }
         for (link, ips) in &nd_groups {
             let r = ndp::sweep(link, ips, &cfg2, &flag, &mut |ip, mac, rtt| {
+                // The round trip times the port scan's first probes, as in
+                // nmap: without it they wait the full initial timeout until
+                // a port answers.
+                cfg2.observe_rtt(ip.into(), std::time::Duration::from_secs_f64(rtt / 1000.0));
                 replies.insert(ip.into(), (mac, rtt, reason::ND_RESPONSE));
             });
             if r.is_ok() {
@@ -695,7 +721,7 @@ mod icmp {
         };
 
         let outcome = (|| -> io::Result<()> {
-            for _ in 0..=cfg.retries {
+            for _ in 0..=cfg.first_retries() {
                 let mut pacer = Pacer::for_config(cfg);
                 for &(seq, addr) in &pending {
                     let pkt = query.request(v6, id, seq);

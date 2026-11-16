@@ -201,11 +201,14 @@ pub(crate) struct Pacer {
 }
 
 impl Pacer {
-    pub(crate) fn new(rate: u32, delay: Duration) -> Self {
+    /// `rate` packets per second at most; `None` for no limit.
+    pub(crate) fn new(rate: Option<u32>, delay: Duration) -> Self {
         Self {
             start: Instant::now(),
             sent: 0,
-            interval: Duration::from_secs_f64(1.0 / f64::from(rate.max(1))),
+            interval: rate.map_or(Duration::ZERO, |r| {
+                Duration::from_secs_f64(1.0 / f64::from(r.max(1)))
+            }),
             delay,
             shared: None,
         }
@@ -269,7 +272,7 @@ impl Pacer {
 /// `send` sends one request. `receive` runs on its own thread and returns
 /// the next answer it reads, `Ok(None)` when its read timed out or the
 /// packet was not an answer, or an error that ends the sweep. Rounds repeat
-/// for unanswered targets up to `cfg.retries`; after each round, answers
+/// for unanswered targets up to `cfg.first_retries()`; after each round, answers
 /// are awaited for the run's current probe timeout (see [`crate::rtt`]). `on_reply` gets each target's first
 /// answer and its round-trip time in ms. Stops early when `cancel` is set.
 ///
@@ -335,7 +338,7 @@ where
 
     let mut pending: Vec<A> = targets.to_vec();
     let outcome = (|| -> io::Result<()> {
-        for _ in 0..=cfg.retries {
+        for _ in 0..=cfg.first_retries() {
             let mut pacer = Pacer::for_config(cfg);
             for &a in &pending {
                 if !pacer.wait_or_cancel(cancel) {
@@ -501,7 +504,7 @@ mod tests {
         // Like host jobs one after another: each new scan's first packet
         // still waits for the shared budget.
         let cfg = crate::model::ScanConfig {
-            max_rate: 20,
+            max_rate: Some(20),
             rate_schedule: Some(crate::timing::RateSchedule::new()),
             ..Default::default()
         };
@@ -526,7 +529,7 @@ mod tests {
 
     #[test]
     fn deadline_cuts_a_wait_short() {
-        let mut pacer = Pacer::new(1, Duration::ZERO);
+        let mut pacer = Pacer::new(Some(1), Duration::ZERO);
         assert!(pacer.wait_until(None));
         // The next packet is due in a second; the deadline comes first.
         let t = Instant::now();
@@ -537,14 +540,14 @@ mod tests {
             "{waited:?}"
         );
         // A deadline that has passed refuses even a packet that is due.
-        let mut pacer = Pacer::new(1000, Duration::ZERO);
+        let mut pacer = Pacer::new(Some(1000), Duration::ZERO);
         assert!(!pacer.wait_until(Some(Instant::now())));
     }
 
     #[test]
     fn cancel_cuts_a_wait_short() {
         // One packet a second, so the second one would wait a full second.
-        let mut pacer = Pacer::new(1, Duration::ZERO);
+        let mut pacer = Pacer::new(Some(1), Duration::ZERO);
         let cancel = AtomicBool::new(false);
         assert!(pacer.wait_or_cancel(&cancel));
         let t = Instant::now();

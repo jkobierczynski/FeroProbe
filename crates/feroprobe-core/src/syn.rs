@@ -124,18 +124,38 @@ impl RawTcpScan {
     /// as its sequence number, and acknowledges any other segment just past
     /// our sequence number: by one for each of SYN and FIN it took into
     /// account, which for odd combinations like SYN+FIN varies by system.
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))] // only the Linux scanner reads replies
+    #[cfg(test)]
     fn answers(&self, tcp: &packet::Tcp, sport: u16, cookie: u32) -> bool {
+        self.answered_try(tcp, sport, cookie).is_some()
+    }
+
+    /// Which try of our probe a TCP segment from the target answers, if
+    /// any: each try carries its number in our sequence number (see
+    /// [`try_seq`]), and so in the number the target sends back.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))] // only the Linux scanner reads replies
+    fn answered_try(&self, tcp: &packet::Tcp, sport: u16, cookie: u32) -> Option<u32> {
         if tcp.dport != sport {
-            return false;
+            return None;
         }
-        if self.flags & TCP_ACK != 0 {
-            tcp.seq == cookie
+        let (echoed, max) = if self.flags & TCP_ACK != 0 {
+            (tcp.seq, 0)
         } else {
             let max = u32::from(self.flags & TCP_SYN != 0) + u32::from(self.flags & TCP_FIN != 0);
-            tcp.ack.wrapping_sub(cookie) <= max
-        }
+            (tcp.ack, max)
+        };
+        let off = echoed.wrapping_sub(cookie);
+        (off & 0xffff <= max).then_some(off >> 16)
     }
+}
+
+/// The sequence number (or, for probes with ACK set, the acknowledgment
+/// number) of try `tryno` of a probe: the scan's random cookie with the try
+/// number in its upper half, so an answer tells which try it answers, as
+/// nmap's do. Resends can then be timed, and an answer to the first copy
+/// that comes after a resend still counts as an answer to the first copy.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) fn try_seq(cookie: u32, tryno: u32) -> u32 {
+    cookie.wrapping_add(tryno.min(0xffff) << 16)
 }
 
 /// Parse nmap's `--scanflags` value: flag names run together in any order
@@ -335,7 +355,8 @@ mod imp {
 
     /// An answer seen by a receiver thread: host index, port, state,
     /// reason, time.
-    type Answer = (usize, u16, PortState, &'static str, Instant);
+    /// Host, port, state, reason, receive time and the try it answers.
+    type Answer = (usize, u16, PortState, &'static str, Instant, u32);
 
     fn result(
         port: u16,
@@ -473,7 +494,7 @@ mod imp {
         let mut rng = Rng::new();
         let sport = crate::raw::probe_sport(cfg, &mut rng);
         let cookie = rng.next_u32();
-        let ack = if scan.flags & TCP_ACK != 0 { cookie } else { 0 };
+        let has_ack = scan.flags & TCP_ACK != 0;
 
         let mut results: HashMap<(usize, u16), PortResult> = HashMap::new();
 
@@ -505,9 +526,9 @@ mod imp {
             let (stop, index, tx) = (Arc::clone(&stop), Arc::clone(&index), tx.clone());
             receivers.push(std::thread::spawn(move || {
                 receive_loop(recv, &stop, &tx, |data, from, at| {
-                    let (h, port, state, why) =
+                    let (h, port, state, why, tryno) =
                         tcp_answer(data, from, &index, &scan, sport, cookie)?;
-                    Some((h, port, state, why, at))
+                    Some((h, port, state, why, at, tryno))
                 });
             }));
         }
@@ -517,10 +538,18 @@ mod imp {
             receivers.push(std::thread::spawn(move || {
                 receive_loop(sock, &stop, &tx, |data, _, at| {
                     let (dst, sp, dp, seq, why) = parse_tcp_unreach(data, v6)?;
-                    if sp != sport || seq != cookie {
+                    let off = seq.wrapping_sub(cookie);
+                    if sp != sport || off & 0xffff != 0 {
                         return None;
                     }
-                    Some((*index.get(&dst)?, dp, PortState::Filtered, why, at))
+                    Some((
+                        *index.get(&dst)?,
+                        dp,
+                        PortState::Filtered,
+                        why,
+                        at,
+                        off >> 16,
+                    ))
                 });
             }));
         }
@@ -539,7 +568,7 @@ mod imp {
         };
 
         // Port-major order spreads the probes across hosts.
-        let mut pending: Vec<(usize, u16)> = ports
+        let pending: Vec<(usize, u16)> = ports
             .iter()
             .flat_map(|&p| (0..addrs.len()).map(move |h| (h, p)))
             .filter(|k| !results.contains_key(k))
@@ -577,55 +606,105 @@ mod imp {
         };
 
         let outcome = (|| -> io::Result<()> {
-            for round in 0..=cfg.retries {
-                let mut pacer = Pacer::for_config(cfg);
-                flight.start_round(pending.iter().copied(), round);
-                loop {
-                    if cfg.expired() {
-                        return Err(ScanConfig::timed_out());
-                    }
-                    let (h, p) = match flight.next(Instant::now()) {
-                        Next::Idle => break,
-                        Next::Send(h, p) => (h, p),
-                        // Every window is full: wait for an answer or a
-                        // timeout.
-                        Next::Wait(until) => {
-                            let until = cfg.deadline.map_or(until, |d| until.min(d));
-                            let left = until.saturating_duration_since(Instant::now()).min(slice);
-                            match rx.recv_timeout(left) {
-                                Ok(a) => {
-                                    record(&mut results, &mut flight, a);
-                                }
-                                Err(mpsc::RecvTimeoutError::Timeout) => {}
-                                Err(mpsc::RecvTimeoutError::Disconnected) => {
-                                    std::thread::sleep(left)
-                                }
+            // Resends go out as their probes time out, as often as each
+            // host's losses call for, up to cfg.retries (see Flight).
+            let mut pacer = Pacer::for_config(cfg);
+            flight.start(pending.iter().copied());
+            loop {
+                if cfg.expired() {
+                    return Err(ScanConfig::timed_out());
+                }
+                // Answers already in first: one may raise its host's allowance
+                // before its other probes are timed out and benched.
+                while let Ok(a) = rx.try_recv() {
+                    record(&mut results, &mut flight, a);
+                }
+                let (h, p) = match flight.next(Instant::now()) {
+                    Next::Idle => break,
+                    Next::Send(h, p) => (h, p),
+                    // Every window is full, or only probes waiting for
+                    // their answers are left: wait for an answer or a
+                    // timeout or (as a discovery probe) for the host to be
+                    // proven up.
+                    Next::Wait(until) => {
+                        let until = cfg.deadline.map_or(until, |d| until.min(d));
+                        let left = until.saturating_duration_since(Instant::now()).min(slice);
+                        match rx.recv_timeout(left) {
+                            Ok(a) => {
+                                record(&mut results, &mut flight, a);
                             }
-                            if round > 0 {
-                                retire_done(&mut flight);
-                            }
-                            continue;
+                            Err(mpsc::RecvTimeoutError::Timeout) => {}
+                            Err(mpsc::RecvTimeoutError::Disconnected) => std::thread::sleep(left),
                         }
-                    };
-                    if round == 0 {
-                        crate::progress::tick(1);
-                    }
-                    let Some(src) = sources[h] else {
-                        flight.settle(h, p);
-                        continue;
-                    };
-                    // Answered by a reply that came in during this round, or
-                    // (on a retry) the host is already known to be up. The
-                    // first round always goes out: nmap sends a host all
-                    // its discovery probes in one burst, so an early ICMP
-                    // reply does not hold back the SYN or ACK.
-                    if results.contains_key(&(h, p)) || (round > 0 && is_done(h)) {
-                        flight.settle(h, p);
+                        retire_done(&mut flight);
                         continue;
                     }
-                    let Some(send_sock) = send_socks[usize::from(addrs[h].is_ipv6())].as_ref()
-                    else {
-                        // No socket for this family (no IPv6 here).
+                };
+                let resend = flight.is_resend(h, p);
+                if !resend {
+                    crate::progress::tick(1);
+                }
+                let Some(src) = sources[h] else {
+                    flight.settle(h, p);
+                    continue;
+                };
+                // Answered by a reply that came in meanwhile, or (on a
+                // resend) the host is already known to be up. First tries
+                // always go out: nmap sends a host all its discovery probes
+                // in one burst, so an early ICMP reply does not hold back
+                // the SYN or ACK.
+                if results.contains_key(&(h, p)) || (resend && is_done(h)) {
+                    flight.settle(h, p);
+                    continue;
+                }
+                let Some(send_sock) = send_socks[usize::from(addrs[h].is_ipv6())].as_ref() else {
+                    // No socket for this family (no IPv6 here).
+                    results.entry((h, p)).or_insert(result(
+                        p,
+                        PortState::Filtered,
+                        reason::UNREACHABLE,
+                        None,
+                    ));
+                    flight.settle(h, p);
+                    continue;
+                };
+                // The wait gives up at the host deadline.
+                if !pacer.wait_until(cfg.deadline) {
+                    return Err(ScanConfig::timed_out());
+                }
+                // A slow template can wait long enough for an answer to the
+                // earlier copy of a resent probe to arrive: record it
+                // against the old send time and do not send again.
+                while let Ok(a) = rx.try_recv() {
+                    record(&mut results, &mut flight, a);
+                }
+                // Another probe may have proven the host up meanwhile.
+                if results.contains_key(&(h, p)) || (resend && is_done(h)) {
+                    flight.settle(h, p);
+                    continue;
+                }
+                flight.sent(h, p, Instant::now());
+                let seq = try_seq(cookie, flight.tryno(h, p));
+                let ack = if has_ack { seq } else { 0 };
+                let to = socket_addr(addrs[h], 0);
+                // The SYN scan keeps its MSS option, which makes the
+                // probe look like an ordinary connection attempt.
+                let sent = if let Some(raw) = evasion_sock.as_ref().filter(|_| addrs[h].is_ipv4()) {
+                    send_evasion(raw, src, addrs[h], sport, p, seq, ack, scan.flags, cfg)
+                } else if scan.flags == TCP_SYN {
+                    let pkt = packet::tcp_syn(src, addrs[h], sport, p, seq);
+                    nmap_ip_header(send_sock, addrs[h].is_ipv6());
+                    send_with_backoff_until(send_sock, &pkt, to, cfg.deadline)
+                } else {
+                    let pkt = packet::tcp_probe(src, addrs[h], sport, p, seq, ack, scan.flags);
+                    nmap_ip_header(send_sock, addrs[h].is_ipv6());
+                    send_with_backoff_until(send_sock, &pkt, to, cfg.deadline)
+                };
+                match sent {
+                    Ok(()) => {}
+                    // The send gave up at the host deadline.
+                    Err(_) if cfg.expired() => return Err(ScanConfig::timed_out()),
+                    Err(e) if is_network_error(&e) => {
                         results.entry((h, p)).or_insert(result(
                             p,
                             PortState::Filtered,
@@ -633,91 +712,11 @@ mod imp {
                             None,
                         ));
                         flight.settle(h, p);
-                        continue;
-                    };
-                    // The wait gives up at the host deadline.
-                    if !pacer.wait_until(cfg.deadline) {
-                        return Err(ScanConfig::timed_out());
                     }
-                    // A slow template can wait long enough for an answer to
-                    // the previous round's probe to arrive: record it against
-                    // the old send time and do not send again.
-                    while let Ok(a) = rx.try_recv() {
-                        record(&mut results, &mut flight, a);
-                    }
-                    // Another probe may have proven the host up meanwhile.
-                    if results.contains_key(&(h, p)) || (round > 0 && is_done(h)) {
-                        flight.settle(h, p);
-                        continue;
-                    }
-                    flight.sent(h, p, Instant::now());
-                    let to = socket_addr(addrs[h], 0);
-                    // The SYN scan keeps its MSS option, which makes the
-                    // probe look like an ordinary connection attempt.
-                    let sent =
-                        if let Some(raw) = evasion_sock.as_ref().filter(|_| addrs[h].is_ipv4()) {
-                            send_evasion(raw, src, addrs[h], sport, p, cookie, ack, scan.flags, cfg)
-                        } else if scan.flags == TCP_SYN {
-                            let pkt = packet::tcp_syn(src, addrs[h], sport, p, cookie);
-                            nmap_ip_header(send_sock, addrs[h].is_ipv6());
-                            send_with_backoff_until(send_sock, &pkt, to, cfg.deadline)
-                        } else {
-                            let pkt =
-                                packet::tcp_probe(src, addrs[h], sport, p, cookie, ack, scan.flags);
-                            nmap_ip_header(send_sock, addrs[h].is_ipv6());
-                            send_with_backoff_until(send_sock, &pkt, to, cfg.deadline)
-                        };
-                    match sent {
-                        Ok(()) => {}
-                        // The send gave up at the host deadline.
-                        Err(_) if cfg.expired() => return Err(ScanConfig::timed_out()),
-                        Err(e) if is_network_error(&e) => {
-                            results.entry((h, p)).or_insert(result(
-                                p,
-                                PortState::Filtered,
-                                reason::UNREACHABLE,
-                                None,
-                            ));
-                            flight.settle(h, p);
-                        }
-                        Err(e) => return Err(e),
-                    }
-                    while let Ok(a) = rx.try_recv() {
-                        record(&mut results, &mut flight, a);
-                    }
+                    Err(e) => return Err(e),
                 }
-                // Wait for stragglers: until every probe is answered or has
-                // waited out its host's timeout, or (as a discovery probe)
-                // its host is proven up.
-                retire_done(&mut flight);
-                while flight.any_waiting() {
-                    let Some(mut until) = flight.next_expiry() else {
-                        break;
-                    };
-                    if let Some(limit) = cfg.deadline {
-                        if Instant::now() >= limit {
-                            break;
-                        }
-                        until = until.min(limit);
-                    }
-                    let left = until.saturating_duration_since(Instant::now()).min(slice);
-                    match rx.recv_timeout(left) {
-                        Ok(a) => {
-                            record(&mut results, &mut flight, a);
-                        }
-                        Err(mpsc::RecvTimeoutError::Timeout) => {
-                            flight.expire(Instant::now());
-                            retire_done(&mut flight);
-                        }
-                        Err(_) => break,
-                    }
-                }
-                pending.retain(|&(h, p)| !results.contains_key(&(h, p)) && !is_done(h));
-                if pending.is_empty() {
-                    break;
-                }
-                if cfg.expired() {
-                    return Err(ScanConfig::timed_out());
+                while let Ok(a) = rx.try_recv() {
+                    record(&mut results, &mut flight, a);
                 }
             }
             Ok(())
@@ -755,7 +754,7 @@ mod imp {
         results: &mut HashMap<(usize, u16), PortResult>,
         flight: &mut Flight<u16>,
         no_answer: PortState,
-        (h, p, state, why, at): Answer,
+        (h, p, state, why, at, tryno): Answer,
     ) -> bool {
         if results.contains_key(&(h, p)) {
             return false;
@@ -763,7 +762,7 @@ mod imp {
         // An ICMP error moves no window on a retry when silence already
         // means filtered (see `rtt::Outcome::FilteredError`).
         let filtered_error = no_answer == PortState::Filtered && state == PortState::Filtered;
-        let Some(rtt) = flight.answered(h, p, at, filtered_error) else {
+        let Some(rtt) = flight.answered(h, p, at, filtered_error, Some(tryno)) else {
             return false;
         };
         let rtt_ms = (rtt.as_secs_f64() * 1_000_000.0).round() / 1000.0;
@@ -782,7 +781,7 @@ mod imp {
         scan: &RawTcpScan,
         sport: u16,
         cookie: u32,
-    ) -> Option<(usize, u16, PortState, &'static str)> {
+    ) -> Option<(usize, u16, PortState, &'static str, u32)> {
         let (src, segment) = match from.as_socket() {
             Some(sa) if sa.is_ipv6() => (sa.ip(), data),
             _ => {
@@ -794,12 +793,10 @@ mod imp {
             }
         };
         let tcp = packet::parse_tcp(segment)?;
-        if !scan.answers(&tcp, sport, cookie) {
-            return None;
-        }
+        let tryno = scan.answered_try(&tcp, sport, cookie)?;
         let &h = index.get(&src)?;
         let (state, why) = scan.kind.classify(&tcp)?;
-        Some((h, tcp.sport, state, why))
+        Some((h, tcp.sport, state, why, tryno))
     }
 
     #[cfg(test)]
@@ -892,7 +889,7 @@ mod imp {
             let mut flight: Flight<u16> = Flight::new(&cfg, &addrs, vec![1, 1]);
             let mut results = HashMap::new();
             let now = Instant::now();
-            flight.start_round([(0, 80), (1, 80)], 0);
+            flight.start([(0, 80), (1, 80)]);
             while let Next::Send(h, p) = flight.next(now) {
                 flight.sent(h, p, now);
             }
@@ -906,7 +903,7 @@ mod imp {
                 &mut results,
                 &mut flight,
                 PortState::Filtered,
-                (0, 80, PortState::Closed, reason::RESET, later)
+                (0, 80, PortState::Closed, reason::RESET, later, 0)
             ));
             // ... but does not stand in for B's answer.
             assert!(flight.any_waiting());
@@ -914,7 +911,7 @@ mod imp {
                 &mut results,
                 &mut flight,
                 PortState::Filtered,
-                (1, 80, PortState::Closed, reason::RESET, later),
+                (1, 80, PortState::Closed, reason::RESET, later, 0),
             ));
             assert!(!flight.any_waiting());
             // Only the first answer counts.
@@ -922,7 +919,7 @@ mod imp {
                 &mut results,
                 &mut flight,
                 PortState::Filtered,
-                (1, 80, PortState::Open, reason::SYN_ACK, later),
+                (1, 80, PortState::Open, reason::SYN_ACK, later, 0),
             ));
         }
 
@@ -1109,6 +1106,34 @@ mod tests {
         assert!(parse_scanflags("SYNFOO").is_err());
         assert!(parse_scanflags("256").is_err());
         assert!(parse_scanflags("").is_err());
+    }
+
+    #[test]
+    fn answers_name_their_try() {
+        let tcp = |seq, ack, flags| packet::Tcp {
+            sport: 80,
+            dport: 41000,
+            seq,
+            ack,
+            flags,
+            window: 0,
+        };
+        let cookie = 0xffff_fff0;
+        let syn = RawTcpScan::new(TcpScanKind::Syn);
+        for tryno in [0, 1, 2, 9] {
+            let seq = try_seq(cookie, tryno);
+            let rst = tcp(0, seq.wrapping_add(1), TCP_RST | TCP_ACK);
+            assert_eq!(syn.answered_try(&rst, 41000, cookie), Some(tryno));
+            assert_eq!(
+                syn.answered_try(&tcp(0, seq.wrapping_add(2), TCP_RST), 41000, cookie),
+                None
+            );
+        }
+        // An ACK scan's reset echoes the acknowledgment number as its
+        // sequence number.
+        let ack = RawTcpScan::new(TcpScanKind::Ack);
+        let rst = tcp(try_seq(cookie, 3), 0, TCP_RST);
+        assert_eq!(ack.answered_try(&rst, 41000, cookie), Some(3));
     }
 
     #[test]
