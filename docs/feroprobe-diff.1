@@ -294,19 +294,24 @@ Scan a network every day and mail the changes, from cron:
 .nf
 \f[C]
 #!/bin/sh
-date=$(date +%F)
-cd /var/lib/scans
+# One name per run, so a second run on the same day gets its own report.
+run=$(date +%F-%H%M%S)
+cd /var/lib/scans || exit 1
 # A failed scan leaves the last good report as the baseline.
-feroprobe -T4 -F -sV 10.0.0.0/24 -oA scan-$date > /dev/null || exit 1
+feroprobe -T4 -F -sV 10.0.0.0/24 -oA scan-$run > /dev/null || exit 1
 if [ -e scan-prev.xml ]; then
     status=0
-    feroprobe-diff scan-prev.xml scan-$date.xml > diff-$date || status=$?
+    feroprobe-diff scan-prev.xml scan-$run.xml > diff-$run || status=$?
     # 0 same, 1 changed; anything else (2: a report could not be read)
     # keeps the baseline and stops.
     [ $status -gt 1 ] && exit $status
-    [ $status -eq 1 ] && mail -s \[dq]Network changes $date\[dq] admin < diff-$date
+    # If the mail cannot be sent, keep the baseline so the next run
+    # reports these changes again.
+    if [ $status -eq 1 ]; then
+        mail -s \[dq]Network changes $run\[dq] admin < diff-$run || exit 1
+    fi
 fi
-ln -sf scan-$date.xml scan-prev.xml
+ln -sf scan-$run.xml scan-prev.xml
 \f[R]
 .fi
 .PP
