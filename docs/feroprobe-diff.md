@@ -176,7 +176,9 @@ round-trip times, CPEs, confidence) are not compared.
 matches are marked, unchanged ones in between are shown for context.
 
 **Script results** are paired by script id; their output is compared line
-by line.
+by line. Very long outputs that differ in many scattered places
+(beyond about four million line pairs to align) are shown as the old block
+replaced by the new one.
 
 ## Differences from ndiff
 
@@ -214,10 +216,14 @@ Scan a network every day and mail the changes, from cron:
 #!/bin/sh
 date=$(date +%F)
 cd /var/lib/scans
-feroprobe -T4 -F -sV 10.0.0.0/24 -oA scan-$date > /dev/null
+# A failed scan leaves the last good report as the baseline.
+feroprobe -T4 -F -sV 10.0.0.0/24 -oA scan-$date > /dev/null || exit 1
 if [ -e scan-prev.xml ]; then
-    feroprobe-diff scan-prev.xml scan-$date.xml > diff-$date
-    [ $? -eq 1 ] && mail -s "Network changes $date" admin < diff-$date
+    status=0
+    feroprobe-diff scan-prev.xml scan-$date.xml > diff-$date || status=$?
+    # 2: a report could not be read; keep the baseline and stop.
+    [ $status -eq 2 ] && exit 2
+    [ $status -eq 1 ] && mail -s "Network changes $date" admin < diff-$date
 fi
 ln -sf scan-$date.xml scan-prev.xml
 ```

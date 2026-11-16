@@ -86,6 +86,33 @@ fn bad_input_exits_2() {
     assert_eq!(o.status.code(), Some(2), "two files are needed");
 }
 
+/// A fresh directory, removed when dropped (also when the test panics).
+struct TempDir(PathBuf);
+
+impl TempDir {
+    fn new() -> TempDir {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static N: AtomicU32 = AtomicU32::new(0);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.subsec_nanos());
+        let path = std::env::temp_dir().join(format!(
+            "feroprobe-diff-test-{}-{nanos}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        // create_dir (not _all) fails on a leftover directory.
+        std::fs::create_dir(&path).expect("create a fresh temporary directory");
+        TempDir(path)
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 /// Scan one local port with a connect scan and save the XML report.
 fn scan(port: u16, out: &Path) {
     let o = Command::new(env!("CARGO_BIN_EXE_feroprobe"))
@@ -110,8 +137,8 @@ fn scan(port: u16, out: &Path) {
 
 #[test]
 fn real_scans_show_a_port_closing() {
-    let dir = std::env::temp_dir().join(format!("feroprobe-diff-test-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = TempDir::new();
+    let dir = &dir.0;
     let (a, b) = (dir.join("a.xml"), dir.join("b.xml"));
 
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -132,5 +159,4 @@ fn real_scans_show_a_port_closing() {
 
     let o = diff(&[], &a, &a);
     assert_eq!(o.status.code(), Some(0), "{}", stdout(&o));
-    let _ = std::fs::remove_dir_all(&dir);
 }

@@ -104,9 +104,7 @@ impl Ord for Address {
             .cmp(&rank(other))
             .then_with(|| match (self, other) {
                 (Address::Ip(a), Address::Ip(b)) => a.cmp(b),
-                (Address::Mac(a), Address::Mac(b)) => {
-                    a.to_ascii_lowercase().cmp(&b.to_ascii_lowercase())
-                }
+                (Address::Mac(a), Address::Mac(b)) => a.cmp(b),
                 _ => Ordering::Equal,
             })
     }
@@ -226,6 +224,10 @@ impl Script {
     /// `|  id: first`, ..., `|_ last`.
     pub fn lines(&self) -> Vec<String> {
         let mut lines: Vec<String> = self.output.lines().map(str::to_string).collect();
+        if lines.is_empty() {
+            // A result with no output still shows that the script ran.
+            return vec![format!("|_ {}:", self.id)];
+        }
         if let Some(first) = lines.first_mut() {
             *first = format!("{}: {first}", self.id);
         }
@@ -350,7 +352,8 @@ fn parse_host(h: roxmltree::Node, warnings: &mut Vec<String>) -> Host {
         };
         let parsed = match a.attribute("addrtype").unwrap_or("ipv4") {
             "ipv4" | "ipv6" => addr.parse().ok().map(Address::Ip),
-            "mac" => Some(Address::Mac(addr.to_string())),
+            // Upper case, as nmap writes them, so case alone is no change.
+            "mac" => Some(Address::Mac(addr.to_ascii_uppercase())),
             _ => None,
         };
         match parsed {
@@ -477,6 +480,29 @@ mod tests {
         assert_eq!(https.scripts[0].id, "a");
         assert_eq!(https.scripts[0].lines(), ["|  a: one", "|_ more"]);
         assert_eq!(h.os, ["Linux 5.x", "Linux 4.x"]);
+    }
+
+    #[test]
+    fn empty_script_output_still_shows_the_script() {
+        let s = Script {
+            id: "x".into(),
+            output: String::new(),
+        };
+        assert_eq!(s.lines(), ["|_ x:"]);
+    }
+
+    #[test]
+    fn mac_case_is_not_a_change() {
+        let host = |mac: &str| {
+            let xml = format!(
+                r#"<nmaprun><host><status state="up"/><address addr="{mac}" addrtype="mac"/></host></nmaprun>"#
+            );
+            Scan::parse(&xml).unwrap().0.hosts.remove(0)
+        };
+        assert_eq!(
+            host("aa:bb:cc:dd:ee:ff").addresses,
+            host("AA:BB:CC:DD:EE:FF").addresses
+        );
     }
 
     #[test]

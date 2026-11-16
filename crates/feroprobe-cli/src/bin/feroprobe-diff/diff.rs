@@ -14,10 +14,45 @@ pub enum Op {
     Replace,
 }
 
+/// The largest LCS table (cells) built for one comparison. Script outputs
+/// differing in many scattered lines beyond this are shown as one
+/// replaced block instead of a line-by-line diff.
+const MAX_LCS_CELLS: usize = 4_000_000;
+
 /// An edit script turning `a` into `b`: `(op, a_start, a_end, b_start,
 /// b_end)` steps over a longest common subsequence, with a delete next to an
-/// insert merged into a replace.
+/// insert merged into a replace. The common start and end are matched
+/// first, so only the part that differs needs the LCS table.
 pub fn opcodes<T: PartialEq>(a: &[T], b: &[T]) -> Vec<(Op, usize, usize, usize, usize)> {
+    let pre = a.iter().zip(b).take_while(|(x, y)| x == y).count();
+    let suf = a[pre..]
+        .iter()
+        .rev()
+        .zip(b[pre..].iter().rev())
+        .take_while(|(x, y)| x == y)
+        .count();
+    let (am, bm) = (&a[pre..a.len() - suf], &b[pre..b.len() - suf]);
+    let mut ops = Vec::new();
+    if pre > 0 {
+        ops.push((Op::Equal, 0, pre, 0, pre));
+    }
+    let middle = if am.len().saturating_mul(bm.len()) > MAX_LCS_CELLS {
+        vec![(Op::Replace, 0, am.len(), 0, bm.len())]
+    } else {
+        lcs_opcodes(am, bm)
+    };
+    ops.extend(
+        middle
+            .into_iter()
+            .map(|(op, i1, i2, j1, j2)| (op, i1 + pre, i2 + pre, j1 + pre, j2 + pre)),
+    );
+    if suf > 0 {
+        ops.push((Op::Equal, a.len() - suf, a.len(), b.len() - suf, b.len()));
+    }
+    ops
+}
+
+fn lcs_opcodes<T: PartialEq>(a: &[T], b: &[T]) -> Vec<(Op, usize, usize, usize, usize)> {
     let (n, m) = (a.len(), b.len());
     // lcs[i][j]: length of the longest common subsequence of a[i..], b[j..].
     let mut lcs = vec![vec![0usize; m + 1]; n + 1];
@@ -331,6 +366,21 @@ mod tests {
         assert_eq!(opcodes::<&str>(&[], &[]), []);
         assert_eq!(opcodes(&["x"], &[]), [(Op::Delete, 0, 1, 0, 0)]);
         assert_eq!(opcodes(&["x"], &["x"]), [(Op::Equal, 0, 1, 0, 1)]);
+        assert_eq!(
+            opcodes(&["p", "a", "s"], &["p", "b", "s"]),
+            [
+                (Op::Equal, 0, 1, 0, 1),
+                (Op::Replace, 1, 2, 1, 2),
+                (Op::Equal, 2, 3, 2, 3)
+            ]
+        );
+    }
+
+    #[test]
+    fn huge_scattered_differences_stay_bounded() {
+        let a: Vec<u32> = (0..3000).map(|i| i * 2).collect();
+        let b: Vec<u32> = (0..3000).map(|i| i * 2 + 1).collect();
+        assert_eq!(opcodes(&a, &b), [(Op::Replace, 0, 3000, 0, 3000)]);
     }
 
     #[test]
