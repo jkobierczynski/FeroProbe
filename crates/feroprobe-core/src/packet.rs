@@ -619,6 +619,40 @@ pub fn ipv4_packet(
     p
 }
 
+/// An IPv4 packet like [`ipv4_packet`], with header `options` (a multiple
+/// of 4 bytes, at most 40) after the fixed header.
+pub fn ipv4_packet_with_options(
+    src: Ipv4Addr,
+    dst: Ipv4Addr,
+    protocol: u8,
+    ttl: u8,
+    id: u16,
+    options: &[u8],
+    payload: &[u8],
+) -> Vec<u8> {
+    if options.is_empty() {
+        return ipv4_packet(src, dst, protocol, ttl, id, payload);
+    }
+    let hlen = 20 + options.len();
+    let total = hlen + payload.len();
+    let mut p = Vec::with_capacity(total);
+    p.push(0x40 | (hlen / 4) as u8);
+    p.push(0);
+    p.extend_from_slice(&(total as u16).to_be_bytes());
+    p.extend_from_slice(&id.to_be_bytes());
+    p.extend_from_slice(&[0, 0]);
+    p.push(ttl);
+    p.push(protocol);
+    p.extend_from_slice(&[0, 0]);
+    p.extend_from_slice(&src.octets());
+    p.extend_from_slice(&dst.octets());
+    p.extend_from_slice(options);
+    let sum = checksum(&p);
+    p[10..12].copy_from_slice(&sum.to_be_bytes());
+    p.extend_from_slice(payload);
+    p
+}
+
 /// An IPv6 packet around `payload`, for sockets where we write the IP
 /// header ourselves (`IPPROTO_RAW`): no extension headers, flow label 0.
 pub fn ipv6_packet(

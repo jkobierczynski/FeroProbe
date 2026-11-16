@@ -44,7 +44,14 @@ pub(crate) struct Probe {
 
 impl Probe {
     /// The body of the probe for protocol `proto`, after the IP header.
+    /// The `--data` bytes follow it and `--badsum` spoils its checksum,
+    /// as in nmap's protocol scan.
     pub(crate) fn body(&self, proto: u8, src: IpAddr, dst: IpAddr) -> Vec<u8> {
+        let body = self.bare_body(proto, src, dst);
+        crate::packet_opts::get().finish(proto, src, dst, body, true)
+    }
+
+    fn bare_body(&self, proto: u8, src: IpAddr, dst: IpAddr) -> Vec<u8> {
         match (proto, src, dst) {
             (IPPROTO_ICMP, IpAddr::V4(_), _) => packet::icmp_echo(self.icmp_id, 0, &[]),
             (IPPROTO_ICMPV6, IpAddr::V6(s), IpAddr::V6(d)) => {
@@ -67,18 +74,22 @@ impl Probe {
         }
     }
 
-    /// The whole packet, IP header included.
+    /// The whole packet, IP header included (with the `--ttl` and
+    /// `--ip-options`), and the address to send it to: the target, or the
+    /// first hop of an `--ip-options` source route.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-    pub(crate) fn packet(&self, proto: u8, src: IpAddr, dst: IpAddr) -> Vec<u8> {
+    pub(crate) fn packet(&self, proto: u8, src: IpAddr, dst: IpAddr) -> (Vec<u8>, IpAddr) {
         let body = self.body(proto, src, dst);
         match (src, dst) {
             (IpAddr::V4(s), IpAddr::V4(d)) => {
-                packet::ipv4_packet(s, d, proto, crate::raw::probe_ttl(), self.ipid, &body)
+                let (p, to) = crate::packet_opts::ipv4_probe(s, d, proto, self.ipid, &body);
+                (p, IpAddr::V4(to))
             }
-            (IpAddr::V6(s), IpAddr::V6(d)) => {
-                packet::ipv6_packet(s, d, proto, crate::raw::probe_ttl(), &body)
-            }
-            _ => Vec::new(),
+            (IpAddr::V6(s), IpAddr::V6(d)) => (
+                packet::ipv6_packet(s, d, proto, crate::raw::probe_ttl(), &body),
+                dst,
+            ),
+            _ => (Vec::new(), dst),
         }
     }
 }
@@ -169,12 +180,26 @@ mod imp {
                 return Err(io::Error::from_raw_os_error(libc::ENETUNREACH));
             };
             let proto = proto as u8;
-            let pkt = probe.packet(proto, src, dst);
+            let (pkt, to) = probe.packet(proto, src, dst);
             // Our own trace line: the socket's protocol is IPPROTO_RAW.
-            send_logged_until(sock, &pkt, socket_addr(dst, 0), cfg.deadline, || {
+            send_logged_until(sock, &pkt, socket_addr(to, 0), cfg.deadline, || {
                 crate::packet_trace::log("SENT", || {
                     let body = probe.body(proto, src, dst);
-                    crate::packet_trace::describe(proto, &body, Some(src), Some(dst))
+                    match (&pkt, dst) {
+                        // The whole packet we wrote, header options and all.
+                        (p, IpAddr::V4(_)) => {
+                            crate::packet_trace::describe_raw_ipv4(p, socket_addr(to, 0))
+                        }
+                        _ => format!(
+                            "{}{}",
+                            crate::packet_trace::describe(proto, &body, Some(src), Some(dst)),
+                            crate::packet_trace::header_note(
+                                crate::packet_opts::get().ttl,
+                                &[],
+                                crate::packet_opts::checksum_is_bad(proto, src, dst, &body),
+                            )
+                        ),
+                    }
                 });
             })
         };

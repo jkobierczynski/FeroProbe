@@ -49,6 +49,8 @@ pub struct RunInfo {
     pub nmap_label: bool,
     /// How many `-v` were given.
     pub verbosity: u8,
+    /// `--defeat-rst-ratelimit` (or `--open`) was in effect for a TCP scan.
+    pub defeat_rst: bool,
 }
 
 pub(crate) fn is_openish(state: PortState) -> bool {
@@ -211,6 +213,17 @@ fn print_ports(out: &mut String, host: &HostResult, info: &RunInfo) {
     }
     if !hidden.is_empty() {
         w!(out, "Not shown: {}", not_shown(&hidden));
+    }
+    if info.defeat_rst
+        && host
+            .ports
+            .iter()
+            .any(|p| p.protocol == feroprobe_core::Protocol::Tcp && p.state == PortState::Filtered)
+    {
+        w!(
+            out,
+            "Some closed ports may be reported as filtered due to --defeat-rst-ratelimit"
+        );
     }
     let mut header = vec![format!("{:<10} {:<14} {:<14}", "PORT", "STATE", "SERVICE")];
     if info.show_reason {
@@ -644,6 +657,7 @@ pub(crate) mod tests {
             ping_only: false,
             nmap_label: false,
             verbosity: 0,
+            defeat_rst: false,
         }
     }
 

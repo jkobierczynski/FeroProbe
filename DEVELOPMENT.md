@@ -43,6 +43,7 @@ the SCTP, IP protocol, IPv6 OS detection and probe-signature work).
 | SCTP INIT and COOKIE ECHO scans | `-sY`, `-sZ` | Raw sockets, IPv4 and IPv6 (`crates/feroprobe-core/src/sctp.rs`) |
 | IP protocol scan | `-sO` | Protocol numbers via `-p P:...`, real probes for ICMP/IGMP/TCP/UDP/SCTP (`ipproto.rs`) |
 | Ping scan only | `-sn` | Host discovery without a port scan |
+| FTP bounce scan | `-b` | `PORT` + `LIST` through an FTP relay, read like nmap's `bounce_scan` (`ftp_bounce.rs`): open, closed, filtered; privileged-port refusal skips ports below 1024; IPv4 only; no privileges. Targets and relay must be private unless `--allow-public-evasion`. FTP commands in `--packet-trace`, one line per port in `--dry-run` |
 
 ### Host discovery and names
 
@@ -55,7 +56,7 @@ the SCTP, IP protocol, IPv6 OS detection and probe-signature work).
 | ARP on the local network (IPv4) | default as root, `--disable-arp-ping` / `--send-ip` | MAC address and vendor |
 | Neighbour discovery (IPv6) | default as root | MAC address and vendor (`ndp.rs`) |
 | MAC vendor names | `--oui-file` | Full IEEE OUI list from the system or a file, small built-in fallback |
-| Reverse DNS | `-n`, `-R`, `--dns-servers` | Own resolver for `--dns-servers` (`dns.rs`) |
+| Reverse DNS | `-n`, `-R`, `--dns-servers`, `--system-dns` | Own resolver for `--dns-servers` (`dns.rs`); the system resolver otherwise, so `--system-dns` only overrides `--dns-servers` (with a warning) |
 | Random host order | `--randomize-hosts` | |
 | Traceroute | `--traceroute` | TCP SYN probes, IPv4 and IPv6 (`trace.rs`); only through a TCP port the command names (scanned, `-p` with `-sn`, or discovery) (see [Deliberate differences](#deliberate-differences-from-nmap)). Like nmap: this machine is not traced, a directly connected host gets no probes (one hop, the host) |
 
@@ -109,6 +110,7 @@ the SCTP, IP protocol, IPv6 OS detection and probe-signature work).
 | Packet rate | `--min-rate`, `--max-rate` | `--max-rate` (no default, as nmap; until 2026-11-16 templates capped it, 5000/s for -T3) caps raw-socket probes (SYN, ICMP, ARP, NDP) on one schedule shared across the run, catching up on slots lost to oversleeping; connect and UDP probes are paced by `--scan-delay` and bounded by the congestion windows and `--concurrency`. `--min-rate` raises `--max-rate` and the connect/UDP parallelism, shortens a template's scan delay, and lets probes through a full congestion window when the scan falls behind |
 | Delay between probes | `--scan-delay`, `--max-scan-delay` | A per-host delay, raised as nmap's `boostScanDelay` does: over 10 answers to resends making up more than 30 % (40 % at `-T4`/`-T5`) of answers since the last change, or an answer only after more than 3 (4) resends; 5 ms first (50 ms UDP), doubling to 1 s, capped by `--max-scan-delay` (10 ms TCP at `-T4`, 5 ms at `-T5`), never below `--scan-delay`. No timing pings, no `-v` messages |
 | Per-host time limit | `--host-timeout` | |
+| RST rate limits | `--defeat-rst-ratelimit` | As nmap: in a SYN port scan, a RST to a resent probe moves no congestion window (`Outcome::FilteredError` path in `syn.rs`), and the table says some closed ports may show as filtered. Refused for other TCP scans unless `--open`, which turns it on as in nmap |
 | Progress | `--stats-every`, `-v`, `-vv` | |
 | Benchmarks | | criterion benches in `crates/feroprobe-core/benches` |
 
@@ -118,6 +120,17 @@ the SCTP, IP protocol, IPv6 OS detection and probe-signature work).
 | --- | --- | --- |
 | Interface | `-e` | Every socket of the run is bound to it (`netif::use_interface`, `netif::bind_socket`): raw sockets, the `AF_PACKET` capture, ARP and NDP, connect, UDP, `-sV` and the `--dns-servers` resolver. Source address from the interface; only its networks are local. Linux and macOS |
 | Source port | `-g`, `--source-port` | Raw TCP/SCTP/IP-protocol scans, raw TCP and UDP pings, OS detection (`raw::probe_sport`) and UDP scan sockets (shared with `SO_REUSEADDR`, bound on the route's source address). Not for connect scans (nmap's warning), `-sV`, traceroute, DNS, as in nmap. `-g 0` warns; UDP cannot use port 0. nmap-diff cases `source-port*`, `interface-*` |
+
+### Packet contents
+
+| Feature | Options | Notes |
+| --- | --- | --- |
+| Payload | `--data`, `--data-string`, `--data-length` | Appended to raw TCP (scan, pings, traceroute), SCTP, ICMP timestamp/mask and IP protocol probes; replaces the ICMP echo and UDP payloads (scan and `-PU`), so those markers go (Jurgen, 2026-11-16, like nmap). nmap's hex forms, 1400-byte warning, one random `--data-length` payload per run. Not for OS detection or `-sV`, as nmap. Raw TCP answers are matched with the data counted in the acknowledgment (`packet_opts.rs`) |
+| TTL | `--ttl` | IPv4 TTL and IPv6 hop limit of every probe instead of the random 37-59 (`raw::probe_ttl`), OS detection included, as nmap |
+| IP options | `--ip-options` | nmap's notation (`R`, `T`, `U`, `L`/`S` hops, `\x..` bytes, `*N`), padded, at most 40 bytes. `IP_OPTIONS` on kernel-header sockets; written into the header (source route: first hop as destination, target in the last slot) for `IPPROTO_RAW` probes; copied into every fragment with `-f`/`--mtu`. Not for OS detection or traceroute, as nmap. IPv4 only, warns for IPv6 targets |
+| Bad checksum | `--badsum` | TCP, UDP, SCTP, ICMP, IGMP checksums one less than right, as nmap; UDP scan probes then go out on a raw socket from the connected socket's port. Needs raw sockets (warns and drops it otherwise); OS detection keeps correct checksums (nmap's do not) |
+| Privileges | `--privileged`, `--unprivileged` | Override the raw-socket check (`raw::assume_privileged`); `--unprivileged` also makes raw socket opens fail. Last one wins |
+| Shown as sent | | `--packet-trace` and `--dry-run` add `len=N` (TCP data), `ttl=N`, `ipopts={...}`, `badsum` (checked against the real checksum) and `via <hop>`; the dry run header lists the packet options |
 
 ### Output
 
@@ -143,7 +156,7 @@ the SCTP, IP protocol, IPv6 OS detection and probe-signature work).
 | IDS rules | Suricata (`rules/feroprobe.rules`) and Snort (`rules/feroprobe.snort.rules`) |
 | Settings files | `~/.config/feroprobe/config.toml` (XDG), under sudo also the invoking user's (`SUDO_USER`), then `./.feroproberc`; CLI wins; `-v` shows what was read. FeroProbe's own, nmap has none. `crates/feroprobe-cli/src/config.rs` |
 | ICS protection | `ics_protection = true` refuses `-sV`, `-O`, `-A` (future script scanning too); `--override-ics-protection` allows one run with a warning; `--dry-run` is not refused but warns; warns on OT ports 102, 502, 20000, 44818, 47808. Off by default, so nmap behaviour is unchanged; Cargo feature `ics-protection-default` builds it always on (files cannot switch it off). `docs/ics-protection.md` |
-| Evasion options behind an authorization flag | `-f`, `--mtu`, `-D`, `-S` (raw IPv4 TCP scans). Private ranges (RFC 1918, loopback, link-local, CGNAT, IPv6 ULA) work as is; a public target, decoy or spoofed source needs `--allow-public-evasion` (`scope.rs`, `evasion.rs`) |
+| Evasion options behind an authorization flag | `-f`, `--mtu`, `-D`, `-S` (raw IPv4 TCP scans), and the FTP bounce scan `-b` (targets and relay). Private ranges (RFC 1918, loopback, link-local, CGNAT, IPv6 ULA) work as is; a public target, decoy or spoofed source needs `--allow-public-evasion` (`scope.rs`, `evasion.rs`) |
 
 ### Platform and project
 
@@ -162,6 +175,8 @@ the SCTP, IP protocol, IPv6 OS detection and probe-signature work).
 | --- | --- | --- | --- |
 | `--packet-trace` with `-f`/`--mtu` | Prints one `SENT` line for the whole, unfragmented probe, although the fragments are what goes on the wire | Prints one `SENT` line per fragment actually sent (`TCP ... (frag)`, then `IP ... frag offset=N`) | The trace should show what is sent; nmap's display is treated as a bug and not copied (Jurgen, 2026-11-15). `--dry-run` shows fragments the same way |
 | Evasion against public addresses | Allowed | Needs `--allow-public-evasion` | Anti-abuse safeguard, see `docs/responsible-use.md` |
+| FTP bounce scan against public addresses | Allowed | A public target or relay needs `--allow-public-evasion` | Same safeguard: it scans a network through someone else's server |
+| `--badsum` with `-O` | Also spoils OS-detection probes (nmap's checksum routine applies it globally) | OS-detection probes keep correct checksums | nmap's answers would be meaningless there; treated as an nmap bug |
 | Probes outside the requested ports | `-A`'s scripts probe other ports (`ms-sql-info` sends a 1-byte UDP datagram to 1434 on every host, seen in Jurgen's tcpdump of `nmap -A -p 502,102`); `-O` picks a random UDP port, and for IPv4 also TCP (30000-44780, regardless of `-p`), when the scan found no closed or unfiltered one | Never. `-sV` probes only open ports the scan found; `-O` probes an open TCP port the scan found and, when it found one, a closed TCP port (plus an ICMP echo only when discovery sends echo requests); there are no scripts. Traceroute falls back to a TCP port of the command: a scanned port, the `-p` port with `-sn` (even with `-Pn`, where nothing else probes it), or a discovery port, else skips the host with a warning (it used to fall back to port 80) | An OT operator must be able to rely on the command's ports (`-p` plus the documented host-discovery ports, which `-Pn` or `-P*` control) being the whole scope (Jurgen, 2026-11-15). When script scanning is added, scripts must default to the scanned ports (like nmap's `mssql.scanned-ports-only`) |
 | `-A` without root | Silently drops `-O` and traceroute | Drops them too, with a warning naming them and why | No silent downgrade (Jurgen, 2026-11-15) |
 | UDP service payloads (`-sU`) | nmap's payload database: several probes per port (two DNS queries to 53, two NTP versions to 123, SNMPv1 and v3 to 161, three NetBIOS queries to 137) | FeroProbe's own, one per port (DNS, NTP, SNMP, SSDP), else `FeroProbeScan/1\n` | nmap's payloads cannot be redistributed; found by `scripts/nmap-diff` and kept (Jurgen, 2026-11-15) |
@@ -203,7 +218,7 @@ the scope rule (no probes outside the command's ports and protocols, see
 | 6.4 | More ping types | `-PR`, `-PO`, `-PY` | `-PR` asks for ARP/NDP alone; `-PO` sends IP protocol pings (ICMP, IGMP, IP-in-IP by default, like nmap) through `ipproto.rs`; `-PY` sends SCTP INIT through `sctp.rs` |
 | 6.5 | Debug output and interactive keys | `-d`, `-d1`…`-d9`, `--iflist`, keys `v`/`V`, `d`/`D`, `p`/`P`, `?`, any other key for a status line | `-d` levels on top of `-v`; `--iflist` prints interfaces and routes (`netif.rs`); keys read from a raw-mode terminal on standard input while the scan runs, only when it is a terminal |
 | 6.6 | Output extras | `--append-output`, `-oS`, `--stylesheet`, `--webxml`, `--no-stylesheet` | Append mode for every format; `-oS` for parity; an XML stylesheet of our own (nmap's `nmap.xsl` is not reused), referenced by default, `--webxml` points at a published copy |
-| 6.7 | Small options | `--data-length`, `--data`, `--data-string`, `--ttl`, `--ip-options`, `--badsum`, `--spoof-mac`, `-b`, `--privileged`, `--unprivileged`, `--system-dns`, `--port-ratio`, `--defeat-rst-ratelimit` | One pull request per group: payload options; IP header options; `--badsum`; `--spoof-mac` (behind the same private-range / `--allow-public-evasion` gate as the evasion options); FTP bounce `-b` (also behind that gate, since it scans a third party through someone else's server); the rest. Open question for each payload option: whether the probe signature is kept when the user supplies the payload (see `docs/responsible-use.md`) |
+| 6.7 | Small options | `--data-length`, `--data`, `--data-string`, `--ttl`, `--ip-options`, `--badsum`, `--spoof-mac`, `-b`, `--privileged`, `--unprivileged`, `--system-dns`, `--port-ratio`, `--defeat-rst-ratelimit` | **Done in one pull request** except `--spoof-mac` and `--port-ratio` (see [Packet contents](#packet-contents)); the payload replaces the UDP and echo markers (Jurgen, 2026-11-16). Still to do: `--spoof-mac` needs Ethernet-level sending for every raw probe (today only ARP/NDP use `AF_PACKET`); `--port-ratio` needs nmap-services frequency values, not just its order. Original plan: one pull request per group: payload options; IP header options; `--badsum`; `--spoof-mac` (behind the same private-range / `--allow-public-evasion` gate as the evasion options); FTP bounce `-b` (also behind that gate, since it scans a third party through someone else's server); the rest. Open question for each payload option: whether the probe signature is kept when the user supplies the payload (see `docs/responsible-use.md`) |
 
 ### Phase 7: script engine (v0.6.0)
 

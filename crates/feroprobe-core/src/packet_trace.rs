@@ -65,14 +65,24 @@ pub(crate) fn describe(proto: u8, data: &[u8], src: Option<IpAddr>, dst: Option<
     let to = dst.map_or_else(|| "*".to_string(), |d| d.to_string());
     match proto {
         packet::IPPROTO_TCP => match packet::parse_tcp(data) {
-            Some(t) => format!(
-                "TCP {} > {} {} seq={} win={}",
-                host_port(src, t.sport),
-                host_port(dst, t.dport),
-                tcp_flags(t.flags),
-                t.seq,
-                t.window
-            ),
+            Some(t) => {
+                // Data after the header (--data and friends) shows as len=.
+                let hlen = usize::from(data[12] >> 4) * 4;
+                let extra = data.len().saturating_sub(hlen);
+                let len = if extra > 0 {
+                    format!(" len={extra}")
+                } else {
+                    String::new()
+                };
+                format!(
+                    "TCP {} > {} {} seq={} win={}{len}",
+                    host_port(src, t.sport),
+                    host_port(dst, t.dport),
+                    tcp_flags(t.flags),
+                    t.seq,
+                    t.window
+                )
+            }
             None => format!("TCP {} bytes to {to}", data.len()),
         },
         packet::IPPROTO_UDP if data.len() >= 8 => format!(
@@ -196,8 +206,9 @@ pub(crate) fn tcp_options_text(seg: &[u8]) -> String {
     }
 }
 
-/// A sent raw packet: `to` is where it went.
-pub(crate) fn sent(proto: u8, pkt: &[u8], to: SocketAddr) {
+/// A sent raw packet: `to` is where it went, and `ip_options` the IPv4
+/// options the socket adds (`--ip-options`).
+pub(crate) fn sent(proto: u8, pkt: &[u8], to: SocketAddr, ip_options: &[u8], ttl: Option<u8>) {
     log("SENT", || {
         if proto == IPPROTO_RAW {
             // Evasion probes (-f/--mtu/-D/-S) are complete IPv4 packets, so
@@ -205,9 +216,63 @@ pub(crate) fn sent(proto: u8, pkt: &[u8], to: SocketAddr) {
             // protocol come from the header, not from the socket or `to`.
             describe_raw_ipv4(pkt, to)
         } else {
-            describe(proto, pkt, local_for(to.ip()), Some(to.ip()))
+            let src = local_for(to.ip());
+            let bad =
+                src.is_some_and(|s| crate::packet_opts::checksum_is_bad(proto, s, to.ip(), pkt));
+            format!(
+                "{}{}",
+                describe(proto, pkt, src, Some(to.ip())),
+                kernel_header_note(ttl, ip_options, to.ip(), bad)
+            )
         }
     });
+}
+
+/// [`header_note`] for a probe whose IPv4 header the kernel writes from
+/// the `--ip-options` set on its socket: shown as they leave, so a source
+/// route names the hops still to come and the target, plus ` via` the
+/// first hop the packet is really sent to.
+pub(crate) fn kernel_header_note(
+    ttl: Option<u8>,
+    ip_options: &[u8],
+    dst: IpAddr,
+    badsum: bool,
+) -> String {
+    let IpAddr::V4(dst4) = dst else {
+        return header_note(ttl, &[], badsum);
+    };
+    let (opts, hop) = crate::packet_opts::get().ipv4_header_options(dst4);
+    let opts = if ip_options.is_empty() {
+        Vec::new()
+    } else {
+        opts
+    };
+    let mut s = header_note(ttl, &opts, badsum);
+    if !ip_options.is_empty() && hop != dst4 {
+        s.push_str(&format!(" via {hop}"));
+    }
+    s
+}
+
+/// What the packet options put in a probe, for its trace line: ` ttl=N`
+/// (given only with `--ttl`, so the usual lines stay as they were),
+/// ` ipopts={...}` for IPv4 header options and ` badsum` for a wrong
+/// transport checksum, each only when present.
+pub(crate) fn header_note(ttl: Option<u8>, ip_options: &[u8], badsum: bool) -> String {
+    let mut s = String::new();
+    if let Some(ttl) = ttl {
+        s.push_str(&format!(" ttl={ttl}"));
+    }
+    if !ip_options.is_empty() {
+        s.push_str(&format!(
+            " ipopts={{{}}}",
+            crate::packet_opts::describe_ip_options(ip_options)
+        ));
+    }
+    if badsum {
+        s.push_str(" badsum");
+    }
+    s
 }
 
 /// Trace line for a complete IPv4 packet sent on an `IPPROTO_RAW` socket.
@@ -219,13 +284,18 @@ pub(crate) fn describe_raw_ipv4(pkt: &[u8], to: SocketAddr) -> String {
     let proto = pkt[9];
     let src = Ipv4Addr::new(pkt[12], pkt[13], pkt[14], pkt[15]);
     let dst = Ipv4Addr::new(pkt[16], pkt[17], pkt[18], pkt[19]);
+    let options = pkt.get(20..ihl).unwrap_or(&[]);
+    let ttl = crate::packet_opts::get().ttl.map(|_| pkt[8]);
     let frag = u16::from_be_bytes([pkt[6], pkt[7]]);
     let offset = usize::from(frag & 0x1fff) * 8;
     let more = frag & 0x2000 != 0;
     // A fragment past the first carries no transport header to read.
     if offset > 0 {
         let tail = if more { " +" } else { "" };
-        return format!("IP {src} > {dst} proto {proto} frag offset={offset}{tail}");
+        return format!(
+            "IP {src} > {dst} proto {proto} frag offset={offset}{tail}{}",
+            header_note(ttl, options, false)
+        );
     }
     let payload = pkt.get(ihl..).unwrap_or(&[]);
     // The first fragment (offset 0, more set) with `-f` carries only 8 bytes
@@ -234,12 +304,20 @@ pub(crate) fn describe_raw_ipv4(pkt: &[u8], to: SocketAddr) -> String {
     if more && proto == packet::IPPROTO_TCP && (4..20).contains(&payload.len()) {
         let sport = u16::from_be_bytes([payload[0], payload[1]]);
         let dport = u16::from_be_bytes([payload[2], payload[3]]);
-        return format!("TCP {src}:{sport} > {dst}:{dport} (frag)");
+        return format!(
+            "TCP {src}:{sport} > {dst}:{dport} (frag){}",
+            header_note(ttl, options, false)
+        );
     }
     let mut line = describe(proto, payload, Some(IpAddr::V4(src)), Some(IpAddr::V4(dst)));
     if more {
         line.push_str(" (frag)");
     }
+    // A source-routed packet's checksum covers its final destination.
+    let last = crate::packet_opts::final_destination(options, dst);
+    let bad = !more
+        && crate::packet_opts::checksum_is_bad(proto, IpAddr::V4(src), IpAddr::V4(last), payload);
+    line.push_str(&header_note(ttl, options, bad));
     line
 }
 

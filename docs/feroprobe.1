@@ -352,6 +352,12 @@ Each is an IP address, optionally with a port
 port is 53.
 FeroProbe uses its own resolver for these queries.
 Target hostnames are still resolved by the system resolver.
+.SS \f[V]--system-dns\f[R]
+.PP
+Use the system resolver for reverse DNS.
+That is already FeroProbe\[aq]s default (nmap\[aq]s default is its own
+parallel resolver), so the option only matters together with
+\f[V]--dns-servers\f[R], which it overrides, with a warning.
 .SH PORT SCANNING BASICS
 .SS Port states
 .PP
@@ -713,6 +719,73 @@ T}
 .TE
 .PP
 \f[V]-sO\f[R] can run together with a TCP, UDP or SCTP scan.
+.SS FTP bounce scan (\f[V]-b <FTP relay host>\f[R])
+.PP
+Asks an FTP server (the relay) to open a data connection to each target
+port, as nmap\[aq]s \f[V]-b\f[R] does: after logging in, FeroProbe sends
+one \f[V]PORT\f[R] command naming the target address and port, then
+\f[V]LIST\f[R], over a single control connection.
+The relay, not this machine, connects to the targets, so the result
+shows what the targets look like from the relay\[aq]s network.
+.PP
+The argument is \f[V][user[:pass]\[at]]server[:port]\f[R]; the defaults
+are user \f[V]anonymous\f[R], password \f[V]-wwwuser\[at]\f[R] and port
+21, like nmap\[aq]s.
+The last \f[V]\[at]\f[R] ends the login, so a password may contain
+\f[V]\[at]\f[R].
+.PP
+.TS
+tab(@);
+l l.
+T{
+Relay\[aq]s answer to \f[V]LIST\f[R]
+T}@T{
+State
+T}
+_
+T{
+\f[V]150\f[R]/\f[V]125\f[R] then \f[V]226\f[R] (the data connection
+opened), or a \f[V]2xx\f[R]
+T}@T{
+\f[V]open\f[R]
+T}
+T{
+\f[V]425\f[R] (can\[aq]t open data connection), \f[V]150\f[R] then
+\f[V]426\f[R], anything else
+T}@T{
+\f[V]closed\f[R]
+T}
+T{
+Nothing within 12 seconds, or a \f[V]150\f[R] that never completes
+(FeroProbe sends \f[V]ABOR\f[R])
+T}@T{
+\f[V]filtered\f[R]
+T}
+.TE
+.PP
+If the relay refuses a \f[V]PORT\f[R] command for a port below 1024
+before any privileged port went through, FeroProbe warns and skips the
+privileged ports, as nmap does; if it refuses an unprivileged one, the
+relay cannot bounce at all and the scan stops with an error.
+The reason shown with \f[V]--reason\f[R] is \f[V]ftp-bounce\f[R] (or
+\f[V]no-response\f[R] for \f[V]filtered\f[R]).
+.PP
+\f[V]-b\f[R] is a TCP scan of its own: it replaces the default TCP scan
+and cannot be combined with \f[V]-sS\f[R], \f[V]-sT\f[R] or the other
+TCP scans.
+It is IPv4 only, because \f[V]PORT\f[R] carries an IPv4 address, and it
+needs no privileges.
+Host discovery still runs from this machine, so FeroProbe prints
+nmap\[aq]s hint to add \f[V]-Pn\f[R] when the targets are only reachable
+from the relay.
+The FTP commands and answers show in \f[V]--packet-trace\f[R] as
+\f[V]SENT ... FTP\f[R] and \f[V]RCVD ... FTP\f[R] lines (the password as
+\f[V]****\f[R]), and \f[V]--dry-run\f[R] lists one line per port.
+.PP
+Like the evasion options, the bounce scan is refused when any target or
+the relay has a public address, unless \f[V]--allow-public-evasion\f[R]
+is given; see the authorization model.
+Few FTP servers still allow it (RFC 2577 asks them not to).
 .SS Version detection (\f[V]-sV\f[R])
 .PP
 Listed with the scan types because it is given as \f[V]-s\f[R] option;
@@ -1618,6 +1691,19 @@ Default from the template: 1 s, or for TCP, SCTP and IP protocol probes
 An explicit \f[V]--scan-delay\f[R] above it raises it, as in nmap;
 \f[V]--max-scan-delay\f[R] given explicitly applies to every scan type.
 It never takes the delay below \f[V]--scan-delay\f[R].
+.SS \f[V]--defeat-rst-ratelimit\f[R]
+.PP
+In a SYN scan, a reset that answers a resent probe no longer slows the
+scan down.
+Many hosts rate-limit the resets they send for closed ports, and the
+scan otherwise reads the missing ones as losses and backs off.
+The price, as in nmap: a closed port whose reset was held back may be
+reported \f[V]filtered\f[R], and the port table then says
+\f[V]Some closed ports may be reported as filtered due to --defeat-rst-ratelimit\f[R].
+It is refused with any other TCP scan type unless \f[V]--open\f[R] is
+given.
+\f[V]--open\f[R] turns it on by itself, as in nmap, since closed and
+filtered ports are not shown then.
 .SS \f[V]--host-timeout <time>\f[R]
 .PP
 Give up on a host whose port scans and detection take longer than this
@@ -1761,6 +1847,80 @@ fragment as \f[V]TCP src:sport > dst:dport (frag)\f[R], the later ones
 as \f[V]IP src > dst proto 6 frag offset=N\f[R], with a trailing
 \f[V]+\f[R] while more fragments follow.
 nmap shows only the unfragmented probe there; see Differences from nmap.
+.SS Packet contents
+.PP
+These options change what goes into the probes.
+Unlike the options above they need no authorization; \f[V]--badsum\f[R]
+needs raw sockets.
+.PP
+They apply, as in nmap, to the raw TCP scans, the UDP scan, the SCTP
+scans, the IP protocol scan, the discovery pings and (all but
+\f[V]--ip-options\f[R]) traceroute.
+OS detection keeps its own packets: it takes \f[V]--ttl\f[R] but no
+payload, options or bad checksum.
+The connect scan and version detection use the system\[aq]s TCP stack,
+so none of them apply; FeroProbe warns when the TCP scan is
+\f[V]-sT\f[R].
+\f[V]--packet-trace\f[R] and \f[V]--dry-run\f[R] show what was added:
+\f[V]len=N\f[R] for TCP data, \f[V]ttl=N\f[R], \f[V]ipopts={...}\f[R],
+\f[V]badsum\f[R], and \f[V]via <hop>\f[R] for a source route.
+.SS \f[V]--data <hex string>\f[R]
+.PP
+Add these bytes after the header of each probe, written
+\f[V]0xdeadbeef\f[R], \f[V]\[rs]xde\[rs]xad\[rs]xbe\[rs]xef\f[R] or
+\f[V]deadbeef\f[R].
+They replace the payload of ICMP echo requests and of UDP probes (nmap
+does the same with its UDP payloads), so those probes no longer carry
+FeroProbe\[aq]s \f[V]feroprobe\f[R] and \f[V]FeroProbeScan/1\f[R]
+markers; the TCP window mark stays (see docs/responsible-use.md).
+Payloads over 1400 bytes get nmap\[aq]s warning that they may not be
+sent successfully.
+Only one of \f[V]--data\f[R], \f[V]--data-string\f[R] and
+\f[V]--data-length\f[R] may be given.
+.SS \f[V]--data-string <string>\f[R]
+.PP
+Like \f[V]--data\f[R], with the bytes of this text.
+.SS \f[V]--data-length <number>\f[R]
+.PP
+Like \f[V]--data\f[R], with this many random bytes (0 to 65435), drawn
+once for the whole scan as nmap does.
+.SS \f[V]--ip-options <options>\f[R]
+.PP
+Send IPv4 probes with these IP header options, in nmap\[aq]s notation:
+.IP \[bu] 2
+\f[V]R\f[R]: record route (room for 9 addresses),
+.IP \[bu] 2
+\f[V]T\f[R]: internet timestamp; \f[V]U\f[R]: timestamps with addresses,
+.IP \[bu] 2
+\f[V]L <hop> [<hop> ...]\f[R]: loose source route;
+\f[V]S <hop> ...\f[R]: strict source route.
+Up to 8 hops; the packet goes to the first hop and the target takes the
+last slot,
+.IP \[bu] 2
+raw bytes: \f[V]\[rs]x01\[rs]x07\[rs]x04...\f[R] in hex,
+\f[V]\[rs]1\[rs]7\f[R] in decimal, and \f[V]*N\f[R] to repeat the last
+byte (\f[V]\[rs]x01*4\f[R] is four NOPs).
+.PP
+The result is padded to a multiple of 4 bytes and may be at most 40.
+IPv4 only: probes to IPv6 targets go without them, with a warning.
+With \f[V]-f\f[R]/\f[V]--mtu\f[R] every fragment carries the whole
+header, options included, as in nmap.
+Many routers drop packets with source routes.
+.SS \f[V]--ttl <value>\f[R]
+.PP
+Send probes with this IP time-to-live (IPv6 hop limit), 0 to 255,
+instead of a random one from 37 to 59.
+.SS \f[V]--badsum\f[R]
+.PP
+Send TCP, UDP, SCTP, ICMP and IGMP probes with a checksum one less than
+the right one, as nmap does.
+Hosts drop such packets, so an answer usually comes from a firewall or
+IDS that did not check the checksum.
+UDP scan probes then go out on a raw socket from the probe\[aq]s port.
+It needs raw sockets: without them FeroProbe warns and sends correct
+checksums.
+ICMPv6 checksums are always written by the kernel, so IPv6 echo requests
+keep theirs.
 .SH OUTPUT
 .SS Normal output
 .PP
@@ -2122,6 +2282,16 @@ packages, or by Wireshark), and otherwise a small built-in table of
 common vendors.
 The IEEE publishes the list at
 \f[V]https://standards-oui.ieee.org/oui/oui.csv\f[R].
+.SS \f[V]--privileged\f[R]
+.PP
+Assume raw sockets work, for a process that has \f[V]CAP_NET_RAW\f[R] in
+a way FeroProbe\[aq]s check (opening a raw socket) does not see.
+A raw socket that then cannot be opened fails the scan with an error.
+.SS \f[V]--unprivileged\f[R]
+.PP
+Act as an ordinary user: no raw sockets, so the connect scan and connect
+pings by default, as without root.
+The last of \f[V]--privileged\f[R] and \f[V]--unprivileged\f[R] wins.
 .SS \f[V]-V\f[R], \f[V]--version\f[R]
 .PP
 Print the version and exit.
@@ -2216,13 +2386,14 @@ T{
 \f[V]-sA\f[R], \f[V]-sW\f[R], \f[V]-sM\f[R], \f[V]--scanflags\f[R],
 \f[V]-sY\f[R], \f[V]-sZ\f[R], \f[V]-sO\f[R], \f[V]-O\f[R],
 \f[V]--traceroute\f[R], \f[V]-f\f[R], \f[V]--mtu\f[R], \f[V]-D\f[R],
-\f[V]-S\f[R], ARP and neighbour discovery, raw
+\f[V]-S\f[R], \f[V]--badsum\f[R], ARP and neighbour discovery, raw
 \f[V]-PS\f[R]/\f[V]-PA\f[R] pings, \f[V]-PP\f[R], \f[V]-PM\f[R]
 T}@T{
-\f[V]-sT\f[R], \f[V]-sU\f[R], \f[V]-sV\f[R], \f[V]-sn\f[R],
-\f[V]-Pn\f[R], \f[V]-PS\f[R] and \f[V]-PA\f[R] (as connects),
-\f[V]-PU\f[R], \f[V]-PE\f[R] (where an unprivileged ping socket exists),
-all output options, \f[V]--explain\f[R], \f[V]--dry-run\f[R]
+\f[V]-sT\f[R], \f[V]-sU\f[R], \f[V]-sV\f[R], \f[V]-b\f[R],
+\f[V]-sn\f[R], \f[V]-Pn\f[R], \f[V]-PS\f[R] and \f[V]-PA\f[R] (as
+connects), \f[V]-PU\f[R], \f[V]-PE\f[R] (where an unprivileged ping
+socket exists), all output options, \f[V]--explain\f[R],
+\f[V]--dry-run\f[R]
 T}
 .TE
 .PP
@@ -2260,6 +2431,11 @@ UDP probes to ports without a service payload carry
 .IP \[bu] 2
 ICMP and ICMPv6 echo requests (host discovery) carry the 9-byte payload
 \f[V]feroprobe\f[R], where nmap\[aq]s are empty.
+.PP
+A payload given with \f[V]--data\f[R], \f[V]--data-string\f[R] or
+\f[V]--data-length\f[R] replaces the UDP and ICMP echo markers (the TCP
+window mark stays), and the FTP bounce scan (\f[V]-b\f[R]) sends only
+ordinary FTP commands to the relay.
 .PP
 The connect scan and OS detection probes carry no mark, by design.
 Suricata and Snort rules matching the signature are in the
@@ -2314,7 +2490,25 @@ None (empty ICMP echo payload)
 T}@T{
 Raw TCP probes use window 65109; generic UDP probes carry
 \f[V]FeroProbeScan/1\[rs]n\f[R]; ICMP echo requests carry
-\f[V]feroprobe\f[R]
+\f[V]feroprobe\f[R].
+A \f[V]--data\f[R], \f[V]--data-string\f[R] or \f[V]--data-length\f[R]
+payload replaces the UDP and echo markers, as nmap\[aq]s replaces its
+payloads
+T}
+T{
+FTP bounce scan (\f[V]-b\f[R])
+T}@T{
+Allowed against any target through any relay
+T}@T{
+Public targets or a public relay need \f[V]--allow-public-evasion\f[R]
+T}
+T{
+\f[V]--badsum\f[R] with \f[V]-O\f[R]
+T}@T{
+Also spoils the OS-detection probes (nmap\[aq]s checksum routine applies
+it to every packet), which makes their answers meaningless
+T}@T{
+OS-detection probes keep correct checksums
 T}
 T{
 Unprivileged discovery
@@ -2493,24 +2687,19 @@ These nmap options are refused as unknown, or (for \f[V]-PO\f[R],
 alternatives:
 .IP \[bu] 2
 Scans and discovery: \f[V]-sL\f[R] (list scan), \f[V]-sI\f[R] (idle
-scan, not planned), \f[V]-b\f[R] (FTP bounce), \f[V]-PO\f[R],
-\f[V]-PY\f[R], \f[V]-PR\f[R], \f[V]-iR\f[R], \f[V]--system-dns\f[R],
-\f[V]--resolve-all\f[R].
+scan, not planned), \f[V]-PO\f[R], \f[V]-PY\f[R], \f[V]-PR\f[R],
+\f[V]-iR\f[R], \f[V]--resolve-all\f[R].
 .IP \[bu] 2
 Scripting: \f[V]-sC\f[R], \f[V]--script\f[R] and related options
 (nmap\[aq]s scripts cannot be shipped under their licence).
 .IP \[bu] 2
-Timing: \f[V]--min-hostgroup\f[R], \f[V]--max-hostgroup\f[R],
-\f[V]--defeat-rst-ratelimit\f[R].
+Timing: \f[V]--min-hostgroup\f[R], \f[V]--max-hostgroup\f[R].
 .IP \[bu] 2
-Evasion and packet options: \f[V]--spoof-mac\f[R], \f[V]--data\f[R],
-\f[V]--data-string\f[R], \f[V]--data-length\f[R],
-\f[V]--ip-options\f[R], \f[V]--ttl\f[R], \f[V]--badsum\f[R].
+Evasion and packet options: \f[V]--spoof-mac\f[R].
 .IP \[bu] 2
 Output and misc: \f[V]-oS\f[R], \f[V]--append-output\f[R],
 \f[V]--resume\f[R], \f[V]--stylesheet\f[R], \f[V]--webxml\f[R],
 \f[V]--no-stylesheet\f[R], \f[V]-d\f[R], \f[V]--iflist\f[R],
-\f[V]--privileged\f[R], \f[V]--unprivileged\f[R],
 \f[V]--port-ratio\f[R], and the interactive keys during a scan.
 .PP
 DEVELOPMENT.md tracks which of these are planned.

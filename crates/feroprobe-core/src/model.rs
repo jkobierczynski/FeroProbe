@@ -254,6 +254,11 @@ pub struct ScanConfig {
     /// picks a random port. Connect scans, version detection, traceroute
     /// and DNS keep their own ports, as in nmap.
     pub source_port: Option<u16>,
+    /// nmap's `--defeat-rst-ratelimit`: in a raw TCP scan, a RST that
+    /// answers a resent probe does not slow the scan down, so hosts that
+    /// rate-limit their RSTs do not drag it out. Some closed ports may then
+    /// be reported filtered. `--open` sets it too, as in nmap.
+    pub defeat_rst_ratelimit: bool,
 }
 
 impl ScanConfig {
@@ -310,6 +315,7 @@ impl Default for ScanConfig {
             rate_schedule: None,
             evasion: crate::evasion::Evasion::default(),
             source_port: None,
+            defeat_rst_ratelimit: false,
         }
     }
 }

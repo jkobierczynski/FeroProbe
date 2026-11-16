@@ -535,13 +535,34 @@ mod icmp {
     impl Query {
         /// The request to send, with a valid checksum (ICMPv6 leaves that
         /// to the kernel).
-        fn request(self, v6: bool, id: u16, seq: u16) -> Vec<u8> {
+        ///
+        /// The `--data` bytes replace the echo payload and follow the
+        /// timestamp and mask bodies; `--badsum` spoils the checksum of
+        /// the ICMPv4 requests (the kernel writes ICMPv6's).
+        pub(crate) fn request(self, v6: bool, id: u16, seq: u16) -> Vec<u8> {
+            let opts = crate::packet_opts::get();
+            let any = std::net::IpAddr::from([0u8; 4]);
             match self {
-                Query::Echo if v6 => packet::icmpv6_echo(id, seq, packet::ECHO_MARKER),
-                Query::Echo => packet::icmp_echo(id, seq, packet::ECHO_MARKER),
+                Query::Echo if v6 => packet::icmpv6_echo(id, seq, opts.echo_payload()),
+                Query::Echo => {
+                    let p = packet::icmp_echo(id, seq, opts.echo_payload());
+                    opts.finish(packet::IPPROTO_ICMP, any, any, p, false)
+                }
                 // Originate, receive and transmit timestamps.
-                Query::Timestamp => packet::icmp_query(packet::ICMP_TIMESTAMP, id, seq, 12),
-                Query::Mask => packet::icmp_query(packet::ICMP_ADDRESS_MASK, id, seq, 4),
+                Query::Timestamp => opts.finish(
+                    packet::IPPROTO_ICMP,
+                    any,
+                    any,
+                    packet::icmp_query(packet::ICMP_TIMESTAMP, id, seq, 12),
+                    true,
+                ),
+                Query::Mask => opts.finish(
+                    packet::IPPROTO_ICMP,
+                    any,
+                    any,
+                    packet::icmp_query(packet::ICMP_ADDRESS_MASK, id, seq, 4),
+                    true,
+                ),
             }
         }
 

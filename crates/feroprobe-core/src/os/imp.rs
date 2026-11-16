@@ -15,9 +15,7 @@ use super::probes::{self, Keys, PROBES, Target};
 use super::{Job, OsOptions, ScanConfig, classify, db, tries_for};
 use crate::capture;
 use crate::packet;
-use crate::raw::{
-    Pacer, Rng, nmap_ip_header, raw_socket, raw_socket_in, send_logged_until, source_addr_for,
-};
+use crate::raw::{Pacer, Rng, raw_socket, raw_socket_in, send_logged_until, source_addr_for};
 
 /// Where answers are matched: target address to (slot, open port, closed port).
 pub(super) type Slots = HashMap<IpAddr, (usize, u16, Option<u16>)>;
@@ -348,7 +346,8 @@ fn send(
     if !pacer.wait_until(cfg.deadline) {
         return Err(ScanConfig::timed_out());
     }
-    nmap_ip_header(sock, v6);
+    // nmap's OS probes carry no --ip-options.
+    crate::raw::nmap_ip_header_bare(sock, v6);
     // `socket_addr` keeps a link-local target's interface scope.
     let to = crate::target::socket_addr(s.dst, 0);
     let proto = match (probes::target_of(i), v6) {

@@ -140,7 +140,13 @@ impl RawTcpScan {
         let (echoed, max) = if self.flags & TCP_ACK != 0 {
             (tcp.seq, 0)
         } else {
-            let max = u32::from(self.flags & TCP_SYN != 0) + u32::from(self.flags & TCP_FIN != 0);
+            // The --data bytes count too: a reset acknowledges them all.
+            let data = crate::packet_opts::get()
+                .data
+                .as_ref()
+                .map_or(0, |d| d.len() as u32);
+            let max =
+                u32::from(self.flags & TCP_SYN != 0) + u32::from(self.flags & TCP_FIN != 0) + data;
             (tcp.ack, max)
         };
         let off = echoed.wrapping_sub(cookie);
@@ -347,8 +353,8 @@ mod imp {
     use crate::connect::is_network_error;
     use crate::model::{PortResult, Protocol};
     use crate::raw::{
-        Pacer, Rng, nmap_ip_header, probe_ttl, raw_socket_in, receive_loop,
-        send_with_backoff_until, source_addr_for,
+        Pacer, Rng, nmap_ip_header, raw_socket_in, receive_loop, send_with_backoff_until,
+        source_addr_for,
     };
     use crate::rtt::{Flight, Next};
     use crate::target::socket_addr;
@@ -394,7 +400,6 @@ mod imp {
         let IpAddr::V4(dst4) = dst else {
             return Ok(());
         };
-        let to = socket_addr(dst, 0);
         for (i, source) in cfg.evasion.source_addrs(real_src).into_iter().enumerate() {
             let IpAddr::V4(src4) = source else { continue };
             let seg = if flags == TCP_SYN {
@@ -402,10 +407,13 @@ mod imp {
             } else {
                 packet::tcp_probe(source, dst, sport, dport, seq, ack, flags).to_vec()
             };
+            let seg = crate::packet_opts::get().finish(packet::IPPROTO_TCP, source, dst, seg, true);
             // A distinct identification per datagram; fragments of one
             // datagram share it, as reassembly needs.
             let id = (seq as u16) ^ dport ^ (i as u16);
-            let pkt = packet::ipv4_packet(src4, dst4, packet::IPPROTO_TCP, probe_ttl(), id, &seg);
+            let (pkt, hop) =
+                crate::packet_opts::ipv4_probe(src4, dst4, packet::IPPROTO_TCP, id, &seg);
+            let to = socket_addr(IpAddr::V4(hop), 0);
             let frags = match cfg.evasion.fragment {
                 Some(f) => crate::evasion::fragment_ipv4(&pkt, f),
                 None => vec![pkt],
@@ -428,6 +436,8 @@ mod imp {
         // A TCP answer (not an ICMP error) proves the host up for the other
         // discovery probes too.
         let no_answer = scan.kind.no_response();
+        // Not for discovery pings: --defeat-rst-ratelimit is a port-scan option.
+        let defeat_rst = cfg.defeat_rst_ratelimit && done.is_none();
         let record = |results: &mut HashMap<(usize, u16), PortResult>,
                       flight: &mut Flight<u16>,
                       a: Answer| {
@@ -444,7 +454,7 @@ mod imp {
                     results.remove(&(a.0, a.1));
                 }
             }
-            record(results, flight, no_answer, a)
+            record(results, flight, no_answer, defeat_rst, a)
         };
         let addrs: Vec<IpAddr> = targets.iter().map(|t| t.addr).collect();
         let index: Arc<HashMap<IpAddr, usize>> =
@@ -691,12 +701,20 @@ mod imp {
                 // probe look like an ordinary connection attempt.
                 let sent = if let Some(raw) = evasion_sock.as_ref().filter(|_| addrs[h].is_ipv4()) {
                     send_evasion(raw, src, addrs[h], sport, p, seq, ack, scan.flags, cfg)
-                } else if scan.flags == TCP_SYN {
-                    let pkt = packet::tcp_syn(src, addrs[h], sport, p, seq);
-                    nmap_ip_header(send_sock, addrs[h].is_ipv6());
-                    send_with_backoff_until(send_sock, &pkt, to, cfg.deadline)
                 } else {
-                    let pkt = packet::tcp_probe(src, addrs[h], sport, p, seq, ack, scan.flags);
+                    let pkt = if scan.flags == TCP_SYN {
+                        packet::tcp_syn(src, addrs[h], sport, p, seq).to_vec()
+                    } else {
+                        packet::tcp_probe(src, addrs[h], sport, p, seq, ack, scan.flags).to_vec()
+                    };
+                    // --data, --data-length and --badsum, as in nmap.
+                    let pkt = crate::packet_opts::get().finish(
+                        packet::IPPROTO_TCP,
+                        src,
+                        addrs[h],
+                        pkt,
+                        true,
+                    );
                     nmap_ip_header(send_sock, addrs[h].is_ipv6());
                     send_with_backoff_until(send_sock, &pkt, to, cfg.deadline)
                 };
@@ -754,6 +772,7 @@ mod imp {
         results: &mut HashMap<(usize, u16), PortResult>,
         flight: &mut Flight<u16>,
         no_answer: PortState,
+        defeat_rst: bool,
         (h, p, state, why, at, tryno): Answer,
     ) -> bool {
         if results.contains_key(&(h, p)) {
@@ -761,7 +780,10 @@ mod imp {
         }
         // An ICMP error moves no window on a retry when silence already
         // means filtered (see `rtt::Outcome::FilteredError`).
-        let filtered_error = no_answer == PortState::Filtered && state == PortState::Filtered;
+        // With --defeat-rst-ratelimit a RST (closed) is treated the same,
+        // as nmap does, so rate-limited RSTs do not slow the scan.
+        let filtered_error = (no_answer == PortState::Filtered && state == PortState::Filtered)
+            || (defeat_rst && state == PortState::Closed);
         let Some(rtt) = flight.answered(h, p, at, filtered_error, Some(tryno)) else {
             return false;
         };
@@ -903,6 +925,7 @@ mod imp {
                 &mut results,
                 &mut flight,
                 PortState::Filtered,
+                false,
                 (0, 80, PortState::Closed, reason::RESET, later, 0)
             ));
             // ... but does not stand in for B's answer.
@@ -911,6 +934,7 @@ mod imp {
                 &mut results,
                 &mut flight,
                 PortState::Filtered,
+                false,
                 (1, 80, PortState::Closed, reason::RESET, later, 0),
             ));
             assert!(!flight.any_waiting());
@@ -919,6 +943,7 @@ mod imp {
                 &mut results,
                 &mut flight,
                 PortState::Filtered,
+                false,
                 (1, 80, PortState::Open, reason::SYN_ACK, later, 0),
             ));
         }

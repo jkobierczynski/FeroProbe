@@ -19,6 +19,7 @@ HOST DISCOVERY:
   -PE/PP/PM: ICMP echo, timestamp and address mask request probes
   -n/-R: Never resolve names / resolve every target [default: hosts that are up]
   --dns-servers <serv1[,serv2],...>: Ask these servers for reverse DNS
+  --system-dns: Use the system resolver (the default; overrides --dns-servers)
   --disable-arp-ping, --send-ip: No ARP or neighbour discovery on the local link
   --randomize-hosts: Scan the targets in random order
   --traceroute: Trace the hop path to each host
@@ -29,6 +30,7 @@ SCAN TECHNIQUES:
   -sY/sZ: SCTP INIT and COOKIE ECHO scans
   -sO: IP protocol scan - which protocols (TCP, UDP, ICMP, ...) a host runs
   --scanflags <flags>: Send these TCP flags (e.g. SYNFIN) instead
+  -b <FTP relay host>: FTP bounce scan ([user[:pass]@]server[:port])
 FIREWALL/IDS EVASION AND SPOOFING:
   -e <iface>: Send and receive on this network interface
   -g, --source-port <portnum>: Send raw and UDP probes from this source port
@@ -37,6 +39,12 @@ FIREWALL/IDS EVASION AND SPOOFING:
   -D, --decoys <a,b,ME,c>: Cloak the scan among decoy source addresses
   -S, --source <addr>: Spoof the source address of raw IPv4 probes
   --allow-public-evasion: Authorize the above against public targets you may test
+  --data <hex string>: Add these bytes to raw probes (ex: 0xdeadbeef)
+  --data-string <string>: Add this text to raw probes
+  --data-length <num>: Add <num> random bytes to raw probes
+  --ip-options <options>: Send IPv4 probes with these IP options (R, T, U, L/S <hops>)
+  --ttl <val>: Set the IP time-to-live (IPv6 hop limit) of probes
+  --badsum: Send probes with a wrong TCP/UDP/SCTP/ICMP checksum
 PORT SPECIFICATION AND SCAN ORDER:
   -p, --ports <port ranges>: Scan only these ports
     Ex: -p 443; -p 1-1024; -p 22,80,T:8080,U:53,S:2905; -sO -p P:1,6,17
@@ -72,6 +80,7 @@ TIMING AND PERFORMANCE:
   --scan-delay <time>: Wait at least <time> between probes
   --max-scan-delay <time>: Longest delay the scan may add for a lossy host
   --host-timeout <time>: Give up on a host after <time>
+  --defeat-rst-ratelimit: Don't slow a SYN scan down for rate-limited RSTs
 OUTPUT:
   -oN/-oX/-oG/-oJ <file>: Write normal, XML, grepable or JSON output to <file>
   -oA <basename>: Write normal, XML and grepable output at once
@@ -89,6 +98,8 @@ MISC:
   -A: Version and OS detection plus traceroute
   --override-ics-protection: Allow -sV/-O/-A once despite ics_protection = true
   --oui-file <file>: IEEE OUI list for MAC vendor names
+  --privileged: Assume raw sockets work
+  --unprivileged: Act as an ordinary user, with no raw sockets
   -V, --version: Print the version
   -h, --help: Print this help page
 EXAMPLES:

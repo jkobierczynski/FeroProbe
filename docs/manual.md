@@ -280,6 +280,12 @@ is an IP address, optionally with a port (`192.0.2.53:5353`,
 resolver for these queries. Target hostnames are still resolved by the
 system resolver.
 
+#### `--system-dns`
+
+Use the system resolver for reverse DNS. That is already FeroProbe's
+default (nmap's default is its own parallel resolver), so the option only
+matters together with `--dns-servers`, which it overrides, with a warning.
+
 ## Port scanning basics
 
 ### Port states
@@ -440,6 +446,44 @@ a datagram, an INIT); every other protocol is sent as a bare IP header.
 | No answer | `open\|filtered` |
 
 `-sO` can run together with a TCP, UDP or SCTP scan.
+
+### FTP bounce scan (`-b <FTP relay host>`)
+
+Asks an FTP server (the relay) to open a data connection to each target
+port, as nmap's `-b` does: after logging in, FeroProbe sends one `PORT`
+command naming the target address and port, then `LIST`, over a single
+control connection. The relay, not this machine, connects to the targets,
+so the result shows what the targets look like from the relay's network.
+
+The argument is `[user[:pass]@]server[:port]`; the defaults are user
+`anonymous`, password `-wwwuser@` and port 21, like nmap's. The last `@`
+ends the login, so a password may contain `@`.
+
+| Relay's answer to `LIST` | State |
+| --- | --- |
+| `150`/`125` then `226` (the data connection opened), or a `2xx` | `open` |
+| `425` (can't open data connection), `150` then `426`, anything else | `closed` |
+| Nothing within 12 seconds, or a `150` that never completes (FeroProbe sends `ABOR`) | `filtered` |
+
+If the relay refuses a `PORT` command for a port below 1024 before any
+privileged port went through, FeroProbe warns and skips the privileged
+ports, as nmap does; if it refuses an unprivileged one, the relay cannot
+bounce at all and the scan stops with an error. The reason shown with
+`--reason` is `ftp-bounce` (or `no-response` for `filtered`).
+
+`-b` is a TCP scan of its own: it replaces the default TCP scan and cannot
+be combined with `-sS`, `-sT` or the other TCP scans. It is IPv4 only,
+because `PORT` carries an IPv4 address, and it needs no privileges. Host
+discovery still runs from this machine, so FeroProbe prints nmap's hint to
+add `-Pn` when the targets are only reachable from the relay. The FTP
+commands and answers show in `--packet-trace` as `SENT ... FTP` and `RCVD
+... FTP` lines (the password as `****`), and `--dry-run` lists one line per
+port.
+
+Like the evasion options, the bounce scan is refused when any target or
+the relay has a public address, unless `--allow-public-evasion` is given;
+see [the authorization model](#authorization-model). Few FTP servers still
+allow it (RFC 2577 asks them not to).
 
 ### Version detection (`-sV`)
 
@@ -1040,6 +1084,17 @@ and 5 ms with `-T5`. An explicit `--scan-delay` above it raises it, as in
 nmap; `--max-scan-delay` given explicitly applies to every scan type. It
 never takes the delay below `--scan-delay`.
 
+#### `--defeat-rst-ratelimit`
+
+In a SYN scan, a reset that answers a resent probe no longer slows the
+scan down. Many hosts rate-limit the resets they send for closed ports,
+and the scan otherwise reads the missing ones as losses and backs off.
+The price, as in nmap: a closed port whose reset was held back may be
+reported `filtered`, and the port table then says `Some closed ports may be
+reported as filtered due to --defeat-rst-ratelimit`. It is refused with
+any other TCP scan type unless `--open` is given. `--open` turns it on by
+itself, as in nmap, since closed and filtered ports are not shown then.
+
 #### `--host-timeout <time>`
 
 Give up on a host whose port scans and detection take longer than this
@@ -1166,6 +1221,72 @@ so you see exactly what goes on the wire: the first fragment as `TCP
 src:sport > dst:dport (frag)`, the later ones as `IP src > dst proto 6 frag
 offset=N`, with a trailing `+` while more fragments follow. nmap shows only
 the unfragmented probe there; see [Differences from nmap](#differences-from-nmap).
+
+### Packet contents
+
+These options change what goes into the probes. Unlike the options above
+they need no authorization; `--badsum` needs raw sockets.
+
+They apply, as in nmap, to the raw TCP scans, the UDP scan, the SCTP
+scans, the IP protocol scan, the discovery pings and (all but
+`--ip-options`) traceroute. OS detection keeps its own packets: it takes
+`--ttl` but no payload, options or bad checksum. The connect scan and
+version detection use the system's TCP stack, so none of them apply;
+FeroProbe warns when the TCP scan is `-sT`. `--packet-trace` and
+`--dry-run` show what was added: `len=N` for TCP data, `ttl=N`,
+`ipopts={...}`, `badsum`, and `via <hop>` for a source route.
+
+#### `--data <hex string>`
+
+Add these bytes after the header of each probe, written `0xdeadbeef`,
+`\xde\xad\xbe\xef` or `deadbeef`. They replace the payload of ICMP echo
+requests and of UDP probes (nmap does the same with its UDP payloads), so
+those probes no longer carry FeroProbe's `feroprobe` and
+`FeroProbeScan/1` markers; the TCP window mark stays (see
+[docs/responsible-use.md](responsible-use.md)). Payloads over 1400 bytes
+get nmap's warning that they may not be sent successfully. Only one of
+`--data`, `--data-string` and `--data-length` may be given.
+
+#### `--data-string <string>`
+
+Like `--data`, with the bytes of this text.
+
+#### `--data-length <number>`
+
+Like `--data`, with this many random bytes (0 to 65435), drawn once for
+the whole scan as nmap does.
+
+#### `--ip-options <options>`
+
+Send IPv4 probes with these IP header options, in nmap's notation:
+
+- `R`: record route (room for 9 addresses),
+- `T`: internet timestamp; `U`: timestamps with addresses,
+- `L <hop> [<hop> ...]`: loose source route; `S <hop> ...`: strict source
+  route. Up to 8 hops; the packet goes to the first hop and the target
+  takes the last slot,
+- raw bytes: `\x01\x07\x04...` in hex, `\1\7` in decimal, and `*N` to
+  repeat the last byte (`\x01*4` is four NOPs).
+
+The result is padded to a multiple of 4 bytes and may be at most 40.
+IPv4 only: probes to IPv6 targets go without them, with a warning. With
+`-f`/`--mtu` every fragment carries the whole header, options included, as
+in nmap. Many routers drop packets with source routes.
+
+#### `--ttl <value>`
+
+Send probes with this IP time-to-live (IPv6 hop limit), 0 to 255, instead
+of a random one from 37 to 59.
+
+#### `--badsum`
+
+Send TCP, UDP, SCTP, ICMP and IGMP probes with a checksum one less than
+the right one, as nmap does. Hosts drop such packets, so an answer usually
+comes from a firewall or IDS that did not check the checksum. UDP scan
+probes then go out on a raw socket from the probe's port. It needs raw
+sockets: without them FeroProbe warns and sends correct checksums. ICMPv6
+checksums are always written by the kernel, so IPv6 echo requests keep
+theirs.
 
 ## Output
 
@@ -1427,6 +1548,18 @@ packages, or by Wireshark), and otherwise a small built-in table of
 common vendors. The IEEE publishes the list at
 `https://standards-oui.ieee.org/oui/oui.csv`.
 
+#### `--privileged`
+
+Assume raw sockets work, for a process that has `CAP_NET_RAW` in a way
+FeroProbe's check (opening a raw socket) does not see. A raw socket that
+then cannot be opened fails the scan with an error.
+
+#### `--unprivileged`
+
+Act as an ordinary user: no raw sockets, so the connect scan and connect
+pings by default, as without root. The last of `--privileged` and
+`--unprivileged` wins.
+
 #### `-V`, `--version`
 
 Print the version and exit.
@@ -1494,7 +1627,7 @@ See [docs/ics-protection.md](ics-protection.md) for the full rationale.
 
 | Needs raw sockets (Linux, root or `CAP_NET_RAW`) | Works without |
 | --- | --- |
-| `-sS`, `-sF`, `-sN`, `-sX`, `-sA`, `-sW`, `-sM`, `--scanflags`, `-sY`, `-sZ`, `-sO`, `-O`, `--traceroute`, `-f`, `--mtu`, `-D`, `-S`, ARP and neighbour discovery, raw `-PS`/`-PA` pings, `-PP`, `-PM` | `-sT`, `-sU`, `-sV`, `-sn`, `-Pn`, `-PS` and `-PA` (as connects), `-PU`, `-PE` (where an unprivileged ping socket exists), all output options, `--explain`, `--dry-run` |
+| `-sS`, `-sF`, `-sN`, `-sX`, `-sA`, `-sW`, `-sM`, `--scanflags`, `-sY`, `-sZ`, `-sO`, `-O`, `--traceroute`, `-f`, `--mtu`, `-D`, `-S`, `--badsum`, ARP and neighbour discovery, raw `-PS`/`-PA` pings, `-PP`, `-PM` | `-sT`, `-sU`, `-sV`, `-b`, `-sn`, `-Pn`, `-PS` and `-PA` (as connects), `-PU`, `-PE` (where an unprivileged ping socket exists), all output options, `--explain`, `--dry-run` |
 
 Instead of running as root on Linux, you can grant the binary just the
 capability it needs:
@@ -1523,6 +1656,10 @@ owners can recognize them:
 - ICMP and ICMPv6 echo requests (host discovery) carry the 9-byte payload
   `feroprobe`, where nmap's are empty.
 
+A payload given with `--data`, `--data-string` or `--data-length` replaces
+the UDP and ICMP echo markers (the TCP window mark stays), and the FTP
+bounce scan (`-b`) sends only ordinary FTP commands to the relay.
+
 The connect scan and OS detection probes carry no mark, by design. Suricata
 and Snort rules matching the signature are in the repository's `rules/`
 directory. Details are in [docs/responsible-use.md](responsible-use.md).
@@ -1537,7 +1674,9 @@ safeguard calls for a difference. The deliberate differences are:
 | `--packet-trace` with `-f`/`--mtu` | Prints one `SENT` line for the unfragmented probe, although fragments are what goes on the wire | Prints one line per fragment actually sent. nmap's display is treated as a bug |
 | Evasion options (`-f`, `--mtu`, `-D`, `-S`) | Allowed against any address | Raw IPv4 TCP scans only; public targets, decoys or spoofed sources need `--allow-public-evasion` |
 | Decoy order (`-D ...,ME,...`) | `ME` places the real probe | `ME` is accepted, but the real probe always goes last |
-| Probe signature | None (empty ICMP echo payload) | Raw TCP probes use window 65109; generic UDP probes carry `FeroProbeScan/1\n`; ICMP echo requests carry `feroprobe` |
+| Probe signature | None (empty ICMP echo payload) | Raw TCP probes use window 65109; generic UDP probes carry `FeroProbeScan/1\n`; ICMP echo requests carry `feroprobe`. A `--data`, `--data-string` or `--data-length` payload replaces the UDP and echo markers, as nmap's replaces its payloads |
+| FTP bounce scan (`-b`) | Allowed against any target through any relay | Public targets or a public relay need `--allow-public-evasion` |
+| `--badsum` with `-O` | Also spoils the OS-detection probes (nmap's checksum routine applies it to every packet), which makes their answers meaningless | OS-detection probes keep correct checksums |
 | Unprivileged discovery | TCP connects to 80 and 443 only | The same, plus an ICMP echo through an unprivileged ping socket where the OS offers one |
 | `--explain`, `--dry-run` | No equivalent | FeroProbe's own planning and checking options |
 | Settings files, `ics_protection`, `--override-ics-protection` | No equivalent | FeroProbe's own; off by default, so default behaviour is unchanged |
@@ -1568,16 +1707,14 @@ These nmap options are refused as unknown, or (for `-PO`, `-PY`, `-PR`)
 with an error naming the supported alternatives:
 
 - Scans and discovery: `-sL` (list scan), `-sI` (idle scan, not planned),
-  `-b` (FTP bounce), `-PO`, `-PY`, `-PR`, `-iR`, `--system-dns`,
-  `--resolve-all`.
+  `-PO`, `-PY`, `-PR`, `-iR`, `--resolve-all`.
 - Scripting: `-sC`, `--script` and related options (nmap's scripts cannot
   be shipped under their licence).
-- Timing: `--min-hostgroup`, `--max-hostgroup`, `--defeat-rst-ratelimit`.
-- Evasion and packet options: `--spoof-mac`, `--data`, `--data-string`, `--data-length`, `--ip-options`, `--ttl`,
-  `--badsum`.
+- Timing: `--min-hostgroup`, `--max-hostgroup`.
+- Evasion and packet options: `--spoof-mac`.
 - Output and misc: `-oS`, `--append-output`, `--resume`, `--stylesheet`,
-  `--webxml`, `--no-stylesheet`, `-d`, `--iflist`, `--privileged`,
-  `--unprivileged`, `--port-ratio`, and the interactive keys during a scan.
+  `--webxml`, `--no-stylesheet`, `-d`, `--iflist`, `--port-ratio`, and the
+  interactive keys during a scan.
 
 [DEVELOPMENT.md](../DEVELOPMENT.md) tracks which of these are planned.
 

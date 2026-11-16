@@ -8,15 +8,47 @@ use std::time::{Duration, Instant};
 
 use socket2::{Domain, Protocol, Socket, Type};
 
-/// Whether this process may open raw sockets (root, or `CAP_NET_RAW` on Linux).
+/// `--privileged` (1) or `--unprivileged` (2); 0 means find out.
+static PRIVILEGE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// Override the privilege check, like nmap's `--privileged` (`Some(true)`:
+/// assume raw sockets work, as when the process has `CAP_NET_RAW` that a
+/// check cannot see) and `--unprivileged` (`Some(false)`: act as an
+/// ordinary user, sending nothing raw). `None` checks again.
+pub fn assume_privileged(p: Option<bool>) {
+    let v = match p {
+        None => 0,
+        Some(true) => 1,
+        Some(false) => 2,
+    };
+    PRIVILEGE.store(v, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The `--privileged`/`--unprivileged` override, if any.
+pub(crate) fn privilege_override() -> Option<bool> {
+    match PRIVILEGE.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => Some(true),
+        2 => Some(false),
+        _ => None,
+    }
+}
+
+/// Whether this process may open raw sockets (root, or `CAP_NET_RAW` on
+/// Linux), unless `--privileged` or `--unprivileged` said otherwise.
 pub fn raw_sockets_available() -> bool {
-    Socket::new(Domain::IPV4, Type::RAW, Some(Protocol::TCP)).is_ok()
+    privilege_override()
+        .unwrap_or_else(|| Socket::new(Domain::IPV4, Type::RAW, Some(Protocol::TCP)).is_ok())
 }
 
 /// Whether this process may open raw IPv6 sockets: it has the privileges
-/// and the system has IPv6.
+/// and the system has IPv6. `--unprivileged` makes it false;
+/// `--privileged` still needs the system to have IPv6.
 pub fn raw_ipv6_available() -> bool {
-    Socket::new(Domain::IPV6, Type::RAW, Some(Protocol::TCP)).is_ok()
+    match privilege_override() {
+        Some(false) => false,
+        Some(true) => Socket::new(Domain::IPV6, Type::DGRAM, None).is_ok(),
+        None => Socket::new(Domain::IPV6, Type::RAW, Some(Protocol::TCP)).is_ok(),
+    }
 }
 
 /// Open a raw IPv4 socket for `proto`, with a friendly error if not allowed.
@@ -28,6 +60,12 @@ pub(crate) fn raw_socket(proto: Protocol) -> io::Result<Socket> {
 /// Open a raw socket of `domain` (IPv4 or IPv6) for `proto`.
 #[cfg(target_os = "linux")]
 pub(crate) fn raw_socket_in(domain: Domain, proto: Protocol) -> io::Result<Socket> {
+    if privilege_override() == Some(false) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "--unprivileged was given, so no raw sockets are used",
+        ));
+    }
     let sock = Socket::new(domain, Type::RAW, Some(proto)).map_err(|e| {
         if e.kind() == io::ErrorKind::PermissionDenied {
             io::Error::new(
@@ -42,10 +80,13 @@ pub(crate) fn raw_socket_in(domain: Domain, proto: Protocol) -> io::Result<Socke
     Ok(sock)
 }
 
-/// A TTL (IPv6: hop limit) for one probe, picked like nmap does when no
-/// `--ttl` is given: at random from 37 to 59 (`build_ip_raw` in nmap's
-/// tcpip.cc). A fresh value for every probe.
+/// A TTL (IPv6: hop limit) for one probe: the `--ttl` value, or, like
+/// nmap when none is given, one picked at random from 37 to 59
+/// (`build_ip_raw` in nmap's tcpip.cc), fresh for every probe.
 pub(crate) fn probe_ttl() -> u8 {
+    if let Some(ttl) = crate::packet_opts::get().ttl {
+        return ttl;
+    }
     use std::cell::Cell;
     thread_local! {
         static STATE: Cell<u64> = Cell::new({
@@ -67,9 +108,10 @@ pub(crate) fn probe_ttl() -> u8 {
 }
 
 /// Give the next probe sent on `sock` nmap's IP header: "don't fragment"
-/// clear (IPv4) and a random TTL or hop limit from [`probe_ttl`]. Call it
-/// before each probe on a socket whose IP header the kernel writes. Best
-/// effort: an option the system refuses leaves its default in place.
+/// clear (IPv4), the TTL or hop limit from [`probe_ttl`], and the
+/// `--ip-options` (IPv4). Call it before each probe on a socket whose IP
+/// header the kernel writes. Best effort: an option the system refuses
+/// leaves its default in place.
 pub(crate) fn nmap_ip_header(sock: &Socket, ipv6: bool) {
     let ttl = u32::from(probe_ttl());
     if ipv6 {
@@ -77,6 +119,73 @@ pub(crate) fn nmap_ip_header(sock: &Socket, ipv6: bool) {
     } else {
         clear_dont_fragment(sock);
         let _ = sock.set_ttl_v4(ttl);
+        let opts = &crate::packet_opts::get().ip_options;
+        if !opts.is_empty() {
+            set_ip_options(sock, opts);
+        }
+    }
+}
+
+/// Set IPv4 header options (`IP_OPTIONS`) on `sock`. For source routes the
+/// kernel sends to the first hop and puts the destination in the last
+/// slot, as nmap does by hand.
+pub(crate) fn set_ip_options(sock: &Socket, opts: &[u8]) {
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        // SAFETY: valid socket fd, and a pointer/length pair for `opts`.
+        unsafe {
+            libc::setsockopt(
+                sock.as_raw_fd(),
+                libc::IPPROTO_IP,
+                libc::IP_OPTIONS,
+                opts.as_ptr().cast(),
+                opts.len() as libc::socklen_t,
+            );
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = (sock, opts);
+}
+
+/// [`nmap_ip_header`] without the `--ip-options`, for OS detection,
+/// whose probes nmap sends with a plain IP header.
+pub(crate) fn nmap_ip_header_bare(sock: &Socket, ipv6: bool) {
+    let ttl = u32::from(probe_ttl());
+    if ipv6 {
+        let _ = sock.set_unicast_hops_v6(ttl);
+    } else {
+        clear_dont_fragment(sock);
+        let _ = sock.set_ttl_v4(ttl);
+    }
+}
+
+/// The IPv4 options set on `sock` with `IP_OPTIONS`, for the trace.
+pub(crate) fn ip_options_of(sock: &Socket) -> Vec<u8> {
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd;
+        let mut buf = [0u8; 40];
+        let mut len = buf.len() as libc::socklen_t;
+        // SAFETY: valid socket fd, and a buffer with its length.
+        let rc = unsafe {
+            libc::getsockopt(
+                sock.as_raw_fd(),
+                libc::IPPROTO_IP,
+                libc::IP_OPTIONS,
+                buf.as_mut_ptr().cast(),
+                &raw mut len,
+            )
+        };
+        if rc == 0 {
+            return buf[..(len as usize).min(40)].to_vec();
+        }
+        Vec::new()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = sock;
+        Vec::new()
     }
 }
 
@@ -414,7 +523,21 @@ pub(crate) fn send_with_backoff_until(
     deadline: Option<Instant>,
 ) -> io::Result<()> {
     send_logged_until(sock, pkt, to, deadline, || {
-        crate::packet_trace::sent(sent_protocol(sock, to), pkt, to);
+        let opts = if to.is_ipv4() {
+            ip_options_of(sock)
+        } else {
+            Vec::new()
+        };
+        // The TTL the socket really sends with, shown with --ttl.
+        let ttl = crate::packet_opts::get().ttl.and_then(|_| {
+            let t = if to.is_ipv6() {
+                sock.unicast_hops_v6()
+            } else {
+                sock.ttl_v4()
+            };
+            t.ok().map(|t| t as u8)
+        });
+        crate::packet_trace::sent(sent_protocol(sock, to), pkt, to, &opts, ttl);
     })
 }
 

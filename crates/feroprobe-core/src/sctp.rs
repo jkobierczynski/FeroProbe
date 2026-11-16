@@ -142,11 +142,12 @@ mod imp {
             SctpScanKind::CookieEcho => tag,
         };
 
-        let send = |_: usize, port: u16, _: IpAddr, dst: IpAddr| -> io::Result<()> {
+        let send = |_: usize, port: u16, src: IpAddr, dst: IpAddr| -> io::Result<()> {
             let pkt = match kind {
                 SctpScanKind::Init => packet::sctp_init(sport, port, tag, tsn),
                 SctpScanKind::CookieEcho => packet::sctp_cookie_echo(sport, port, tag, tsn),
             };
+            let pkt = crate::packet_opts::get().finish(packet::IPPROTO_SCTP, src, dst, pkt, true);
             let sock = if dst.is_ipv6() {
                 v6.as_ref()
             } else {
