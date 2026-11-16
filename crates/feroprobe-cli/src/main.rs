@@ -1,9 +1,11 @@
 //! `feroprobe`: an nmap-style network scanner, written natively in Rust.
 
 mod config;
+mod debugging;
 mod explain;
 mod grep;
 mod help;
+mod keys;
 mod output;
 mod xml;
 
@@ -250,7 +252,7 @@ struct Args {
     /// Targets: IPv4 or IPv6 addresses, CIDR blocks (10.0.0.0/24, 2001:db8::/120),
     /// ranges (10.0.0.1-20), link-local addresses with their interface
     /// (fe80::1%eth0) or hostnames
-    #[arg(required_unless_present = "input_file")]
+    #[arg(required_unless_present_any = ["input_file", "iflist"])]
     targets: Vec<String>,
 
     /// -iL FILE: read more targets from FILE (one or more per line, # starts
@@ -637,6 +639,28 @@ struct Args {
     /// and the open ports each scan found when it finishes); -vv for more
     #[arg(short = 'v', action = clap::ArgAction::Count)]
     verbose: u8,
+
+    /// -d: raise the debugging level (and the verbosity) by one; -dd by
+    /// two, and so on; -d<level> sets both to <level> (0 to 10). Also turns
+    /// on --reason, as in nmap
+    #[arg(
+        long = "debug",
+        value_name = "LEVEL",
+        num_args = 0..=1,
+        require_equals = true,
+        default_missing_value = "",
+        action = clap::ArgAction::Append
+    )]
+    debug: Vec<String>,
+
+    /// Print the host's interfaces and routes, then stop
+    #[arg(long)]
+    iflist: bool,
+
+    /// Do not read keys from the terminal while the scan runs (v/V, d/D,
+    /// p/P, ? and any other key for a status line)
+    #[arg(long)]
+    noninteractive: bool,
 }
 
 /// nmap's two-letter options (`-iL`, `-oN`, `-oX`, `-oG`, `-oA`) clash with
@@ -662,6 +686,13 @@ fn nmap_style_args(argv: impl IntoIterator<Item = String>) -> Vec<String> {
             "-oJ" => Some("--output-json"),
             "-oA" => Some("--output-all"),
             "-oS" => Some("--output-skid"),
+            // -d, -dd, -d3: nmap's debug option takes its argument only
+            // when attached, so `-d host` keeps `host` as a target.
+            "-d" => Some("--debug"),
+            d if d.starts_with("-d") => {
+                out.push(format!("--debug={}", &d[2..]));
+                continue;
+            }
             _ => None,
         };
         out.push(long.map_or(a, str::to_string));
@@ -899,7 +930,9 @@ fn refuse_planted_link(_path: &str) -> Result<()> {
 /// `--stats-every` names.
 #[derive(Clone, Copy)]
 struct Progress {
-    level: u8,
+    /// Say nothing, whatever the verbosity (the per-host jobs of
+    /// `--host-timeout`, which report as one).
+    quiet: bool,
     /// Whether this run's phases are the ones `--stats-every` reports. Off
     /// for the per-host scans of `--host-timeout`, which share one count.
     track: bool,
@@ -915,8 +948,8 @@ fn set_phase(what: &str, probes: usize) {
 
 impl Progress {
     fn say(&self, level: u8, msg: impl FnOnce() -> String) {
-        if self.level >= level {
-            eprintln!("{}", msg());
+        if !self.quiet {
+            feroprobe_core::debug::verbose(level, msg);
         }
     }
 
@@ -943,20 +976,27 @@ impl Progress {
         }
     }
 
-    /// Announce the open ports a scan found, like nmap's -v.
+    /// Announce the open ports a scan found, like nmap's -v; from -d2 on,
+    /// the ports in every state, as nmap does.
     fn found(&self, results: &[HostResult]) {
+        if self.quiet {
+            return;
+        }
+        // nmap: open ports at -v, every port at -d2, whatever the other
+        // level (the keys change them independently).
+        // Read per port, so a key pressed meanwhile takes effect at once.
+        let every = || feroprobe_core::debug::debugging() > 1;
+        let open = || feroprobe_core::debug::verbosity() > 0;
         for h in results {
             for p in h
                 .ports
                 .iter()
-                .filter(|p| p.state == feroprobe_core::PortState::Open)
+                .filter(|p| every() || (open() && p.state == feroprobe_core::PortState::Open))
             {
-                self.say(1, || {
-                    format!(
-                        "Discovered open port {}/{} on {}",
-                        p.port, p.protocol, h.addr
-                    )
-                });
+                eprintln!(
+                    "Discovered {} port {}/{} on {}",
+                    p.state, p.port, p.protocol, h.addr
+                );
             }
         }
     }
@@ -1960,7 +2000,7 @@ impl ScanJob<'_> {
             live.len() * probes,
         );
         let quiet = Progress {
-            level: 0,
+            quiet: true,
             track: false,
         };
         let start: Vec<HostResult> = hosts.to_vec();
@@ -2173,7 +2213,16 @@ fn dry_run(
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let args = Args::parse_from(nmap_style_args(std::env::args()));
+    let args = debugging::parse_args(nmap_style_args(std::env::args()));
+    if args.iflist {
+        let debug = feroprobe_core::debug::debugging() > 0;
+        use feroprobe_core::iflist;
+        print!(
+            "{}",
+            iflist::render(&iflist::interfaces(), &iflist::routes(), debug)
+        );
+        return Ok(());
+    }
     // Settings files, then the ICS guard: before anything is resolved or sent.
     let settings = config::load()?;
     for w in &settings.warnings {
@@ -2193,7 +2242,7 @@ async fn main() -> Result<()> {
         outputs.open_files()?
     };
     let progress = Progress {
-        level: args.verbose,
+        quiet: false,
         track: true,
     };
     progress.say(1, || {
@@ -2487,6 +2536,20 @@ async fn main() -> Result<()> {
             }
         })
     });
+    feroprobe_core::debug::debug(1, || {
+        let group = if args.host_timeout.is_some_and(|d| !d.is_zero()) {
+            host_group(targets.len(), &cfg)
+        } else {
+            targets.len().max(1)
+        };
+        debugging::timing_report(&cfg, group, args.host_timeout)
+    });
+    // Keys typed while the scan runs (v/V, d/D, p/P, ?, status).
+    let keys = if args.noninteractive {
+        None
+    } else {
+        keys::start(started)
+    };
     let mut hosts: Vec<HostResult> = if plan.discovery {
         let done = progress.phase("host discovery", targets.len());
         let hosts = discover(&targets, &cfg, &probes)
@@ -2565,6 +2628,16 @@ async fn main() -> Result<()> {
                 .srtt(h.addr)
                 .map(|d| (d.as_secs_f64() * 1e6).round() / 1000.0);
         }
+        for h in &hosts {
+            if let Some((srtt, rttvar, to)) = cfg.rtt_state.times(h.addr) {
+                feroprobe_core::debug::debug(1, || {
+                    format!(
+                        "Final times for host {}: srtt: {srtt} rttvar: {rttvar}  to: {to}",
+                        h.addr
+                    )
+                });
+            }
+        }
     } else {
         scan_types.push("ping");
     }
@@ -2601,6 +2674,9 @@ async fn main() -> Result<()> {
     if let Some(task) = stats {
         task.abort();
     }
+    if let Some(k) = keys {
+        k.stop();
+    }
     let ports_per_host = plan.tcp.map_or(0, |_| tcp_ports.len())
         + if plan.udp { udp_ports.len() } else { 0 }
         + plan.sctp.map_or(0, |_| sctp_ports.len())
@@ -2628,7 +2704,7 @@ async fn main() -> Result<()> {
         ports_per_host,
         elapsed: started.elapsed(),
         only_open: args.open,
-        show_reason: args.reason,
+        show_reason: args.reason || feroprobe_core::debug::debugging() > 0,
         show_version: plan.version,
         show_os: os,
         os_guess: args.osscan_guess,
@@ -2636,7 +2712,7 @@ async fn main() -> Result<()> {
         assume_up: !plan.discovery,
         ping_only: plan.ping_only,
         nmap_label: args.nmap_label,
-        verbosity: args.verbose,
+        verbosity: feroprobe_core::debug::verbosity(),
         stylesheet: xml::stylesheet(args.stylesheet.as_deref(), args.webxml, args.no_stylesheet),
     };
     if !outputs.stdout_taken() {
@@ -3801,7 +3877,7 @@ mod tests {
             hostname: None,
         };
         let quiet = Progress {
-            level: 0,
+            quiet: true,
             track: false,
         };
         let fresh = || vec![HostResult::new(target.addr, None)];
