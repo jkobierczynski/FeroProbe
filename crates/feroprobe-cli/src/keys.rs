@@ -100,13 +100,24 @@ mod unix {
     static SAVED: OnceLock<libc::termios> = OnceLock::new();
     static STOP: AtomicBool = AtomicBool::new(false);
 
-    /// Put the terminal's settings back. Async-signal-safe: only
-    /// tcsetattr on a saved copy.
+    /// Put the terminal's settings back. Async-signal-safe: only signal
+    /// mask calls and tcsetattr on a saved copy. SIGTTOU is blocked
+    /// meanwhile, so a scan moved to the background (Ctrl-Z, `bg`) is not
+    /// stopped by the kernel for changing the terminal.
     fn restore() {
         let fd = TTY.load(Ordering::SeqCst);
         if let (true, Some(saved)) = (fd >= 0, SAVED.get()) {
-            // SAFETY: tcsetattr on our own descriptor with a valid termios.
-            unsafe { libc::tcsetattr(fd, libc::TCSANOW, saved) };
+            // SAFETY: plain signal-set and mask calls on local sets, and
+            // tcsetattr on our own descriptor with a valid termios.
+            unsafe {
+                let mut block: libc::sigset_t = std::mem::zeroed();
+                let mut old: libc::sigset_t = std::mem::zeroed();
+                libc::sigemptyset(&mut block);
+                libc::sigaddset(&mut block, libc::SIGTTOU);
+                libc::pthread_sigmask(libc::SIG_BLOCK, &block, &mut old);
+                libc::tcsetattr(fd, libc::TCSANOW, saved);
+                libc::pthread_sigmask(libc::SIG_SETMASK, &old, std::ptr::null_mut());
+            }
         }
     }
 
@@ -172,11 +183,14 @@ mod unix {
             ti.c_cc[libc::VTIME] = 0;
             // SAFETY: tcsetattr on our descriptor with a valid termios.
             unsafe { libc::tcsetattr(fd, libc::TCSANOW, &ti) };
+            // From here the Reader owns the change: dropping it (also when
+            // the thread cannot start) puts the terminal back.
+            let reader = Reader;
             std::thread::Builder::new()
                 .name("keys".into())
                 .spawn(move || read_keys(fd, started))
                 .ok()?;
-            Some(Reader)
+            Some(reader)
         }
     }
 

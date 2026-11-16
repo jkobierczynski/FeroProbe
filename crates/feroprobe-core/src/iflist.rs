@@ -65,7 +65,9 @@ pub fn interfaces() -> io::Result<Vec<IfEntry>> {
     struct Link {
         name: String,
         flags: u32,
-        addrs: Vec<(IpAddr, u8)>,
+        /// Each address with the name it carries (an alias such as
+        /// `eth0:1` names its own addresses).
+        addrs: Vec<(String, IpAddr, u8)>,
         mac: Option<MacAddr>,
         mtu: Option<u32>,
     }
@@ -89,11 +91,14 @@ pub fn interfaces() -> io::Result<Vec<IfEntry>> {
         let name = unsafe { CStr::from_ptr(ifa.ifa_name) }
             .to_string_lossy()
             .into_owned();
-        let i = match links.iter().position(|l| l.name == name) {
+        // A Linux alias (`eth0:1`) shares its interface's flags, hardware
+        // address and MTU.
+        let base = name.split(':').next().unwrap_or(&name).to_string();
+        let i = match links.iter().position(|l| l.name == base) {
             Some(i) => i,
             None => {
                 links.push(Link {
-                    name,
+                    name: base,
                     flags: ifa.ifa_flags,
                     addrs: Vec::new(),
                     mac: None,
@@ -119,7 +124,7 @@ pub fn interfaces() -> io::Result<Vec<IfEntry>> {
                 u32::from_be(m.sin_addr.s_addr).count_ones() as u8
             };
             let addr = Ipv4Addr::from(u32::from_be(sin.sin_addr.s_addr));
-            link.addrs.push((IpAddr::V4(addr), prefix));
+            link.addrs.push((name, IpAddr::V4(addr), prefix));
         } else if family == libc::AF_INET6 {
             // SAFETY: AF_INET6 entries hold sockaddr_in6, as does their mask.
             let sin6 = unsafe { &*(ifa.ifa_addr as *const libc::sockaddr_in6) };
@@ -130,7 +135,7 @@ pub fn interfaces() -> io::Result<Vec<IfEntry>> {
                 u128::from_be_bytes(m.sin6_addr.s6_addr).count_ones() as u8
             };
             let addr = Ipv6Addr::from(sin6.sin6_addr.s6_addr);
-            link.addrs.push((IpAddr::V6(addr), prefix));
+            link.addrs.push((name, IpAddr::V6(addr), prefix));
         } else {
             link_layer(ifa, family, &mut link.mac, &mut link.mtu);
         }
@@ -154,7 +159,7 @@ pub fn interfaces() -> io::Result<Vec<IfEntry>> {
         let mtu = link.mtu.or_else(|| mtu_of(&link.name)).unwrap_or(0);
         let mac = (kind == IfKind::Ethernet).then_some(link.mac).flatten();
         // IPv4 first, as nmap lists an interface's primary address first.
-        link.addrs.sort_by_key(|(a, _)| a.is_ipv6());
+        link.addrs.sort_by_key(|(_, a, _)| a.is_ipv6());
         if link.addrs.is_empty() {
             out.push(IfEntry {
                 name: link.name.clone(),
@@ -166,9 +171,9 @@ pub fn interfaces() -> io::Result<Vec<IfEntry>> {
                 mac,
             });
         }
-        for (addr, prefix) in link.addrs {
+        for (name, addr, prefix) in link.addrs {
             out.push(IfEntry {
-                name: link.name.clone(),
+                name,
                 addr: Some(addr),
                 prefix,
                 kind,
@@ -451,12 +456,24 @@ pub fn render(
 mod tests {
     use super::*;
 
-    const ROUTE: &str = "\
-Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT
-eth0\t00000000\t0100A8C0\t0003\t0\t0\t100\t00000000\t0\t0\t0
-eth0\t0000A8C0\t00000000\t0001\t0\t0\t100\t00FFFFFF\t0\t0\t0
-eth0\t0000A8C0\t00000000\t0000\t0\t0\t100\t00FFFFFF\t0\t0\t0
-";
+    /// A /proc/net/route as this machine's kernel would print it: each
+    /// address's bytes read as a native-endian number.
+    fn route_table() -> String {
+        let hex = |a: [u8; 4]| format!("{:08X}", u32::from_ne_bytes(a));
+        let (any, gw, net, mask) = (
+            hex([0, 0, 0, 0]),
+            hex([192, 168, 0, 1]),
+            hex([192, 168, 0, 0]),
+            hex([255, 255, 255, 0]),
+        );
+        format!(
+            "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT
+eth0\t{any}\t{gw}\t0003\t0\t0\t100\t{any}\t0\t0\t0
+eth0\t{net}\t{any}\t0001\t0\t0\t100\t{mask}\t0\t0\t0
+eth0\t{net}\t{any}\t0000\t0\t0\t100\t{mask}\t0\t0\t0
+"
+        )
+    }
 
     const ROUTE6: &str = "\
 fe800000000000000000000000000000 40 00000000000000000000000000000000 00 00000000000000000000000000000000 00000100 00000001 00000000 00000001     eth0
@@ -465,10 +482,10 @@ fe800000000000000000000000000000 40 00000000000000000000000000000000 00 00000000
 
     #[test]
     fn reads_linux_ipv4_routes() {
-        let r = parse_proc_route(ROUTE);
+        let r = parse_proc_route(&route_table());
         // The third route is down (no RTF_UP) and left out.
         assert_eq!(r.len(), 2);
-        if cfg!(target_endian = "little") {
+        {
             assert_eq!(r[0].dst, "0.0.0.0".parse::<IpAddr>().unwrap());
             assert_eq!(r[0].prefix, 0);
             assert_eq!(r[0].gateway, Some("192.168.0.1".parse().unwrap()));

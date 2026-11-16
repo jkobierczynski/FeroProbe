@@ -863,19 +863,23 @@ impl Progress {
     /// Announce the open ports a scan found, like nmap's -v; from -d2 on,
     /// the ports in every state, as nmap does.
     fn found(&self, results: &[HostResult]) {
+        if self.quiet {
+            return;
+        }
+        // nmap: open ports at -v, every port at -d2, whatever the other
+        // level (the keys change them independently).
         let every = feroprobe_core::debug::debugging() > 1;
+        let open = feroprobe_core::debug::verbosity() > 0;
         for h in results {
             for p in h
                 .ports
                 .iter()
-                .filter(|p| every || p.state == feroprobe_core::PortState::Open)
+                .filter(|p| every || (open && p.state == feroprobe_core::PortState::Open))
             {
-                self.say(1, || {
-                    format!(
-                        "Discovered {} port {}/{} on {}",
-                        p.state, p.port, p.protocol, h.addr
-                    )
-                });
+                eprintln!(
+                    "Discovered {} port {}/{} on {}",
+                    p.state, p.port, p.protocol, h.addr
+                );
             }
         }
     }
