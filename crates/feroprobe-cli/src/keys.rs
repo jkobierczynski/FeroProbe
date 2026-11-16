@@ -70,6 +70,11 @@ pub(crate) struct Keys {
     _inner: unix::Reader,
 }
 
+impl Keys {
+    /// Stop reading keys and put the terminal back.
+    pub(crate) fn stop(self) {}
+}
+
 /// Start reading keys, if there is a terminal and FeroProbe is its
 /// foreground job. `None` otherwise.
 pub(crate) fn start(started: Instant) -> Option<Keys> {

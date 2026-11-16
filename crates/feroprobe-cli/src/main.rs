@@ -2551,7 +2551,9 @@ async fn main() -> Result<()> {
     if let Some(task) = stats {
         task.abort();
     }
-    drop(keys);
+    if let Some(k) = keys {
+        k.stop();
+    }
     let ports_per_host = plan.tcp.map_or(0, |_| tcp_ports.len())
         + if plan.udp { udp_ports.len() } else { 0 }
         + plan.sctp.map_or(0, |_| sctp_ports.len())
