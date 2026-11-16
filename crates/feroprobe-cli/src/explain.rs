@@ -371,7 +371,7 @@ pub(crate) fn explain(args: &Args, f: &Facts) -> Vec<String> {
     say(
         &mut out,
         format!(
-            "{} and resend {}; at most {} probes waiting for an answer at once and {} packets per second",
+            "{} and resend {}; at most {} probes waiting for an answer at once{}",
             wait_text(&c.rtt),
             match c.retries {
                 0 => "nothing".to_string(),
@@ -380,6 +380,7 @@ pub(crate) fn explain(args: &Args, f: &Facts) -> Vec<String> {
             },
             c.concurrency,
             c.max_rate
+                .map_or(String::new(), |r| format!(" and {r} packets per second"))
         ),
     );
     if let Some(min) = args.min_parallelism {

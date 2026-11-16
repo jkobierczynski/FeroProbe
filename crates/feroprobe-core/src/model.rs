@@ -222,8 +222,9 @@ pub struct ScanConfig {
     /// try that was answered, up to this cap. See
     /// [`ScanConfig::first_retries`].
     pub retries: u32,
-    /// Maximum packets per second for raw-socket scans (SYN, ICMP).
-    pub max_rate: u32,
+    /// Maximum packets per second for raw-socket scans (SYN, ICMP):
+    /// `--max-rate`. `None`, the default as in nmap, is no limit.
+    pub max_rate: Option<u32>,
     /// Minimum time between probes (nmap's `--scan-delay`), whatever the
     /// parallelism. Zero means no extra spacing.
     pub scan_delay: Duration,
@@ -300,7 +301,7 @@ impl Default for ScanConfig {
             min_parallelism: 0,
             concurrency: 500,
             retries: 10,
-            max_rate: 5000,
+            max_rate: None,
             scan_delay: Duration::ZERO,
             max_scan_delay: Duration::from_secs(1),
             max_udp_scan_delay: Duration::from_secs(1),

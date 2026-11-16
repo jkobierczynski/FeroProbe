@@ -845,15 +845,16 @@ is aggressive with a lower packet rate. Given more than once, the last
 
 | Template | RTT timeouts (initial / min / max) | Most retries | Most probes waiting at once | Max rate (packets/s) | Scan delay | Max scan delay (TCP, SCTP, IP / UDP) |
 | --- | --- | --- | --- | --- | --- | --- |
-| `-T0` paranoid | 5 min / 100 ms / 5 min | 10 | 1 | 1 | 5 min | 5 min / 5 min |
-| `-T1` sneaky | 15 s / 100 ms / 15 s | 10 | 1 | 1 | 15 s | 15 s / 15 s |
-| `-T2` polite | 1 s / 100 ms / 10 s | 10 | 10 | 100 | 0.4 s | 1 s / 1 s |
-| `-T3` normal (default) | 1 s / 100 ms / 10 s | 10 | 500 | 5000 | none | 1 s / 1 s |
-| `-T4` aggressive | 500 ms / 100 ms / 1.25 s | 6 | 1000 | 10000 | none | 10 ms / 1 s |
-| `-T5` insane | 250 ms / 50 ms / 300 ms | 2 | 2000 | 50000 | none | 5 ms / 1 s |
+| `-T0` paranoid | 5 min / 100 ms / 5 min | 10 | 1 | none | 5 min | 5 min / 5 min |
+| `-T1` sneaky | 15 s / 100 ms / 15 s | 10 | 1 | none | 15 s | 15 s / 15 s |
+| `-T2` polite | 1 s / 100 ms / 10 s | 10 | 10 | none | 0.4 s | 1 s / 1 s |
+| `-T3` normal (default) | 1 s / 100 ms / 10 s | 10 | 500 | none | none | 1 s / 1 s |
+| `-T4` aggressive | 500 ms / 100 ms / 1.25 s | 6 | 1000 | none | none | 10 ms / 1 s |
+| `-T5` insane | 250 ms / 50 ms / 300 ms | 2 | 2000 | none | none | 5 ms / 1 s |
 
 The RTT timeouts, retries and maximum scan delays are nmap's for each
-template. Most retries is a cap: a probe is resent once unless its host
+template. As in nmap, no template limits the packet rate: only an explicit
+`--max-rate` does. Most retries is a cap: a probe is resent once unless its host
 shows losses (see [Resends and delays](#resends-and-delays)). The scan delay also sets a
 floor under every measured timeout, so `-T0` and `-T1` probes wait at least
 their delay.
@@ -1005,8 +1006,9 @@ at least 1, warns above 100, and is an error above an explicit
 #### `--max-rate <number>`
 
 Send at most this many raw-socket packets per second (SYN and other raw
-TCP probes, SCTP, IP protocol, ICMP, ARP and NDP). Default from the
-template: 5000. One rate holds for the whole run, across all scans and
+TCP probes, SCTP, IP protocol, ICMP, ARP and NDP). By default there is
+no limit, as in nmap: the congestion windows and the scan delay pace the
+probes. One rate holds for the whole run, across all scans and
 hosts. Connect and UDP probes are bounded by the congestion windows,
 `--concurrency` and `--scan-delay` instead.
 

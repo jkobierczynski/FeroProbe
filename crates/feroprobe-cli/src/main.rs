@@ -1065,7 +1065,7 @@ fn scan_config(args: &Args) -> ScanConfig {
         min_parallelism: 0,
         concurrency: args.concurrency.unwrap_or(base.concurrency).max(1),
         retries: args.retries.unwrap_or(base.retries),
-        max_rate: args.max_rate.unwrap_or(base.max_rate).max(1),
+        max_rate: args.max_rate.map(|r| r.max(1)).or(base.max_rate),
         scan_delay,
         // Like nmap: an explicit --scan-delay above the template's cap
         // raises it, and --max-scan-delay replaces it. The scan never goes
@@ -1201,7 +1201,7 @@ fn apply_min_rate(
     }
     match args.max_rate {
         Some(max) if max < min => bail!("--min-rate {min} is above --max-rate {max}"),
-        _ => cfg.max_rate = cfg.max_rate.max(min),
+        _ => cfg.max_rate = cfg.max_rate.map(|r| r.max(min)),
     }
     let gap = Duration::from_secs_f64(1.0 / f64::from(min));
     if cfg.scan_delay > gap {
@@ -1899,7 +1899,7 @@ fn host_group(hosts: usize, cfg: &ScanConfig) -> usize {
     hosts
         .min(HOST_GROUP)
         .min(cfg.concurrency)
-        .min(cfg.max_rate as usize)
+        .min(cfg.max_rate.map_or(usize::MAX, |r| r as usize))
         .max(1)
 }
 
@@ -3430,15 +3430,15 @@ mod tests {
         // Windows, whose connect tries wait at least 3 s, 3000).
         let (cfg, w) = tuned(&["--min-rate", "1000", "--timeout", "1500"], None).unwrap();
         assert_eq!(cfg.concurrency, if cfg!(windows) { 3000 } else { 1500 });
-        assert_eq!(cfg.max_rate, 5000);
+        assert_eq!(cfg.max_rate, None);
         assert!(w.is_empty());
         let (cfg, w) = tuned(&["--min-rate", "9000", "--timeout", "100"], Some(1024)).unwrap();
         if cfg!(windows) {
             // 27000 needed: capped by the open-file limit, with a warning.
-            assert_eq!((cfg.max_rate, cfg.concurrency), (9000, 960));
+            assert_eq!((cfg.max_rate, cfg.concurrency), (None, 960));
             assert_eq!(w.len(), 1, "{w:?}");
         } else {
-            assert_eq!((cfg.max_rate, cfg.concurrency), (9000, 900));
+            assert_eq!((cfg.max_rate, cfg.concurrency), (None, 900));
             assert!(w.is_empty());
         }
         // The open-file limit caps the parallelism, with a warning.
@@ -3491,7 +3491,7 @@ mod tests {
     fn host_groups_keep_the_budgets() {
         let cfg = |concurrency, max_rate| ScanConfig {
             concurrency,
-            max_rate,
+            max_rate: Some(max_rate),
             ..ScanConfig::default()
         };
         assert_eq!(host_group(100, &cfg(500, 5000)), HOST_GROUP);

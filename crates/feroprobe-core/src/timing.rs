@@ -61,20 +61,22 @@ impl Timing {
         let ms = Duration::from_millis;
         // Retries are a cap, as in nmap: 10 unless -T4 (6) or -T5 (2).
         // -T4 and -T5 also keep the automatic delay of TCP probes short.
-        let (retries, concurrency, max_rate, scan_delay, max_scan_delay) = match self {
-            Timing::Paranoid => (10, 1, 1, Duration::from_secs(300), Duration::from_secs(1)),
-            Timing::Sneaky => (10, 1, 1, Duration::from_secs(15), Duration::from_secs(1)),
-            Timing::Polite => (10, 10, 100, ms(400), Duration::from_secs(1)),
+        // Like nmap, no template limits the packet rate: the scan delay
+        // and the congestion windows pace the probes.
+        let (retries, concurrency, scan_delay, max_scan_delay) = match self {
+            Timing::Paranoid => (10, 1, Duration::from_secs(300), Duration::from_secs(1)),
+            Timing::Sneaky => (10, 1, Duration::from_secs(15), Duration::from_secs(1)),
+            Timing::Polite => (10, 10, ms(400), Duration::from_secs(1)),
             Timing::Normal => return ScanConfig::default(),
-            Timing::Aggressive => (6, 1000, 10_000, Duration::ZERO, ms(10)),
-            Timing::Insane => (2, 2000, 50_000, Duration::ZERO, ms(5)),
+            Timing::Aggressive => (6, 1000, Duration::ZERO, ms(10)),
+            Timing::Insane => (2, 2000, Duration::ZERO, ms(5)),
         };
         ScanConfig {
             rtt: self.rtt_timeouts(),
             timing_level: self.level(),
             retries,
             concurrency,
-            max_rate,
+            max_rate: None,
             scan_delay,
             // A template's own scan delay raises the cap, as in nmap.
             max_scan_delay: max_scan_delay.max(scan_delay),
@@ -263,7 +265,7 @@ mod tests {
             let (slow, fast) = (&pair[0], &pair[1]);
             assert!(slow.scan_delay >= fast.scan_delay);
             assert!(slow.concurrency <= fast.concurrency);
-            assert!(slow.max_rate <= fast.max_rate);
+            assert_eq!(slow.max_rate, None);
             if slow.timing_level >= 2 {
                 assert!(slow.rtt.max >= fast.rtt.max);
                 assert!(slow.rtt.initial >= fast.rtt.initial);

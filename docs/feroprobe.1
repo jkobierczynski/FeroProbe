@@ -1326,7 +1326,7 @@ T}@T{
 T}@T{
 1
 T}@T{
-1
+none
 T}@T{
 5 min
 T}@T{
@@ -1341,7 +1341,7 @@ T}@T{
 T}@T{
 1
 T}@T{
-1
+none
 T}@T{
 15 s
 T}@T{
@@ -1356,7 +1356,7 @@ T}@T{
 T}@T{
 10
 T}@T{
-100
+none
 T}@T{
 0.4 s
 T}@T{
@@ -1371,7 +1371,7 @@ T}@T{
 T}@T{
 500
 T}@T{
-5000
+none
 T}@T{
 none
 T}@T{
@@ -1386,7 +1386,7 @@ T}@T{
 T}@T{
 1000
 T}@T{
-10000
+none
 T}@T{
 none
 T}@T{
@@ -1401,7 +1401,7 @@ T}@T{
 T}@T{
 2000
 T}@T{
-50000
+none
 T}@T{
 none
 T}@T{
@@ -1411,6 +1411,8 @@ T}
 .PP
 The RTT timeouts, retries and maximum scan delays are nmap\[aq]s for
 each template.
+As in nmap, no template limits the packet rate: only an explicit
+\f[V]--max-rate\f[R] does.
 Most retries is a cap: a probe is resent once unless its host shows
 losses (see Resends and delays).
 The scan delay also sets a floor under every measured timeout, so
@@ -1582,7 +1584,8 @@ message.
 .PP
 Send at most this many raw-socket packets per second (SYN and other raw
 TCP probes, SCTP, IP protocol, ICMP, ARP and NDP).
-Default from the template: 5000.
+By default there is no limit, as in nmap: the congestion windows and the
+scan delay pace the probes.
 One rate holds for the whole run, across all scans and hosts.
 Connect and UDP probes are bounded by the congestion windows,
 \f[V]--concurrency\f[R] and \f[V]--scan-delay\f[R] instead.
