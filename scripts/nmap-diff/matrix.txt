@@ -38,6 +38,8 @@ skip-discovery   | routed | root | -Pn -sS -p @TCP
 version          | lan    | root | -sV -p @TCP
 version-udp      | lan    | root | -sU -sV -p @UDP
 version-closed   | lan    | root | -sV -p 102,502
+version-light    | lan    | root | -sV --version-light -p @TCP
+version-all      | lan    | root | -sV --version-all -p @TCP
 os               | lan    | root | -O -p @TCP
 aggressive       | lan    | root | -A -p @TCP
 aggressive-routed| routed | root | -A -p @TCP

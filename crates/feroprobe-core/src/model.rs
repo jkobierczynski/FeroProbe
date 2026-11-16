@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 
 use crate::arp::MacInfo;
-use crate::os::OsMatch;
+use crate::os::OsResult;
 use crate::service::ServiceInfo;
 use crate::trace::Trace;
 
@@ -146,7 +146,7 @@ pub struct HostResult {
     pub ports: Vec<PortResult>,
     /// What OS detection (`-O`) guessed, if it ran and the host answered.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub os: Option<OsMatch>,
+    pub os: Option<OsResult>,
     /// The route to the host, if `--traceroute` ran.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trace: Option<Trace>,

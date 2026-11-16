@@ -344,7 +344,9 @@ pub(crate) fn explain(args: &Args, f: &Facts) -> Vec<String> {
         } else if let Some(n) = args.top_ports {
             format!("--top-ports {n}")
         } else {
-            "the default: the 100 most common TCP and 20 most common UDP ports".into()
+            "the defaults: the 1000 most common TCP and UDP ports, the 50 most common SCTP ports, \
+             all 256 IP protocols with -sO"
+                .into()
         };
         say(&mut out, format!("ports come from {source}"));
         if let Some(ex) = &args.exclude_ports {
@@ -432,10 +434,19 @@ pub(crate) fn explain(args: &Args, f: &Facts) -> Vec<String> {
     // 6. After the scan.
     let mut extras = Vec::new();
     if p.version {
-        extras.push("service and version detection on open ports (-sV)".to_string());
+        let intensity = crate::version_intensity(args);
+        extras.push(format!(
+            "service and version detection on open ports, and UDP ports left open|filtered \
+             (-sV, intensity {intensity})"
+        ));
     }
     if f.os {
-        extras.push("OS detection from SYN-ACK traits (-O)".to_string());
+        extras.push(
+            "OS detection (-O): up to 9 probes per try to an open and a closed TCP port the \
+             scan finds (and an ICMP echo if discovery sends echo requests), matched against \
+             FeroProbe's own OS database"
+                .to_string(),
+        );
     }
     if f.trace {
         extras.push("traceroute to each host that is up (--traceroute)".to_string());

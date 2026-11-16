@@ -26,7 +26,7 @@ no external binaries.
 | Table, JSON, nmap-style XML and grepable output, `--reason`, `--open`, `--packet-trace` | ✅ |
 | Report files `-oN`, `-oX`, `-oG`, `-oJ`, `-oA`; target lists `-iL`; `--exclude`, `--excludefile`; progress with `-v` | ✅ |
 | Service and version detection, `-sV`, with our own probes and rules | ✅ |
-| OS detection, `-O`, from SYN-ACK traits with our own signatures, IPv4 and IPv6 (Linux, root) | ✅ |
+| OS detection, `-O`, a multi-probe fingerprint matched against our own OS database, with `--osscan-limit`, `--osscan-guess`, `--max-os-tries`, IPv4 and IPv6 (Linux, root) | ✅ |
 | Traceroute, `--traceroute`, IPv4 and IPv6 (Linux, root), and `-A` (`-sV -O --traceroute`) | ✅ |
 
 **[The FeroProbe manual](docs/manual.md)** documents every option, its
@@ -51,7 +51,7 @@ cargo install --git https://github.com/jkobierczynski/FeroProbe feroprobe
 ```sh
 cargo build --release
 
-# Discover hosts, then scan the top 100 ports (SYN scan when root on Linux,
+# Discover hosts, then scan the top 1000 ports (SYN scan when root on Linux,
 # connect scan otherwise)
 ./target/release/feroprobe 192.168.1.0/24
 
@@ -186,42 +186,52 @@ PORT       STATE          SERVICE        VERSION
 
 1. On usual TLS ports (443, 993, 8443, ...) it tries TLS first and probes
    the service inside the tunnel. The certificate's subject name is shown.
-2. It sends the probes meant for that port: HTTP, Redis, memcached,
-   PostgreSQL, AMQP, MQTT, RDP (with its security mode), Microsoft SQL Server
-   (with its release, such as 2019), SMB (dialect and signing), LDAP (vendor,
-   host and naming context), MongoDB, ZooKeeper, RTSP and SIP.
-3. It listens, since SSH, FTP, SMTP, POP3, IMAP, MySQL, VNC, rsync, NNTP and
-   IRC talk first.
-4. If the service is still silent, it tries HTTP and then TLS.
+2. It sends the probes meant for that port: HTTP, Redis, SMB (dialect and
+   signing), RDP (security mode), Microsoft SQL Server (release), LDAP
+   (vendor, host and naming context), MongoDB, ONC RPC and many more.
+3. It listens, since SSH, FTP, SMTP, POP3, IMAP, MySQL, VNC and others talk
+   first.
+4. It tries the other probes, the most common first, up to the intensity
+   (`--version-intensity 0-9`, default 7; `--version-light` is 2,
+   `--version-all` is 9), as nmap does; then TLS if the port stayed silent.
 
-Replies are matched against FeroProbe's own rules in
-`crates/feroprobe-core/src/service/rules.rs`. nmap's probe database is not used,
-because its license does not allow redistributing it. Replies that no rule
-recognizes are printed under "Unrecognized service replies", which is the
-starting point for a new rule. Open UDP ports get a DNS `version.bind`, NTP or
-SNMP query. `--version-timeout` sets how long to wait for each reply (default
+The probes and rules are FeroProbe's own, in
+[`crates/feroprobe-core/data/service-rules.txt`](crates/feroprobe-core/data/service-rules.txt),
+built into the binary; `--service-rules FILE` replaces them. nmap's probe
+database is not used, because its license does not allow redistributing it.
+`--version-trace` prints every probe, reply and matching rule. Replies that
+no rule recognizes are printed under "Unrecognized service replies", which
+is the starting point for a new rule. A `Service Info` line shows the host
+name, OS and CPEs the services gave away. Open UDP ports, and UDP ports left
+`open|filtered`, get the UDP probes (DNS, SNMP, NetBIOS, NTP, SIP, IPMI and
+more). `--version-timeout` sets how long to wait for each reply (default
 3000 ms).
 
 ### OS detection
 
-`-O` sends one SYN that offers every common TCP option to an open port and
-reads the SYN-ACK. The initial TTL (64, 128 or 255), the order of the TCP
-options that come back and the "don't fragment" bit tell operating system
-families apart, and the TTL also gives the number of hops:
+`-O` sends each host with an open TCP port at most 9 probes per try: four
+SYNs with different TCP options, an ECN SYN and an ACK to the open port, a SYN
+and an ACK to a closed port the scan found, and an ICMP echo only when host
+discovery sends echo requests anyway. The answers (option layouts, windows,
+flags, IP ID and timestamp sequences, initial TTL) form a fingerprint that is
+matched against FeroProbe's own OS database, which names versions where the
+probes tell them apart:
 
 ```
-OS guess: Linux 3.x - 6.x (90%), from 22/tcp
-OS fingerprint: ttl=64 df=1 win=65483 opts=M,S,T,N,W mss=65495 ws=7
-Network distance: 1 hop
+Device type: general purpose
+Running: Linux 4.X|5.X|6.X
+OS CPE: cpe:/o:linux:linux_kernel:4 cpe:/o:linux:linux_kernel:5 cpe:/o:linux:linux_kernel:6
+OS details: Linux 4.19 - 6.x
+Network Distance: 1 hop
 ```
 
-The signatures are FeroProbe's own (in `crates/feroprobe-core/src/os.rs`), not
-nmap's database, so the guess is per family (Linux, Windows, macOS, FreeBSD,
-OpenBSD, network devices) rather than an exact version. Linux is still
-recognized when SACK, timestamps or window scaling are turned off. The fingerprint line
-shows the raw traits, which is what a new signature is written from. It needs
-raw sockets, so Linux with root or `CAP_NET_RAW`, and at least one open TCP port.
-IPv6 hosts are covered too: the hop limit stands in for the TTL.
+The database is FeroProbe's own ([docs/os-fingerprints.md](docs/os-fingerprints.md)),
+not nmap's, and much smaller: a host it does not know gets `No exact OS
+matches` and its fingerprint, which is what a new signature is written from.
+`--osscan-guess` shows near matches, `--osscan-limit` skips hosts without both
+an open and a closed TCP port, `--max-os-tries` caps the tries (default 5). It
+needs raw sockets, so Linux with root or `CAP_NET_RAW`. IPv6 hosts are covered
+too.
 
 ### Traceroute and -A
 
@@ -417,7 +427,7 @@ feroprobe -v -oG - 192.168.1.0/24 | grep '/open/'
 | --- | --- |
 | `-p 22,80,1000-2000` | These ports; `-p-` is all 65535 |
 | `-p 22,U:53,161,T:80` | `T:` and `U:` apply to the ports after them; ports before any prefix are both TCP and UDP. Here TCP gets 22 and 80, UDP gets 22, 53 and 161 |
-| `--top-ports N` | The N most common ports (by default 100 for TCP and 20 for UDP) |
+| `--top-ports N` | The N most common ports of each protocol, from FeroProbe's own ranking (by default 1000 for TCP and UDP, as in nmap, and 50 for SCTP) |
 | `-F` | Fast: the 100 most common TCP and UDP ports |
 | `--exclude-ports SPEC` | Leave these out, written like `-p`. As in nmap, this also removes them from the discovery probes (`-PS`, `-PA`, `-PU` and the default TCP pings to 443 and 80) |
 | `-r` | Probe ports in order; by default the order is shuffled, like nmap's (reports are always sorted) |

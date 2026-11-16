@@ -77,6 +77,8 @@ pub struct DryRun<'a> {
     pub evasion: &'a Evasion,
     /// The most times unanswered probes are resent in a real run.
     pub retries: u32,
+    /// OS detection (`-O`), if it runs.
+    pub os: Option<crate::os::OsOptions>,
     /// `-g`: the source port of raw and UDP probes (random when `None`).
     pub source_port: Option<u16>,
     /// Extra lines for the header: steps the dry run cannot show, what a
@@ -92,6 +94,8 @@ pub struct Summary {
     /// Port-scan probes; with `-f`/`--mtu` each fragment counts, with `-D`
     /// each decoy copy counts.
     pub scan: u64,
+    /// OS-detection probes of one try, for every target.
+    pub os: u64,
 }
 
 /// Fixed per-run values (source port, sequence cookie, ...) that a real
@@ -258,6 +262,33 @@ pub fn write(run: &DryRun<'_>, w: &mut dyn Write) -> io::Result<Summary> {
         }
     }
     summary.scan = out.count - before;
+    if let Some(opts) = &run.os
+        && let Some((tcp, ports)) = &run.tcp
+    {
+        let before = out.count;
+        // OS detection needs a port the scan reports open: -sA, -sF, -sN,
+        // -sX and -sM never do, so no host would be fingerprinted.
+        let finds_open = match tcp {
+            DryTcp::Connect => true,
+            DryTcp::Raw(scan) => matches!(
+                scan.kind,
+                crate::syn::TcpScanKind::Syn | crate::syn::TcpScanKind::Window
+            ),
+        };
+        let distinct = ports
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .len();
+        if finds_open {
+            os_probes(&mut out, run, opts, distinct, &sources, &v)?;
+        } else {
+            out.note(
+                "OS detection (-O): no host is fingerprinted, because this TCP scan type never \
+                 reports a port open and OS detection needs an open one",
+            )?;
+        }
+        summary.os = out.count - before;
+    }
     let retry = if run.retries > 0 {
         format!(
             "; a real run resends unanswered probes once{}",
@@ -270,8 +301,13 @@ pub fn write(run: &DryRun<'_>, w: &mut dyn Write) -> io::Result<Summary> {
     } else {
         String::new()
     };
+    let os = if run.os.is_some() && run.tcp.is_some() {
+        format!(", {} OS-detection probes (one try)", summary.os)
+    } else {
+        String::new()
+    };
     out.note(&format!(
-        "Dry run done: {} discovery and {} port-scan probe{} for {} host{} listed, nothing sent{retry}",
+        "Dry run done: {} discovery and {} port-scan probe{}{os} for {} host{} listed, nothing sent{retry}",
         summary.discovery,
         summary.scan,
         if summary.scan == 1 { "" } else { "s" },
@@ -280,6 +316,107 @@ pub fn write(run: &DryRun<'_>, w: &mut dyn Write) -> io::Result<Summary> {
     ))?;
     Ok(summary)
 }
+
+/// The OS-detection probes of one try, per target. The ports are the ones
+/// the scan finds, so they show as `<open>` and `<closed>`.
+fn os_probes(
+    out: &mut Out<'_>,
+    run: &DryRun<'_>,
+    opts: &crate::os::OsOptions,
+    ports: usize,
+    sources: &[Option<IpAddr>],
+    v: &Values,
+) -> io::Result<()> {
+    use crate::os::probes::{self, Target};
+    // One scanned port can be open or closed, never both: there is no
+    // closed port to probe, and --osscan-limit skips every host.
+    let closed = ports >= 2;
+    if opts.limit && !closed {
+        return out.note(
+            "OS detection (-O --osscan-limit): no host is fingerprinted, because the scan \
+             covers only one TCP port and so cannot find both an open and a closed one",
+        );
+    }
+    let max = opts.max_tries.max(1);
+    let tries = if closed {
+        max
+    } else {
+        max.min(crate::os::UNIDEAL_TRIES)
+    };
+    out.note(&format!(
+        "OS detection (-O): only for hosts where the scan finds an open TCP port{}. {} \
+         The four SYNs to <open> go 100 ms apart. A host without a perfect match is tried \
+         again, up to {tries} tr{} in all{}",
+        if opts.limit {
+            " and a closed (or unfiltered) one (--osscan-limit)"
+        } else {
+            ""
+        },
+        if closed {
+            "<open> and <closed> stand for an open and a closed TCP port the scan finds among \
+             the ports above; the probes to <closed> go only if it finds one."
+        } else {
+            "<open> stands for the scanned port when the scan finds it open. With one TCP \
+             port there is no closed port to probe."
+        },
+        if tries == 1 { "y" } else { "ies" },
+        if closed && max > crate::os::UNIDEAL_TRIES {
+            " (two when the scan finds no closed port)"
+        } else {
+            ""
+        },
+    ))?;
+    if opts.icmp_echo {
+        out.note("The echo request is sent because this command's host discovery sends ICMP echo requests")?;
+    }
+    let keys = probes::Keys {
+        sport: v.sport,
+        seq: v.cookie,
+        ack: v.cookie.rotate_left(16),
+        tsval: v.cookie.rotate_left(8),
+        icmp_id: v.icmp_id,
+        fixed: run.source_port.is_some(),
+    };
+    for (t, src) in run.targets.iter().zip(sources) {
+        for i in probes::plan(closed, opts.icmp_echo) {
+            let v6 = t.addr.is_ipv6();
+            let Some(src) = src.filter(|s| s.is_ipv6() == v6) else {
+                out.probe(&format!("{} * > {} (no route)", NAMES_UPPER[i], t.addr))?;
+                continue;
+            };
+            let line = match probes::target_of(i) {
+                Target::Icmp => {
+                    let proto = if v6 {
+                        packet::IPPROTO_ICMPV6
+                    } else {
+                        packet::IPPROTO_ICMP
+                    };
+                    probes::describe(proto, &probes::echo(v6, &keys), Some(src), t.addr)
+                }
+                target => {
+                    let seg = probes::tcp_segment(i, src, t.addr, 0, &keys);
+                    let placeholder = if target == Target::Open {
+                        "<open>"
+                    } else {
+                        "<closed>"
+                    };
+                    probes::describe(packet::IPPROTO_TCP, &seg, Some(src), t.addr).replacen(
+                        &host_port(Some(t.addr), Some(0)),
+                        &host_port(Some(t.addr), None).replace('*', placeholder),
+                        1,
+                    )
+                }
+            };
+            out.probe(&line)?;
+        }
+    }
+    Ok(())
+}
+
+/// The protocol of each OS probe, for a line without a route.
+const NAMES_UPPER: [&str; crate::os::probes::PROBES] = [
+    "TCP", "TCP", "TCP", "TCP", "TCP", "TCP", "TCP", "TCP", "ICMP",
+];
 
 /// The UDP datagram a UDP probe sends; the kernel picks the source port
 /// unless `-g` gave one.
@@ -632,9 +769,79 @@ mod tests {
             protocols: &[],
             evasion: ev,
             retries: 1,
+            os: None,
             source_port: None,
             notes: Vec::new(),
         }
+    }
+
+    #[test]
+    fn os_detection_probes_use_placeholders() {
+        let targets = [target("127.0.0.1")];
+        let ev = Evasion::default();
+        let ports = [22, 80];
+        let run = DryRun {
+            tcp: Some((DryTcp::Raw(RawTcpScan::new(TcpScanKind::Syn)), &ports)),
+            os: Some(crate::os::OsOptions::default()),
+            ..base(&targets, &ev)
+        };
+        let (text, summary) = run_to_string(&run);
+        // Eight TCP probes, no echo (discovery sends none).
+        assert_eq!(summary.os, 8, "{text}");
+        assert!(text.contains("> 127.0.0.1:<open> S seq="), "{text}");
+        assert!(text.contains("> 127.0.0.1:<open> SEC seq="), "{text}");
+        assert!(text.contains("> 127.0.0.1:<closed> A seq="), "{text}");
+        assert!(text.contains("<mss 1460,sackOK,timestamp"), "{text}");
+        assert!(!text.contains("ICMP"), "{text}");
+        assert!(text.contains("up to 5 tries"), "{text}");
+        assert!(text.contains("8 OS-detection probes"), "{text}");
+
+        let echo = crate::os::OsOptions {
+            icmp_echo: true,
+            max_tries: 1,
+            ..Default::default()
+        };
+        let run = DryRun {
+            os: Some(echo),
+            ..run
+        };
+        let (text, summary) = run_to_string(&run);
+        assert_eq!(summary.os, 9, "{text}");
+        assert!(text.contains("echo request"), "{text}");
+        assert!(text.contains("up to 1 try in all"), "{text}");
+
+        // One scanned port cannot be both open and closed: no <closed> probes,
+        // and --osscan-limit fingerprints nothing.
+        // The same port twice is still one port.
+        let one = [22, 22];
+        let run = DryRun {
+            tcp: Some((DryTcp::Raw(RawTcpScan::new(TcpScanKind::Syn)), &one)),
+            os: Some(crate::os::OsOptions::default()),
+            ..base(&targets, &ev)
+        };
+        let (text, summary) = run_to_string(&run);
+        assert_eq!(summary.os, 6, "{text}");
+        assert!(!text.contains("<closed>"), "{text}");
+        let run = DryRun {
+            os: Some(crate::os::OsOptions {
+                limit: true,
+                ..Default::default()
+            }),
+            ..run
+        };
+        let (text, summary) = run_to_string(&run);
+        assert_eq!(summary.os, 0, "{text}");
+        assert!(text.contains("no host is fingerprinted"), "{text}");
+
+        // An ACK scan never finds a port open: nothing to fingerprint.
+        let run = DryRun {
+            tcp: Some((DryTcp::Raw(RawTcpScan::new(TcpScanKind::Ack)), &ports)),
+            os: Some(crate::os::OsOptions::default()),
+            ..base(&targets, &ev)
+        };
+        let (text, summary) = run_to_string(&run);
+        assert_eq!(summary.os, 0, "{text}");
+        assert!(text.contains("never reports a port open"), "{text}");
     }
 
     #[test]
@@ -670,7 +877,8 @@ mod tests {
             summary,
             Summary {
                 discovery: 0,
-                scan: 2
+                scan: 2,
+                os: 0
             }
         );
         let probes: Vec<&str> = text.lines().filter(|l| l.starts_with(PREFIX)).collect();
