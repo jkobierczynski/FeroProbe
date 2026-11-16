@@ -1070,12 +1070,15 @@ fn scan_config(args: &Args) -> ScanConfig {
         // Like nmap: an explicit --scan-delay above the template's cap
         // raises it, and --max-scan-delay replaces it. The scan never goes
         // below --scan-delay whatever the cap.
+        // Never below --scan-delay, even when given explicitly.
         max_scan_delay: args
             .max_scan_delay
-            .unwrap_or(base.max_scan_delay.max(scan_delay)),
+            .unwrap_or(base.max_scan_delay)
+            .max(scan_delay),
         max_udp_scan_delay: args
             .max_scan_delay
-            .unwrap_or(base.max_udp_scan_delay.max(scan_delay)),
+            .unwrap_or(base.max_udp_scan_delay)
+            .max(scan_delay),
         arp_ping: !args.disable_arp_ping,
         deadline: None,
         // One --max-rate for the whole run, like nmap's, however many scans

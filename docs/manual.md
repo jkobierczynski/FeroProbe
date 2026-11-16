@@ -332,7 +332,8 @@ sets its own TTLs.
 
 Sends a SYN and reads the answer without completing the handshake: a
 SYN-ACK means `open`, a reset `closed`, and no answer or an ICMP unreachable
-error `filtered`. Unanswered probes are retried (`--retries`). This is the
+error `filtered`. Unanswered probes are resent as the host's losses call for, up to
+`--retries` times (see [Resends and delays](#resends-and-delays)). This is the
 default scan as root.
 
 ### TCP connect scan (`-sT`)

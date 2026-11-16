@@ -511,7 +511,8 @@ Traceroute sets its own TTLs.
 Sends a SYN and reads the answer without completing the handshake: a
 SYN-ACK means \f[V]open\f[R], a reset \f[V]closed\f[R], and no answer or
 an ICMP unreachable error \f[V]filtered\f[R].
-Unanswered probes are retried (\f[V]--retries\f[R]).
+Unanswered probes are resent as the host\[aq]s losses call for, up to
+\f[V]--retries\f[R] times (see Resends and delays).
 This is the default scan as root.
 .SS TCP connect scan (\f[V]-sT\f[R])
 .PP
