@@ -14,6 +14,7 @@
 #   -e IFACE             the same through the chosen interface: answers
 #                        still reach the scan (they come back through lo)
 #   -sS                  no reset from this host answers a SYN-ACK
+#   silent next hop      --host-timeout still bounds the ARP lookup
 #   -sS -sV              the version scan's own connections complete,
 #                        though the target now answers the spoofed MAC
 #   --spoof-mac 0        a random address: not the interface's, unicast
@@ -142,6 +143,15 @@ echo "== --spoof-mac 02:aa (prefix) =="
 fero_frames -Pn -sS --spoof-mac 02:aa -p "$TCP_OPEN" "$TGT_A"
 check "exit status" "$RC" 0
 check "frames carry the prefix" "$(macs_to_target | cut -c1-5)" "02:aa"
+
+echo "== silent next hop, --host-timeout 300ms =="
+# The next hop's ARP lookup must stop at the host timeout too.
+T0=$(date +%s%N)
+fero -Pn -sS -p 1-20 --host-timeout 300ms --spoof-mac "$SPOOF" 10.66.1.99
+T1=$(( ($(date +%s%N) - T0) / 1000000 ))
+check "exit status" "$RC" 0
+check_true "skipped for the host timeout" output_has "due to host timeout"
+check_true "  within 5 s (${T1} ms)" test "$T1" -lt 5000
 
 echo "== -sS -sV --spoof-mac $SPOOF =="
 # Last of the captured runs: the system's own connections may still be
