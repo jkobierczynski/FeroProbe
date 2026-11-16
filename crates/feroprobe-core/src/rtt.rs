@@ -1007,7 +1007,10 @@ impl<K: Copy + Eq + Hash> Flight<K> {
             // One already passed holds nothing back: not a reason to wake.
             .filter(|&due| due > now)
             .min();
-        let due = [self.next_expiry(), self.cc.min_rate_due(), delays]
+        // An overdue --min-rate deadline has already let every probe it
+        // can go (a host's delay still holds the rest): not a wake-up.
+        let rate = self.cc.min_rate_due().filter(|&due| due > now);
+        let due = [self.next_expiry(), rate, delays]
             .into_iter()
             .flatten()
             .min()
@@ -1253,7 +1256,8 @@ impl AsyncWindow {
                 // Wake for --min-rate or the host's delay between probes,
                 // whichever comes first; answers wake it sooner.
                 let delay = cc.delay_due(h).filter(|&due| due > now);
-                [cc.min_rate_due(), delay].into_iter().flatten().min()
+                let rate = cc.min_rate_due().filter(|&due| due > now);
+                [rate, delay].into_iter().flatten().min()
             };
             match due {
                 Some(due) => {
@@ -1712,6 +1716,24 @@ mod tests {
         // The window is full and the pause is over: wait for the resend's
         // timeout, not for the pause that already ended.
         assert_eq!(f.next(t1 + ms(10)), Next::Wait(t1 + ms(100)));
+    }
+
+    #[test]
+    fn an_overdue_min_rate_does_not_wake_the_scan() {
+        let ms = Duration::from_millis;
+        let cfg = ScanConfig {
+            rtt: RttTimeouts::fixed(ms(100)),
+            min_rate: 1000,
+            ..cfg(500, 3)
+        };
+        let a: IpAddr = "10.0.0.1".parse().unwrap();
+        let mut f: Flight<u16> = Flight::new(&cfg, &[a], vec![1]);
+        let t0 = Instant::now();
+        f.start([(0, 1)]);
+        assert_eq!(f.next(t0), Next::Send(0, 1));
+        f.sent(0, 1, t0);
+        // Only an answer or the timeout can change anything now.
+        assert_eq!(f.next(t0 + ms(50)), Next::Wait(t0 + ms(100)));
     }
 
     #[test]
