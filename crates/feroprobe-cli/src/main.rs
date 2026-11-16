@@ -1478,7 +1478,10 @@ fn packet_option_warnings(
 
 /// The command line for reports, with the password of an FTP bounce
 /// relay (`-b user:pass@server`) masked, so saved output does not carry it.
-fn redact_args(args: impl IntoIterator<Item = String>) -> String {
+/// `secret` is the password the relay login actually uses: wherever it
+/// appears as `:secret@`, in whatever grouping of short options (`-vb`),
+/// it is masked too.
+fn redact_args(args: impl IntoIterator<Item = String>, secret: Option<&str>) -> String {
     let mask = |v: &str| match v.rsplit_once('@') {
         Some((login, server)) => match login.split_once(':') {
             Some((user, _)) => format!("{user}:****@{server}"),
@@ -1501,7 +1504,11 @@ fn redact_args(args: impl IntoIterator<Item = String>) -> String {
             out.push(a);
         }
     }
-    out.join(" ")
+    let line = out.join(" ");
+    match secret.filter(|s| !s.is_empty()) {
+        Some(s) => line.replace(&format!(":{s}@"), ":****@"),
+        None => line,
+    }
 }
 
 /// Refuse evasion options unless they are allowed: a raw TCP scan, raw
@@ -2815,7 +2822,14 @@ async fn main() -> Result<()> {
             } else {
                 Default::default()
             },
-            tcp_ports: if plan.tcp.is_some() { &tcp_ports } else { &[] },
+            tcp_ports: if plan.tcp.is_some() || bounce.is_some() {
+                &tcp_ports
+            } else {
+                &[]
+            },
+            bounce: bounce
+                .as_ref()
+                .map(|(addr, relay)| format!("{}:{} ({})", relay.server, relay.port, addr.ip())),
             udp_ports: if plan.udp { &udp_ports } else { &[] },
             sctp_ports: if plan.sctp.is_some() {
                 &sctp_ports
@@ -3025,7 +3039,10 @@ async fn main() -> Result<()> {
         + plan.sctp.map_or(0, |_| sctp_ports.len())
         + if plan.ip_proto { protocols.len() } else { 0 };
     let info = RunInfo {
-        args: redact_args(std::env::args()),
+        args: redact_args(
+            std::env::args(),
+            bounce.as_ref().map(|(_, relay)| relay.pass.as_str()),
+        ),
         start: start_time,
         scan_types,
         tcp_ports: if (plan.tcp.is_some() || bounce.is_some()) && !plan.ping_only {
@@ -3839,7 +3856,7 @@ mod tests {
 
     #[test]
     fn relay_password_is_masked_in_reports() {
-        let a = |v: &[&str]| redact_args(v.iter().map(|s| s.to_string()));
+        let a = |v: &[&str]| redact_args(v.iter().map(|s| s.to_string()), None);
         assert_eq!(
             a(&["feroprobe", "-b", "bob:s3cret@ftp.lan:2121", "10.0.0.1"]),
             "feroprobe -b bob:****@ftp.lan:2121 10.0.0.1"
@@ -3847,6 +3864,16 @@ mod tests {
         assert_eq!(a(&["feroprobe", "-bbob:x@ftp"]), "feroprobe -bbob:****@ftp");
         assert_eq!(a(&["feroprobe", "-b", "ftp.lan"]), "feroprobe -b ftp.lan");
         assert_eq!(a(&["feroprobe", "-sS", "a@b"]), "feroprobe -sS a@b");
+        // Grouped short options: masked by the relay's own password.
+        let g = |v: &[&str]| redact_args(v.iter().map(|s| s.to_string()), Some("s3cret"));
+        assert_eq!(
+            g(&["feroprobe", "-vb", "bob:s3cret@ftp.lan", "10.0.0.1"]),
+            "feroprobe -vb bob:****@ftp.lan 10.0.0.1"
+        );
+        assert_eq!(
+            g(&["feroprobe", "-vbbob:s3cret@ftp"]),
+            "feroprobe -vbbob:****@ftp"
+        );
     }
 
     #[test]

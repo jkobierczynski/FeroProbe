@@ -221,8 +221,9 @@ async fn discover_with(
             }
         }
     }
-    // Then ARP or NDP for hosts on a local Ethernet network.
-    if cfg.arp_ping {
+    // Then ARP or NDP for hosts on a local Ethernet network. Those need
+    // raw sockets, so `--unprivileged` skips them, as nmap does.
+    if cfg.arp_ping && raw_sockets_available() {
         neighbour_phase(targets, cfg, &mut hosts, &mut decided).await?;
     }
     let decided = decided;
