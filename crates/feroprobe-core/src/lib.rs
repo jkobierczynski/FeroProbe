@@ -89,6 +89,15 @@ pub enum Error {
 
 #[cfg(test)]
 pub(crate) mod testutil {
+    /// Held by every test that sends raw IP-protocol probes (-sO, -PO) to
+    /// 127.0.0.1. Loopback delivers each such probe to every raw socket on
+    /// the machine, and a packet from the target in a probed protocol is a
+    /// `proto-response` (as in nmap), so one test's protocol-253 probe
+    /// would prove the host up for another test that expects the kernel's
+    /// protocol unreachable. Our own probes are told apart by their IP id,
+    /// but a concurrent scan's have a different one.
+    pub(crate) static LOOPBACK_IP_PROTO: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     /// Whether this machine has IPv6 on its loopback interface. CI sets
     /// FEROPROBE_REQUIRE_IPV6=1 so the IPv6 tests cannot silently pass there.
     pub(crate) fn ipv6_loopback() -> bool {

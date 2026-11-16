@@ -579,6 +579,7 @@ mod imp {
                 retries: 0,
                 ..Default::default()
             };
+            let _quiet = crate::testutil::LOOPBACK_IP_PROTO.blocking_lock();
             let target = Target::new("127.0.0.1".parse().unwrap());
             // 253 is reserved for experiments: Linux has no handler.
             let hosts =

@@ -1006,7 +1006,10 @@ mod tests {
         // -PO: Linux has no handler for protocol 253 (reserved for
         // experiments), so it answers with a protocol unreachable; IGMP
         // draws nothing back on loopback, so 253 decides.
+        // Another test's protocol-253 probe on loopback would be a
+        // proto-response, so no other -sO/-PO test may run meanwhile.
         if raw {
+            let _quiet = crate::testutil::LOOPBACK_IP_PROTO.lock().await;
             let host = run(PingProbes {
                 proto: vec![2, 253],
                 ..PingProbes::none()
