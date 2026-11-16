@@ -217,11 +217,13 @@ reported.
 
 ```
 #!/bin/sh
-# One name per run, so a second run on the same day gets its own report.
-run=$(date +%F-%H%M%S)
+# One name per run, in UTC so it never repeats when the clock goes back.
+run=$(date -u +%F-%H%M%SZ)
 cd /var/lib/scans || exit 1
 # One run at a time (flock from util-linux), so runs cannot overtake each other.
 exec 9> .lock && flock -n 9 || exit 1
+# Never overwrite an earlier report (or the baseline it may be).
+[ -e scan-$run.xml ] && exit 1
 # A failed scan leaves the last good report as the baseline.
 feroprobe -T4 -F -sV 10.0.0.0/24 -oA scan-$run > /dev/null || exit 1
 if [ -e scan-prev.xml ]; then
