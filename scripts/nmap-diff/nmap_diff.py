@@ -570,8 +570,8 @@ def load_sent(files, scanner_macs):
 # --------------------------------------------------------------------------
 
 
-def expand_ports(spec):
-    """'22,80-82' -> {22,80,81,82}"""
+def expand_ports(spec, lo=1, hi=65535):
+    """'22,80-82' -> {22,80,81,82}; an open end of a range is lo or hi"""
     out = set()
     for part in spec.split(","):
         part = part.strip()
@@ -579,7 +579,7 @@ def expand_ports(spec):
             continue
         if "-" in part:
             a, b = part.split("-", 1)
-            out.update(range(int(a or 1), int(b or 65535) + 1))
+            out.update(range(int(a or lo), int(b or hi) + 1))
         else:
             out.add(int(part))
     return out
@@ -651,12 +651,20 @@ def scope_of(argv, target_kind, privileged):
             proto = {"S": "tcp", "A": "tcp", "U": "udp", "Y": "sctp"}[m.group(1)]
             default = {"S": "80", "A": "80", "U": "40125", "Y": "80"}[m.group(1)]
             ping[proto] |= expand_ports(m.group(2) or default)
+        m = re.match(r"^-PO(.*)$", a)
+        if m:
+            # IP protocol ping: protocol numbers (nmap's default 1,2,4).
+            explicit_ping = True
+            ping["ip"] |= expand_ports(m.group(1) or "1,2,4", 0, 255)
         if re.match(r"^-P[EPM]$", a):
             explicit_ping = True
             icmp_types.add({"E": "echo-request", "P": "timestamp-request", "M": "mask-request"}[a[2]])
         i += 1
     if "n" in scans:
         sn = True
+    if "L" in scans:
+        # -sL: no port scan and no discovery; nothing may be sent.
+        sn = pn = True
     scope = collections.defaultdict(set)
     if not sn:
         if ports is None:
@@ -683,6 +691,10 @@ def scope_of(argv, target_kind, privileged):
     if not pn:
         for proto, ps in ping.items():
             scope[proto] |= ps
+        # -PO's TCP, UDP and SCTP probes pick a port as -sO's do.
+        for num, proto in ((6, "tcp"), (17, "udp"), (132, "sctp")):
+            if num in ping.get("ip", set()):
+                scope[proto].add(ANY_PORT)
         ip_discovery = target_kind in ("routed", "local") or not privileged or \
             "--send-ip" in argv or "--disable-arp-ping" in argv
         if not explicit_ping and ip_discovery:

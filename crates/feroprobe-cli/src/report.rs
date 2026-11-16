@@ -11,7 +11,7 @@ use std::time::SystemTime;
 use anyhow::{Context, Result};
 use feroprobe_core::HostResult;
 
-use crate::output::{self, RunInfo, reported};
+use crate::output::{self, RunInfo, counted_up};
 use crate::{Format, ReportFiles, grep, xml};
 
 /// What a report holds.
@@ -105,7 +105,7 @@ impl Reports {
         end: SystemTime,
     ) -> Result<()> {
         self.total += hosts.len();
-        self.up += hosts.iter().filter(|h| reported(h, info)).count();
+        self.up += hosts.iter().filter(|h| counted_up(h, info)).count();
         let mut json = false;
         for r in &self.list {
             let text = match r.kind {

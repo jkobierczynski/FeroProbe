@@ -66,6 +66,8 @@ pub enum DryTcp {
 #[derive(Debug, Clone)]
 pub struct DryRun<'a> {
     pub targets: &'a [Target],
+    /// `-sL`: the targets are only listed; nothing would go to them.
+    pub list: bool,
     /// `None` with `-Pn`.
     pub discovery: Option<DryDiscovery>,
     /// With `-Pn`: targets on a local network still get an ARP or ND
@@ -238,6 +240,12 @@ pub fn write(run: &DryRun<'_>, w: &mut dyn Write) -> io::Result<Summary> {
 
     let mut summary = Summary::default();
     match &run.discovery {
+        None if run.list => {
+            out.note(
+                "List scan (-sL): nothing would be sent to the targets, not even ARP; a real run \
+                 only lists them",
+            )?;
+        }
         None => {
             out.note("Host discovery: skipped (-Pn), every target is treated as up")?;
             if run.pn_neighbours {
@@ -314,21 +322,11 @@ pub fn write(run: &DryRun<'_>, w: &mut dyn Write) -> io::Result<Summary> {
                 seq: v.cookie,
                 ipid: v.ipid,
                 icmp_id: v.icmp_id,
+                echo_payload: &[],
             };
             for &proto in run.protocols {
                 for (t, src) in run.targets.iter().zip(&sources) {
-                    let line = match src {
-                        Some(s) if s.is_ipv4() == t.addr.is_ipv4() => {
-                            let body = probe.body(proto, *s, t.addr);
-                            line(proto, &body, Some(*s), t.addr)
-                        }
-                        _ => format!(
-                            "{} * > {} (no route)",
-                            crate::ports::ip_protocol_name(proto).to_uppercase(),
-                            t.addr
-                        ),
-                    };
-                    out.probe(&line)?;
+                    out.probe(&proto_line(&probe, proto, *src, t.addr))?;
                 }
             }
         }
@@ -361,7 +359,7 @@ pub fn write(run: &DryRun<'_>, w: &mut dyn Write) -> io::Result<Summary> {
         }
         summary.os = out.count - before;
     }
-    let retry = if run.retries > 0 {
+    let retry = if run.retries > 0 && !run.list {
         format!(
             "; a real run resends unanswered probes once{}",
             if run.retries > 1 {
@@ -387,6 +385,21 @@ pub fn write(run: &DryRun<'_>, w: &mut dyn Write) -> io::Result<Summary> {
         if run.targets.len() == 1 { "" } else { "s" },
     ))?;
     Ok(summary)
+}
+
+/// The packet an IP protocol probe (`-sO`, `-PO`) sends for `proto`.
+fn proto_line(probe: &ProtoProbe, proto: u8, src: Option<IpAddr>, dst: IpAddr) -> String {
+    match src {
+        Some(s) if s.is_ipv4() == dst.is_ipv4() => {
+            let body = probe.body(proto, s, dst);
+            line(proto, &body, Some(s), dst)
+        }
+        _ => format!(
+            "{} * > {} (no route)",
+            crate::ports::ip_protocol_name(proto).to_uppercase(),
+            dst
+        ),
+    }
 }
 
 /// The OS-detection probes of one try, per target. The ports are the ones
@@ -844,6 +857,37 @@ fn discovery(
             out.probe(&udp_line(*src, run.source_port, t.addr, port))?;
         }
     }
+    if p.needs_raw() && !(d.privileged && cfg!(target_os = "linux")) {
+        out.note(
+            "-PY and -PO send raw packets: a real run needs root (or CAP_NET_RAW) on Linux \
+             and refuses to start without",
+        )?;
+    }
+    // -PY: an SCTP INIT per port, as the -sY scan builds it.
+    for &port in &p.sctp {
+        for (t, src) in &rest {
+            let chunk = packet::sctp_init(v.sport, port, v.cookie, v.cookie);
+            out.probe(&packet_trace::describe(
+                packet::IPPROTO_SCTP,
+                &chunk,
+                *src,
+                Some(t.addr),
+            ))?;
+        }
+    }
+    // -PO: the -sO probe of each protocol, with marked echo requests.
+    let probe = ProtoProbe {
+        sport: v.sport,
+        seq: v.cookie,
+        ipid: v.ipid,
+        icmp_id: v.icmp_id,
+        echo_payload: packet::ECHO_MARKER,
+    };
+    for &proto in &p.proto {
+        for (t, src) in &rest {
+            out.probe(&proto_line(&probe, proto, *src, t.addr))?;
+        }
+    }
     out.note("A real run stops probing a host as soon as one probe proves it is up")?;
     Ok(())
 }
@@ -867,6 +911,7 @@ mod tests {
     fn base<'a>(targets: &'a [Target], ev: &'a Evasion) -> DryRun<'a> {
         DryRun {
             targets,
+            list: false,
             discovery: None,
             pn_neighbours: false,
             tcp: None,
@@ -1150,6 +1195,68 @@ mod tests {
             assert!(text.contains("192.0.2.9:443 S"), "{text}");
             assert!(text.contains("192.0.2.9:80 A"), "{text}");
         }
+    }
+
+    #[test]
+    fn list_scan_sends_nothing() {
+        let targets = [target("192.0.2.9"), target("127.0.0.1")];
+        let ev = Evasion::default();
+        let run = DryRun {
+            list: true,
+            ..base(&targets, &ev)
+        };
+        let (text, summary) = run_to_string(&run);
+        assert_eq!(summary, Summary::default(), "{text}");
+        assert!(text.contains("List scan (-sL)"), "{text}");
+        assert!(!text.contains("-Pn"), "{text}");
+        assert!(!text.contains(PREFIX), "{text}");
+    }
+
+    #[test]
+    fn sctp_and_protocol_pings_are_listed() {
+        let targets = [target("192.0.2.9")];
+        let ev = Evasion::default();
+        let probes = PingProbes {
+            sctp: vec![80, 2905],
+            proto: crate::discovery::DEFAULT_PROTO_PINGS.to_vec(),
+            ..PingProbes::none()
+        };
+        let disc = |privileged| DryDiscovery {
+            probes: probes.clone(),
+            privileged,
+            icmp: true,
+            arp_ping: false,
+        };
+        let run = DryRun {
+            discovery: Some(disc(true)),
+            ..base(&targets, &ev)
+        };
+        let (text, summary) = run_to_string(&run);
+        assert_eq!(summary.discovery, 5, "{text}");
+        if !text.contains("192.0.2.9 from") {
+            // No route to the test address here: no packet lines.
+            return;
+        }
+        assert!(text.contains("SCTP"), "{text}");
+        assert!(text.contains("192.0.2.9:2905"), "{text}");
+        // The -PO echo request carries the marker: 8 + 9 bytes.
+        assert!(text.contains("Echo request"), "{text}");
+        assert!(text.contains("IGMP"), "{text}");
+        // Elsewhere than Linux they cannot be sent even as root.
+        assert_eq!(
+            text.contains("a real run needs root"),
+            !cfg!(target_os = "linux"),
+            "{text}"
+        );
+        // Without raw sockets the dry run still lists them, and says a
+        // real run would refuse.
+        let run = DryRun {
+            discovery: Some(disc(false)),
+            ..base(&targets, &ev)
+        };
+        let (text, summary) = run_to_string(&run);
+        assert_eq!(summary.discovery, 5, "{text}");
+        assert!(text.contains("a real run needs root"), "{text}");
     }
 
     #[test]

@@ -70,9 +70,36 @@ pub async fn sctp_scan(
     kind: SctpScanKind,
 ) -> io::Result<Vec<HostResult>> {
     let (targets, ports, cfg) = (targets.to_vec(), ports.to_vec(), cfg.clone());
-    tokio::task::spawn_blocking(move || imp::scan_blocking(&targets, &ports, &cfg, kind))
+    tokio::task::spawn_blocking(move || imp::scan_blocking(&targets, &ports, &cfg, kind, None))
         .await
         .map_err(io::Error::other)?
+}
+
+/// The SCTP INIT ping (`-PY`), a host-discovery probe: an INIT to each of
+/// `ports`. As in nmap, a host is up when it answers with an INIT-ACK or an
+/// ABORT, or when it sends back an ICMP port or protocol unreachable
+/// itself (a router's error proves nothing). Each port's result is
+/// [`PortState::Open`] with the answer as its reason when the answer
+/// proves the host up; anything else means it did not. Hosts that `done`
+/// marks as up get no more probes.
+pub(crate) async fn sctp_ping(
+    targets: &[Target],
+    ports: &[u16],
+    cfg: &ScanConfig,
+    done: Option<crate::syn::HostsDone>,
+) -> io::Result<Vec<HostResult>> {
+    let (targets, ports, cfg) = (targets.to_vec(), ports.to_vec(), cfg.clone());
+    tokio::task::spawn_blocking(move || {
+        imp::scan_blocking(
+            &targets,
+            &ports,
+            &cfg,
+            SctpScanKind::Init,
+            Some(done.as_ref()),
+        )
+    })
+    .await
+    .map_err(io::Error::other)?
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -84,10 +111,11 @@ mod imp {
         _: &[u16],
         _: &ScanConfig,
         _: SctpScanKind,
+        _: Option<Option<&crate::syn::HostsDone>>,
     ) -> io::Result<Vec<HostResult>> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            "SCTP scans (-sY, -sZ) are only supported on Linux for now",
+            "SCTP scans and pings (-sY, -sZ, -PY) are only supported on Linux for now",
         ))
     }
 }
@@ -112,6 +140,8 @@ mod imp {
         ports: &[u16],
         cfg: &ScanConfig,
         kind: SctpScanKind,
+        // As a ping (-PY): the hosts already proven up, if tracked.
+        ping: Option<Option<&crate::syn::HostsDone>>,
     ) -> io::Result<Vec<HostResult>> {
         let open = |domain| raw_socket_in(domain, SockProto::from(i32::from(IPPROTO_SCTP)));
         let v4 = if targets.iter().any(|t| t.addr.is_ipv4()) {
@@ -159,10 +189,14 @@ mod imp {
             nmap_ip_header(sock, dst.is_ipv6());
             send_with_backoff_until(sock, &pkt, socket_addr(dst, 0), cfg.deadline)
         };
+        let as_ping = ping.is_some();
         let classify = move |pkt: &Packet<'_>, index: &Index| -> Vec<Answer> {
-            answer(pkt, index, kind, sport, tag, sent_vtag)
-                .into_iter()
-                .collect()
+            let a = answer(pkt, index, kind, sport, tag, sent_vtag);
+            if as_ping {
+                a.map(|a| ping_answer(a, pkt, index)).into_iter().collect()
+            } else {
+                a.into_iter().collect()
+            }
         };
         rawscan::run(
             targets,
@@ -172,7 +206,29 @@ mod imp {
             kind.no_response(),
             send,
             classify,
+            ping.flatten(),
         )
+    }
+
+    /// What an answer to an INIT says as a ping, as nmap reads it: an SCTP
+    /// answer (INIT-ACK or ABORT) proves the host up, and so does an ICMP
+    /// port or protocol unreachable that the target sent itself. Proof
+    /// comes back as [`PortState::Open`], anything else as filtered.
+    pub(super) fn ping_answer(mut a: Answer, pkt: &Packet<'_>, index: &Index) -> Answer {
+        use crate::model::reason;
+        let proof = match a.state {
+            PortState::Filtered => {
+                index.get(&pkt.src) == Some(&a.host)
+                    && matches!(a.reason, reason::PORT_UNREACH | reason::PROTO_UNREACH)
+            }
+            _ => true,
+        };
+        a.state = if proof {
+            PortState::Open
+        } else {
+            PortState::Filtered
+        };
+        a
     }
 
     /// What a captured packet says about one of our probes: an SCTP
@@ -306,6 +362,27 @@ mod imp {
             );
             // A quote of someone else's probe (other tag) is not ours.
             assert!(answer(&pkt, &idx, SctpScanKind::CookieEcho, 40000, 7, 7).is_none());
+
+            // As a ping, the target's own protocol unreachable proves it up.
+            assert_eq!(ping_answer(got, &pkt, &idx).state, PortState::Open);
+            // The same error from a router on the way proves nothing.
+            let mut routed = from_target(IPPROTO_ICMP, &msg);
+            routed.src = Ipv4Addr::new(10, 0, 0, 254).into();
+            let a = answer(&routed, &idx, SctpScanKind::Init, 40000, 7, 0).unwrap();
+            assert_eq!(ping_answer(a, &routed, &idx).state, PortState::Filtered);
+            // A host unreachable from the target itself proves nothing either.
+            msg[1] = 1;
+            let pkt = from_target(IPPROTO_ICMP, &msg);
+            let a = answer(&pkt, &idx, SctpScanKind::Init, 40000, 7, 0).unwrap();
+            assert_eq!(ping_answer(a, &pkt, &idx).state, PortState::Filtered);
+            // An ABORT does.
+            let abort = sctp(80, 40000, 7, packet::SCTP_ABORT);
+            let pkt = from_target(IPPROTO_SCTP, &abort);
+            let a = answer(&pkt, &idx, SctpScanKind::Init, 40000, 7, 0).unwrap();
+            assert_eq!(
+                (ping_answer(a, &pkt, &idx).state, a.reason),
+                (PortState::Open, reason::ABORT)
+            );
         }
 
         /// Raw sockets need root. CI runs the tests with sudo and sets
@@ -393,10 +470,26 @@ mod imp {
                 &[2905, 3868],
                 &cfg,
                 SctpScanKind::Init,
+                None,
             )
             .unwrap();
-            let echo =
-                scan_blocking(&[target], &[2905, 3868], &cfg, SctpScanKind::CookieEcho).unwrap();
+            // As a ping (-PY), the ABORT from the closed port proves the host.
+            let ping = scan_blocking(
+                std::slice::from_ref(&target),
+                &[3868],
+                &cfg,
+                SctpScanKind::Init,
+                Some(None),
+            )
+            .unwrap();
+            let echo = scan_blocking(
+                &[target],
+                &[2905, 3868],
+                &cfg,
+                SctpScanKind::CookieEcho,
+                None,
+            )
+            .unwrap();
             stop.store(true, Ordering::Relaxed);
             stack.join().unwrap();
             let state = |hosts: &[HostResult], p: u16| {
@@ -410,6 +503,10 @@ mod imp {
             assert_eq!(
                 state(&init, 3868),
                 (Protocol::Sctp, PortState::Closed, reason::ABORT)
+            );
+            assert_eq!(
+                state(&ping, 3868),
+                (Protocol::Sctp, PortState::Open, reason::ABORT)
             );
             // The fake stack aborts every COOKIE ECHO, like a closed port.
             assert_eq!(state(&echo, 3868).1, PortState::Closed);

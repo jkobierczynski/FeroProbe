@@ -577,8 +577,14 @@ pub fn igmp_query() -> [u8; 8] {
 /// An ICMPv6 echo request with its checksum, which (unlike ICMP's)
 /// covers the IPv6 pseudo-header. Raw ICMPv6 sockets fill it in
 /// themselves; other sockets need it done.
-pub fn icmpv6_echo_with_checksum(src: Ipv6Addr, dst: Ipv6Addr, id: u16, seq: u16) -> Vec<u8> {
-    let mut p = icmpv6_echo(id, seq, &[]);
+pub fn icmpv6_echo_with_checksum(
+    src: Ipv6Addr,
+    dst: Ipv6Addr,
+    id: u16,
+    seq: u16,
+    payload: &[u8],
+) -> Vec<u8> {
+    let mut p = icmpv6_echo(id, seq, payload);
     p[2..4].copy_from_slice(&[0, 0]);
     let sum = checksum_with(
         pseudo_header_sum(src.into(), dst.into(), IPPROTO_ICMPV6, p.len()),
