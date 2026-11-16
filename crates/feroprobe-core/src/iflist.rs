@@ -70,11 +70,13 @@ pub fn interfaces() -> io::Result<Vec<IfEntry>> {
         mtu: Option<u32>,
     }
     let mut links: Vec<Link> = Vec::new();
-    let mut ifap: *mut libc::ifaddrs = std::ptr::null_mut();
-    // SAFETY: getifaddrs fills `ifap` with a list we free below.
-    if unsafe { libc::getifaddrs(&mut ifap) } != 0 {
+    let mut list = std::mem::MaybeUninit::<*mut libc::ifaddrs>::uninit();
+    // SAFETY: getifaddrs fills `list` with a list we free below.
+    if unsafe { libc::getifaddrs(list.as_mut_ptr()) } != 0 {
         return Err(io::Error::last_os_error());
     }
+    // SAFETY: getifaddrs succeeded, so it wrote the list's head.
+    let ifap = unsafe { list.assume_init() };
     let mut cur = ifap;
     // SAFETY: `cur` is null or a node of the list getifaddrs returned,
     // which stays valid until freeifaddrs below; as_ref checks for null.
