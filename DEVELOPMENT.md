@@ -239,6 +239,15 @@ groups (5.5), which ships with `--resume` in v0.5.0.
 
 ### Phase 6: v0.5.0
 
+Released as v0.5.0 (2026-11-17) with every step of this phase (6.1 to 6.7)
+and host groups from 5.5: `--resume` with `--min-hostgroup`/`--max-hostgroup`,
+`feroprobe-diff`, `-sL`, `-PO`/`-PY`/`-PR`, `-d` levels, `--iflist` and
+runtime keys, the output extras, the small packet options with `-b`, and
+`--spoof-mac` (IPv4 and ARP). Not done from this phase: `--port-ratio`
+(dropped), keys on Windows and routes on macOS for `--iflist`, `--spoof-mac`
+for IPv6. The findings of the 2026-11-16 security review are not fixed in this
+release.
+
 | Step | Feature | nmap options | Plan |
 | --- | --- | --- | --- |
 | 6.1 | Resume an aborted scan | `--resume` | **Done** (with host groups, 5.5). Read the `-oN`/`-oG`/`-oX` file of the aborted run, take the command line from it, skip the hosts already finished and append to the same files, as nmap does. Needs `--append-output` (6.6) first, or in the same pull request |
