@@ -340,7 +340,7 @@ checksum = "0e9c71c2167ca323c882b99918929403426e2373ea17242ff5653e0d5e1058be"
 
 [[package]]
 name = "feroprobe"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -356,7 +356,7 @@ dependencies = [
 
 [[package]]
 name = "feroprobe-core"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "criterion",
  "dns-lookup",
