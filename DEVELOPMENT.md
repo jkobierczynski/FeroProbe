@@ -188,6 +188,11 @@ the scope rule (no probes outside the command's ports and protocols, see
 
 ### Phase 5: v0.4.0
 
+Released as v0.4.0 (2026-11-16) with 5.1 (first pull request), 5.2, 5.3,
+5.4 and the tuning names of 5.5, plus nmap's default port lists and top-ports
+order. Still open from this phase: more `-sV` protocol batches (5.1) and host
+groups (5.5), which ships with `--resume` in v0.5.0.
+
 | Step | Feature | nmap options | Plan |
 | --- | --- | --- | --- |
 | 5.1 | Deeper version detection | `--version-intensity`, `--version-light`, `--version-all`, `--version-trace` | Move the rules in `service/rules.rs` into a data file in our own format (probe, ports, rarity 1-9, match and soft-match patterns, version and CPE fields), compiled into the binary and overridable with a file, like `--oui-file`. Intensity picks probes by rarity, as nmap does. `--version-trace` prints each probe and reply. Then grow the rule set protocol by protocol from public protocol documentation and our own captures (never from `nmap-service-probes`). Several pull requests: the format and options first, then batches of protocols. **First pull request done:** the format, the options, `--service-rules`, the Service Info line and CPEs, `open\|filtered` UDP probing, and a first batch (37 probes, about 150 rules). Next: more protocol batches |
