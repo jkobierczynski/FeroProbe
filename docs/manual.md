@@ -1369,6 +1369,9 @@ so a scan started in the background with `&` reads nothing; and only
 during the scan itself, not during `--dry-run` or after the scan. Line
 editing and echo are turned off on the terminal while keys are read and
 are restored when the scan ends, when FeroProbe exits, and on Ctrl-C.
+Keys are not read when FeroProbe was started with SIGTTOU ignored or
+blocked: the terminal could then not keep a scan that was moved to the
+background from changing another job's settings.
 `--noninteractive` turns key reading off. Not available on Windows yet.
 
 ## Checking a scan before and while it runs

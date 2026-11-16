@@ -106,7 +106,8 @@ mod unix {
     /// its settings are left alone. Should the scan lose the terminal
     /// between the check and the write, the kernel stops it with SIGTTOU
     /// instead of letting the write through, and the write happens once it
-    /// is in the foreground again; SIGTTOU is deliberately not blocked.
+    /// is in the foreground again; SIGTTOU is deliberately not blocked, and
+    /// keys are not read at all when it was inherited ignored or blocked.
     /// Async-signal-safe: tcgetpgrp, getpgrp and tcsetattr only.
     fn restore() {
         let fd = TTY.load(Ordering::SeqCst);
@@ -135,6 +136,23 @@ mod unix {
         unsafe { libc::tcgetpgrp(fd) == libc::getpgrp() }
     }
 
+    /// Whether SIGTTOU would stop FeroProbe from writing the terminal's
+    /// settings once in the background. Inherited as ignored or blocked,
+    /// it would not (POSIX lets the write through), and a job that lost
+    /// the terminal between `restore`'s check and its write would then
+    /// overwrite the new foreground job's settings; keys stay off then.
+    fn sigttou_stops() -> bool {
+        // SAFETY: queries only: a null new action and a null new mask.
+        unsafe {
+            let mut act: libc::sigaction = std::mem::zeroed();
+            let mut mask: libc::sigset_t = std::mem::zeroed();
+            libc::sigaction(libc::SIGTTOU, std::ptr::null(), &mut act) == 0
+                && act.sa_sigaction != libc::SIG_IGN
+                && libc::pthread_sigmask(libc::SIG_BLOCK, std::ptr::null(), &mut mask) == 0
+                && libc::sigismember(&mask, libc::SIGTTOU) == 0
+        }
+    }
+
     pub(super) struct Reader;
 
     impl Reader {
@@ -151,7 +169,7 @@ mod unix {
             }
             // SAFETY: termios is plain data; tcgetattr fills it.
             let mut ti: libc::termios = unsafe { std::mem::zeroed() };
-            if !foreground(fd) || unsafe { libc::tcgetattr(fd, &mut ti) } != 0 {
+            if !foreground(fd) || !sigttou_stops() || unsafe { libc::tcgetattr(fd, &mut ti) } != 0 {
                 // SAFETY: closes the descriptor opened above.
                 unsafe { libc::close(fd) };
                 return None;

@@ -2011,6 +2011,9 @@ itself, not during \f[V]--dry-run\f[R] or after the scan.
 Line editing and echo are turned off on the terminal while keys are read
 and are restored when the scan ends, when FeroProbe exits, and on
 Ctrl-C.
+Keys are not read when FeroProbe was started with SIGTTOU ignored or
+blocked: the terminal could then not keep a scan that was moved to the
+background from changing another job\[aq]s settings.
 \f[V]--noninteractive\f[R] turns key reading off.
 Not available on Windows yet.
 .SH CHECKING A SCAN BEFORE AND WHILE IT RUNS
