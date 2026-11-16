@@ -68,7 +68,7 @@ the SCTP, IP protocol, IPv6 OS detection and probe-signature work).
 | Target lists | `-iL` | `-` for standard input |
 | Exclusions | `--exclude`, `--excludefile` | |
 | Port specs | `-p` | Ranges, `-p-`, `T:`/`U:`/`S:`/`P:` prefixes, mismatch warnings like nmap's |
-| Common ports | default, `--top-ports`, `-F` | Default 1000 TCP and 1000 UDP ports, as nmap; `-F` 100. FeroProbe's own three-tier ranking (`ports.rs`: hand-ranked, curated by category, then IANA-registered ascending), not nmap-services |
+| Common ports | default, `--top-ports`, `-F` | Default 1000 TCP and 1000 UDP ports, as nmap; `-F` 100. nmap's `--top-ports` order (`ports.rs`, from nmap-services frequencies, nmap 7.94) |
 | Port exclusions | `--exclude-ports` | Also removed from the ping probes, like nmap |
 | Port order | `-r` | Shuffled by default, like nmap |
 
@@ -170,7 +170,6 @@ the SCTP, IP protocol, IPv6 OS detection and probe-signature work).
 | OS uptime and TCP sequence lines (`-O -v`) | `Uptime guess` from TCP timestamps, `TCP Sequence Prediction` | Not printed | Current Linux, macOS and FreeBSD give each connection a random timestamp offset, so nmap's uptime for them is wrong |
 | `-sV` probe order | Sends the `NULL` probe (listen, up to 6 s) first on every port, then the probes registered for the port | Sends the probes meant for the port first, then listens; inside TLS it listens only on talk-first ports (465, 993, ...) | Saves a 3 s wait on every HTTP and other client-speaks-first port. Kept from before the rules file; up to Jurgen whether to follow nmap here |
 | `-sV` on industrial protocols | Its database has probes for some industrial protocols | No probes for Modbus, S7 and the like; on those ports `-sV` sends only the generic probes (listen, HTTP and the others up to the intensity) | A version probe is a request the device must parse; see `docs/ics-protection.md` |
-| Default port lists | nmap-services' 1000 most common ports | Its own 1000-port ranking: the hand-ranked top tier agrees with nmap's most common ports, the rest partly differs (about 30% overlap over all 1000 TCP ports, measured against nmap 7.94) | nmap-services cannot be redistributed; written independently (Jurgen, 2026-11-15) |
 | Dry run | No equivalent. The closest is the list scan `-sL`, which only lists (and reverse-resolves) the targets | `--dry-run` lists every probe, per target and port, without sending any, and does no reverse DNS | A safe way to check exactly what a command would put on the wire. It lists FeroProbe's probes only. The manual's `--dry-run` section documents what nmap sends differently per option; an in-output "not nmap" box was tried and dropped (Jurgen, 2026-11-15) |
 
 ## Roadmap to nmap parity

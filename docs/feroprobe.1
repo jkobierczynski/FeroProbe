@@ -716,25 +716,16 @@ scans the 1000 most common TCP ports and the 1000 most common UDP ports,
 as nmap does, the 50 most common SCTP ports, and, with \f[V]-sO\f[R],
 all 256 IP protocols.
 .PP
-The port lists are FeroProbe\[aq]s own rankings, not nmap\[aq]s:
-nmap\[aq]s port data is under its own licence, so FeroProbe does not
-copy it.
-The count matches nmap, but the ports differ, so on the same host the
-two can scan different ports beyond the most common ones.
-Each list is ranked in three tiers:
-.IP "1." 3
-The most common services, ranked by hand.
-\f[V]-F\f[R] scans the first 100.
-.IP "2." 3
-Services commonly exposed on networks today: remote administration,
-alternative web ports, databases, message queues, container and
-monitoring tools, Windows, printing, media, industrial and game ports.
-.IP "3." 3
-The rest of the 1000, filled with the IANA-registered ports in ascending
-order, which covers most of the well-known range (1-1023).
+The TCP and UDP lists are nmap\[aq]s: the same ports in the same order
+as nmap\[aq]s \f[V]--top-ports\f[R], ranked by the frequencies in
+nmap\[aq]s \f[V]nmap-services\f[R] (nmap 7.94).
+The default scan, \f[V]-F\f[R] (the first 100) and
+\f[V]--top-ports N\f[R] (the first \f[V]N\f[R]) cover the same ports as
+nmap\[aq]s.
+Only the port numbers and their order are taken; the names FeroProbe
+prints come from the IANA registry.
 .PP
-To compare with nmap on exactly the same ports, give them with
-\f[V]-p\f[R]; \f[V]-p-\f[R] scans all 65535.
+\f[V]-p-\f[R] scans all 65535.
 .SS \f[V]-p <port ranges>\f[R], \f[V]--ports <port ranges>\f[R]
 .PP
 Scan only these ports.
@@ -2067,12 +2058,6 @@ Default discovery without root
 T}@T{
 Only TCP connects to 80 and 443, no ICMP echo
 T}
-T{
-No \f[V]-p\f[R], or \f[V]-F\f[R], \f[V]--top-ports\f[R]
-T}@T{
-Scans the same number of ports from its own ranking (nmap-services), so
-some ports differ beyond the most common ones
-T}
 .TE
 .PP
 These come from nmap 7.99\[aq]s source.
@@ -2402,16 +2387,6 @@ Not printed.
 Most current systems give each connection its own random timestamp
 offset, so the uptime nmap prints for them is wrong; sequence
 predictability is left out with it
-T}
-T{
-Default ports, \f[V]-F\f[R], \f[V]--top-ports\f[R]
-T}@T{
-The 1000 (or \f[V]n\f[R], or 100) most common ports in nmap-services
-T}@T{
-The same counts, from FeroProbe\[aq]s own ranking: the most common
-services agree, the rest of the 1000 partly differ.
-nmap-services cannot be redistributed; give \f[V]-p\f[R] to scan an
-exact set
 T}
 T{
 Port names
