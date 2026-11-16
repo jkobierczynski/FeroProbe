@@ -2494,16 +2494,8 @@ async fn main() -> Result<()> {
         for w in list_scan_checks(&args)? {
             eprintln!("Warning: {w}");
         }
-    } else {
-        if args.ping.contains(&PingArg::Arp) {
-            eprintln!("Warning: {PR_NOTE}");
-        }
-        if plan.discovery && !args.dry_run {
-            raw_ping_check(
-                &probes,
-                cfg!(target_os = "linux") && raw_sockets_available(),
-            )?;
-        }
+    } else if args.ping.contains(&PingArg::Arp) {
+        eprintln!("Warning: {PR_NOTE}");
     }
     let (mut os, trace) = aggressive(&mut plan, &args, raw_sockets_available())?;
     for w in os_option_warnings(&args, os) {
@@ -2543,6 +2535,13 @@ async fn main() -> Result<()> {
         for w in exclude_ping_ports(&mut probes, &ex) {
             eprintln!("Warning: {w}");
         }
+    }
+    // After the exclusions: only the probes left need raw sockets.
+    if plan.discovery && !plan.list && !args.dry_run {
+        raw_ping_check(
+            &probes,
+            cfg!(target_os = "linux") && raw_sockets_available(),
+        )?;
     }
     if plan.ping_only && !plan.list && !plan.discovery && !trace {
         bail!("-sn with -Pn would do nothing (add --traceroute to only trace the route)");
