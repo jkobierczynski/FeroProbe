@@ -217,7 +217,7 @@ reported.
 
 ```
 #!/bin/sh
-# One name per run, in UTC so it never repeats when the clock goes back.
+# One name per run, in UTC so it does not repeat when daylight saving time ends.
 run=$(date -u +%F-%H%M%SZ)
 cd /var/lib/scans || exit 1
 # One run at a time (flock from util-linux), so runs cannot overtake each other.
