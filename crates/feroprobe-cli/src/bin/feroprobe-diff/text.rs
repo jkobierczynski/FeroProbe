@@ -378,6 +378,19 @@ mod tests {
     }
 
     #[test]
+    fn an_added_script_with_empty_output_is_shown() {
+        let a = Scan::parse("<nmaprun scanner=\"nmap\"/>").unwrap().0;
+        let b = Scan::parse(
+            "<nmaprun scanner=\"nmap\"><prescript><script id=\"bcast\" output=\"\"/></prescript></nmaprun>",
+        )
+        .unwrap()
+        .0;
+        let d = crate::diff::ScanDiff::new(&a, &b, false);
+        assert_eq!(d.cost, 1, "exit status 1");
+        assert_eq!(render(&d), "\n+Pre-scan script results:\n+|_ bcast:\n");
+    }
+
+    #[test]
     fn table_lines_up_columns() {
         let mut t = Table::new();
         t.cells(
