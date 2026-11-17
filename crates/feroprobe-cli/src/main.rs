@@ -1058,33 +1058,36 @@ fn check_resumed_file(
              run the scan again instead"
         )
     };
+    // Where the standard streams go is the person's own choice (a
+    // redirection to a new, empty file included).
+    if RESUME_DEVICES.contains(&path) {
+        return Ok(());
+    }
     let meta = file.metadata().with_context(|| format!("reading {path}"))?;
     if !meta.is_file() {
-        if RESUME_DEVICES.contains(&path) {
-            return Ok(());
-        }
         return refuse("it is not a regular file");
     }
-    let mut head = vec![0u8; resume::HEAD_LEN];
-    let mut got = 0;
-    while got < head.len() {
+    // The whole file: with --append-output it may hold earlier scans first.
+    let mut text = Vec::with_capacity(meta.len() as usize);
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let at = text.len() as u64;
         #[cfg(unix)]
         let n = {
             use std::os::unix::fs::FileExt;
-            file.read_at(&mut head[got..], got as u64)
+            file.read_at(&mut buf, at)
         };
         #[cfg(windows)]
         let n = {
             use std::os::windows::fs::FileExt;
-            file.seek_read(&mut head[got..], got as u64)
+            file.seek_read(&mut buf, at)
         };
         match n.with_context(|| format!("reading {path}"))? {
             0 => break,
-            n => got += n,
+            n => text.extend_from_slice(&buf[..n]),
         }
     }
-    head.truncate(got);
-    if !resume::continues_scan(kind, &String::from_utf8_lossy(&head), args) {
+    if !resume::continues_scan(kind, &String::from_utf8_lossy(&text), args) {
         return refuse("it does not hold that scan's report");
     }
     Ok(())
@@ -3003,7 +3006,7 @@ fn hostgroup_limits(args: &Args) -> Result<(usize, usize)> {
 }
 
 /// The options `--resume` accepts beside it: `--keep-root`, and the two
-/// authorizations, which a resumed scan only uses when given again.
+/// authorizations, which a recorded one needs given again; given, they apply.
 const RESUME_ALSO: [&str; 3] = [
     "--keep-root",
     "--allow-public-evasion",
@@ -3264,7 +3267,7 @@ async fn run(
             // As nmap: the recorded command line, appending to its reports.
             let mut command = vec![raw[0].clone(), "--append-output".to_string()];
             command.extend(r.args.iter().filter(|a| *a != "--append-output").cloned());
-            let args = debugging::parse_args(nmap_style_args(command.clone()));
+            let mut args = debugging::parse_args(nmap_style_args(command.clone()));
             // Anyone can write a report, so say what is about to run.
             eprintln!(
                 "Resuming the scan recorded in {path}: {}",
@@ -3292,6 +3295,11 @@ async fn run(
                     );
                 }
             }
+            // An authorization given beside --resume applies to the resumed
+            // scan, as it would to the command typed again. The recorded
+            // command line (which the report checks compare) is unchanged.
+            args.allow_public_evasion |= first.allow_public_evasion;
+            args.override_ics_protection |= first.override_ics_protection;
             // Reports mask the FTP relay password, so it cannot be resumed
             // from them: say so rather than log in with "****".
             if args.bounce.as_deref().is_some_and(|b| b.contains(":****@")) {

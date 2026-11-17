@@ -1649,7 +1649,8 @@ before anything else happens. Three safeguards, all differences from nmap:
   `--allow-public-evasion` or `--override-ics-protection`, the resume is
   refused unless the same option is given beside `--resume`
   (`feroprobe --allow-public-evasion --resume scan.nmap`). A deliberate
-  opt-in is not taken from a file.
+  opt-in is not taken from a file. Given beside `--resume`, either option
+  applies to the resumed scan, as it would to the command typed again.
 - **Root is not kept for it.** Under `sudo`, the resumed scan runs as the
   user who ran `sudo` like any other (see
   [Giving up root under sudo](#giving-up-root-under-sudo)); with

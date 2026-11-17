@@ -171,10 +171,7 @@ pub enum FileKind {
     Json,
 }
 
-/// How much of a report file [`continues_scan`] needs: its first lines.
-pub const HEAD_LEN: usize = 64 * 1024;
-
-/// Whether `head` (the start of an existing file) is a report of the scan
+/// Whether `head` (an existing file's text) is a report of the scan
 /// whose command line is `args`, so that a resumed run may append to it.
 ///
 /// The command line comes from the report given to `--resume`, which may
@@ -186,13 +183,6 @@ pub const HEAD_LEN: usize = 64 * 1024;
 pub fn continues_scan(kind: FileKind, head: &str, args: &[String]) -> bool {
     match kind {
         FileKind::Recorded => {
-            let Some(recorded) = head.lines().find_map(|l| {
-                let header = l.starts_with("# FeroProbe ") || l.starts_with("<!-- FeroProbe ");
-                let at = l.find(" as: ")?;
-                (header && l[..at].contains(" scan initiated ")).then(|| &l[at + 5..])
-            }) else {
-                return false;
-            };
             // A resumed run records the command with --append-output added.
             let without = |v: &[String]| -> Vec<String> {
                 v.iter()
@@ -200,7 +190,16 @@ pub fn continues_scan(kind: FileKind, head: &str, args: &[String]) -> bool {
                     .cloned()
                     .collect()
             };
-            command_line(recorded).is_ok_and(|r| without(&r) == without(args))
+            let want = without(args);
+            // Any header counts: with --append-output, earlier scans' reports
+            // may come first.
+            head.lines()
+                .filter_map(|l| {
+                    let header = l.starts_with("# FeroProbe ") || l.starts_with("<!-- FeroProbe ");
+                    let at = l.find(" as: ")?;
+                    (header && l[..at].contains(" scan initiated ")).then(|| &l[at + 5..])
+                })
+                .any(|recorded| command_line(recorded).is_ok_and(|r| without(&r) == want))
         }
         FileKind::Skid => {
             let first = head.lines().next().unwrap_or("");
@@ -309,6 +308,11 @@ mod tests {
         assert!(continues_scan(FileKind::Recorded, again, &args));
         let xml = "<?xml version=\"1.0\"?>\n<!-- FeroProbe 0.5.0 scan initiated Mon Nov 16 10:00:00 2026 UTC as: feroprobe -oN r.nmap -oG r.gnmap 10.0.0.0/24 -->\n<nmaprun>\n";
         assert!(continues_scan(FileKind::Recorded, xml, &args));
+        // An older scan's report first (--append-output), then this one's.
+        let older = format!(
+            "# FeroProbe 0.5.0 scan initiated Sun Nov 15 10:00:00 2026 UTC as: feroprobe -oN r.nmap 10.9.9.9\n\n{normal}"
+        );
+        assert!(continues_scan(FileKind::Recorded, &older, &args));
         // Another scan's report, or no report at all.
         let other = normal.replace("10.0.0.0/24", "10.0.1.0/24");
         assert!(!continues_scan(FileKind::Recorded, &other, &args));
