@@ -1601,14 +1601,18 @@ When a limit is reached the script is stopped, and \f[V]pcall\f[R],
 \f[V]xpcall\f[R] and \f[V]coroutine.resume\f[R] pass that error on
 rather than catching it, so a script cannot carry on past it.
 .PP
-One gap remains: Lua\[aq]s pattern functions (\f[V]string.find\f[R],
+Lua\[aq]s pattern functions (\f[V]string.find\f[R],
 \f[V]string.match\f[R], \f[V]string.gmatch\f[R] and
-\f[V]string.gsub\f[R]) each run as a single step that the limits cannot
-interrupt.
-A pattern that backtracks heavily, such as several \f[V].-\f[R] in a row
-over a long text, can therefore run past the script\[aq]s timeout.
-FeroProbe\[aq]s own scripts use patterns that cannot do this; check the
-patterns of scripts from elsewhere before you run them.
+\f[V]string.gsub\f[R]) are FeroProbe\[aq]s own, not Lua\[aq]s: Lua runs
+each of them as a single step that no limit can interrupt, so a pattern
+that backtracks heavily over a long text could hold a script far past
+its timeout.
+FeroProbe\[aq]s versions count every matching step against the
+instruction limit and check the deadline as they go, and the result of
+\f[V]string.gsub\f[R] may grow no larger than the memory limit.
+They take the same arguments, give the same results and raise the same
+errors as Lua 5.4\[aq]s, with the same limits (32 captures, nesting 200
+deep).
 .PP
 \f[B]Scope.\f[R] The engine checks every connection, rather than
 trusting the script.
@@ -2251,8 +2255,7 @@ It is not traced.
 The host timeout does not yet cover scripts (\f[V]--script\f[R]): a host
 that finished its scans in time runs its scripts with their own limit,
 \f[V]--script-timeout\f[R], per script.
-Use that option to bound the script phase (but see the note on Lua\[aq]s
-pattern functions under Script sandbox and scope).
+Use that option to bound the script phase.
 .SS \f[V]--min-hostgroup <size>\f[R], \f[V]--max-hostgroup <size>\f[R]
 .PP
 As in nmap, hosts are pinged in batches of up to 4096 targets, then

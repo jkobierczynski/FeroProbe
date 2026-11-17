@@ -1073,12 +1073,15 @@ When a limit is reached the script is stopped, and `pcall`, `xpcall` and
 `coroutine.resume` pass that error on rather than catching it, so a
 script cannot carry on past it.
 
-One gap remains: Lua's pattern functions (`string.find`, `string.match`,
-`string.gmatch` and `string.gsub`) each run as a single step that the
-limits cannot interrupt. A pattern that backtracks heavily, such as
-several `.-` in a row over a long text, can therefore run past the
-script's timeout. FeroProbe's own scripts use patterns that cannot do
-this; check the patterns of scripts from elsewhere before you run them.
+Lua's pattern functions (`string.find`, `string.match`, `string.gmatch`
+and `string.gsub`) are FeroProbe's own, not Lua's: Lua runs each of them
+as a single step that no limit can interrupt, so a pattern that
+backtracks heavily over a long text could hold a script far past its
+timeout. FeroProbe's versions count every matching step against the
+instruction limit and check the deadline as they go, and the result of
+`string.gsub` may grow no larger than the memory limit. They take the
+same arguments, give the same results and raise the same errors as
+Lua 5.4's, with the same limits (32 captures, nesting 200 deep).
 
 **Scope.** The engine checks every connection, rather than trusting the
 script. A script running against a host may connect only to that host
@@ -1436,8 +1439,7 @@ in XML. It is not traced. `0` means no limit, as in nmap.
 The host timeout does not yet cover scripts (`--script`): a host that
 finished its scans in time runs its scripts with their own limit,
 `--script-timeout`, per script. Use that option to bound the script
-phase (but see the note on Lua's pattern functions under
-[Script sandbox and scope](#script-sandbox-and-scope)).
+phase.
 
 #### `--min-hostgroup <size>`, `--max-hostgroup <size>`
 

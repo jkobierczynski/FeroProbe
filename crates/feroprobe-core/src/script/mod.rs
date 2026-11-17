@@ -16,6 +16,7 @@
 pub mod args;
 mod engine;
 pub mod output;
+mod pattern;
 mod sandbox;
 pub mod select;
 mod socket;

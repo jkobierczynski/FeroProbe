@@ -3,7 +3,9 @@
 //! the clock and date functions of `os`, and FeroProbe's `fero` library:
 //! no `io`, no `os.execute` or `os.getenv`, no `require`, `dofile`,
 //! `loadfile` or `debug`, no `string.dump`, and `load` only for source
-//! text, never bytecode. A memory limit, an instruction limit and a
+//! text, never bytecode. Lua's pattern functions are replaced by
+//! FeroProbe's own (see the `pattern` module) so that the limits reach
+//! them too. A memory limit, an instruction limit and a
 //! deadline bound every run; once one of them trips, `pcall`, `xpcall`
 //! and `coroutine.resume` pass the error on instead of catching it, so a
 //! script cannot carry on past it.
@@ -60,15 +62,23 @@ impl Budget {
         self.tripped.store(false, Ordering::Relaxed);
     }
 
-    /// Why the run must stop, if it must.
+    /// Why the run must stop, if it must, counting another
+    /// [`CHECK_EVERY`] instructions.
     fn check(&self) -> Option<&'static str> {
+        self.charge(u64::from(CHECK_EVERY))
+    }
+
+    /// Count `n` more units of work (instructions, or steps of Rust code
+    /// run for the script such as pattern matching), and say why the run
+    /// must stop, if it must.
+    pub(crate) fn charge(&self, n: u64) -> Option<&'static str> {
         let left = self.left.load(Ordering::Relaxed);
-        if left < u64::from(CHECK_EVERY) {
+        if left < n {
+            self.left.store(0, Ordering::Relaxed);
             self.tripped.store(true, Ordering::Relaxed);
             return Some(TOO_LONG);
         }
-        self.left
-            .store(left - u64::from(CHECK_EVERY), Ordering::Relaxed);
+        self.left.store(left - n, Ordering::Relaxed);
         let deadline = self.deadline_ms.load(Ordering::Relaxed);
         if deadline != u64::MAX && self.start.elapsed().as_millis() as u64 >= deadline {
             self.tripped.store(true, Ordering::Relaxed);
@@ -122,6 +132,7 @@ pub(crate) fn new_state(budget: &Arc<Budget>) -> mlua::Result<Lua> {
     }
     let string: Table = g.get("string")?;
     string.raw_set("dump", Value::Nil)?;
+    super::pattern::install(&lua, &string, budget)?;
     let os: Table = g.get("os")?;
     let safe_os = lua.create_table()?;
     for name in ["clock", "date", "difftime", "time"] {
