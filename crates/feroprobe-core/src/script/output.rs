@@ -44,6 +44,10 @@ impl Serialize for ScriptValue {
 
 /// A table with only numbered entries is a JSON array; otherwise an
 /// object, the numbered entries under their numbers ("1", "2", ...).
+/// Lua keeps `t[1]` and `t["1"]` apart, so a name that is already taken
+/// by a numbered entry (or by an earlier such name) is written in double
+/// quotes (`"\"1\""`), again until it is free: no entry is lost or
+/// written twice.
 impl Serialize for ScriptTable {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         if self.named.is_empty() {
@@ -54,11 +58,28 @@ impl Serialize for ScriptTable {
             return seq.end();
         }
         let mut map = s.serialize_map(Some(self.list.len() + self.named.len()))?;
+        let mut used: std::collections::HashSet<String> = (1..=self.list.len())
+            .map(|i| i.to_string())
+            .chain(self.named.iter().map(|(k, _)| k.clone()))
+            .collect();
         for (i, v) in self.list.iter().enumerate() {
             map.serialize_entry(&(i + 1).to_string(), v)?;
         }
+        let numbered = |k: &str| {
+            k.parse::<usize>()
+                .is_ok_and(|n| (1..=self.list.len()).contains(&n) && n.to_string() == k)
+        };
         for (k, v) in &self.named {
-            map.serialize_entry(k, v)?;
+            if !numbered(k) {
+                map.serialize_entry(k, v)?;
+                continue;
+            }
+            let mut key = format!("\"{k}\"");
+            while used.contains(&key) {
+                key = format!("\"{key}\"");
+            }
+            used.insert(key.clone());
+            map.serialize_entry(&key, v)?;
         }
         map.end()
     }
@@ -226,5 +247,15 @@ mod tests {
             serde_json::to_string(&mixed).unwrap(),
             "{\"1\":\"a\",\"k\":\"v\"}"
         );
+        // t[1], t["1"] and t['"1"'] stay three entries.
+        let clash = ScriptValue::Table(ScriptTable {
+            list: vec![s("a")],
+            named: vec![("\"1\"".into(), s("c")), ("1".into(), s("b"))],
+        });
+        let json: serde_json::Value = serde_json::to_value(&clash).unwrap();
+        assert_eq!(json["1"], "a");
+        assert_eq!(json["\"1\""], "c");
+        assert_eq!(json["\"\"1\"\""], "b");
+        assert_eq!(json.as_object().unwrap().len(), 3);
     }
 }

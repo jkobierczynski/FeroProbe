@@ -1515,9 +1515,11 @@ see the ports that may be open).
 \f[V]-v\f[R] prints how many scripts were loaded.
 .PP
 Each script is loaded (its file run in the sandbox to read its fields)
-when FeroProbe starts, and again in a fresh sandbox for every host or
-port it runs on, so scripts share nothing with each other or between
-runs.
+when FeroProbe starts.
+Its rules are checked in one sandbox per host (the hostrule and the
+portrules of that host\[aq]s ports), and its action runs in a fresh
+sandbox for every host or port, so actions share nothing with each
+other, with the rules or between runs.
 .SS \f[V]--script-args <args>\f[R]
 .PP
 Arguments for the scripts, in nmap\[aq]s syntax: comma-separated
@@ -1598,6 +1600,15 @@ at most 32 sockets open at once.
 When a limit is reached the script is stopped, and \f[V]pcall\f[R],
 \f[V]xpcall\f[R] and \f[V]coroutine.resume\f[R] pass that error on
 rather than catching it, so a script cannot carry on past it.
+.PP
+One gap remains: Lua\[aq]s pattern functions (\f[V]string.find\f[R],
+\f[V]string.match\f[R], \f[V]string.gmatch\f[R] and
+\f[V]string.gsub\f[R]) each run as a single step that the limits cannot
+interrupt.
+A pattern that backtracks heavily, such as several \f[V].-\f[R] in a row
+over a long text, can therefore run past the script\[aq]s timeout.
+FeroProbe\[aq]s own scripts use patterns that cannot do this; check the
+patterns of scripts from elsewhere before you run them.
 .PP
 \f[B]Scope.\f[R] The engine checks every connection, rather than
 trusting the script.
@@ -1832,8 +1843,18 @@ The JSON report has a \f[V]scripts\f[R] list in each port and host, and
 \f[V]prescript\f[R] and \f[V]postscript\f[R] lists at the top, each
 entry with \f[V]id\f[R], \f[V]output\f[R] and, for a table,
 \f[V]data\f[R] (an array for a table with only numbered entries, else an
-object).
+object with the numbered entries under \f[V]\[dq]1\[dq]\f[R],
+\f[V]\[dq]2\[dq]\f[R], ...; a name that would clash with one of those,
+as Lua lets \f[V]t[\[dq]1\[dq]]\f[R] and \f[V]t[1]\f[R] both exist, is
+written in double quotes, \f[V]\[dq]\[rs]\[dq]1\[rs]\[dq]\[dq]\f[R]).
+At most 100,000 values and 16 MiB of text are kept from one result; the
+rest is shown as \f[V]...\f[R].
 The grepable report has no script results, as in nmap.
+.PP
+A port whose state is folded into the \f[V]Not shown\f[R] line still
+gets its own row when a script gave output for it, in every report, so
+the output is not lost; the \f[V]Not shown\f[R] count leaves it out.
+nmap drops such output.
 .SS Built-in scripts
 .PP
 .TS
@@ -3747,6 +3768,13 @@ Named entries in Lua\[aq]s traversal order (unpredictable) unless the
 script orders them
 T}@T{
 Named entries sorted by name
+T}
+T{
+Script output on folded ports
+T}@T{
+Not shown when the port\[aq]s state is folded into \f[V]Not shown\f[R]
+T}@T{
+The port is listed with its output
 T}
 T{
 \f[V]fero.args.get\f[R] of a bare flag

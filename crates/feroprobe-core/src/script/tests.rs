@@ -362,3 +362,61 @@ action = function() return "ran" end"#;
     assert_eq!(hosts[0].scripts[0].output, "ran");
     assert!(hosts[1].scripts.is_empty());
 }
+
+#[tokio::test]
+async fn rules_see_their_own_script_type() {
+    let src = r#"
+categories = {"safe"}
+seen = {}
+hostrule = function() seen[#seen + 1] = SCRIPT_TYPE return true end
+portrule = function() seen[#seen + 1] = SCRIPT_TYPE return true end
+action = function() return table.concat(seen, ",") .. ";" .. SCRIPT_TYPE end"#;
+    let scan = ScriptScan::new(vec![script("t", src)], ArgTable::default(), None).unwrap();
+    let mut hosts = vec![host_with(&[(1, PortState::Open)])];
+    scan.scan_hosts(&mut hosts).await;
+    // Actions get a fresh state, so `seen` is empty there.
+    assert_eq!(hosts[0].scripts[0].output, ";hostrule");
+    assert_eq!(hosts[0].ports[0].scripts[0].output, ";portrule");
+    let src = r#"
+categories = {"safe"}
+portrule = function() return SCRIPT_TYPE == "portrule" end
+hostrule = function() return SCRIPT_TYPE == "hostrule" end
+action = function() return "ran" end"#;
+    let scan = ScriptScan::new(vec![script("t", src)], ArgTable::default(), None).unwrap();
+    let mut hosts = vec![host_with(&[(1, PortState::Open)])];
+    scan.scan_hosts(&mut hosts).await;
+    assert_eq!(hosts[0].scripts.len(), 1);
+    assert_eq!(hosts[0].ports[0].scripts.len(), 1);
+}
+
+#[tokio::test]
+async fn shared_strings_in_output_are_bounded() {
+    // One 1 MiB string 1000 times over: about 1 GiB if every copy were kept.
+    let src = r#"
+categories = {"safe"}
+hostrule = function() return true end
+action = function()
+  local s = ("x"):rep(1024 * 1024)
+  local t = {}
+  for i = 1, 1000 do t[i] = s end
+  return t
+end"#;
+    let scan = ScriptScan::new(vec![script("t", src)], ArgTable::default(), None).unwrap();
+    let mut hosts = vec![host_with(&[])];
+    scan.scan_hosts(&mut hosts).await;
+    let r = &hosts[0].scripts[0];
+    let Some(ScriptValue::Table(t)) = &r.data else {
+        panic!()
+    };
+    let kept: usize = t
+        .list
+        .iter()
+        .map(|v| match v {
+            ScriptValue::Str(s) => s.len(),
+            ScriptValue::Table(_) => 0,
+        })
+        .sum();
+    assert!(kept <= 17 * 1024 * 1024, "{kept}");
+    assert!(t.list.len() < 1000);
+    assert_eq!(t.list.last(), Some(&ScriptValue::Str("...".into())));
+}

@@ -116,7 +116,7 @@ line asks for any of these options:
 | `-sV` | Application-protocol probes (HTTP requests, TLS handshakes, banner prompts and more) to every open port |
 | `-O` | Raw TCP SYNs carrying every common TCP option (one, plus retries if unanswered) to one open TCP port per host. Lighter than nmap's `-O`, which also sends odd flag combinations and probes a closed port, but still a packet a minimal stack may not expect |
 | `-A` | Both of the above, plus traceroute |
-| `--script` | Whatever the chosen scripts send: they connect to the open ports the scan found and talk to the services there, in whatever way they are written to |
+| `--script` | Whatever the chosen scripts send: they may connect to any port the scan probed on the host they run against, in any state (open, closed or filtered), and talk to the services there in whatever way they are written to |
 
 `--script-help` only prints the scripts' descriptions and is never refused.
 

@@ -58,12 +58,16 @@ impl fmt::Display for ArgsError {
 
 impl std::error::Error for ArgsError {}
 
-/// Join `--script-args-file`'s text (trailing commas dropped) and
+/// Join `--script-args-file`'s text (trailing commas and white space
+/// dropped) and
 /// `--script-args`, file first, as nmap does, and parse them.
 pub fn parse_combined(file: Option<&str>, cli: Option<&str>) -> Result<ArgTable, ArgsError> {
     let mut parts = Vec::new();
     if let Some(f) = file {
-        parts.push(f.trim_end_matches(',').to_string());
+        let f = f.trim_end_matches(|c: char| c == ',' || c.is_ascii_whitespace());
+        if !f.is_empty() {
+            parts.push(f.to_string());
+        }
     }
     if let Some(c) = cli {
         parts.push(c.to_string());
@@ -139,6 +143,11 @@ impl Parser<'_> {
                 Some(b',' | b'\n') => {
                     self.i += 1;
                     self.space();
+                    // A trailing separator, such as the last newline of
+                    // an args file, ends the list.
+                    if self.peek() == close {
+                        return Ok(t);
+                    }
                 }
                 c if c == close => return Ok(t),
                 None => return Err(self.err("missing '}'")),
@@ -241,6 +250,24 @@ mod tests {
         assert_eq!(parse("a=").unwrap().get("a"), Some(&s("")));
         let t = parse_combined(Some("a=1\nb=2,,"), Some("c=3")).unwrap();
         assert_eq!(t.named.len(), 3);
+    }
+
+    #[test]
+    fn trailing_separators_add_nothing() {
+        let t = parse("a=1,b,\n").unwrap();
+        assert_eq!(t.list, vec![s("b")]);
+        assert_eq!(t.named.len(), 1);
+        let t = parse("x={1,2,}").unwrap();
+        let ArgValue::Table(x) = t.get("x").unwrap() else {
+            panic!()
+        };
+        assert_eq!(x.list, vec![s("1"), s("2")]);
+        // An args file ends in a newline.
+        let t = parse_combined(Some("a=1\nflag\n"), Some("c=3")).unwrap();
+        assert_eq!(t.list, vec![s("flag")]);
+        assert_eq!(t.named.len(), 2);
+        let t = parse_combined(Some("\n"), None).unwrap();
+        assert!(t.is_empty());
     }
 
     #[test]

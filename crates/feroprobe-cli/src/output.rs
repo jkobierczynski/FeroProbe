@@ -122,12 +122,20 @@ pub(crate) fn port_rows<'a>(
     if info.only_open {
         hidden.clear();
     }
+    // A port with script output is listed even in a folded state, so the
+    // output is not lost (nmap drops it there); the summary counts the
+    // rest.
+    let folded = |p: &PortResult| hidden.iter().any(|&(_, s)| s == p.state);
+    let rows: Vec<&PortResult> = visible(host, info.only_open)
+        .filter(|p| !folded(p) || !p.scripts.is_empty())
+        .collect();
+    for (n, s) in &mut hidden {
+        *n -= rows.iter().filter(|p| p.state == *s).count();
+    }
+    hidden.retain(|&(n, _)| n > 0);
     // Most ports first, as nmap orders its "Not shown" line (stable, so a
     // tie keeps the order above).
     hidden.sort_by_key(|&(n, _)| std::cmp::Reverse(n));
-    let rows = visible(host, info.only_open)
-        .filter(|p| !hidden.iter().any(|&(_, s)| s == p.state))
-        .collect();
     (hidden, rows)
 }
 
@@ -1012,6 +1020,30 @@ pub(crate) mod tests {
             x.contains("portid=\"1100\"><state state=\"open|filtered\""),
             "{x}"
         );
+
+        // A folded port with script output is still listed, with its output.
+        host.ports[205]
+            .scripts
+            .push(feroprobe_core::script::ScriptResult {
+                id: "demo".into(),
+                output: "hello".into(),
+                data: None,
+            });
+        let table = render_table(std::slice::from_ref(&host), &info());
+        assert!(
+            table.contains("Not shown: 200 closed ports, 100 open|filtered ports"),
+            "{table}"
+        );
+        assert!(
+            table.contains("1005/tcp   open|filtered") && table.contains("|_demo: hello"),
+            "{table}"
+        );
+        let x = crate::xml::render(std::slice::from_ref(&host), &info());
+        assert!(
+            x.contains("<extraports state=\"open|filtered\" count=\"100\">"),
+            "{x}"
+        );
+        assert!(x.contains("<script id=\"demo\" output=\"hello\""), "{x}");
     }
 
     #[test]

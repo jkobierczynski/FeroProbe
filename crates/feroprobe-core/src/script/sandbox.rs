@@ -92,8 +92,12 @@ local function pass(ok, ...)
   if tripped() then error("__FEROPROBE_LIMIT__", 0) end
   return ok, ...
 end
-load = function(chunk, name, mode, env)
-  return raw_load(chunk, name, "t", env)
+load = function(chunk, name, mode, ...)
+  -- An env given, even nil, becomes the chunk's _ENV; none means _G.
+  if select('#', ...) > 0 then
+    return raw_load(chunk, name, "t", (...))
+  end
+  return raw_load(chunk, name, "t")
 end
 pcall = function(f, ...) return pass(raw_pcall(f, ...)) end
 xpcall = function(f, h, ...) return pass(raw_xpcall(f, h, ...)) end
@@ -227,6 +231,14 @@ mod tests {
         // A binary chunk starts with "\27Lua".
         let r = run(
             "local f, e = load('\\27Lua....') return f == nil and e:find('binary') ~= nil",
+            None,
+        );
+        assert_eq!(r, Ok(Value::Boolean(true)));
+        // No env: the chunk sees the globals. An env table: only that.
+        let r = run(
+            "return load('return tostring(1)')() == '1' \
+             and load('return x', 'c', 't', {x = 5})() == 5 \
+             and load('return tostring', 'c', 't', {})() == nil",
             None,
         );
         assert_eq!(r, Ok(Value::Boolean(true)));

@@ -25,6 +25,32 @@ pub const DEFAULT_PARALLEL: usize = 32;
 const MAX_DEPTH: usize = 32;
 /// Most values kept from a script's output table.
 const MAX_VALUES: usize = 100_000;
+/// Most bytes of text (values and names) kept from a script's output
+/// table. A table can hold one string many times at no cost to the
+/// script, but every copy costs FeroProbe, so copies count in full.
+const MAX_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
+
+/// What converting a script's output table has kept so far.
+#[derive(Default)]
+struct Kept {
+    values: usize,
+    bytes: usize,
+}
+
+impl Kept {
+    fn full(&self) -> bool {
+        self.values > MAX_VALUES || self.bytes > MAX_OUTPUT_BYTES
+    }
+
+    /// `text` if it still fits, else "...", and from then on nothing more.
+    fn text(&mut self, text: String) -> String {
+        self.bytes = self.bytes.saturating_add(text.len());
+        if self.bytes > MAX_OUTPUT_BYTES {
+            return "...".into();
+        }
+        text
+    }
+}
 
 /// The library every script gets, written for FeroProbe, on top of the
 /// `fero` table the engine fills in.
@@ -257,30 +283,39 @@ fn tostring(lua: &Lua, v: &Value) -> String {
         .unwrap_or_default()
 }
 
-fn convert(lua: &Lua, v: &Value, depth: usize, count: &mut usize) -> ScriptValue {
-    *count += 1;
+fn convert(lua: &Lua, v: &Value, depth: usize, kept: &mut Kept) -> ScriptValue {
+    kept.values += 1;
+    if kept.full() {
+        return ScriptValue::Str("...".into());
+    }
     let Value::Table(t) = v else {
-        return ScriptValue::Str(match v {
-            Value::String(s) => bytes_to_text(&s.as_bytes()),
+        let text = match v {
+            // Cut before copying, so a huge string is never copied whole.
+            Value::String(s) => {
+                let b = s.as_bytes();
+                let room = MAX_OUTPUT_BYTES.saturating_sub(kept.bytes);
+                bytes_to_text(&b[..b.len().min(room + 1)])
+            }
             other => tostring(lua, other),
-        });
+        };
+        return ScriptValue::Str(kept.text(text));
     };
     if t.metatable()
         .is_some_and(|m| m.raw_get::<Value>("__tostring").is_ok_and(|f| !f.is_nil()))
     {
-        return ScriptValue::Str(tostring(lua, v));
+        return ScriptValue::Str(kept.text(tostring(lua, v)));
     }
-    if depth >= MAX_DEPTH || *count > MAX_VALUES {
+    if depth >= MAX_DEPTH {
         return ScriptValue::Str("...".into());
     }
     let mut out = ScriptTable::default();
     for i in 1.. {
+        if kept.full() {
+            break;
+        }
         match t.raw_get::<Value>(i) {
             Ok(Value::Nil) | Err(_) => break,
-            Ok(x) => out.list.push(convert(lua, &x, depth + 1, count)),
-        }
-        if *count > MAX_VALUES {
-            break;
+            Ok(x) => out.list.push(convert(lua, &x, depth + 1, kept)),
         }
     }
     let mut named: Vec<(String, Value)> = t
@@ -293,10 +328,11 @@ fn convert(lua: &Lua, v: &Value, depth: usize, count: &mut usize) -> ScriptValue
         .collect();
     named.sort_by(|a, b| a.0.cmp(&b.0));
     for (k, x) in named {
-        if *count > MAX_VALUES {
+        if kept.full() {
             break;
         }
-        out.named.push((k, convert(lua, &x, depth + 1, count)));
+        let k = kept.text(k);
+        out.named.push((k, convert(lua, &x, depth + 1, kept)));
     }
     ScriptValue::Table(out)
 }
@@ -309,16 +345,16 @@ fn to_result(lua: &Lua, id: &str, ret: MultiValue) -> Option<ScriptResult> {
     let mut it = ret.into_iter();
     let r1 = it.next().unwrap_or(Value::Nil);
     let r2 = it.next().unwrap_or(Value::Nil);
-    let mut count = 0;
+    let mut kept = Kept::default();
     let (data, output) = if !r2.is_nil() {
-        let data = (!r1.is_nil()).then(|| convert(lua, &r1, 0, &mut count));
+        let data = (!r1.is_nil()).then(|| convert(lua, &r1, 0, &mut kept));
         (data, tostring(lua, &r2))
     } else {
         match &r1 {
             Value::Nil => return None,
             Value::String(s) => (None, bytes_to_text(&s.as_bytes())),
             Value::Table(_) => {
-                let d = convert(lua, &r1, 0, &mut count);
+                let d = convert(lua, &r1, 0, &mut kept);
                 let text = d.layout();
                 (Some(d), text)
             }
@@ -434,6 +470,10 @@ impl ScriptScan {
         };
         if script.forced {
             return true;
+        }
+        // One state serves a script's hostrule and portrules on a host.
+        if lua.globals().raw_set("SCRIPT_TYPE", name).is_err() {
+            return false;
         }
         budget.reset(self.rule_deadline());
         let r = match on {

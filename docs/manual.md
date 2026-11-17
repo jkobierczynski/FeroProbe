@@ -1001,8 +1001,10 @@ may be open). `--script` may be given more than once; the lists add up.
 `-v` prints how many scripts were loaded.
 
 Each script is loaded (its file run in the sandbox to read its fields)
-when FeroProbe starts, and again in a fresh sandbox for every host or port
-it runs on, so scripts share nothing with each other or between runs.
+when FeroProbe starts. Its rules are checked in one sandbox per host (the
+hostrule and the portrules of that host's ports), and its action runs in
+a fresh sandbox for every host or port, so actions share nothing with
+each other, with the rules or between runs.
 
 #### `--script-args <args>`
 
@@ -1070,6 +1072,13 @@ Every script runs in its own Lua state with:
 When a limit is reached the script is stopped, and `pcall`, `xpcall` and
 `coroutine.resume` pass that error on rather than catching it, so a
 script cannot carry on past it.
+
+One gap remains: Lua's pattern functions (`string.find`, `string.match`,
+`string.gmatch` and `string.gsub`) each run as a single step that the
+limits cannot interrupt. A pattern that backtracks heavily, such as
+several `.-` in a row over a long text, can therefore run past the
+script's timeout. FeroProbe's own scripts use patterns that cannot do
+this; check the patterns of scripts from elsewhere before you run them.
 
 **Scope.** The engine checks every connection, rather than trusting the
 script. A script running against a host may connect only to that host
@@ -1170,8 +1179,16 @@ in `<nmaprun>`, with a returned table as nested `<elem key="...">` and
 `<table key="...">` elements. The JSON report has a `scripts` list in each
 port and host, and `prescript` and `postscript` lists at the top, each
 entry with `id`, `output` and, for a table, `data` (an array for a table
-with only numbered entries, else an object). The grepable report has no
-script results, as in nmap.
+with only numbered entries, else an object with the numbered entries under
+`"1"`, `"2"`, ...; a name that would clash with one of those, as Lua lets
+`t["1"]` and `t[1]` both exist, is written in double quotes, `"\"1\""`).
+At most 100,000 values and 16 MiB of text are kept from one result; the
+rest is shown as `...`. The grepable report has no script results, as in
+nmap.
+
+A port whose state is folded into the `Not shown` line still gets its own
+row when a script gave output for it, in every report, so the output is
+not lost; the `Not shown` count leaves it out. nmap drops such output.
 
 ### Built-in scripts
 
@@ -2371,6 +2388,7 @@ safeguard calls for a difference. The deliberate differences are:
 | Script sandbox | Scripts may read and write files and run commands (`io`, `os`) | No files, commands or environment; memory and instruction limits per run |
 | Script output text | Every byte outside printable ASCII shown as `\xHH` | UTF-8 text kept; control characters and invalid bytes shown as `\xHH` |
 | Script table output | Named entries in Lua's traversal order (unpredictable) unless the script orders them | Named entries sorted by name |
+| Script output on folded ports | Not shown when the port's state is folded into `Not shown` | The port is listed with its output |
 | `fero.args.get` of a bare flag | `stdnse.get_script_args` returns `1` | Returns `true` |
 | `--script-help` | Prints a link to nmap.org's documentation of each script, and writes `-oX` XML | Prints where the script came from (built in, or its file); no XML |
 
