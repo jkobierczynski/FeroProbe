@@ -44,11 +44,12 @@ impl Serialize for ScriptValue {
 
 /// A table with only numbered entries is a JSON array; otherwise an
 /// object, the numbered entries under their numbers ("1", "2", ...).
-/// Lua keeps `t[1]` and `t["1"]` apart, so in a table with numbered
-/// entries a name that is one of those numbers, or that starts with a
-/// double quote, is written in double quotes (`"1"` as `"\"1\""`). That
-/// is reversible: a key in quotes is a name with one pair of quotes
-/// added, a bare number is a numbered entry, anything else a name.
+/// Lua keeps `t[2]` and `t["2"]` apart, so a name that reads as a
+/// positive whole number (`2`, not `02`), or that starts with a double
+/// quote, is written in an added pair of double quotes (`"2"` as
+/// `"\"2\""`). That is reversible: a bare whole number is always a
+/// numbered entry, a key in quotes a name with the outer pair removed,
+/// any other key a name as it is.
 impl Serialize for ScriptTable {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         if self.named.is_empty() {
@@ -62,13 +63,8 @@ impl Serialize for ScriptTable {
         for (i, v) in self.list.iter().enumerate() {
             map.serialize_entry(&(i + 1).to_string(), v)?;
         }
-        let n = self.list.len();
-        let numbered = |k: &str| {
-            k.parse::<usize>()
-                .is_ok_and(|i| (1..=n).contains(&i) && i.to_string() == k)
-        };
         for (k, v) in &self.named {
-            if n > 0 && (numbered(k) || k.starts_with('"')) {
+            if needs_quotes(k) {
                 map.serialize_entry(&format!("\"{k}\""), v)?;
             } else {
                 map.serialize_entry(k, v)?;
@@ -76,6 +72,13 @@ impl Serialize for ScriptTable {
         }
         map.end()
     }
+}
+
+/// Whether a name must be quoted in JSON to stay apart from a numbered
+/// entry: it reads as a positive whole number, or starts with a quote.
+fn needs_quotes(k: &str) -> bool {
+    k.starts_with('"')
+        || (!k.is_empty() && !k.starts_with('0') && k.bytes().all(|b| b.is_ascii_digit()))
 }
 
 impl ScriptValue {
@@ -240,8 +243,7 @@ mod tests {
             serde_json::to_string(&mixed).unwrap(),
             "{\"1\":\"a\",\"k\":\"v\"}"
         );
-        // t[1], t["1"] and t['"1"'] stay three distinct keys, and a table
-        // without t["1"] cannot give the same JSON as one with it.
+        // t[1], t["1"] and t['"1"'] stay three distinct keys.
         let table = |named: Vec<(&str, &str)>| {
             ScriptValue::Table(ScriptTable {
                 list: vec![s("a")],
@@ -258,14 +260,28 @@ mod tests {
             json(&table(vec![("1", "b")])),
             json(&table(vec![("\"1\"", "b")]))
         );
-        // Names that are not numbered keys, and all names of a table
-        // without numbered entries, are written as they are.
-        assert_eq!(json(&table(vec![("2", "b")]))["2"], "b");
+        // {[1]="a", ["2"]="b", x="c"} and {[1]="a", [2]="b", x="c"} differ.
+        let named_two = json(&table(vec![("2", "b"), ("x", "c")]));
+        let numbered_two = json(&ScriptValue::Table(ScriptTable {
+            list: vec![s("a"), s("b")],
+            named: vec![("x".into(), s("c"))],
+        }));
+        assert_ne!(named_two, numbered_two);
+        assert_eq!(named_two["\"2\""], "b");
+        assert_eq!(numbered_two["2"], "b");
+        // A purely named table cannot look like one with numbered entries.
         let named = ScriptValue::Table(ScriptTable {
             list: vec![],
-            named: vec![("\"1\"".into(), s("x")), ("1".into(), s("y"))],
+            named: vec![("1".into(), s("a")), ("x".into(), s("c"))],
         });
-        assert_eq!(json(&named)["1"], "y");
-        assert_eq!(json(&named)["\"1\""], "x");
+        assert_ne!(json(&named), json(&table(vec![("x", "c")])));
+        assert_eq!(json(&named)["\"1\""], "a");
+        // Other names, "02" and "0" among them, are written as they are.
+        let plain = json(&table(vec![("02", "b"), ("0", "z"), ("k", "v")]));
+        assert_eq!(plain["02"], "b");
+        assert_eq!(plain["0"], "z");
+        assert_eq!(plain["k"], "v");
+        let big = json(&table(vec![("123456789012345678901234567890", "n")]));
+        assert_eq!(big["\"123456789012345678901234567890\""], "n");
     }
 }
