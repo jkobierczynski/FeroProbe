@@ -8,6 +8,7 @@ mod groups;
 mod help;
 mod keys;
 mod output;
+mod privdrop;
 mod report;
 mod resume;
 mod xml;
@@ -413,6 +414,12 @@ struct Args {
     /// scan and connect pings by default
     #[arg(long, overrides_with = "privileged")]
     unprivileged: bool,
+
+    /// --keep-root: under sudo, stay root for the whole run instead of
+    /// becoming the invoking user once the settings are read (needed only
+    /// to read or write files that only root can reach)
+    #[arg(long = "keep-root")]
+    keep_root: bool,
 
     /// --system-dns: resolve names with the system resolver (FeroProbe's
     /// default already; it also overrides --dns-servers)
@@ -933,14 +940,7 @@ impl Outputs {
             ..Default::default()
         };
         for path in self.files() {
-            refuse_planted_link(path)?;
-            let file = std::fs::OpenOptions::new()
-                .write(true)
-                .append(self.append)
-                .create(true)
-                .truncate(false)
-                .open(path)
-                .with_context(|| format!("opening {path}"))?;
+            let file = open_report(path, self.append)?;
             #[cfg(unix)]
             let id = {
                 use std::os::unix::fs::MetadataExt;
@@ -998,49 +998,86 @@ impl ReportFiles {
     }
 }
 
-/// Refuse, when running as root, to write a report through a symbolic link
-/// that another user owns in a sticky, world-writable directory such as
-/// `/tmp`: that is how someone tricks `sudo feroprobe -oN /tmp/scan.txt`
-/// into overwriting a file of root's choosing. Linux's
-/// `fs.protected_symlinks` refuses the same, but not every system has it
-/// switched on, and other systems lack it.
-#[cfg(unix)]
-fn refuse_planted_link(path: &str) -> Result<()> {
-    use std::os::unix::fs::{MetadataExt, PermissionsExt};
-    // SAFETY: geteuid has no preconditions.
-    let euid = unsafe { libc::geteuid() };
-    if euid != 0 {
-        return Ok(());
+/// Open (creating, not truncating) one report file.
+///
+/// As root (`--keep-root`, root without sudo, or a failed hand-over), a
+/// report is not written through a symbolic link unless root owns both
+/// the link and its directory and nobody else can write to that directory
+/// (as with `/dev/stdout`): someone else's link, or any link in a shared
+/// directory such as `/tmp`, could aim root's write at a system file. The
+/// final open uses `O_NOFOLLOW`, so a link swapped in after the check is
+/// refused too. A file root creates under `sudo` is handed to the invoking
+/// user (`SUDO_UID`/`SUDO_GID`), so the report is theirs, not root's.
+/// Without root nothing changes: a report goes wherever the path leads.
+fn open_report(path: &str, append: bool) -> Result<std::fs::File> {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).append(append).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+        // SAFETY: geteuid has no preconditions.
+        if unsafe { libc::geteuid() } == 0 {
+            let p = std::path::Path::new(path);
+            let trusted_link = match std::fs::symlink_metadata(p) {
+                Ok(m) if m.file_type().is_symlink() => {
+                    let dir = match p.parent() {
+                        Some(d) if !d.as_os_str().is_empty() => d,
+                        _ => std::path::Path::new("."),
+                    };
+                    let dir_ok =
+                        std::fs::metadata(dir).is_ok_and(|d| d.uid() == 0 && d.mode() & 0o022 == 0);
+                    if m.uid() != 0 || !dir_ok {
+                        bail!(
+                            "{path} is a symbolic link {}; running as root, FeroProbe does not \
+                             write a report through it. Give the real path",
+                            if m.uid() != 0 {
+                                "owned by another user"
+                            } else {
+                                "in a directory other users can write to"
+                            }
+                        );
+                    }
+                    true
+                }
+                _ => false,
+            };
+            if !trusted_link {
+                opts.custom_flags(libc::O_NOFOLLOW);
+            }
+            let refused = |e: std::io::Error| -> anyhow::Error {
+                if e.raw_os_error() == Some(libc::ELOOP) {
+                    anyhow::anyhow!(
+                        "{path} is a symbolic link; running as root, FeroProbe does not write \
+                         a report through it. Give the real path"
+                    )
+                } else {
+                    anyhow::Error::new(e).context(format!("opening {path}"))
+                }
+            };
+            // Create it ourselves if we can, to know whether to hand it over.
+            let created = opts.clone().create_new(true).open(path);
+            return match created {
+                Ok(file) => {
+                    if let Some((uid, gid)) = privdrop::sudo_ids() {
+                        use std::os::fd::AsRawFd;
+                        // SAFETY: a valid open descriptor.
+                        if unsafe { libc::fchown(file.as_raw_fd(), uid, gid) } != 0 {
+                            return Err(std::io::Error::last_os_error())
+                                .with_context(|| format!("handing {path} to SUDO_UID {uid}"));
+                        }
+                    }
+                    Ok(file)
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    opts.open(path).map_err(refused)
+                }
+                Err(e) => Err(refused(e)),
+            };
+        }
     }
-    let p = std::path::Path::new(path);
-    let Ok(link) = std::fs::symlink_metadata(p) else {
-        return Ok(());
-    };
-    if !link.file_type().is_symlink() || link.uid() == euid {
-        return Ok(());
-    }
-    let dir = match p.parent() {
-        Some(d) if !d.as_os_str().is_empty() => d,
-        _ => std::path::Path::new("."),
-    };
-    let Ok(dir_meta) = std::fs::metadata(dir) else {
-        return Ok(());
-    };
-    let mode = dir_meta.permissions().mode();
-    // Sticky (o+t) and writable by everyone (o+w); the owner of the
-    // directory itself may link as it likes, as with protected_symlinks.
-    if mode & 0o1002 == 0o1002 && dir_meta.uid() != link.uid() {
-        bail!(
-            "{path} is a symbolic link owned by another user in a shared directory; \
-             refusing to write a report through it as root"
-        );
-    }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn refuse_planted_link(_path: &str) -> Result<()> {
-    Ok(())
+    opts.create(true)
+        .open(path)
+        .with_context(|| format!("opening {path}"))
 }
 
 /// Progress on standard error for -v.
@@ -2881,10 +2918,27 @@ fn dry_run(
     Ok(())
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     let raw: Vec<String> = std::env::args().collect();
     let first = debugging::parse_args(nmap_style_args(raw.clone()));
+    // Settings files first, while still root (root's own file may be
+    // readable by root only), then give root up before any other file is
+    // opened and before the runtime starts its threads.
+    let settings = config::load()?;
+    let privileges = privdrop::drop_to_invoking_user(first.keep_root)?;
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("starting the async runtime")?
+        .block_on(run(raw, first, settings, privileges))
+}
+
+async fn run(
+    raw: Vec<String>,
+    first: Args,
+    settings: config::Loaded,
+    privileges: privdrop::Outcome,
+) -> Result<()> {
     // --resume: the rest of the command line comes from the report.
     let (args, command, resumed) = match &first.resume {
         None => (first, raw, None),
@@ -2922,8 +2976,8 @@ async fn main() -> Result<()> {
         );
         return Ok(());
     }
-    // Settings files, then the ICS guard: before anything is resolved or sent.
-    let settings = config::load()?;
+    // Settings files (read in main), then the ICS guard: before anything
+    // is resolved or sent.
     for w in &settings.warnings {
         eprintln!("Warning: {w}");
     }
@@ -2982,6 +3036,9 @@ async fn main() -> Result<()> {
         };
         format!("ICS protection {ics}; {read}")
     });
+    if let Some(line) = privileges.describe() {
+        progress.say(1, || line);
+    }
     // --privileged / --unprivileged: before anything checks for raw sockets.
     if args.unprivileged {
         feroprobe_core::assume_privileged(Some(false));
@@ -4069,42 +4126,62 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// As root, a link another user planted in a sticky shared directory is
-    /// refused; root's own links, and links in private directories, work.
+    /// As root, a report is not written through someone else's link, nor
+    /// through any link in a directory others can write to; a link root
+    /// owns in a root-only directory works. A file root creates under sudo
+    /// goes to the invoking user.
     #[cfg(unix)]
     #[test]
-    fn planted_links_are_refused_as_root() {
-        use std::os::unix::fs::PermissionsExt;
+    fn report_links_are_refused_as_root() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
         // SAFETY: geteuid has no preconditions.
         if unsafe { libc::geteuid() } != 0 {
             return;
         }
-        let dir = private_dir("sticky");
-        let shared = dir.join("shared");
-        std::fs::create_dir(&shared).unwrap();
-        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o1777)).unwrap();
+        let dir = private_dir("rootlinks");
         let target = dir.join("target");
         std::fs::write(&target, "keep").unwrap();
-        let link = shared.join("scan.txt");
-        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let open = |p: &std::path::Path| {
+            Outputs {
+                normal: vec![p.display().to_string()],
+                ..Default::default()
+            }
+            .open_files()
+        };
         let lchown = |p: &std::path::Path, uid: u32| {
             let c = std::ffi::CString::new(p.as_os_str().as_encoded_bytes()).unwrap();
             // SAFETY: c is a valid NUL-terminated path.
             assert_eq!(unsafe { libc::lchown(c.as_ptr(), uid, u32::MAX) }, 0);
         };
-        let name = link.display().to_string();
-        assert!(refuse_planted_link(&name).is_ok());
+        // Root's link in root's private directory: allowed.
+        let link = dir.join("own.txt");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(open(&link).is_ok());
+        // Someone else's link, even there: refused.
         lchown(&link, 65534);
-        assert!(refuse_planted_link(&name).is_err());
-        let o = Outputs {
-            normal: vec![name.clone()],
-            ..Default::default()
-        };
-        assert!(o.open_files().is_err());
+        let err = open(&link).err().unwrap().to_string();
+        assert!(err.contains("owned by another user"), "{err}");
+        // Root's own link in a shared sticky directory: refused.
+        let shared = dir.join("shared");
+        std::fs::create_dir(&shared).unwrap();
+        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o1777)).unwrap();
+        let link = shared.join("scan.txt");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let err = open(&link).err().unwrap().to_string();
+        assert!(err.contains("other users can write to"), "{err}");
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep");
-        // The directory's owner may link: same owner as the link.
-        lchown(&shared, 65534);
-        assert!(refuse_planted_link(&name).is_ok());
+        // /dev/stdout is root's link in root's /dev.
+        if std::path::Path::new("/dev/stdout").is_symlink() {
+            assert!(open(std::path::Path::new("/dev/stdout")).is_ok());
+        }
+        // A new file is handed to SUDO_UID/SUDO_GID; tests run in threads,
+        // so this reads the variables only if the environment has them.
+        if let Some((uid, gid)) = privdrop::sudo_ids() {
+            let new = dir.join("new.txt");
+            open(&new).unwrap();
+            let m = std::fs::metadata(&new).unwrap();
+            assert_eq!((m.uid(), m.gid()), (uid, gid));
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

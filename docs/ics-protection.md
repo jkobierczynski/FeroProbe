@@ -43,8 +43,26 @@ From lowest to highest:
 A key set in a later file replaces the same key from an earlier file. A key
 that a file leaves out keeps whatever the earlier layers said, so a
 `.feroproberc` that sets nothing does not switch off a protection from your
-user file. A `.feroproberc` that sets `ics_protection = false` does switch it
-off for runs started in that directory.
+user file.
+
+A `.feroproberc` can only **tighten** ICS protection: `ics_protection = true`
+there switches it on for runs started in that directory, but
+`ics_protection = false` cannot switch off a protection an earlier file
+(your user file, or root's) switched on. FeroProbe ignores it and says so
+on every run:
+
+```text
+Warning: settings file .feroproberc: ics_protection = false ignored: a .feroproberc in the
+working directory can switch ICS protection on but not off. It stays on (ics_protection = true
+in /home/me/.config/feroprobe/config.toml); change that file, or pass --override-ics-protection
+for a single run
+```
+
+A working directory is often not yours alone: `/tmp`, a shared engagement
+folder, an unpacked archive or a cloned repository can carry a
+`.feroproberc` you never looked at, and it must not quietly undo a
+safeguard you set. To switch protection off, change the file that switched
+it on, or use `--override-ics-protection` for one run.
 
 Run with `-v` to see which files were read and whether ICS protection
 is on:
@@ -58,7 +76,23 @@ ICS protection on (ics_protection = true in /home/me/.config/feroprobe/config.to
 The files are [TOML](https://toml.io/). A missing file is fine and is
 skipped. A file that exists but cannot be read, is not valid TOML, or gives
 a setting the wrong type stops the run with an error naming the file: a
-protection you set is never dropped silently because of a typo. An unknown
+protection you set is never dropped silently because of a typo.
+
+Under `sudo`, root reads files that an ordinary user controls, so every
+settings file is checked before it is read:
+
+- running as root, a symbolic link is refused (put the file itself there);
+- it must be a regular file (a named pipe or device is refused, so the
+  run cannot hang or read without end) of at most 64 KB;
+- it must not be writable by every user;
+- a file owned by anyone but root or you (the user who ran `sudo`) is
+  skipped with a warning naming its owner, since someone else may have
+  planted it in a shared directory.
+
+A TOML error gives the line and column; the parser's own message, which
+can repeat a word from the file, is added only when the file is yours, and
+the offending line is never printed. That way an error cannot be used to
+show a line of a file you could not read yourself. An unknown
 key gets a warning and is otherwise ignored, so a file written for a newer
 FeroProbe still works with an older one.
 

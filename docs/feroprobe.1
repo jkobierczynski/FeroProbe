@@ -1975,8 +1975,8 @@ or DNS, whose packets the system sends; FeroProbe warns when the scan
 includes any of them.
 \f[V]--packet-trace\f[R] adds \f[V]ether-src=<MAC>\f[R] to each probe
 sent in a spoofed frame.
-Like every SENT line it is printed just before the send, so it shows
-a frame FeroProbe attempted to send, not proof that the frame left.
+Like every SENT line it is printed just before the send, so it shows a
+frame FeroProbe attempted to send, not proof that the frame left.
 Like the other evasion options, public targets need
 \f[V]--allow-public-evasion\f[R].
 .SS \f[V]--allow-public-evasion\f[R]
@@ -2190,15 +2190,21 @@ A \f[V]--dry-run\f[R] writes no reports and creates no files.
 Report files are written through the handles opened at the start, so the
 paths are not looked up again: replacing a report path with a link while
 the scan runs does not redirect the report.
-When FeroProbe runs as root (for example under \f[V]sudo\f[R]), it also
-refuses to write a report through a symbolic link that another user owns
-in a shared directory with the sticky bit, such as \f[V]/tmp\f[R] (for
-example \f[V]sudo feroprobe -oN /tmp/scan.txt\f[R] when someone else has
-made \f[V]/tmp/scan.txt\f[R] a link to a system file).
-Linux refuses this too when \f[V]fs.protected_symlinks\f[R] is on;
-FeroProbe checks it on every system.
-The files are created with the usual permissions from the umask and
-owned by root, as with nmap.
+.PP
+Under \f[V]sudo\f[R], FeroProbe has already given up root when it opens
+the report files (see Giving up root under sudo), so it writes them as
+the user who ran \f[V]sudo\f[R]: they belong to that user, and a path
+that user cannot write to fails as it would for them.
+When it does run as root (\f[V]--keep-root\f[R], or root without
+\f[V]sudo\f[R]), it refuses to write a report through a symbolic link
+unless root owns both the link and its directory and no other user can
+write to that directory (so \f[V]/dev/stdout\f[R] works, but
+\f[V]sudo feroprobe --keep-root -oN /tmp/scan.txt\f[R] is refused when
+\f[V]/tmp/scan.txt\f[R] is a link, whoever made it).
+The file is opened with \f[V]O_NOFOLLOW\f[R], so a link swapped in at
+the last moment is refused too, and a file root creates under
+\f[V]sudo --keep-root\f[R] is handed to the invoking user.
+nmap writes its reports as root through any link.
 .SS \f[V]--append-output\f[R]
 .PP
 Add the reports to the end of the \f[V]-oN\f[R], \f[V]-oX\f[R],
@@ -2752,6 +2758,15 @@ A raw socket that then cannot be opened fails the scan with an error.
 Act as an ordinary user: no raw sockets, so the connect scan and connect
 pings by default, as without root.
 The last of \f[V]--privileged\f[R] and \f[V]--unprivileged\f[R] wins.
+.SS \f[V]--keep-root\f[R]
+.PP
+Under \f[V]sudo\f[R], stay root for the whole run.
+Without it, FeroProbe reads its settings files as root and then becomes
+the user who ran \f[V]sudo\f[R], keeping only the network capabilities a
+scan needs; see Giving up root under sudo.
+Use it only when the run must read or write a file that only root can
+reach (for example \f[V]-oN /root/scan.txt\f[R]).
+nmap has no such option, since it always stays root.
 .SS \f[V]-V\f[R], \f[V]--version\f[R]
 .PP
 Print the version and exit.
@@ -2778,10 +2793,25 @@ root\[aq]s (skipped when sudo kept an absolute
 \f[V].feroproberc\f[R] in the current directory.
 .PP
 A key in a later file replaces the same key from an earlier one, and
-command-line options win over all of them.
+command-line options win over all of them, with one exception: the
+directory\[aq]s \f[V].feroproberc\f[R] may switch
+\f[V]ics_protection\f[R] on but not off.
+A \f[V]ics_protection = false\f[R] there, when an earlier file switched
+it on, is ignored with a warning naming both files (a working directory
+may be shared, unpacked from an archive or cloned, and must not quietly
+undo your own setting).
 A missing file is skipped; one that cannot be read, is not valid TOML or
 gives a value of the wrong type stops the run.
 Unknown keys only warn.
+.PP
+Since root reads these files under \f[V]sudo\f[R] from places an
+ordinary user controls, each file is checked first: as root, a symbolic
+link is refused; the file must be a regular file (not a pipe or device)
+of at most 64 KB, not writable by every user; and a file owned by anyone
+other than root or you (the user who ran \f[V]sudo\f[R]) is skipped with
+a warning.
+A TOML error names the line and column, and repeats the parser\[aq]s
+message only for your own file.
 \f[V]-v\f[R] prints which files were read and whether ICS protection is
 on.
 nmap has no such files.
@@ -2877,6 +2907,36 @@ Linux has every feature.
 On macOS and Windows FeroProbe runs the connect and UDP scans, discovery
 with its unprivileged probes, \f[V]-sV\f[R], and every output format;
 the raw-socket features are Linux only.
+.SS Giving up root under sudo
+.PP
+Only raw sockets need root.
+So when root runs FeroProbe under \f[V]sudo\f[R], it reads its settings
+files first and then becomes the user who ran \f[V]sudo\f[R]
+(\f[V]SUDO_UID\f[R], \f[V]SUDO_GID\f[R] and that user\[aq]s groups)
+before it opens any other file or starts a thread.
+On Linux it keeps just \f[V]CAP_NET_RAW\f[R], \f[V]CAP_NET_ADMIN\f[R]
+and \f[V]CAP_NET_BIND_SERVICE\f[R] (for \f[V]-g\f[R] below 1024), so
+every raw-socket feature still works; on other systems, where raw scans
+are not supported, it gives root up entirely.
+Everything else in the run (service and banner parsing, TLS,
+\f[V]-iL\f[R], \f[V]--excludefile\f[R], \f[V]--service-rules\f[R],
+\f[V]--resume\f[R] and the report files) then happens as that user.
+\f[V]-v\f[R] prints a line saying so.
+.PP
+This means a \f[V]sudo feroprobe\f[R] run reads and writes files with
+your own permissions: \f[V]-iL /root/targets.txt\f[R] or
+\f[V]-oN /root/scan.txt\f[R] fail unless you can reach them yourself.
+\f[V]--keep-root\f[R] stays root for such a run.
+Root without \f[V]sudo\f[R] (a root shell with no \f[V]SUDO_UID\f[R])
+keeps root, as there is no other user to become.
+.PP
+nmap stays root for the whole run, which is why a sudoers entry that
+allows only \f[V]nmap\f[R] is a well-known way to become root.
+Do not rely on a restricted sudoers entry for FeroProbe either:
+\f[V]--keep-root\f[R], and options that read files, still put root\[aq]s
+privileges in the hands of whoever runs it.
+Grant the capability with \f[V]setcap\f[R] instead (above), or give such
+users full \f[V]sudo\f[R].
 .SH PROBE SIGNATURE
 .PP
 FeroProbe\[aq]s probes carry a stable, documented signature so that
@@ -3001,7 +3061,9 @@ Settings files, \f[V]ics_protection\f[R],
 T}@T{
 No equivalent
 T}@T{
-FeroProbe\[aq]s own; off by default, so default behaviour is unchanged
+FeroProbe\[aq]s own; off by default, so default behaviour is unchanged.
+A \f[V].feroproberc\f[R] in the working directory can switch protection
+on but not off
 T}
 T{
 JSON output (\f[V]-oJ\f[R])
@@ -3026,12 +3088,24 @@ Links FeroProbe\[aq]s own \f[V]feroprobe.xsl\f[R]; \f[V]--webxml\f[R]
 links FeroProbe\[aq]s published copy
 T}
 T{
+Privileges under \f[V]sudo\f[R]
+T}@T{
+Stays root for the whole run
+T}@T{
+Becomes the user who ran \f[V]sudo\f[R] once the settings files are
+read, keeping only the network capabilities on Linux, so reports,
+\f[V]-iL\f[R] and other files are read and written as that user;
+\f[V]--keep-root\f[R] stays root (see Giving up root under sudo)
+T}
+T{
 Report files as root
 T}@T{
 Written through any symbolic link
 T}@T{
-A link another user owns in a sticky shared directory such as
-\f[V]/tmp\f[R] is refused (see \f[V]-oA\f[R] under Output options)
+With \f[V]--keep-root\f[R] or without \f[V]sudo\f[R]: a link is refused
+unless root owns it and its directory and no other user can write there
+(\f[V]/dev/stdout\f[R] works); a new file under \f[V]sudo\f[R] belongs
+to the invoking user (see \f[V]-oA\f[R] under Output options)
 T}
 T{
 Service and OS signatures

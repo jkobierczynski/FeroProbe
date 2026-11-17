@@ -114,6 +114,7 @@ MISC:
   --oui-file <file>: IEEE OUI list for MAC vendor names
   --privileged: Assume raw sockets work
   --unprivileged: Act as an ordinary user, with no raw sockets
+  --keep-root: Under sudo, stay root instead of becoming the invoking user
   -V, --version: Print the version
   -h, --help: Print this help page
 EXAMPLES:

@@ -24,6 +24,12 @@
 
 set -euo pipefail
 
+# Run FeroProbe as plain root, not "root under sudo": under sudo it gives
+# root up for the user who ran sudo, who could not write the reports these
+# tests put in root's temporary directories. scripts/test-privdrop.sh tests
+# that hand-over itself.
+unset SUDO_UID SUDO_GID SUDO_USER SUDO_COMMAND
+
 # Names of this run's own, so two test scripts can run at the same time.
 NS_SCAN=fpt-scan-$$
 NS_TGT=fpt-tgt-$$
