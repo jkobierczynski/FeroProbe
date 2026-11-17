@@ -1102,3 +1102,34 @@ end"#
         o[0]
     );
 }
+
+#[tokio::test]
+async fn credentials_never_fall_back_from_tls_to_plain_text() {
+    // A plain HTTP server on a port -sV said speaks TLS: the TLS attempt
+    // fails, and only a request without credentials may retry in plain text.
+    let (port, seen) = web(|_| b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok".to_vec()).await;
+    let src = format!(
+        r#"{PORT_SCRIPT}
+action = function(host, port)
+  local out = {{}}
+  for _, h in ipairs({{ "Authorization", "Proxy-Authorization", "Cookie" }}) do
+    local r, err = fero.http.get(host, port, "/" .. h, {{ header = {{ [h] = "secret" }}, timeout = 1000 }})
+    out[#out + 1] = h .. " " .. tostring(r and r.status)
+  end
+  local r = fero.http.get(host, port, "/plain", {{ timeout = 1000 }})
+  out[#out + 1] = "none " .. tostring(r and r.status)
+  return table.concat(out, ",")
+end"#
+    );
+    let scan = ScriptScan::new(vec![script("f", &src)], ArgTable::default(), None).unwrap();
+    let mut hosts = vec![host_with_services(&[(port, "http")])];
+    hosts[0].ports[0].service.as_mut().unwrap().tunnel = Some("ssl");
+    scan.scan_hosts(&mut hosts).await;
+    assert_eq!(
+        hosts[0].ports[0].scripts[0].output,
+        "Authorization nil,Proxy-Authorization nil,Cookie nil,none 200"
+    );
+    let seen = seen.lock().unwrap();
+    assert!(seen.iter().all(|r| !r.contains("secret")), "{seen:?}");
+    assert!(seen.iter().any(|r| r.starts_with("GET /plain ")));
+}
