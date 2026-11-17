@@ -95,6 +95,187 @@ fero.args = {
     return table.unpack(out, 1, n)
   end,
 }
+
+-- Port-rule helpers.
+local function set_of(x)
+  if x == nil then return nil end
+  if type(x) ~= "table" then x = { x } end
+  local s = {}
+  for _, v in ipairs(x) do s[v] = true end
+  return s
+end
+local function rule_for(ports, services, protos, states)
+  local P, S = set_of(ports), set_of(services)
+  local PR = set_of(protos or "tcp")
+  local ST = set_of(states or { "open", "open|filtered" })
+  return function(host, port)
+    if not (PR[port.protocol] and ST[port.state]) then return false end
+    return (P ~= nil and P[port.number] == true)
+      or (S ~= nil and S[port.service] == true)
+  end
+end
+local http_rule = rule_for(
+  { 80, 443, 591, 631, 3000, 5000, 7080, 8000, 8008, 8080, 8081, 8088, 8180,
+    8443, 8888, 9000, 9443 },
+  { "http", "https", "http-alt", "https-alt", "http-proxy", "http-mgmt",
+    "ssl/http", "ipp" })
+local ssl_rule = rule_for(
+  { 443, 465, 636, 989, 990, 992, 993, 995, 4443, 5061, 6697, 8443, 9443 },
+  { "https", "https-alt", "ssl", "ssl/http", "imaps", "pop3s", "smtps",
+    "submissions", "ldaps", "ftps", "ftps-data", "ircs", "sip-tls", "telnets" })
+fero.portrule = {
+  match = rule_for,
+  http = function(host, port) return http_rule(host, port) end,
+  ssl = function(host, port)
+    if port.protocol == "tcp" and (port.state == "open" or port.state == "open|filtered")
+      and type(port.version) == "table" and port.version.service_tunnel == "ssl" then
+      return true
+    end
+    return ssl_rule(host, port)
+  end,
+}
+
+-- HTTP: the defaults --script-args give, around the client.
+local raw_request = fero.http.request
+local function truthy_arg(v)
+  return v == true or v == "true" or v == "1" or v == "yes"
+end
+local function with_defaults(options)
+  local o = {}
+  if options ~= nil then
+    for k, v in pairs(options) do o[k] = v end
+  end
+  local header = {}
+  if type(o.header) == "table" then
+    for k, v in pairs(o.header) do header[k] = v end
+  end
+  o.header = header
+  local ua, maxbody, truncok, hosthdr = fero.args.get(
+    "http.useragent", "http.max-body-size", "http.truncated-ok", "http.host")
+  if o.user_agent == nil and type(ua) == "string" then o.user_agent = ua end
+  if o.max_body_size == nil and tonumber(maxbody) then
+    o.max_body_size = math.tointeger(tonumber(maxbody))
+  end
+  if o.truncated_ok == nil and truthy_arg(truncok) then o.truncated_ok = true end
+  if type(hosthdr) == "string" then
+    local has = false
+    for k in pairs(header) do
+      if type(k) == "string" and k:lower() == "host" then has = true end
+    end
+    if not has then header.Host = hosthdr end
+  end
+  return o
+end
+local function form_encode(t)
+  local parts = {}
+  local function enc(s)
+    return (tostring(s):gsub("[^%w%-%._~]", function(c)
+      return string.format("%%%02X", c:byte())
+    end))
+  end
+  local items = {}
+  for k, v in pairs(t) do items[#items + 1] = { tostring(k), v } end
+  table.sort(items, function(a, b)
+    if a[1] ~= b[1] then return a[1] < b[1] end
+    return tostring(a[2]) < tostring(b[2])
+  end)
+  for _, kv in ipairs(items) do
+    parts[#parts + 1] = enc(kv[1]) .. "=" .. enc(kv[2])
+  end
+  return table.concat(parts, "&")
+end
+fero.http.request = function(method, host, port, path, options)
+  return raw_request(method, host, port, path, with_defaults(options))
+end
+fero.http.get = function(host, port, path, options)
+  return raw_request("GET", host, port, path, with_defaults(options))
+end
+fero.http.head = function(host, port, path, options)
+  return raw_request("HEAD", host, port, path, with_defaults(options))
+end
+fero.http.post = function(host, port, path, options, content)
+  local o = with_defaults(options)
+  if type(content) == "table" then
+    o.content = form_encode(content)
+    local has = false
+    for k in pairs(o.header) do
+      if type(k) == "string" and k:lower() == "content-type" then has = true end
+    end
+    if not has then o.header["Content-Type"] = "application/x-www-form-urlencoded" end
+  elseif content ~= nil then
+    o.content = content
+  end
+  return raw_request("POST", host, port, path, o)
+end
+fero.http.form_encode = form_encode
+
+-- Bytes as lower-case hex, with an optional separator between bytes.
+fero.hex = function(s, sep)
+  local t = {}
+  for i = 1, #s do t[i] = string.format("%02x", s:byte(i)) end
+  return table.concat(t, sep or "")
+end
+
+-- A buffered reader over a connected socket, for line protocols and
+-- length-prefixed records: r:line() (without its CR LF), r:bytes(n), and
+-- r:reply() for FTP/SMTP-style replies ("250-..." lines up to "250 ...").
+-- Each returns nil and a message on a timeout, the end of the
+-- connection, or a line or reply too long to be one.
+local MAX_LINE, MAX_REPLY_LINES = 65536, 1000
+fero.reader = function(sock)
+  local buf = ""
+  local r = {}
+  local function fill()
+    local ok, data = sock:receive()
+    if not ok then return false, data end
+    buf = buf .. data
+    return true
+  end
+  function r:line()
+    while true do
+      local i = buf:find("\n", 1, true)
+      if i then
+        if i - 1 > MAX_LINE then return nil, "line too long" end
+        local line = buf:sub(1, i - 1)
+        buf = buf:sub(i + 1)
+        return (line:gsub("\r$", ""))
+      end
+      if #buf > MAX_LINE then return nil, "line too long" end
+      local ok, err = fill()
+      if not ok then return nil, err end
+    end
+  end
+  function r:bytes(n)
+    while #buf < n do
+      local ok, err = fill()
+      if not ok then return nil, err end
+    end
+    local out = buf:sub(1, n)
+    buf = buf:sub(n + 1)
+    return out
+  end
+  function r:reply()
+    local line, err = self:line()
+    if not line then return nil, err end
+    local code, sep = line:match("^(%d%d%d)([ -]?)")
+    if code and sep == "" and #line > 3 then code = nil end
+    if not code then return nil, "not a numbered reply: " .. line:sub(1, 80) end
+    local lines = { line }
+    if sep == "-" then
+      while #lines < MAX_REPLY_LINES do
+        line, err = self:line()
+        if not line then return nil, err end
+        lines[#lines + 1] = line
+        if line:sub(1, 4) == code .. " " or line == code then
+          return tonumber(code), lines
+        end
+      end
+      return nil, "reply too long"
+    end
+    return tonumber(code), lines
+  end
+  return r
+end
 "##;
 
 fn arg_to_lua(lua: &Lua, v: &ArgValue) -> mlua::Result<Value> {
@@ -181,13 +362,68 @@ pub(crate) fn install_library(
     g.raw_set("SCRIPT_TYPE", kind)?;
     let fero = lua.create_table()?;
     let socket = lua.create_table()?;
-    let scope = scope.clone();
     let open = Arc::new(AtomicUsize::new(0));
-    socket.raw_set(
-        "new",
-        lua.create_function(move |_, ()| Ok(ScriptSocket::new(scope.clone(), open.clone())))?,
-    )?;
+    {
+        let scope = scope.clone();
+        let open = open.clone();
+        socket.raw_set(
+            "new",
+            lua.create_function(move |_, ()| Ok(ScriptSocket::new(scope.clone(), open.clone())))?,
+        )?;
+    }
     fero.raw_set("socket", socket)?;
+    let http = lua.create_table()?;
+    {
+        let scope = scope.clone();
+        http.raw_set(
+            "request",
+            lua.create_async_function(move |lua, args| {
+                super::http::request(lua, scope.clone(), open.clone(), args)
+            })?,
+        )?;
+    }
+    http.raw_set("USER_AGENT", super::http::USER_AGENT)?;
+    fero.raw_set("http", http)?;
+    let base64 = lua.create_table()?;
+    base64.raw_set(
+        "encode",
+        lua.create_function(|_, s: mlua::LuaString| Ok(super::base64::encode(&s.as_bytes())))?,
+    )?;
+    base64.raw_set(
+        "decode",
+        lua.create_function(|lua, s: mlua::LuaString| {
+            super::base64::decode(&s.as_bytes())
+                .map(|b| lua.create_string(b))
+                .transpose()
+        })?,
+    )?;
+    fero.raw_set("base64", base64)?;
+    let crypto = lua.create_table()?;
+    crypto.raw_set(
+        "digest",
+        lua.create_function(|lua, (name, data): (String, mlua::LuaString)| {
+            match super::digest::digest(&name, &data.as_bytes()) {
+                Some(d) => Ok(Value::String(lua.create_string(d)?)),
+                None => Err(mlua::Error::runtime(format!(
+                    "fero.crypto.digest: unknown algorithm {name:?}"
+                ))),
+            }
+        })?,
+    )?;
+    crypto.raw_set(
+        "random_bytes",
+        lua.create_function(|lua, n: usize| {
+            if n > 65536 {
+                return Err(mlua::Error::runtime(
+                    "fero.crypto.random_bytes: at most 65536 bytes",
+                ));
+            }
+            let bytes = super::digest::random(n)
+                .ok_or_else(|| mlua::Error::runtime("no random bytes available"))?;
+            lua.create_string(bytes)
+        })?,
+    )?;
+    fero.raw_set("crypto", crypto)?;
     fero.raw_set(
         "verbosity",
         lua.create_function(|_, ()| Ok(crate::debug::verbosity()))?,

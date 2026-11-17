@@ -115,7 +115,8 @@ line asks for any of these options:
 | --- | --- |
 | `-sV` | Application-protocol probes (HTTP requests, TLS handshakes, banner prompts and more) to every open port |
 | `-O` | Raw TCP SYNs carrying every common TCP option (one, plus retries if unanswered) to one open TCP port per host. Lighter than nmap's `-O`, which also sends odd flag combinations and probes a closed port, but still a packet a minimal stack may not expect |
-| `-A` | Both of the above, plus traceroute |
+| `-A` | Both of the above, plus the default scripts (`-sC`) and traceroute |
+| `-sC` | The default scripts: SSH key exchanges, FTP, SMTP, POP3 and IMAP commands, HTTP requests, TLS handshakes, MySQL, VNC and X11 greetings, an RPC portmapper dump and NTP requests, each to the matching open ports |
 | `--script` | Whatever the chosen scripts send: they may connect to any port the scan probed on the host they run against, in any state (open, closed or filtered), and talk to the services there in whatever way they are written to |
 
 `--script-help` only prints the scripts' descriptions and is never refused.
@@ -141,7 +142,7 @@ choose gentle timing (`-T2` or slower) there anyway.
 `--dry-run` sends no scan probes, so it is never refused. (Hostname
 targets are still resolved through the system resolver, which can send DNS
 queries; use numeric targets where no DNS traffic is allowed.) With protection on and
-`-sV`, `-O`, `-A` or `--script` on the command line, it prints the preview as usual plus
+`-sV`, `-O`, `-A`, `-sC` or `--script` on the command line, it prints the preview as usual plus
 a warning that a real run would be refused, so the habit is learned before
 it matters:
 

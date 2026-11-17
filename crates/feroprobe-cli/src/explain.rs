@@ -506,11 +506,21 @@ pub(crate) fn explain(args: &Args, f: &Facts) -> Vec<String> {
     if f.trace {
         extras.push("traceroute to each host that is up (--traceroute)".to_string());
     }
-    if !args.script.is_empty() {
+    let selection = crate::script_selection(args);
+    if !selection.is_empty() {
+        let how = match (args.script.is_empty(), crate::default_scripts(args)) {
+            (true, _) if args.aggressive => "the default scripts (-sC, part of -A)".to_string(),
+            (true, _) => "the default scripts (-sC)".to_string(),
+            (false, true) => format!(
+                "the scripts chosen by --script {} and the default scripts (-sC{})",
+                args.script.join(","),
+                if args.aggressive { ", part of -A" } else { "" }
+            ),
+            (false, false) => format!("the scripts chosen by --script {}", args.script.join(",")),
+        };
         extras.push(format!(
-            "the scripts chosen by --script {}, on the hosts and ports their rules pick; each \
-             may connect only to the host it runs against, on ports this scan probes there",
-            args.script.join(",")
+            "{how}, on the hosts and ports their rules pick; each may connect only to the host \
+             it runs against, on ports this scan probes there"
         ));
     }
     if !extras.is_empty() {

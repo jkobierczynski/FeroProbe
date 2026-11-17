@@ -6,6 +6,9 @@
 //!
 //! The calls answer like nmap's sockets: `status, value`, where a failed
 //! call gives `false` and a message such as `"TIMEOUT"` or `"EOF"`.
+//!
+//! A TCP socket can speak TLS: connected with `"ssl"` as the protocol, or
+//! upgraded in place with `reconnect_ssl()` after a STARTTLS exchange.
 
 use std::collections::BTreeSet;
 use std::net::{IpAddr, SocketAddr};
@@ -16,6 +19,9 @@ use std::time::Duration;
 use mlua::{Lua, MultiValue, UserData, UserDataMethods, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
+
+use tokio::net::TcpStream;
+use tokio_rustls::client::TlsStream;
 
 use crate::model::Protocol;
 
@@ -80,7 +86,8 @@ const MAX_RECEIVE: usize = 16 * 1024 * 1024;
 
 enum Conn {
     Closed,
-    Tcp(tokio::net::TcpStream),
+    Tcp(TcpStream),
+    Tls(Box<TlsStream<TcpStream>>),
     Udp(tokio::net::UdpSocket),
 }
 
@@ -91,10 +98,23 @@ struct State {
     timeout: Duration,
     /// Holds one of the run's [`MAX_SOCKETS`] while connected.
     slot: Option<Slot>,
+    /// The name to send as TLS SNI, from the last `connect`.
+    sni: Option<String>,
 }
 
 /// One open socket counted against a run's limit.
-struct Slot(Arc<AtomicUsize>);
+pub(crate) struct Slot(Arc<AtomicUsize>);
+
+impl Slot {
+    /// One of the run's sockets, or why there is none left.
+    pub(crate) fn take(open: &Arc<AtomicUsize>) -> Result<Slot, String> {
+        if open.fetch_add(1, Ordering::Relaxed) >= MAX_SOCKETS {
+            open.fetch_sub(1, Ordering::Relaxed);
+            return Err(format!("too many open sockets (at most {MAX_SOCKETS})"));
+        }
+        Ok(Slot(open.clone()))
+    }
+}
 
 impl Drop for Slot {
     fn drop(&mut self) {
@@ -119,6 +139,7 @@ impl ScriptSocket {
                 buf: Vec::new(),
                 timeout: DEFAULT_TIMEOUT,
                 slot: None,
+                sni: None,
             })),
         }
     }
@@ -143,19 +164,75 @@ fn ok(_lua: &Lua) -> mlua::Result<MultiValue> {
 }
 
 /// A host argument: an address or name, or a host table with `ip`.
-fn host_arg(v: &Value) -> mlua::Result<String> {
+/// Returns the host to connect to and the name to send as TLS SNI, if
+/// any: a name given as text, or the host table's `targetname` (else its
+/// reverse DNS `name`). An address is never sent as SNI.
+pub(crate) fn host_arg(v: &Value) -> mlua::Result<(String, Option<String>)> {
+    let named = |n: &str| (!n.is_empty() && n.parse::<IpAddr>().is_err()).then(|| n.to_string());
     match v {
-        Value::String(s) => Ok(s.to_str()?.to_string()),
-        Value::Table(t) => t.get::<String>("ip"),
+        Value::String(s) => {
+            let h = s.to_str()?.to_string();
+            let sni = named(&h);
+            Ok((h, sni))
+        }
+        Value::Table(t) => {
+            let ip = t.get::<String>("ip")?;
+            let target: Option<String> = t.get("targetname")?;
+            let rdns: Option<String> = t.get("name")?;
+            let sni = target
+                .as_deref()
+                .and_then(named)
+                .or_else(|| rdns.as_deref().and_then(named));
+            Ok((ip, sni))
+        }
         _ => Err(mlua::Error::runtime(
             "host must be an address or a host table",
         )),
     }
 }
 
+/// A TLS handshake over `tcp`, sending `sni` when given, within
+/// `timeout`. Certificates are not checked. `http` offers ALPN
+/// `http/1.1`.
+pub(crate) async fn tls_handshake(
+    tcp: TcpStream,
+    sni: Option<&str>,
+    timeout: Duration,
+    http: bool,
+) -> Result<TlsStream<TcpStream>, String> {
+    use rustls::pki_types::ServerName;
+    let name = match sni.and_then(|h| ServerName::try_from(h.to_string()).ok()) {
+        Some(n) => n,
+        None => {
+            let ip = tcp.peer_addr().map_err(|e| e.to_string())?.ip();
+            ServerName::IpAddress(ip.into())
+        }
+    };
+    match tokio::time::timeout(
+        timeout,
+        crate::service::tls::connector(http).connect(name, tcp),
+    )
+    .await
+    {
+        Err(_) => Err("TIMEOUT".to_string()),
+        Ok(Err(e)) => Err(format!("TLS handshake failed: {e}")),
+        Ok(Ok(s)) => Ok(s),
+    }
+}
+
+/// A read error as nmap names it: a connection closed without a TLS
+/// close_notify is just the end.
+fn read_error(e: std::io::Error) -> String {
+    if e.kind() == std::io::ErrorKind::UnexpectedEof {
+        "EOF".to_string()
+    } else {
+        e.to_string()
+    }
+}
+
 /// A port argument: a number, or a port table with `number` (and maybe
 /// `protocol`).
-fn port_arg(v: &Value) -> mlua::Result<(u16, Option<String>)> {
+pub(crate) fn port_arg(v: &Value) -> mlua::Result<(u16, Option<String>)> {
     let n = match v {
         Value::Integer(n) => *n,
         Value::Number(n) if n.fract() == 0.0 => *n as i64,
@@ -212,10 +289,11 @@ async fn receive(lua: Lua, state: Arc<Mutex<State>>, want: Want) -> mlua::Result
         loop {
             let n = match &mut st.conn {
                 Conn::Closed => return Err("socket is not connected".to_string()),
-                Conn::Tcp(s) => s.read(&mut chunk).await.map_err(|e| e.to_string())?,
+                Conn::Tcp(s) => s.read(&mut chunk).await.map_err(read_error)?,
+                Conn::Tls(s) => s.read(&mut chunk).await.map_err(read_error)?,
                 Conn::Udp(s) => s.recv(&mut chunk).await.map_err(|e| e.to_string())?,
             };
-            if n == 0 && matches!(st.conn, Conn::Tcp(_)) {
+            if n == 0 && matches!(st.conn, Conn::Tcp(_) | Conn::Tls(_)) {
                 return Err("EOF".to_string());
             }
             st.buf.extend_from_slice(&chunk[..n]);
@@ -263,10 +341,15 @@ impl UserData for ScriptSocket {
                 let open = this.open.clone();
                 let state = this.state.clone();
                 async move {
-                    let host = host_arg(&host)?;
+                    let (host, sni) = host_arg(&host)?;
                     let (port, table_proto) = port_arg(&port)?;
+                    let mut ssl = false;
                     let proto = match proto.or(table_proto).as_deref().unwrap_or("tcp") {
                         "tcp" => Protocol::Tcp,
+                        "ssl" => {
+                            ssl = true;
+                            Protocol::Tcp
+                        }
                         "udp" => Protocol::Udp,
                         other => return fail(&lua, format!("unsupported protocol {other}")),
                     };
@@ -284,14 +367,10 @@ impl UserData for ScriptSocket {
                     st.conn = Conn::Closed;
                     st.buf.clear();
                     st.slot = None;
-                    if open.fetch_add(1, Ordering::Relaxed) >= MAX_SOCKETS {
-                        open.fetch_sub(1, Ordering::Relaxed);
-                        return fail(
-                            &lua,
-                            format!("too many open sockets (at most {MAX_SOCKETS})"),
-                        );
-                    }
-                    let slot = Slot(open.clone());
+                    let slot = match Slot::take(&open) {
+                        Ok(s) => s,
+                        Err(e) => return fail(&lua, e),
+                    };
                     let timeout = st.timeout;
                     let conn = match proto {
                         Protocol::Tcp => {
@@ -300,6 +379,12 @@ impl UserData for ScriptSocket {
                             {
                                 Err(_) => return fail(&lua, "TIMEOUT"),
                                 Ok(Err(e)) => return fail(&lua, e.to_string()),
+                                Ok(Ok(s)) if ssl => {
+                                    match tls_handshake(s, sni.as_deref(), timeout, false).await {
+                                        Ok(t) => Conn::Tls(Box::new(t)),
+                                        Err(e) => return fail(&lua, e),
+                                    }
+                                }
                                 Ok(Ok(s)) => Conn::Tcp(s),
                             }
                         }
@@ -322,6 +407,7 @@ impl UserData for ScriptSocket {
                     };
                     st.conn = conn;
                     st.slot = Some(slot);
+                    st.sni = sni;
                     ok(&lua)
                 }
             },
@@ -336,6 +422,12 @@ impl UserData for ScriptSocket {
                     match &mut st.conn {
                         Conn::Closed => Err("socket is not connected".to_string()),
                         Conn::Tcp(s) => s.write_all(&data).await.map_err(|e| e.to_string()),
+                        Conn::Tls(s) => async {
+                            s.write_all(&data).await?;
+                            s.flush().await
+                        }
+                        .await
+                        .map_err(|e| e.to_string()),
                         Conn::Udp(s) => s.send(&data).await.map(|_| ()).map_err(|e| e.to_string()),
                     }
                 };
@@ -360,6 +452,88 @@ impl UserData for ScriptSocket {
                 st.timeout = Duration::from_millis(ms);
             }
             Ok(())
+        });
+        // Upgrade a connected TCP socket to TLS in place, as after a
+        // STARTTLS exchange. The name sent as SNI is the one `connect` got.
+        methods.add_async_method("reconnect_ssl", |lua, this, ()| {
+            let state = this.state.clone();
+            async move {
+                let mut st = state.lock().await;
+                let tcp = match std::mem::replace(&mut st.conn, Conn::Closed) {
+                    Conn::Tcp(t) => t,
+                    other => {
+                        let why = match other {
+                            Conn::Tls(_) => "socket already speaks TLS",
+                            Conn::Udp(_) => "TLS over UDP is not supported",
+                            _ => "socket is not connected",
+                        };
+                        st.conn = other;
+                        return fail(&lua, why);
+                    }
+                };
+                st.buf.clear();
+                let sni = st.sni.clone();
+                match tls_handshake(tcp, sni.as_deref(), st.timeout, false).await {
+                    Ok(t) => {
+                        st.conn = Conn::Tls(Box::new(t));
+                        ok(&lua)
+                    }
+                    Err(e) => {
+                        st.slot = None;
+                        fail(&lua, e)
+                    }
+                }
+            }
+        });
+        methods.add_async_method("get_ssl_certificate", |lua, this, ()| {
+            let state = this.state.clone();
+            async move {
+                let st = state.lock().await;
+                let Conn::Tls(t) = &st.conn else {
+                    return fail(&lua, "not an SSL socket");
+                };
+                let Some(der) = t.get_ref().1.peer_certificates().and_then(|c| c.first()) else {
+                    return fail(&lua, "no certificate");
+                };
+                match super::tls::cert_table(&lua, der)? {
+                    Some(t) => Ok(MultiValue::from_vec(vec![Value::Table(t)])),
+                    None => fail(&lua, "certificate does not parse"),
+                }
+            }
+        });
+        methods.add_async_method("get_tls_info", |lua, this, ()| {
+            let state = this.state.clone();
+            async move {
+                let st = state.lock().await;
+                let Conn::Tls(t) = &st.conn else {
+                    return fail(&lua, "not an SSL socket");
+                };
+                let info = super::tls::info_table(&lua, t.get_ref().1)?;
+                Ok(MultiValue::from_vec(vec![Value::Table(info)]))
+            }
+        });
+        // status, local address, local port, remote address, remote port.
+        methods.add_async_method("get_info", |lua, this, ()| {
+            let state = this.state.clone();
+            async move {
+                let st = state.lock().await;
+                let addrs = match &st.conn {
+                    Conn::Closed => return fail(&lua, "socket is not connected"),
+                    Conn::Tcp(s) => (s.local_addr(), s.peer_addr()),
+                    Conn::Tls(s) => (s.get_ref().0.local_addr(), s.get_ref().0.peer_addr()),
+                    Conn::Udp(s) => (s.local_addr(), s.peer_addr()),
+                };
+                let (Ok(l), Ok(r)) = addrs else {
+                    return fail(&lua, "socket is not connected");
+                };
+                Ok(MultiValue::from_vec(vec![
+                    Value::Boolean(true),
+                    Value::String(lua.create_string(l.ip().to_string())?),
+                    Value::Integer(l.port().into()),
+                    Value::String(lua.create_string(r.ip().to_string())?),
+                    Value::Integer(r.port().into()),
+                ]))
+            }
         });
         methods.add_async_method("close", |lua, this, ()| {
             let state = this.state.clone();

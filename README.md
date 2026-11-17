@@ -28,8 +28,8 @@ no external binaries.
 | `feroprobe-diff`: compare two XML reports (FeroProbe's or nmap's) and show what changed, like nmap's `ndiff` | ✅ |
 | Service and version detection, `-sV`, with our own probes and rules | ✅ |
 | OS detection, `-O`, a multi-probe fingerprint matched against our own OS database, with `--osscan-limit`, `--osscan-guess`, `--max-os-tries`, IPv4 and IPv6 (Linux, root) | ✅ |
-| Traceroute, `--traceroute`, IPv4 and IPv6 (Linux, root), and `-A` (`-sV -O --traceroute`) | ✅ |
-| Script scanning, `--script`, `--script-args`, `--script-help`, `--script-timeout`: sandboxed Lua scripts that can only reach the scanned host's probed ports, with our own script library (one script so far, `banner`; `-sC` and default scripts are coming) | ✅ |
+| Traceroute, `--traceroute`, IPv4 and IPv6 (Linux, root), and `-A` (`-sV -O -sC --traceroute`) | ✅ |
+| Script scanning, `--script`, `--script-args`, `--script-help`, `--script-timeout`, `-sC`: sandboxed Lua scripts that can only reach the scanned host's probed ports, with our own script library (sockets, TLS, an HTTP client) and our own default scripts (SSH host keys, FTP, SMTP, POP3, IMAP, MySQL, VNC, X11, RPC, NTP, HTTP title, methods and robots.txt, TLS certificates) | ✅ |
 
 **[The FeroProbe manual](docs/manual.md)** documents every option, its
 default and how options interact, laid out like nmap's reference guide. It
@@ -349,6 +349,7 @@ categories, files, directories, `"safe and not intrusive"`):
 
 ```sh
 feroprobe -p 22,25 --script banner 192.0.2.10
+feroprobe -sV -p 80,443 --script http-title,ssl-cert 192.0.2.10
 feroprobe --script ./my-scripts/ --script-args 'mine.depth=2' 192.0.2.10
 feroprobe --script-help banner
 ```
@@ -357,7 +358,9 @@ The scripts are FeroProbe's own, written for its `fero` library (nmap's
 scripts cannot be shipped under their licence and do not run unchanged).
 Each script runs in a sandbox, without file or command access, and the
 engine lets it connect only to the host it runs against and only to the
-ports the scan probed there. See the manual's "Script scanning" section.
+ports the scan probed there. Script HTTP requests name FeroProbe in their
+`User-Agent`, so web server logs and the shipped IDS rules can recognize
+them. See the manual's "Script scanning" section.
 
 ### Settings file and ICS protection
 

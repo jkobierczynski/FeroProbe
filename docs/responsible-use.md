@@ -87,7 +87,7 @@ serves that.
 ### Opt-in ICS protection
 
 Version detection (`-sV`), OS detection (`-O`), `-A` and scripts
-(`--script`) send probes that can hang or crash fragile industrial devices: a PLC whose Modbus handler on
+(`--script`, `-sC`) send probes that can hang or crash fragile industrial devices: a PLC whose Modbus handler on
 port 502 receives an HTTP request may fault or stop until it is
 power-cycled. Reports on penetration testing of control systems have
 described routine scans that upset production equipment for twenty years.
@@ -152,23 +152,58 @@ Two scans carry no marker, on purpose:
   window marker. The OS-detection echo request, sent only when host
   discovery sends echo requests too, carries the usual `feroprobe` payload.
 
-**Script traffic** (`--script`) is ordinary application traffic over the
+**Script traffic** (`--script`, `-sC`, `-A`) is ordinary application traffic over the
 operating system's own TCP and UDP sockets, like the connect scan, so the
 raw-probe markers cannot apply to it. What it looks like depends on the
 script: the built-in `banner` script only opens a TCP connection and
 reads, sending nothing. Script traffic is bounded instead: a script can
 connect only to the host it runs against, and only to ports the scan
 probed there, and scripts that run before or after the scan get no network
-access at all, so no script broadcasts or wanders to other hosts. Later
-script libraries that speak a protocol themselves (such as HTTP) will
-identify FeroProbe where the protocol has a place for it, as a
-`User-Agent` naming FeroProbe's script engine.
+access at all, so no script broadcasts or wanders to other hosts. HTTP
+redirects are followed only within the same bounds.
+
+Where a protocol has a place to name the client, script traffic names
+FeroProbe. Every request of the script HTTP library (`fero.http`, used by
+the built-in `http-title` script) carries
+
+```
+User-Agent: Mozilla/5.0 (compatible; FeroProbe Scripting Engine; https://github.com/jkobierczynski/FeroProbe)
+```
+
+the counterpart of nmap's `Nmap Scripting Engine` agent. Over HTTPS the
+header is encrypted, so a network sensor sees it only in plain HTTP; the
+web server's own logs show it either way. As with `--data`, a
+`User-Agent` the user chooses replaces it (`--script-args
+http.useragent=...`, or a script that sets the header), as in nmap: a
+value typed on purpose is sent exactly as given. TLS handshakes (the
+`ssl-cert` script, `fero.socket` with `"ssl"`) carry no marker: a TLS
+ClientHello has no field for one. They offer no client certificate and
+check nothing about the server's.
+
+The default scripts (`-sC`, also run by `-A`) name FeroProbe wherever
+their protocol lets a client name itself, so the target's own logs show
+who asked:
+
+| Script | What the target sees | nmap's counterpart |
+| --- | --- | --- |
+| `ssh-hostkey` | The client version line `SSH-2.0-FeroProbe_Scripting_Engine` (in clear text, before encryption starts) | `SSH-2.0-Nmap-SSH2-Hostkey` |
+| `smtp-commands` | `EHLO feroprobe.invalid` (`.invalid` is a reserved name, RFC 2606) | the target's name, or `nmap.scanme.org` |
+| `ftp-anon` | `USER anonymous`, `PASS feroprobe@` | `PASS IEUser@` |
+| `http-title`, `http-methods`, `http-robots.txt` | The `User-Agent` above | `Nmap Scripting Engine` |
+
+As with the `User-Agent`, `--script-args smtp.domain=...` replaces the
+EHLO name with one chosen on purpose. The other default scripts read a
+greeting or ask a protocol's standard question (CAPA, CAPABILITY, SYST,
+an RPC portmapper dump, an NTP time request, an RFB or X11 handshake),
+which has no field for a client name. None of them logs in with a
+password, and each stays within the ports the scan probed.
 
 ### Detection rules for defenders
 
 The repository ships Suricata and Snort rules that match the probe
 signature, so blue teams can flag FeroProbe scans without writing their
-own. They are in [`rules/`](../rules/): `rules/feroprobe.rules` for
+own. Rules 9100006 to 9100009 match the script markers above in clear
+text. They are in [`rules/`](../rules/): `rules/feroprobe.rules` for
 Suricata and `rules/feroprobe.snort.rules` for Snort, with setup notes in
 `rules/README.md`.
 

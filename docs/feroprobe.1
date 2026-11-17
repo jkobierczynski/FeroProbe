@@ -564,8 +564,11 @@ T}
 .PP
 One TCP scan type can run at a time.
 It can be combined with \f[V]-sU\f[R], one of
-\f[V]-sY\f[R]/\f[V]-sZ\f[R], \f[V]-sO\f[R] and \f[V]-sV\f[R] in a single
-run, for example \f[V]-sS -sU -sV\f[R].
+\f[V]-sY\f[R]/\f[V]-sZ\f[R], \f[V]-sO\f[R], \f[V]-sV\f[R] and
+\f[V]-sC\f[R] in a single run, for example \f[V]-sS -sU -sV\f[R].
+As in nmap, the letters can be run together after one \f[V]-s\f[R]:
+\f[V]-sCV\f[R] is \f[V]-sC -sV\f[R], and \f[V]-sSU\f[R] is
+\f[V]-sS -sU\f[R].
 .PP
 With no \f[V]-s\f[R] option, FeroProbe runs a SYN scan when it may use
 raw sockets (root or \f[V]CAP_NET_RAW\f[R] on Linux) and a connect scan
@@ -1416,22 +1419,23 @@ sudo feroprobe -sn -Pn --traceroute -p 443 example.org
 .fi
 .SS \f[V]-A\f[R] (aggressive detection)
 .PP
-The same as \f[V]-sV -O --traceroute\f[R].
-Without raw sockets only \f[V]-sV\f[R] runs, rather than failing, as in
-nmap.
+The same as \f[V]-sV -O -sC --traceroute\f[R], as in nmap: version
+detection, OS detection, the default scripts (see \f[V]-sC\f[R]) and
+traceroute.
+Without raw sockets only \f[V]-sV\f[R] and \f[V]-sC\f[R] run, rather
+than failing, as in nmap.
 Unlike nmap, which drops the other parts silently, FeroProbe prints a
 warning naming them:
 .IP
 .nf
 \f[C]
-Warning: -A without root or CAP_NET_RAW skips OS detection (-O) and traceroute (--traceroute), which send raw packets; only version detection (-sV) runs. Run as root, or grant CAP_NET_RAW, to include them
+Warning: -A without root or CAP_NET_RAW skips OS detection (-O) and traceroute (--traceroute), which send raw packets; only version detection (-sV) and the default scripts (-sC) run. Run as root, or grant CAP_NET_RAW, to include them
 \f[R]
 .fi
 .PP
-nmap\[aq]s \f[V]-A\f[R] also runs its default scripts (\f[V]-sC\f[R]);
-FeroProbe\[aq]s does not run scripts yet, since its default scripts come
-in a later release.
-Cannot be combined with \f[V]-sn\f[R].
+\f[V]--script\f[R] given with \f[V]-A\f[R] adds to the default scripts.
+Cannot be combined with \f[V]-sn\f[R] or \f[V]-sL\f[R].
+With ICS protection on, \f[V]-A\f[R] is refused as a whole.
 .SH SCRIPT SCANNING
 .PP
 After the scan, FeroProbe can run scripts against the hosts and ports it
@@ -1448,8 +1452,9 @@ nmap\[aq]s scripts do not run unchanged: they are built on nmap\[aq]s
 libraries (\f[V]stdnse\f[R], \f[V]shortport\f[R],
 \f[V]nmap.new_socket\f[R] and the rest), which FeroProbe does not have
 and cannot ship under their licence.
-FeroProbe ships one script so far, \f[V]banner\f[R]; more come in later
-releases, as does \f[V]-sC\f[R] (the \f[V]default\f[R] category).
+FeroProbe ships its own scripts, written from the protocols\[aq]
+specifications (see Built-in scripts): \f[V]-sC\f[R] runs the ones in
+the \f[V]default\f[R] category, and more come in later releases.
 You can run your own: see Writing scripts.
 .PP
 Scripts run in a sandbox and can only reach the host they run against,
@@ -1462,10 +1467,10 @@ Scripts with a \f[V]prerule\f[R] run once before host discovery, and
 scripts with a \f[V]postrule\f[R] once after the last host.
 With \f[V]-sn\f[R], scripts with a \f[V]hostrule\f[R] still run, but no
 port is probed, so they can open no socket.
-A list scan (\f[V]-sL\f[R]) refuses \f[V]--script\f[R], since it sends
-the targets nothing.
-With ICS protection on, \f[V]--script\f[R] is refused (see Settings
-files and ICS protection).
+A list scan (\f[V]-sL\f[R]) refuses \f[V]--script\f[R] and
+\f[V]-sC\f[R], since it sends the targets nothing.
+With ICS protection on, \f[V]--script\f[R], \f[V]-sC\f[R] and
+\f[V]-A\f[R] are refused (see Settings files and ICS protection).
 .IP
 .nf
 \f[C]
@@ -1477,6 +1482,47 @@ PORT       STATE          SERVICE
 |_banner: 220 mail.example ESMTP Postfix
 \f[R]
 .fi
+.SS \f[V]-sC\f[R] (default scripts)
+.PP
+Run the scripts in the \f[V]default\f[R] category, the same as
+\f[V]--script default\f[R], as in nmap.
+\f[V]-A\f[R] includes it.
+Given with \f[V]--script\f[R], the default scripts run as well as the
+ones \f[V]--script\f[R] names.
+Like nmap\[aq]s default set, these scripts are chosen to be quick, to
+say something useful about common services, and to be safe: they read
+greetings, capabilities and keys, never try passwords other than an
+anonymous login where the protocol defines one (FTP), and change nothing
+on the target.
+They run on a port only when the port is open and its number or service
+(from the port number, or from \f[V]-sV\f[R]) is theirs; see Built-in
+scripts for the list.
+As every script, they reach only the ports the scan probed:
+\f[V]ftp-anon\f[R] therefore lists no files (a listing would come over a
+second connection to a port the server picks), and nothing is sent to a
+port outside \f[V]-p\f[R].
+.IP
+.nf
+\f[C]
+$ feroprobe -sCV -p 21,22,80 192.0.2.10
+PORT       STATE          SERVICE        VERSION
+21/tcp     open           ftp            vsftpd 3.0.5
+|_ftp-anon: Anonymous FTP login allowed (FTP code 230)
+22/tcp     open           ssh            OpenSSH 9.6p1 Ubuntu 3ubuntu13
+| ssh-hostkey: 
+|   256 4f:0a:...:91 (ECDSA)
+|_  256 c2:7e:...:3b (ED25519)
+80/tcp     open           http           nginx 1.24.0
+| http-methods: 
+|_  Supported Methods: GET HEAD POST OPTIONS
+| http-robots.txt: 1 disallowed entry
+|_/admin
+|_http-title: Welcome
+\f[R]
+.fi
+.PP
+With ICS protection on, \f[V]-sC\f[R] is refused like
+\f[V]--script\f[R].
 .SS \f[V]--script <scripts>\f[R]
 .PP
 Choose the scripts to run: a comma-separated list where each item is
@@ -1620,11 +1666,14 @@ A script running against a host may connect only to that host (its
 address, the name it was given on the command line or its reverse DNS
 name; no name is looked up) and only to a port of the same protocol that
 the scan probed on it, in any state.
-Only TCP and UDP sockets exist.
+Only TCP sockets (plain or TLS) and UDP sockets exist.
+The HTTP library goes through the same check, and follows a redirect
+only when it points inside the scope; one that points elsewhere is not
+followed and is returned to the script as it came.
 Scripts with a \f[V]prerule\f[R] or \f[V]postrule\f[R], which run
 without a host, have no network access at all, so nothing broadcasts.
-A connection outside the scope fails, and FeroProbe prints a warning
-naming the script and the address.
+A connection the script asks for outside the scope fails, and FeroProbe
+prints a warning naming the script and the address.
 A wider scope may come later as an explicit option.
 .SS Writing scripts
 .PP
@@ -1734,8 +1783,34 @@ T{
 T}@T{
 Connect to \f[V]host\f[R] (a host table or an address) on \f[V]port\f[R]
 (a port table or a number), over \f[V]\[dq]tcp\[dq]\f[R] (default, or
-the port table\[aq]s protocol) or \f[V]\[dq]udp\[dq]\f[R].
+the port table\[aq]s protocol), \f[V]\[dq]udp\[dq]\f[R], or
+\f[V]\[dq]ssl\[dq]\f[R] for TLS over TCP.
 Returns \f[V]true\f[R], or \f[V]false\f[R] and a message
+T}
+T{
+\f[V]sock:reconnect_ssl()\f[R]
+T}@T{
+Start TLS on a connected TCP socket, as after a STARTTLS exchange.
+Returns \f[V]true\f[R], or \f[V]false\f[R] and a message
+T}
+T{
+\f[V]sock:get_ssl_certificate()\f[R]
+T}@T{
+The server\[aq]s certificate as a table (see TLS), or \f[V]false\f[R]
+and a message
+T}
+T{
+\f[V]sock:get_tls_info()\f[R]
+T}@T{
+The session\[aq]s \f[V]version\f[R] (\f[V]\[dq]TLSv1.2\[dq]\f[R],
+\f[V]\[dq]TLSv1.3\[dq]\f[R]), \f[V]cipher\f[R] (its IANA name) and
+\f[V]alpn\f[R]
+T}
+T{
+\f[V]sock:get_info()\f[R]
+T}@T{
+\f[V]true\f[R], the local address and port, and the remote address and
+port
 T}
 T{
 \f[V]sock:send(data)\f[R]
@@ -1783,6 +1858,80 @@ T}@T{
 All the arguments, as a table
 T}
 T{
+\f[V]fero.http.get(host, port, path [, options])\f[R]
+T}@T{
+An HTTP GET; returns the response table, or \f[V]nil\f[R] and a message
+(see HTTP)
+T}
+T{
+\f[V]fero.http.head(host, port, path [, options])\f[R]
+T}@T{
+The same with HEAD
+T}
+T{
+\f[V]fero.http.post(host, port, path, options, content)\f[R]
+T}@T{
+A POST of \f[V]content\f[R]: a string, or a table sent form-encoded
+T}
+T{
+\f[V]fero.http.request(method, host, port, path [, options])\f[R]
+T}@T{
+Any method
+T}
+T{
+\f[V]fero.http.USER_AGENT\f[R]
+T}@T{
+The \f[V]User-Agent\f[R] requests send by default
+T}
+T{
+\f[V]fero.portrule.match(ports, services [, protos [, states]])\f[R]
+T}@T{
+A port rule: true for a port whose number is in \f[V]ports\f[R] or whose
+service is in \f[V]services\f[R] (a value or a list each), of a protocol
+in \f[V]protos\f[R] (default \f[V]\[dq]tcp\[dq]\f[R]) and a state in
+\f[V]states\f[R] (default \f[V]open\f[R] and \f[V]open|filtered\f[R])
+T}
+T{
+\f[V]fero.portrule.http\f[R], \f[V]fero.portrule.ssl\f[R]
+T}@T{
+Ready-made port rules for web ports and for TLS ports (TLS found by
+\f[V]-sV\f[R], or a TLS service name or port number)
+T}
+T{
+\f[V]fero.base64.encode(s)\f[R], \f[V]fero.base64.decode(s)\f[R]
+T}@T{
+Base64 (decode gives \f[V]nil\f[R] for text that is not base64)
+T}
+T{
+\f[V]fero.reader(sock)\f[R]
+T}@T{
+A buffered reader over a connected socket: \f[V]r:line()\f[R] (one line,
+without its CR LF), \f[V]r:bytes(n)\f[R] (exactly \f[V]n\f[R] bytes) and
+\f[V]r:reply()\f[R] (an FTP or SMTP style reply: its code as a number
+and its lines, following \f[V]250-\f[R] continuation lines up to
+\f[V]250 \f[R]).
+Each returns \f[V]nil\f[R] and a message on a timeout, the end of the
+connection or a line over 64 KiB
+T}
+T{
+\f[V]fero.crypto.digest(name, data)\f[R]
+T}@T{
+The digest of \f[V]data\f[R] as raw bytes: \f[V]md5\f[R],
+\f[V]sha1\f[R], \f[V]sha256\f[R], \f[V]sha384\f[R] or \f[V]sha512\f[R]
+(MD5 and SHA-1 only for fingerprints, as tools still print them)
+T}
+T{
+\f[V]fero.crypto.random_bytes(n)\f[R]
+T}@T{
+\f[V]n\f[R] random bytes from the system (at most 65536)
+T}
+T{
+\f[V]fero.hex(s [, sep])\f[R]
+T}@T{
+\f[V]s\f[R] in lower-case hex, with \f[V]sep\f[R] between bytes if given
+(\f[V]fero.hex(d, \[dq]:\[dq])\f[R])
+T}
+T{
 \f[V]fero.verbosity()\f[R], \f[V]fero.debugging()\f[R]
 T}@T{
 The \f[V]-v\f[R] and \f[V]-d\f[R] levels
@@ -1824,6 +1973,145 @@ action = function(host, port)
 end
 \f[R]
 .fi
+.SS Script TLS and HTTP
+.PP
+\f[B]TLS.\f[R] Script TLS (\f[V]\[dq]ssl\[dq]\f[R] sockets,
+\f[V]reconnect_ssl\f[R], the HTTP library) speaks TLS 1.2 and 1.3.
+It accepts any certificate without checking it, offers no client
+certificate, and sends the host\[aq]s name as SNI when it has one (the
+name given on the command line, else its reverse DNS name; never an
+address).
+nmap, through OpenSSL, can also speak older versions, so a device that
+only knows SSLv3 to TLS 1.1 answers nmap\[aq]s scripts but not
+FeroProbe\[aq]s.
+.PP
+\f[V]sock:get_ssl_certificate()\f[R] returns \f[V]subject\f[R] and
+\f[V]issuer\f[R] (tables of attribute names such as
+\f[V]commonName\f[R], \f[V]organizationName\f[R] and
+\f[V]countryName\f[R] to their values), \f[V]subject_text\f[R] and
+\f[V]issuer_text\f[R] (every attribute in the certificate\[aq]s order,
+as \f[V]name=value/name=value\f[R]), \f[V]serial\f[R] (hex),
+\f[V]version\f[R], \f[V]sig_algorithm\f[R] (such as
+\f[V]sha256WithRSAEncryption\f[R]), \f[V]pubkey\f[R] (\f[V]type\f[R]:
+\f[V]rsa\f[R], \f[V]ec\f[R], \f[V]dsa\f[R], \f[V]ed25519\f[R]...;
+\f[V]bits\f[R]; \f[V]curve\f[R] for EC keys), \f[V]validity\f[R]
+(\f[V]notBefore\f[R] and \f[V]notAfter\f[R], as
+\f[V]YYYY-MM-DDTHH:MM:SS\f[R] in UTC), \f[V]san\f[R] (the subject
+alternative names, as \f[V]DNS:name\f[R], \f[V]IP:address\f[R],
+\f[V]email:...\f[R], \f[V]URI:...\f[R]), \f[V]sha1\f[R] and
+\f[V]sha256\f[R] (fingerprints in hex), \f[V]pem\f[R] and \f[V]der\f[R].
+.PP
+\f[B]HTTP.\f[R] \f[V]fero.http\f[R] speaks HTTP/1.1, one request per
+connection (\f[V]Connection: close\f[R]), and sends a \f[V]Host\f[R]
+header (the host\[aq]s name, else its address, with the port unless it
+is 80, or 443 over TLS) and a \f[V]User-Agent\f[R] that names FeroProbe:
+.IP
+.nf
+\f[C]
+Mozilla/5.0 (compatible; FeroProbe Scripting Engine; https://github.com/jkobierczynski/FeroProbe)
+\f[R]
+.fi
+.PP
+This is the script engine\[aq]s signature (see
+\f[V]docs/responsible-use.md\f[R]).
+A request goes over TLS or not as the port suggests: TLS when
+\f[V]-sV\f[R] found it, or the service name or port number is a TLS one;
+if that attempt gets no HTTP answer, the other is tried, as nmap does.
+A request carrying credentials (\f[V]Authorization\f[R],
+\f[V]Proxy-Authorization\f[R] or \f[V]Cookie\f[R]) that started over TLS
+never falls back to plain text, and a redirect that leaves TLS for plain
+text, or goes to another port, drops those headers.
+The options table takes:
+.PP
+.TS
+tab(@);
+l l.
+T{
+Option
+T}@T{
+T}
+_
+T{
+\f[V]header\f[R]
+T}@T{
+A table of extra headers, name to value; a \f[V]Host\f[R] or
+\f[V]User-Agent\f[R] here replaces FeroProbe\[aq]s
+T}
+T{
+\f[V]content\f[R]
+T}@T{
+The request body
+T}
+T{
+\f[V]timeout\f[R]
+T}@T{
+Milliseconds for the whole request, both attempts included; a first
+attempt gets at most half while a second may follow (default 30000)
+T}
+T{
+\f[V]ssl\f[R]
+T}@T{
+\f[V]true\f[R] or \f[V]false\f[R] to use TLS or not, with no second
+attempt
+T}
+T{
+\f[V]redirect_ok\f[R]
+T}@T{
+\f[V]false\f[R] to follow no redirect, or how many to follow (default 3)
+T}
+T{
+\f[V]max_body_size\f[R]
+T}@T{
+The most body bytes kept (default 2 MiB, at most 16 MiB)
+T}
+T{
+\f[V]truncated_ok\f[R]
+T}@T{
+Return a body cut at \f[V]max_body_size\f[R]; without it a longer body
+is an error, as in nmap
+T}
+T{
+\f[V]auth\f[R]
+T}@T{
+\f[V]{username = ..., password = ...}\f[R] for basic authentication
+T}
+T{
+\f[V]cookies\f[R]
+T}@T{
+A \f[V]Cookie\f[R] header, as a string or a table of names to values
+T}
+T{
+\f[V]user_agent\f[R]
+T}@T{
+Another \f[V]User-Agent\f[R]
+T}
+.TE
+.PP
+The response table has \f[V]status\f[R] (a number),
+\f[V]status-line\f[R], \f[V]version\f[R] (\f[V]\[dq]1.1\[dq]\f[R]),
+\f[V]header\f[R] (names in lower case; a repeated header\[aq]s values
+joined with \f[V], \f[R]), \f[V]rawheader\f[R] (every header line as
+sent), \f[V]cookies\f[R] (one table per \f[V]Set-Cookie\f[R], with
+\f[V]name\f[R], \f[V]value\f[R] and its attributes in lower case, flags
+such as \f[V]httponly\f[R] as \f[V]true\f[R]), \f[V]body\f[R],
+\f[V]ssl\f[R] (whether TLS was used), \f[V]truncated\f[R], and
+\f[V]location\f[R] (the URLs of the redirects followed, in order; the
+response is the last one\[aq]s).
+A request that fails returns \f[V]nil\f[R] and a message, such as
+\f[V]\[dq]TIMEOUT\[dq]\f[R] or a scope refusal; in nmap the response
+table comes back with no \f[V]status\f[R].
+Bodies are not decompressed; FeroProbe sends no
+\f[V]Accept-Encoding\f[R], so servers send them plain.
+A method, path or header value holding a control character (such as CR
+or LF) is refused.
+.PP
+Script arguments that apply to every HTTP request, as in nmap:
+\f[V]http.useragent\f[R] (another \f[V]User-Agent\f[R]),
+\f[V]http.host\f[R] (another \f[V]Host\f[R] header),
+\f[V]http.max-body-size\f[R] and \f[V]http.truncated-ok\f[R].
+A \f[V]User-Agent\f[R] set this way, or by the script, replaces the
+FeroProbe signature: like \f[V]--data\f[R], it is a deliberate choice,
+and the request carries exactly what was asked for.
 .SS Script output
 .PP
 In the normal report each script\[aq]s output follows its port, or comes
@@ -1869,13 +2157,23 @@ the output is not lost; the \f[V]Not shown\f[R] count leaves it out.
 nmap drops such output.
 .SS Built-in scripts
 .PP
+The scripts in the \f[V]default\f[R] category are the ones \f[V]-sC\f[R]
+and \f[V]-A\f[R] run.
+Every one is also in \f[V]safe\f[R].
+Each was written for FeroProbe from the protocol\[aq]s specification;
+where one of nmap\[aq]s scripts has the same name, FeroProbe\[aq]s does
+the same job and lays out its output alike, so reports compare, with the
+differences named below.
+.PP
 .TS
 tab(@);
-l l l.
+l l l l.
 T{
 Script
 T}@T{
 Categories
+T}@T{
+Runs on
 T}@T{
 What it does
 T}
@@ -1885,12 +2183,242 @@ T{
 T}@T{
 discovery, safe
 T}@T{
-Connects to open TCP ports and shows the first line the service sends,
-without sending anything.
+open TCP ports
+T}@T{
+Shows the first line the service sends, without sending anything.
 Arguments: \f[V]banner.timeout\f[R] (ms, default 5000),
 \f[V]banner.length\f[R] (characters, default 200)
 T}
+T{
+\f[V]ftp-anon\f[R]
+T}@T{
+default, auth, safe
+T}@T{
+21, \f[V]ftp\f[R]
+T}@T{
+Logs in as \f[V]anonymous\f[R] with the password
+\f[V]feroprobe\[at]\f[R] and says whether that is allowed, then quits.
+Lists no files (nmap\[aq]s does): a listing needs a data connection to a
+port the server picks, outside the scan\[aq]s scope.
+Argument: \f[V]ftp-anon.timeout\f[R] (ms, default 8000)
+T}
+T{
+\f[V]ftp-syst\f[R]
+T}@T{
+default, discovery, safe
+T}@T{
+21, \f[V]ftp\f[R]
+T}@T{
+Sends SYST and STAT without logging in and shows the answers (many
+servers answer STAT only after a login; then only SYST is shown).
+Argument: \f[V]ftp-syst.timeout\f[R]
+T}
+T{
+\f[V]http-methods\f[R]
+T}@T{
+default, safe
+T}@T{
+web ports
+T}@T{
+Sends one OPTIONS request and lists the methods in the \f[V]Allow\f[R]
+header, repeating those beyond GET, HEAD, POST and OPTIONS as
+potentially risky.
+Tries no method.
+Argument: \f[V]http-methods.url-path\f[R] (default \f[V]/\f[R])
+T}
+T{
+\f[V]http-robots.txt\f[R]
+T}@T{
+default, discovery, safe
+T}@T{
+web ports
+T}@T{
+Fetches \f[V]/robots.txt\f[R] and lists its \f[V]Disallow\f[R] paths (at
+most 100)
+T}
+T{
+\f[V]http-title\f[R]
+T}@T{
+default, discovery, safe
+T}@T{
+web ports
+T}@T{
+Fetches a web server\[aq]s front page and shows its title, following
+redirects within scope (and saying where the page came from), or where a
+redirect it did not follow points.
+Argument: \f[V]http-title.path\f[R] (default \f[V]/\f[R])
+T}
+T{
+\f[V]imap-capabilities\f[R]
+T}@T{
+default, safe
+T}@T{
+143, 993, \f[V]imap\f[R], \f[V]imaps\f[R]
+T}@T{
+Sends CAPABILITY and lists the answer; logs in to nothing.
+Over TLS on 993 and when \f[V]-sV\f[R] found TLS
+T}
+T{
+\f[V]mysql-info\f[R]
+T}@T{
+default, discovery, safe
+T}@T{
+3306, \f[V]mysql\f[R]
+T}@T{
+Reads the server\[aq]s greeting: protocol, version, thread ID,
+capability flags and names, status, salt and authentication plugin, or
+the error a server that refuses the connection gives.
+Sends nothing
+T}
+T{
+\f[V]ntp-info\f[R]
+T}@T{
+default, discovery, safe
+T}@T{
+123/udp, \f[V]ntp\f[R]
+T}@T{
+One NTP client request (the server\[aq]s receive time) and one
+control-message READVAR request (version, system, stratum, reference ID
+and the other system variables, which many servers refuse).
+Not the \f[V]monlist\f[R] request used for amplification
+T}
+T{
+\f[V]pop3-capabilities\f[R]
+T}@T{
+default, discovery, safe
+T}@T{
+110, 995, \f[V]pop3\f[R], \f[V]pop3s\f[R]
+T}@T{
+Sends CAPA and lists the capabilities, with their arguments in
+parentheses, plus APOP when the greeting offers it; logs in to nothing
+T}
+T{
+\f[V]rpcinfo\f[R]
+T}@T{
+default, discovery, safe
+T}@T{
+111/tcp and udp, \f[V]rpcbind\f[R]
+T}@T{
+Asks the portmapper for its registered RPC programs (DUMP, as
+\f[V]rpcinfo -p\f[R]) and lists program, versions, port and protocol,
+and service name.
+The ports it lists are not contacted
+T}
+T{
+\f[V]smtp-commands\f[R]
+T}@T{
+default, discovery, safe
+T}@T{
+25, 465, 587, \f[V]smtp\f[R], \f[V]submission\f[R]
+T}@T{
+Sends \f[V]EHLO feroprobe.invalid\f[R] and lists the server\[aq]s name
+and extensions; QUIT.
+Over TLS on 465.
+\f[V]smtp.domain\f[R] (nmap\[aq]s name) sends another name instead.
+nmap\[aq]s also sends HELP, and by default the target\[aq]s own name;
+FeroProbe\[aq]s sends no HELP
+T}
+T{
+\f[V]ssh-hostkey\f[R]
+T}@T{
+default, discovery, safe
+T}@T{
+22, \f[V]ssh\f[R]
+T}@T{
+Shows each host key\[aq]s size, MD5 fingerprint and type, as nmap\[aq]s
+does, and with \f[V]-vv\f[R] the key.
+\f[V]ssh-hostkey.format\f[R] (or nmap\[aq]s \f[V]ssh_hostkey\f[R]) picks
+\f[V]md5\f[R], \f[V]sha256\f[R] (as \f[V]ssh-keygen -l\f[R] prints it),
+\f[V]full\f[R] or \f[V]all\f[R]; nmap\[aq]s \f[V]visual\f[R] and
+\f[V]bubble\f[R] forms are not offered.
+One connection per key type the server offers; each stops at the
+server\[aq]s key exchange reply, before any login.
+The client announces itself as
+\f[V]SSH-2.0-FeroProbe_Scripting_Engine\f[R].
+Key exchange: curve25519 or the Diffie-Hellman groups 14, 16, 18 and 1.
+Argument: \f[V]ssh-hostkey.timeout\f[R] (ms, default 10000)
+T}
+T{
+\f[V]ssl-cert\f[R]
+T}@T{
+default, discovery, safe
+T}@T{
+TLS ports
+T}@T{
+Shows the certificate of a TLS port: subject, alternative names, issuer,
+key type and size, signature algorithm, validity dates, SHA-1 and
+SHA-256 fingerprints, and with \f[V]-v\f[R] the PEM.
+Direct TLS only for now (no STARTTLS); nmap\[aq]s also shows MD5,
+FeroProbe\[aq]s SHA-256 instead
+T}
+T{
+\f[V]sshv1\f[R]
+T}@T{
+default, safe
+T}@T{
+22, \f[V]ssh\f[R]
+T}@T{
+Says whether the server still accepts the obsolete SSH protocol 1, from
+the version in its greeting; sends nothing.
+nmap\[aq]s also reads the version 1 keys and ciphers
+T}
+T{
+\f[V]vnc-info\f[R]
+T}@T{
+default, discovery, safe
+T}@T{
+5900-5910, \f[V]vnc\f[R]
+T}@T{
+Answers the RFB version handshake and lists the security types offered,
+with a warning when \[dq]None\[dq] (no authentication) is one; chooses
+none, so nothing logs in
+T}
+T{
+\f[V]x11-access\f[R]
+T}@T{
+default, auth, safe
+T}@T{
+6000-6009, \f[V]X11\f[R]
+T}@T{
+Sends an X11 connection setup without credentials and says whether the
+server lets anyone connect; closes at once
+T}
 .TE
+.PP
+\[dq]Web ports\[dq] are the usual HTTP and HTTPS ports (80, 443, 8080,
+8443 and others) and ports whose service is \f[V]http\f[R],
+\f[V]https\f[R] or similar; \[dq]TLS ports\[dq] are ports where
+\f[V]-sV\f[R] found TLS, or whose number or service is a TLS one.
+A script whose rule needs a service name sees the one \f[V]-sV\f[R]
+found, or without \f[V]-sV\f[R] the name of the port number, as in nmap.
+.PP
+nmap\[aq]s \f[V]default\f[R] category has more scripts (SMB, RDP, DNS
+and others); FeroProbe\[aq]s grows release by release.
+Scripts of nmap\[aq]s that would reach beyond the scanned host, such as
+\f[V]http-open-proxy\f[R] or \f[V]socks-open-proxy\f[R], which ask the
+target to fetch an outside site, are not planned for the default set.
+.IP
+.nf
+\f[C]
+$ feroprobe -sV -p 80,443 --script http-title,ssl-cert 192.0.2.10
+PORT       STATE          SERVICE        VERSION
+80/tcp     open           http           nginx 1.24.0
+|_http-title: Did not follow redirect to https://www.example.test/
+443/tcp    open           ssl/http       nginx 1.24.0
+| http-title: Example
+|_Requested resource was https://192.0.2.10/start
+| ssl-cert: Subject: commonName=www.example.test/organizationName=Example
+| Subject Alternative Name: DNS:www.example.test, DNS:example.test
+| Issuer: countryName=US/organizationName=Example CA/commonName=Example CA R1
+| Public Key type: ec
+| Public Key bits: 256
+| Signature Algorithm: ecdsa-with-SHA384
+| Not valid before: 2026-09-01T00:00:00
+| Not valid after:  2026-11-30T23:59:59
+| SHA-1:   3c1f...
+|_SHA-256: 9a07...
+\f[R]
+.fi
 .SH TIMING AND PERFORMANCE
 .SS Timing templates (\f[V]-T<0-5>\f[R])
 .PP
@@ -3259,13 +3787,13 @@ targets.
 Use the IPv6 address of hostname targets; see Target specification.
 .SS \f[V]-A\f[R]
 .PP
-Version detection, OS detection and traceroute; see Traceroute and
-aggressive mode.
+Version detection, OS detection, the default scripts and traceroute; see
+Traceroute and aggressive mode.
 .SS \f[V]--override-ics-protection\f[R]
 .PP
 Run once despite ICS protection, allowing \f[V]-sV\f[R], \f[V]-O\f[R],
-\f[V]-A\f[R] and \f[V]--script\f[R], with a prominent warning naming
-what it allowed.
+\f[V]-A\f[R], \f[V]-sC\f[R] and \f[V]--script\f[R], with a prominent
+warning naming what it allowed.
 Changes no settings file.
 See Settings files and ICS protection.
 .SS \f[V]--oui-file <file>\f[R]
@@ -3362,9 +3890,10 @@ ics_protection = true
 .PP
 With it on:
 .IP \[bu] 2
-\f[V]-sV\f[R], \f[V]-O\f[R], \f[V]-A\f[R] and \f[V]--script\f[R] are
-refused before any name is resolved or packet sent, with a message
-naming the option and where protection was turned on.
+\f[V]-sV\f[R], \f[V]-O\f[R], \f[V]-A\f[R], \f[V]-sC\f[R] and
+\f[V]--script\f[R] are refused before any name is resolved or packet
+sent, with a message naming the option and where protection was turned
+on.
 Version detection sends application-protocol probes (HTTP, TLS, ...)
 to every open port, and fragile PLCs and RTUs can fault or hang when,
 for example, their Modbus handler on port 502 receives an HTTP request;
@@ -3858,6 +4387,30 @@ T}@T{
 Prints where the script came from (built in, or its file); no XML
 T}
 T{
+Default scripts (\f[V]-sC\f[R])
+T}@T{
+nmap\[aq]s own set of over a hundred scripts, some reaching other ports
+(\f[V]ms-sql-info\f[R]: UDP 1434) or outside hosts
+(\f[V]http-open-proxy\f[R])
+T}@T{
+FeroProbe\[aq]s own, smaller set (see Built-in scripts), within the
+scan\[aq]s scope.
+\f[V]ftp-anon\f[R] lists no files, \f[V]sshv1\f[R] reads the greeting
+only, \f[V]smtp-commands\f[R] sends no HELP, \f[V]ssh-hostkey\f[R] has
+no \f[V]visual\f[R] or \f[V]bubble\f[R] form and offers no ECDH key
+exchange on NIST curves
+T}
+T{
+Script traffic signature
+T}@T{
+\f[V]SSH-2.0-Nmap-SSH2-Hostkey\f[R]; EHLO with the target\[aq]s own
+name, else \f[V]nmap.scanme.org\f[R]; FTP password \f[V]IEUser\[at]\f[R]
+T}@T{
+\f[V]SSH-2.0-FeroProbe_Scripting_Engine\f[R],
+\f[V]EHLO feroprobe.invalid\f[R], FTP password \f[V]feroprobe\[at]\f[R]
+(see \f[V]docs/responsible-use.md\f[R])
+T}
+T{
 \f[V]--resume\f[R]
 T}@T{
 Runs the recorded command line as it is, creating or appending to any
@@ -3883,8 +4436,7 @@ These nmap options are refused as unknown:
 Scans and discovery: \f[V]-sI\f[R] (idle scan, not planned),
 \f[V]-iR\f[R], \f[V]--resolve-all\f[R].
 .IP \[bu] 2
-Scripting: \f[V]-sC\f[R] (FeroProbe\[aq]s default scripts come in a
-later release), \f[V]--script-trace\f[R] and \f[V]--script-updatedb\f[R]
+Scripting: \f[V]--script-trace\f[R] and \f[V]--script-updatedb\f[R]
 (planned).
 .IP \[bu] 2
 Output and misc: \f[V]--port-ratio\f[R].
