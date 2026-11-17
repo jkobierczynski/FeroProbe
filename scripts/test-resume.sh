@@ -20,7 +20,10 @@
 #                 probe to a finished host, scans every other one, and
 #                 leaves each report listing all 12 hosts exactly once, with
 #                 a valid XML document and two "scan initiated" lines
-#   refusals      --resume with another option; a file that is no report
+#   refusals      --resume with another option; a file that is no report;
+#                 a forged report naming another file as its report (left
+#                 untouched, nothing scanned); a recorded authorization
+#                 that is not given again
 #   edge cases    a report without a finished host starts from the
 #                 beginning; a last host that is not among the targets
 #                 leaves nothing to scan; both with a warning
@@ -159,10 +162,35 @@ RC=0
 nsx "$NS_SCAN" "$BIN" --resume "$WORK/notes.txt" >"$WORK/out.txt" 2>&1 || RC=$?
 OUT="$WORK/out.txt"
 check_true "a file that is no report refused (exit $RC)" test "$RC" -ne 0
+# A report anyone could have written, naming another file as its -oN report:
+# nothing is appended to that file and nothing is scanned.
+printf 'keep me\n' >"$WORK/victim.rc"
+printf '# FeroProbe 0.5.0 scan initiated Mon Nov 16 10:00:00 2026 UTC as: feroprobe -Pn -sT -p %s -oN %s %s\n' \
+    "$TCP_OPEN" "$WORK/victim.rc" "$RANGE" >"$WORK/forged.nmap"
+capture_start
+RC=0
+nsx "$NS_SCAN" "$BIN" --resume "$WORK/forged.nmap" >"$WORK/out.txt" 2>&1 || RC=$?
+capture_stop
+OUT="$WORK/out.txt"
+check_true "a report naming another file refused (exit $RC)" test "$RC" -ne 0
+check_true "  with the reason" output_has "does not hold that scan's report"
+check "  that file untouched" "$(cat "$WORK/victim.rc")" "keep me"
+check "  hosts probed" "$(cap "\$3==\"out\" && \$4==\"tcp\" && \$9==\"S\" {print \$7}" | sort -u | grep -c '^10\.66\.1\.' || true)" 0
+# The opt-in authorizations are not taken from a file.
+sed 's/ as: \([^ ]*\) / as: \1 --override-ics-protection /' "$SNAP/scan.gnmap" >"$WORK/authorized.gnmap"
+RC=0
+nsx "$NS_SCAN" "$BIN" --resume "$WORK/authorized.gnmap" >"$WORK/out.txt" 2>&1 || RC=$?
+OUT="$WORK/out.txt"
+check_true "a recorded --override-ics-protection needs repeating (exit $RC)" test "$RC" -ne 0
+check_true "  with the reason" output_has "give it again"
 
 echo "== a report without a finished host =="
 rm -f "$WORK"/scan.*
+# Every report of -oA as the aborted run left it before finishing a host
+# (--resume appends only to the scan's existing reports).
 head -n 1 "$SNAP/scan.gnmap" >"$WORK/scan.gnmap"
+head -n 1 "$SNAP/scan.nmap" >"$WORK/scan.nmap"
+sed '/<nmaprun/q' "$SNAP/scan.xml" >"$WORK/scan.xml"
 capture_start
 RC=0
 (cd "$WORK" && nsx "$NS_SCAN" "$BIN" --resume scan.gnmap) >"$WORK/out.txt" 2>&1 || RC=$?

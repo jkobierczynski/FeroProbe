@@ -2270,11 +2270,14 @@ Carry on with a scan that was aborted (with Ctrl-C, a lost connection, a
 reboot), given its normal (\f[V]-oN\f[R]), XML (\f[V]-oX\f[R]) or
 grepable (\f[V]-oG\f[R]) report; for \f[V]-oA\f[R], any of the three
 files.
-As in nmap, it takes no other options, except \f[V]--keep-root\f[R]:
-under \f[V]sudo\f[R], root is given up before the report is read, so a
+As in nmap, it takes no other options, except \f[V]--keep-root\f[R],
+\f[V]--allow-public-evasion\f[R] and
+\f[V]--override-ics-protection\f[R].
+Under \f[V]sudo\f[R], root is given up before the report is read, so a
 scan whose report or files only root can reach is resumed with
 \f[V]sudo feroprobe --keep-root --resume FILE\f[R] (a
-\f[V]--keep-root\f[R] recorded in the report has no effect on this):
+\f[V]--keep-root\f[R] recorded in the report has no effect on this).
+The two authorizations are explained below:
 .IP
 .nf
 \f[C]
@@ -2317,6 +2320,46 @@ hosts scanned since; a warning says so.
 .IP \[bu] 2
 The settings files and ICS protection apply to the resumed scan as they
 would to the command typed again.
+.PP
+A report is a plain text file that anyone can write, and resuming one
+runs the command line it records: its targets, its options and its
+report files.
+Treat a report you did not write yourself like a script someone handed
+you; FeroProbe prints the command line it resumes on standard error
+before anything else happens.
+Three safeguards, all differences from nmap:
+.IP \[bu] 2
+\f[B]Only the scan\[aq]s own reports are appended to.\f[R] Every report
+file the recorded command line names (except \f[V]-\f[R] and
+\f[V]/dev/null\f[R], \f[V]/dev/stdout\f[R], \f[V]/dev/stderr\f[R]) must
+already exist and hold the report of that same scan: for \f[V]-oN\f[R],
+\f[V]-oG\f[R] and \f[V]-oX\f[R], a \f[V]scan initiated ... as:\f[R] line
+recording the same command line; for \f[V]-oS\f[R], the mangled
+\f[V]Starting FeroProbe\f[R] line; for \f[V]-oJ\f[R], nothing yet or a
+FeroProbe JSON document.
+Otherwise the resume is refused before anything is sent, and a missing
+report file is not created.
+nmap appends to whatever the recorded command line names, so a forged
+report can make it add text to any file the user can write (as root, any
+file), text the scanned hosts partly choose (a service\[aq]s version
+string, for example).
+.IP \[bu] 2
+\f[B]Authorizations are given again.\f[R] If the recorded command line
+has \f[V]--allow-public-evasion\f[R] or
+\f[V]--override-ics-protection\f[R], the resume is refused unless the
+same option is given beside \f[V]--resume\f[R]
+(\f[V]feroprobe --allow-public-evasion --resume scan.nmap\f[R]).
+A deliberate opt-in is not taken from a file.
+.IP \[bu] 2
+\f[B]Root is not kept for it.\f[R] Under \f[V]sudo\f[R], the resumed
+scan runs as the user who ran \f[V]sudo\f[R] like any other (see Giving
+up root under sudo); with \f[V]--keep-root\f[R] or a root shell, the
+checks above still apply.
+.PP
+Files the command line reads (\f[V]-iL\f[R], \f[V]--excludefile\f[R],
+\f[V]--service-rules\f[R], \f[V]--oui-file\f[R]) are read as they would
+be for the command typed again, so under \f[V]sudo\f[R] with root given
+up, only files the user could read anyway.
 .SS \f[V]--nmap-label\f[R]
 .PP
 Write \f[V]scanner=\[dq]nmap\[dq]\f[R] in the XML report instead of
@@ -3260,6 +3303,17 @@ T}@T{
 A no-op; says so only with \f[V]-v\f[R]
 T}@T{
 A no-op; says so on every run
+T}
+T{
+\f[V]--resume\f[R]
+T}@T{
+Runs the recorded command line as it is, creating or appending to any
+report file it names
+T}@T{
+Prints the command line first; appends only to existing files that hold
+that scan\[aq]s report (creates none); a recorded
+\f[V]--allow-public-evasion\f[R] or \f[V]--override-ics-protection\f[R]
+must be given again beside \f[V]--resume\f[R]
 T}
 .TE
 .PP
