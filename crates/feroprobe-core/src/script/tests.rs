@@ -591,3 +591,18 @@ fn debug_output_is_bounded() {
     assert_eq!(room, 0);
     assert_eq!(engine::debug_text(b"more", &mut room), "...");
 }
+
+#[test]
+fn print_lines_are_bounded_tabs_included() {
+    let lua = mlua::Lua::new();
+    let empty = lua.create_string("").unwrap();
+    let line = engine::debug_join((0..200_000).map(|_| Some(empty.clone())));
+    assert!(line.len() <= 64 * 1024 + 3, "{}", line.len());
+    assert!(line.ends_with("..."));
+    let a = lua.create_string("a").unwrap();
+    let b = lua.create_string("b").unwrap();
+    assert_eq!(
+        engine::debug_join([Some(a), None, Some(b)].into_iter()),
+        "a\t\tb"
+    );
+}

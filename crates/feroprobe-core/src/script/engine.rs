@@ -137,6 +137,31 @@ pub(crate) fn debug_text(bytes: &[u8], room: &mut usize) -> String {
     text
 }
 
+/// `print`'s arguments as one tab-separated line of at most
+/// [`MAX_DEBUG_BYTES`] (then "..."), tabs counted, converting each only as
+/// far as the line still has room.
+pub(crate) fn debug_join(parts: impl Iterator<Item = Option<mlua::LuaString>>) -> String {
+    let mut room = MAX_DEBUG_BYTES;
+    let mut line = String::new();
+    for (i, part) in parts.enumerate() {
+        if i > 0 {
+            if room == 0 {
+                line.push_str("...");
+                break;
+            }
+            line.push('\t');
+            room -= 1;
+        }
+        if let Some(s) = part {
+            line.push_str(&debug_text(&s.as_bytes(), &mut room));
+        }
+        if room == 0 && line.ends_with("...") {
+            break;
+        }
+    }
+    line
+}
+
 /// Set up the `fero` library and the script's globals in a new state.
 pub(crate) fn install_library(
     lua: &Lua,
@@ -186,19 +211,11 @@ pub(crate) fn install_library(
             if crate::debug::debugging() < 1 {
                 return Ok(());
             }
-            let mut room = MAX_DEBUG_BYTES;
-            let mut parts = Vec::new();
-            for v in vals.iter() {
-                if room == 0 {
-                    break;
-                }
-                let text = tostring
-                    .call::<mlua::LuaString>(v.clone())
-                    .map(|s| debug_text(&s.as_bytes(), &mut room))
-                    .unwrap_or_default();
-                parts.push(text);
-            }
-            eprintln!("{who}: {}", parts.join("\t"));
+            let line = debug_join(
+                vals.iter()
+                    .map(|v| tostring.call::<mlua::LuaString>(v.clone()).ok()),
+            );
+            eprintln!("{who}: {line}");
             Ok(())
         })?,
     )?;
