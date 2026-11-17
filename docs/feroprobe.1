@@ -2202,9 +2202,11 @@ both the link and the directory holding it and no other user can write
 to that directory (so \f[V]/dev/stdout\f[R] works, but
 \f[V]sudo feroprobe --keep-root -oN /tmp/scan.txt\f[R] is refused when
 \f[V]/tmp/scan.txt\f[R] is a link, whoever made it).
-The path is opened one component at a time with \f[V]O_NOFOLLOW\f[R], so
-a link swapped in at the last moment is refused too, and a file root
-creates under \f[V]sudo --keep-root\f[R] is handed to the invoking user.
+The path is opened one component at a time with \f[V]O_NOFOLLOW\f[R],
+and an allowed link\[aq]s target is walked the same way, so a link it
+leads through is checked too and a link swapped in at the last moment is
+refused, and a file root creates under \f[V]sudo --keep-root\f[R] is
+handed to the invoking user.
 nmap writes its reports as root through any link.
 .SS \f[V]--append-output\f[R]
 .PP

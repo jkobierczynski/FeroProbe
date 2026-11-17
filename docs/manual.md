@@ -1528,8 +1528,9 @@ file itself, unless root owns both the link and the directory holding it
 and no other user can write to that directory (so `/dev/stdout` works, but
 `sudo feroprobe --keep-root -oN /tmp/scan.txt` is refused when
 `/tmp/scan.txt` is a link, whoever made it). The path is opened one
-component at a time with `O_NOFOLLOW`, so a link swapped in at the last
-moment is refused too, and a file root creates under `sudo --keep-root` is handed to
+component at a time with `O_NOFOLLOW`, and an allowed link's target is
+walked the same way, so a link it leads through is checked too and a link
+swapped in at the last moment is refused, and a file root creates under `sudo --keep-root` is handed to
 the invoking user. nmap writes its reports as root through any link.
 
 #### `--append-output`

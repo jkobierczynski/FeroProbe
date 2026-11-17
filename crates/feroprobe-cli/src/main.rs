@@ -1022,7 +1022,9 @@ fn open_report(path: &str, append: bool) -> Result<std::fs::File> {
 /// with `openat` and `O_NOFOLLOW`, so no symbolic link anywhere in it is
 /// followed, in a directory or as the file itself, unless root owns both
 /// the link and the directory holding it and no one else can write to that
-/// directory (as with `/dev/stdout`). Someone else's link, or any link in a
+/// directory (as with `/dev/stdout`). An approved link's target is walked
+/// the same way, so a link it leads through is checked too; only the
+/// kernel's own links in `/proc` are left to the kernel. Someone else's link, or any link in a
 /// shared directory such as `/tmp`, could otherwise aim root's write at a
 /// system file; and since each step opens what it checked, a link swapped
 /// in meanwhile is refused too. A file root creates under `sudo` is handed
@@ -1060,6 +1062,25 @@ fn open_report_as_root(path: &str, append: bool) -> Result<std::fs::File> {
         (rc == 0).then_some(st)
     };
     let is_link = |st: &libc::stat| st.st_mode & libc::S_IFMT == libc::S_IFLNK;
+    // Whether `dir` is on the /proc file system (Linux only).
+    let on_procfs = |dir: &OwnedFd| {
+        #[cfg(target_os = "linux")]
+        {
+            // SAFETY: statfs is plain data that fstatfs fills in.
+            let mut fs: libc::statfs = unsafe { std::mem::zeroed() };
+            // SAFETY: valid descriptor and buffer.
+            let ok = unsafe { libc::fstatfs(dir.as_raw_fd(), &mut fs) } == 0;
+            // f_type's integer type differs between architectures.
+            #[allow(clippy::unnecessary_cast)]
+            let proc = fs.f_type as i64 == libc::PROC_SUPER_MAGIC as i64;
+            ok && proc
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = dir;
+            false
+        }
+    };
     // A link may be followed only if root owns it and its directory, and no
     // one else can write to that directory.
     let check_link = |dir: &OwnedFd, link: &libc::stat, shown: &str| -> Result<()> {
@@ -1083,41 +1104,101 @@ fn open_report_as_root(path: &str, append: bool) -> Result<std::fs::File> {
         Ok(())
     };
     let cstr = |b: &[u8]| CString::new(b).with_context(|| format!("{path} contains a NUL byte"));
+    // Push a path's components onto the front of the queue.
+    let push_front = |queue: &mut std::collections::VecDeque<Vec<u8>>, p: &std::path::Path| {
+        for part in p.components().rev() {
+            match part {
+                Component::Normal(n) => queue.push_front(n.as_bytes().to_vec()),
+                Component::ParentDir => queue.push_front(b"..".to_vec()),
+                _ => {}
+            }
+        }
+    };
 
     let p = std::path::Path::new(path);
-    let mut parts: Vec<Component> = p.components().collect();
-    let Some(Component::Normal(file_name)) = parts.pop() else {
+    if !matches!(p.components().next_back(), Some(Component::Normal(_))) {
         bail!("{path} does not name a file");
-    };
-    let start = cstr(if p.has_root() { b"/" } else { b"." })?;
+    }
     let dir_flags = libc::O_RDONLY | libc::O_DIRECTORY;
+    let root = cstr(b"/")?;
+    let start = if p.has_root() {
+        root.clone()
+    } else {
+        cstr(b".")?
+    };
     let mut dir =
         open_at(libc::AT_FDCWD, &start, dir_flags).with_context(|| format!("opening {path}"))?;
-    let mut walked = std::path::PathBuf::new();
-    for part in parts {
-        walked.push(part.as_os_str());
-        let name = match part {
-            Component::Normal(n) => cstr(n.as_bytes())?,
-            Component::ParentDir => cstr(b"..")?,
-            _ => continue,
+    let mut queue = std::collections::VecDeque::new();
+    push_front(&mut queue, p);
+    // Walk the queue; an approved link's target is put back on it, so the
+    // links it leads through are checked too.
+    let mut links = 0;
+    let (name, follow) = loop {
+        let Some(part) = queue.pop_front() else {
+            bail!("{path} does not name a file");
         };
-        dir = match open_at(dir.as_raw_fd(), &name, dir_flags | libc::O_NOFOLLOW) {
-            Ok(fd) => fd,
-            Err(e) => match stat_at(&dir, &name) {
-                Some(st) if is_link(&st) => {
-                    check_link(&dir, &st, &walked.display().to_string())?;
-                    open_at(dir.as_raw_fd(), &name, dir_flags)
-                        .with_context(|| format!("opening {path}"))?
+        let name = cstr(&part)?;
+        let last = queue.is_empty();
+        let shown = String::from_utf8_lossy(&part).into_owned();
+        if let Some(st) = stat_at(&dir, &name).filter(&is_link) {
+            check_link(&dir, &st, &format!("{path} (at {shown})"))?;
+            // Links in /proc (/dev/stdout leads to /proc/self/fd/1) are the
+            // kernel's own and may name no path at all: let it follow them.
+            if on_procfs(&dir) {
+                if last {
+                    break (name, true);
                 }
-                _ => return Err(e).with_context(|| format!("opening {path}")),
-            },
-        };
-    }
-    let name = cstr(file_name.as_bytes())?;
+                dir = open_at(dir.as_raw_fd(), &name, dir_flags)
+                    .with_context(|| format!("opening {path}"))?;
+                continue;
+            }
+            links += 1;
+            if links > 40 {
+                bail!("{path}: too many levels of symbolic links");
+            }
+            let mut buf = vec![0u8; libc::PATH_MAX as usize];
+            // SAFETY: valid descriptor, C string and buffer of buf.len().
+            let n = unsafe {
+                libc::readlinkat(
+                    dir.as_raw_fd(),
+                    name.as_ptr(),
+                    buf.as_mut_ptr().cast(),
+                    buf.len(),
+                )
+            };
+            if n < 0 {
+                return Err(std::io::Error::last_os_error())
+                    .with_context(|| format!("reading the link {shown} in {path}"));
+            }
+            buf.truncate(n as usize);
+            let target = std::path::Path::new(std::ffi::OsStr::from_bytes(&buf));
+            if target.has_root() {
+                dir = open_at(libc::AT_FDCWD, &root, dir_flags)
+                    .with_context(|| format!("opening {path}"))?;
+            }
+            push_front(&mut queue, target);
+            if queue.is_empty() {
+                bail!("{path}: the link {shown} does not lead to a file");
+            }
+            continue;
+        }
+        if last {
+            if part == b".." {
+                bail!("{path} does not name a file");
+            }
+            break (name, false);
+        }
+        dir = open_at(dir.as_raw_fd(), &name, dir_flags | libc::O_NOFOLLOW).map_err(|e| {
+            if e.raw_os_error() == Some(libc::ELOOP) {
+                anyhow::anyhow!("{path}: {shown} turned into a symbolic link while being opened")
+            } else {
+                anyhow::Error::new(e).context(format!("opening {path}"))
+            }
+        })?;
+    };
     let mut flags = libc::O_WRONLY | if append { libc::O_APPEND } else { 0 };
-    match stat_at(&dir, &name) {
-        Some(st) if is_link(&st) => check_link(&dir, &st, path)?,
-        _ => flags |= libc::O_NOFOLLOW,
+    if !follow {
+        flags |= libc::O_NOFOLLOW;
     }
     let refused = |e: std::io::Error| -> anyhow::Error {
         if e.raw_os_error() == Some(libc::ELOOP) {
@@ -4258,6 +4339,26 @@ mod tests {
         std::os::unix::fs::symlink(&real, &own).unwrap();
         assert!(open(&own.join("r.txt")).is_ok());
         assert!(real.join("r.txt").exists());
+        // Root's approved link whose target runs through someone else's
+        // link: the nested link is checked too, and refused.
+        let victim_dir = dir.join("victimdir");
+        std::fs::create_dir(&victim_dir).unwrap();
+        let redirect = shared.join("redirect");
+        std::os::unix::fs::symlink(&victim_dir, &redirect).unwrap();
+        lchown(&redirect, 65534);
+        let current = dir.join("current");
+        std::os::unix::fs::symlink(&redirect, &current).unwrap();
+        let err = open(&current.join("hosts")).err().unwrap().to_string();
+        assert!(err.contains("owned by another user"), "{err}");
+        assert!(!victim_dir.join("hosts").exists());
+        // The same as the report file itself.
+        let file_link = shared.join("file-redirect");
+        std::os::unix::fs::symlink(&target, &file_link).unwrap();
+        lchown(&file_link, 65534);
+        let current_file = dir.join("current-file");
+        std::os::unix::fs::symlink(&file_link, &current_file).unwrap();
+        assert!(open(&current_file).is_err());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep");
         // /dev/stdout is root's link in root's /dev.
         if std::path::Path::new("/dev/stdout").is_symlink() {
             assert!(open(std::path::Path::new("/dev/stdout")).is_ok());
