@@ -235,6 +235,7 @@ fero.reader = function(sock)
     while true do
       local i = buf:find("\n", 1, true)
       if i then
+        if i - 1 > MAX_LINE then return nil, "line too long" end
         local line = buf:sub(1, i - 1)
         buf = buf:sub(i + 1)
         return (line:gsub("\r$", ""))
@@ -257,6 +258,7 @@ fero.reader = function(sock)
     local line, err = self:line()
     if not line then return nil, err end
     local code, sep = line:match("^(%d%d%d)([ -]?)")
+    if code and sep == "" and #line > 3 then code = nil end
     if not code then return nil, "not a numbered reply: " .. line:sub(1, 80) end
     local lines = { line }
     if sep == "-" then

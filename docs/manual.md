@@ -1334,8 +1334,6 @@ not lost; the `Not shown` count leaves it out. nmap drops such output.
 
 ### Built-in scripts
 
-| Script | Categories | What it does |
-| --- | --- | --- |
 The scripts in the `default` category are the ones `-sC` and `-A` run.
 Every one is also in `safe`. Each was written for FeroProbe from the
 protocol's specification; where one of nmap's scripts has the same name,

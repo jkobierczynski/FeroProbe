@@ -30,7 +30,9 @@ action = function(host, port)
   if not sock:connect(host, port, tls(port) and "ssl" or "tcp") then return nil end
   local r = fero.reader(sock)
   local greeting = r:line()
-  if not greeting or not greeting:match("^%* OK") and not greeting:match("^%* PREAUTH") then
+  -- IMAP keywords are case-insensitive (RFC 9051 section 9).
+  local head = greeting and greeting:upper()
+  if not head or not head:match("^%* OK") and not head:match("^%* PREAUTH") then
     sock:close()
     return nil
   end
@@ -39,8 +41,7 @@ action = function(host, port)
   for _ = 1, 1000 do
     local line = r:line()
     if not line then break end
-    local list = line:match("^%* CAPABILITY (.*)$")
-    if list then caps = list end
+    if line:sub(1, 13):upper() == "* CAPABILITY " then caps = line:sub(14) end
     if line:sub(1, 4) == "fp1 " then break end
   end
   sock:send("fp2 LOGOUT\r\n")

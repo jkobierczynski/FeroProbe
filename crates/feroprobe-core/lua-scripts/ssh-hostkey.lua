@@ -174,9 +174,15 @@ local function fetch(host, port, family, timeout)
       if kex:match("^curve25519") then
         sock:send(packet(string.char(30) .. str(fero.crypto.random_bytes(32))))
       else
-        -- The public value 2 (the group's generator, for a private
-        -- value of 1): valid for every group, and never used further.
-        sock:send(packet(string.char(30) .. str("\2")))
+        -- A random 512-bit public value: below every group's prime, with
+        -- the top bit clear (a positive mpint) and plenty of bits set, as
+        -- servers check (OpenSSH wants 1 < e < p-1 and at least 4 bits).
+        -- No shared secret is computed, so it need not come from a
+        -- private exponent.
+        local e = fero.crypto.random_bytes(64)
+        e = string.char(e:byte(1) & 0x3f | 0x40) .. e:sub(2, 63)
+          .. string.char(e:byte(64) | 0x0f)
+        sock:send(packet(string.char(30) .. str(e)))
       end
     elseif msg == 31 and kex then
       sock:close()

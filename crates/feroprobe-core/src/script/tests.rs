@@ -1262,6 +1262,87 @@ async fn ftp_anon_and_ftp_syst() {
         output_of("ftp-syst", port, "ftp").await.as_deref(),
         Some("SYST: Windows_NT")
     );
+
+    // "2300" is not reply 230.
+    let (port, _) = line_server("220 Lab FTP\r\n", |line| {
+        Some(
+            match line.split(' ').next().unwrap() {
+                "USER" => "331 Password please\r\n",
+                "PASS" => "2300 denied\r\n",
+                "QUIT" => return None,
+                _ => "500 ?\r\n",
+            }
+            .to_string(),
+        )
+    })
+    .await;
+    assert_eq!(output_of("ftp-anon", port, "ftp").await, None);
+}
+
+#[tokio::test]
+async fn reader_bounds_lines_and_reply_codes() {
+    // A line over 64 KiB is refused even when its newline comes in a later
+    // read; a reply code must end at a space, a hyphen or the line's end.
+    // The long line breaks the stream, so the replies come on a second
+    // connection.
+    let long = tcp_server(|mut s| async move {
+        let _ = s.write_all(&vec![b'A'; 65536]).await;
+        let _ = s.flush().await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let _ = s.write_all(b"B\n").await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    })
+    .await;
+    let port = tcp_server(|mut s| async move {
+        let _ = s.write_all(b"2300 denied\n230\n230-a\n230 b\n").await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    })
+    .await;
+    let src = format!(
+        "{PORT_SCRIPT}{}",
+        r#"
+action = function(host, port)
+  local sock = fero.socket.new()
+  sock:set_timeout(2000)
+  local out = {}
+  if port.number == LONG then
+    sock:connect(host, port)
+    local line, err = fero.reader(sock):line()
+    sock:close()
+    return tostring(line) .. "/" .. tostring(err)
+  end
+  sock:connect(host, port)
+  local r = fero.reader(sock)
+  local code, msg = r:reply()
+  out[#out + 1] = tostring(code) .. "/" .. tostring(msg)
+  code, msg = r:reply()
+  out[#out + 1] = tostring(code)
+  code, msg = r:reply()
+  out[#out + 1] = tostring(code) .. "/" .. #msg
+  sock:close()
+  return table.concat(out, " ")
+end
+"#
+    )
+    .replace("LONG", &long.to_string());
+    let scan = ScriptScan::new(vec![script("rd", &src)], ArgTable::default(), None).unwrap();
+    let mut hosts = vec![host_with(&[
+        (long, PortState::Open),
+        (port, PortState::Open),
+    ])];
+    scan.scan_hosts(&mut hosts).await;
+    let out: Vec<_> = hosts[0]
+        .ports
+        .iter()
+        .map(|p| p.scripts[0].output.as_str())
+        .collect();
+    assert_eq!(
+        out,
+        [
+            "nil/line too long",
+            "nil/not a numbered reply: 2300 denied 230 230/2"
+        ]
+    );
 }
 
 #[tokio::test]
@@ -1292,9 +1373,10 @@ async fn smtp_pop3_and_imap_capabilities() {
         Some("TOP UIDL SASL(PLAIN LOGIN) APOP")
     );
 
-    let (port, seen) = line_server("* OK ready\r\n", |line| match line {
+    // IMAP keywords are case-insensitive.
+    let (port, seen) = line_server("* ok ready\r\n", |line| match line {
         "fp1 CAPABILITY" => {
-            Some("* CAPABILITY IMAP4rev1 IDLE AUTH=PLAIN\r\nfp1 OK done\r\n".into())
+            Some("* capability IMAP4rev1 IDLE AUTH=PLAIN\r\nfp1 OK done\r\n".into())
         }
         _ => Some("* BYE\r\nfp2 OK\r\n".into()),
     })
@@ -1352,8 +1434,9 @@ fn ssh_test_keys() -> (Vec<u8>, Vec<u8>) {
     (ed, rsa)
 }
 
-#[tokio::test]
-async fn ssh_hostkey_reads_each_key_from_the_key_exchange() {
+/// A lab SSH server offering `kex`, answering a key exchange with its
+/// host key, after checking the client's public value as OpenSSH does.
+async fn ssh_lab(kex: &'static [u8]) -> (u16, Seen) {
     use tokio::io::AsyncBufReadExt;
     let idents: Seen = Default::default();
     let keep = idents.clone();
@@ -1372,7 +1455,7 @@ async fn ssh_hostkey_reads_each_key_from_the_key_exchange() {
             let mut kexinit = vec![20u8];
             kexinit.extend([0u8; 16]);
             for list in [
-                &b"diffie-hellman-group14-sha256,curve25519-sha256"[..],
+                kex,
                 b"ssh-ed25519,rsa-sha2-256",
                 b"aes128-ctr",
                 b"aes128-ctr",
@@ -1417,8 +1500,20 @@ async fn ssh_hostkey_reads_each_key_from_the_key_exchange() {
                             .push(format!("kex {}", text.contains("curve25519-sha256,")));
                     }
                     30 => {
-                        // curve25519: a 32-byte public value.
-                        assert_eq!(payload.len(), 1 + 4 + 32);
+                        let e = &payload[5..];
+                        // The client puts curve25519 first.
+                        if kex.windows(10).any(|w| w == b"curve25519") {
+                            assert_eq!(e.len(), 32);
+                        } else {
+                            // Finite-field DH: OpenSSH's dh_pub_is_valid
+                            // wants a positive 1 < e < p-1 with at least
+                            // 4 bits set, else it drops the connection.
+                            let bits: u32 = e.iter().map(|b| b.count_ones()).sum();
+                            if e.is_empty() || e[0] & 0x80 != 0 || e.len() > 256 || bits < 4 {
+                                keep.lock().unwrap().push("bad e".into());
+                                return;
+                            }
+                        }
                         let mut reply = vec![31u8];
                         reply.extend(ssh_string(key.as_ref().unwrap()));
                         reply.extend(ssh_string(&[0x22; 32]));
@@ -1432,6 +1527,21 @@ async fn ssh_hostkey_reads_each_key_from_the_key_exchange() {
         }
     })
     .await;
+    (port, idents)
+}
+
+#[tokio::test]
+async fn ssh_hostkey_reads_each_key_from_the_key_exchange() {
+    check_ssh_hostkey(b"diffie-hellman-group14-sha256,curve25519-sha256").await;
+}
+
+#[tokio::test]
+async fn ssh_hostkey_sends_a_valid_dh_public_value() {
+    check_ssh_hostkey(b"diffie-hellman-group14-sha256").await;
+}
+
+async fn check_ssh_hostkey(kex: &'static [u8]) {
+    let (port, idents) = ssh_lab(kex).await;
     let out = output_of("ssh-hostkey", port, "ssh").await.unwrap();
     let (ed, rsa) = ssh_test_keys();
     let md5 = |k: &[u8]| {
@@ -1614,11 +1724,18 @@ async fn ntp_info_asks_for_the_time_and_the_system_variables() {
                     r
                 }
                 6 => {
+                    // Two fragments, the last one first: the script must
+                    // wait for the whole reply.
                     let data = b"version=\"ntpd 4.2.8p15\", stratum=2,\r\nrefid=192.0.2.1";
-                    let mut r = vec![0x16, 0x82, 0, 1, 0, 0, 0, 0, 0, 0];
-                    r.extend((data.len() as u16).to_be_bytes());
-                    r.extend(data);
-                    r
+                    let (a, b) = data.split_at(20);
+                    for (more, offset, part) in [(0, 20u16, b), (0x20, 0, a)] {
+                        let mut r = vec![0x16, 0x82 | more, 0, 1, 0, 0, 0, 0];
+                        r.extend(offset.to_be_bytes());
+                        r.extend((part.len() as u16).to_be_bytes());
+                        r.extend(part);
+                        let _ = server.send_to(&r, from).await;
+                    }
+                    continue;
                 }
                 _ => continue,
             };

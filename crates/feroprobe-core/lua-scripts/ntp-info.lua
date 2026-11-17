@@ -86,21 +86,37 @@ action = function(host, port)
   sock:set_timeout(timeout)
   if sock:connect(host, port, "udp") then
     sock:send(string.pack(">BBI2I2I2I2I2", 0x16, 2, 1, 0, 0, 0, 0))
-    local parts, seen_last = {}, false
+    -- Fragments may arrive in any order: the one without the "more" bit
+    -- gives the end, and the reply is whole once the fragments cover every
+    -- byte from 0 to that end (RFC 9327 section 2.4).
+    local parts, seen, last_end, complete = {}, {}, nil, false
+    local function covered()
+      table.sort(parts, function(a, b) return a[1] < b[1] end)
+      local at = 0
+      for _, p in ipairs(parts) do
+        if p[1] > at then return false end
+        at = math.max(at, p[1] + #p[2])
+      end
+      return at >= last_end
+    end
     for _ = 1, 16 do
       local ok, reply = sock:receive()
       if not ok or #reply < 12 then break end
       local _, op, _, _, _, offset, count = string.unpack(">BBI2I2I2I2I2", reply)
       if op & 0x80 == 0 or op & 0x40 ~= 0 or op & 0x1f ~= 2 then break end
-      parts[#parts + 1] = { offset, reply:sub(13, 12 + count) }
-      if op & 0x20 == 0 then
-        seen_last = true
+      if count > #reply - 12 then break end
+      if not seen[offset] then
+        seen[offset] = true
+        parts[#parts + 1] = { offset, reply:sub(13, 12 + count) }
+      end
+      if op & 0x20 == 0 then last_end = offset + count end
+      if last_end and covered() then
+        complete = true
         break
       end
     end
     sock:close()
-    if seen_last then
-      table.sort(parts, function(a, b) return a[1] < b[1] end)
+    if complete then
       local text = {}
       for i, p in ipairs(parts) do text[i] = p[2] end
       local vars = parse_vars(table.concat(text))
