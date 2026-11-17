@@ -376,7 +376,9 @@ are nmap's:
 ## Scan techniques
 
 One TCP scan type can run at a time. It can be combined with `-sU`, one of
-`-sY`/`-sZ`, `-sO` and `-sV` in a single run, for example `-sS -sU -sV`.
+`-sY`/`-sZ`, `-sO`, `-sV` and `-sC` in a single run, for example `-sS -sU -sV`.
+As in nmap, the letters can be run together after one `-s`: `-sCV` is
+`-sC -sV`, and `-sSU` is `-sS -sU`.
 
 With no `-s` option, FeroProbe runs a SYN scan when it may use raw sockets
 (root or `CAP_NET_RAW` on Linux) and a connect scan otherwise, as nmap does.
@@ -924,17 +926,18 @@ sudo feroprobe -sn -Pn --traceroute -p 443 example.org
 
 #### `-A` (aggressive detection)
 
-The same as `-sV -O --traceroute`. Without raw sockets only `-sV` runs,
-rather than failing, as in nmap. Unlike nmap, which drops the other parts
-silently, FeroProbe prints a warning naming them:
+The same as `-sV -O -sC --traceroute`, as in nmap: version detection, OS
+detection, the default scripts (see [`-sC`](#-sc-default-scripts)) and
+traceroute. Without raw sockets only `-sV` and `-sC` run, rather than
+failing, as in nmap. Unlike nmap, which drops the other parts silently,
+FeroProbe prints a warning naming them:
 
 ```
-Warning: -A without root or CAP_NET_RAW skips OS detection (-O) and traceroute (--traceroute), which send raw packets; only version detection (-sV) runs. Run as root, or grant CAP_NET_RAW, to include them
+Warning: -A without root or CAP_NET_RAW skips OS detection (-O) and traceroute (--traceroute), which send raw packets; only version detection (-sV) and the default scripts (-sC) run. Run as root, or grant CAP_NET_RAW, to include them
 ```
 
-nmap's `-A` also runs its default scripts (`-sC`); FeroProbe's does not
-run scripts yet, since its default scripts come in a later release. Cannot
-be combined with `-sn`.
+`--script` given with `-A` adds to the default scripts. Cannot be combined
+with `-sn` or `-sL`. With ICS protection on, `-A` is refused as a whole.
 
 ## Script scanning
 
@@ -949,10 +952,10 @@ The scripts are FeroProbe's own, with FeroProbe's own script library
 (`fero`). nmap's scripts do not run unchanged: they are built on nmap's
 libraries (`stdnse`, `shortport`, `nmap.new_socket` and the rest), which
 FeroProbe does not have and cannot ship under their licence. FeroProbe
-ships three scripts so far, `banner`, `http-title` and `ssl-cert` (see
-[Built-in scripts](#built-in-scripts)); more come in later releases, as
-does `-sC` (the `default` category). You can run your own: see
-[Writing scripts](#writing-scripts).
+ships its own scripts, written from the protocols' specifications (see
+[Built-in scripts](#built-in-scripts)): `-sC` runs the ones in the
+`default` category, and more come in later releases. You can run your
+own: see [Writing scripts](#writing-scripts).
 
 Scripts run in a sandbox and can only reach the host they run against, and
 only the ports the scan probed there: see
@@ -963,9 +966,10 @@ traceroute, on the hosts found up (every host with `-Pn`) that were not
 given up on by `--host-timeout`, as in nmap. Scripts with a `prerule` run
 once before host discovery, and scripts with a `postrule` once after the
 last host. With `-sn`, scripts with a `hostrule` still run, but no port is
-probed, so they can open no socket. A list scan (`-sL`) refuses `--script`,
-since it sends the targets nothing. With ICS protection on, `--script` is
-refused (see [Settings files and ICS protection](#settings-files-and-ics-protection)).
+probed, so they can open no socket. A list scan (`-sL`) refuses `--script`
+and `-sC`, since it sends the targets nothing. With ICS protection on,
+`--script`, `-sC` and `-A` are refused (see
+[Settings files and ICS protection](#settings-files-and-ics-protection)).
 
 ```
 $ feroprobe -p 22,25 --script banner 192.0.2.10
@@ -975,6 +979,41 @@ PORT       STATE          SERVICE
 25/tcp     open           smtp
 |_banner: 220 mail.example ESMTP Postfix
 ```
+
+#### `-sC` (default scripts)
+
+Run the scripts in the `default` category, the same as `--script
+default`, as in nmap. `-A` includes it. Given with `--script`, the
+default scripts run as well as the ones `--script` names. Like nmap's
+default set, these scripts are chosen to be quick, to say something
+useful about common services, and to be safe: they read greetings,
+capabilities and keys, never try passwords other than an anonymous login
+where the protocol defines one (FTP), and change nothing on the target.
+They run on a port only when the port is open and its number or service
+(from the port number, or from `-sV`) is theirs; see
+[Built-in scripts](#built-in-scripts) for the list. As every script, they
+reach only the ports the scan probed: `ftp-anon` therefore lists no
+files (a listing would come over a second connection to a port the
+server picks), and nothing is sent to a port outside `-p`.
+
+```
+$ feroprobe -sCV -p 21,22,80 192.0.2.10
+PORT       STATE          SERVICE        VERSION
+21/tcp     open           ftp            vsftpd 3.0.5
+|_ftp-anon: Anonymous FTP login allowed (FTP code 230)
+22/tcp     open           ssh            OpenSSH 9.6p1 Ubuntu 3ubuntu13
+| ssh-hostkey: 
+|   256 4f:0a:...:91 (ECDSA)
+|_  256 c2:7e:...:3b (ED25519)
+80/tcp     open           http           nginx 1.24.0
+| http-methods: 
+|_  Supported Methods: GET HEAD POST OPTIONS
+| http-robots.txt: 1 disallowed entry
+|_/admin
+|_http-title: Welcome
+```
+
+With ICS protection on, `-sC` is refused like `--script`.
 
 #### `--script <scripts>`
 
@@ -1155,6 +1194,10 @@ far as `-sV` found them.
 | `fero.portrule.match(ports, services [, protos [, states]])` | A port rule: true for a port whose number is in `ports` or whose service is in `services` (a value or a list each), of a protocol in `protos` (default `"tcp"`) and a state in `states` (default `open` and `open\|filtered`) |
 | `fero.portrule.http`, `fero.portrule.ssl` | Ready-made port rules for web ports and for TLS ports (TLS found by `-sV`, or a TLS service name or port number) |
 | `fero.base64.encode(s)`, `fero.base64.decode(s)` | Base64 (decode gives `nil` for text that is not base64) |
+| `fero.reader(sock)` | A buffered reader over a connected socket: `r:line()` (one line, without its CR LF), `r:bytes(n)` (exactly `n` bytes) and `r:reply()` (an FTP or SMTP style reply: its code as a number and its lines, following `250-` continuation lines up to `250 `). Each returns `nil` and a message on a timeout, the end of the connection or a line over 64 KiB |
+| `fero.crypto.digest(name, data)` | The digest of `data` as raw bytes: `md5`, `sha1`, `sha256`, `sha384` or `sha512` (MD5 and SHA-1 only for fingerprints, as tools still print them) |
+| `fero.crypto.random_bytes(n)` | `n` random bytes from the system (at most 65536) |
+| `fero.hex(s [, sep])` | `s` in lower-case hex, with `sep` between bytes if given (`fero.hex(d, ":")`) |
 | `fero.verbosity()`, `fero.debugging()` | The `-v` and `-d` levels |
 | `fero.debug(level, message)` | Print `message` with `-d` at `level` or more; `print(...)` prints at level 1 |
 
@@ -1293,9 +1336,43 @@ not lost; the `Not shown` count leaves it out. nmap drops such output.
 
 | Script | Categories | What it does |
 | --- | --- | --- |
-| `banner` | discovery, safe | Connects to open TCP ports and shows the first line the service sends, without sending anything. Arguments: `banner.timeout` (ms, default 5000), `banner.length` (characters, default 200) |
-| `http-title` | default, discovery, safe | Fetches a web server's front page and shows its title, following redirects within scope (and saying where the page came from), or where a redirect it did not follow points. Argument: `http-title.path` (default `/`) |
-| `ssl-cert` | default, discovery, safe | Shows the certificate of a TLS port: subject, alternative names, issuer, key type and size, signature algorithm, validity dates, SHA-1 and SHA-256 fingerprints, and with `-v` the PEM. Direct TLS only for now (no STARTTLS); nmap's also shows MD5, FeroProbe's SHA-256 instead |
+The scripts in the `default` category are the ones `-sC` and `-A` run.
+Every one is also in `safe`. Each was written for FeroProbe from the
+protocol's specification; where one of nmap's scripts has the same name,
+FeroProbe's does the same job and lays out its output alike, so reports
+compare, with the differences named below.
+
+| Script | Categories | Runs on | What it does |
+| --- | --- | --- | --- |
+| `banner` | discovery, safe | open TCP ports | Shows the first line the service sends, without sending anything. Arguments: `banner.timeout` (ms, default 5000), `banner.length` (characters, default 200) |
+| `ftp-anon` | default, auth, safe | 21, `ftp` | Logs in as `anonymous` with the password `feroprobe@` and says whether that is allowed, then quits. Lists no files (nmap's does): a listing needs a data connection to a port the server picks, outside the scan's scope. Argument: `ftp-anon.timeout` (ms, default 8000) |
+| `ftp-syst` | default, discovery, safe | 21, `ftp` | Sends SYST and STAT without logging in and shows the answers (many servers answer STAT only after a login; then only SYST is shown). Argument: `ftp-syst.timeout` |
+| `http-methods` | default, safe | web ports | Sends one OPTIONS request and lists the methods in the `Allow` header, repeating those beyond GET, HEAD, POST and OPTIONS as potentially risky. Tries no method. Argument: `http-methods.url-path` (default `/`) |
+| `http-robots.txt` | default, discovery, safe | web ports | Fetches `/robots.txt` and lists its `Disallow` paths (at most 100) |
+| `http-title` | default, discovery, safe | web ports | Fetches a web server's front page and shows its title, following redirects within scope (and saying where the page came from), or where a redirect it did not follow points. Argument: `http-title.path` (default `/`) |
+| `imap-capabilities` | default, safe | 143, 993, `imap`, `imaps` | Sends CAPABILITY and lists the answer; logs in to nothing. Over TLS on 993 and when `-sV` found TLS |
+| `mysql-info` | default, discovery, safe | 3306, `mysql` | Reads the server's greeting: protocol, version, thread ID, capability flags and names, status, salt and authentication plugin, or the error a server that refuses the connection gives. Sends nothing |
+| `ntp-info` | default, discovery, safe | 123/udp, `ntp` | One NTP client request (the server's receive time) and one control-message READVAR request (version, system, stratum, reference ID and the other system variables, which many servers refuse). Not the `monlist` request used for amplification |
+| `pop3-capabilities` | default, discovery, safe | 110, 995, `pop3`, `pop3s` | Sends CAPA and lists the capabilities, with their arguments in parentheses, plus APOP when the greeting offers it; logs in to nothing |
+| `rpcinfo` | default, discovery, safe | 111/tcp and udp, `rpcbind` | Asks the portmapper for its registered RPC programs (DUMP, as `rpcinfo -p`) and lists program, versions, port and protocol, and service name. The ports it lists are not contacted |
+| `smtp-commands` | default, discovery, safe | 25, 465, 587, `smtp`, `submission` | Sends `EHLO feroprobe.invalid` and lists the server's name and extensions; QUIT. Over TLS on 465. `smtp.domain` (nmap's name) sends another name instead. nmap's also sends HELP, and by default the target's own name; FeroProbe's sends no HELP |
+| `ssh-hostkey` | default, discovery, safe | 22, `ssh` | Shows each host key's size, MD5 fingerprint and type, as nmap's does, and with `-vv` the key. `ssh-hostkey.format` (or nmap's `ssh_hostkey`) picks `md5`, `sha256` (as `ssh-keygen -l` prints it), `full` or `all`; nmap's `visual` and `bubble` forms are not offered. One connection per key type the server offers; each stops at the server's key exchange reply, before any login. The client announces itself as `SSH-2.0-FeroProbe_Scripting_Engine`. Key exchange: curve25519 or the Diffie-Hellman groups 14, 16, 18 and 1. Argument: `ssh-hostkey.timeout` (ms, default 10000) |
+| `ssl-cert` | default, discovery, safe | TLS ports | Shows the certificate of a TLS port: subject, alternative names, issuer, key type and size, signature algorithm, validity dates, SHA-1 and SHA-256 fingerprints, and with `-v` the PEM. Direct TLS only for now (no STARTTLS); nmap's also shows MD5, FeroProbe's SHA-256 instead |
+| `sshv1` | default, safe | 22, `ssh` | Says whether the server still accepts the obsolete SSH protocol 1, from the version in its greeting; sends nothing. nmap's also reads the version 1 keys and ciphers |
+| `vnc-info` | default, discovery, safe | 5900-5910, `vnc` | Answers the RFB version handshake and lists the security types offered, with a warning when "None" (no authentication) is one; chooses none, so nothing logs in |
+| `x11-access` | default, auth, safe | 6000-6009, `X11` | Sends an X11 connection setup without credentials and says whether the server lets anyone connect; closes at once |
+
+"Web ports" are the usual HTTP and HTTPS ports (80, 443, 8080, 8443 and
+others) and ports whose service is `http`, `https` or similar; "TLS
+ports" are ports where `-sV` found TLS, or whose number or service is a
+TLS one. A script whose rule needs a service name sees the one `-sV`
+found, or without `-sV` the name of the port number, as in nmap.
+
+nmap's `default` category has more scripts (SMB, RDP, DNS and others);
+FeroProbe's grows release by release. Scripts of nmap's that would reach
+beyond the scanned host, such as `http-open-proxy` or `socks-open-proxy`,
+which ask the target to fetch an outside site, are not planned for the
+default set.
 
 ```
 $ feroprobe -sV -p 80,443 --script http-title,ssl-cert 192.0.2.10
@@ -2324,12 +2401,12 @@ Use the IPv6 address of hostname targets; see
 
 #### `-A`
 
-Version detection, OS detection and traceroute; see
+Version detection, OS detection, the default scripts and traceroute; see
 [Traceroute and aggressive mode](#traceroute-and-aggressive-mode).
 
 #### `--override-ics-protection`
 
-Run once despite ICS protection, allowing `-sV`, `-O`, `-A` and `--script`, with a
+Run once despite ICS protection, allowing `-sV`, `-O`, `-A`, `-sC` and `--script`, with a
 prominent warning naming what it allowed. Changes no settings file. See
 [Settings files and ICS protection](#settings-files-and-ics-protection).
 
@@ -2415,7 +2492,7 @@ ics_protection = true
 
 With it on:
 
-- `-sV`, `-O`, `-A` and `--script` are refused before any name is
+- `-sV`, `-O`, `-A`, `-sC` and `--script` are refused before any name is
   resolved or packet sent, with a message naming the option and where
   protection was turned on. Version detection sends application-protocol
   probes (HTTP, TLS, ...) to every open port, and fragile PLCs and RTUs can
@@ -2555,6 +2632,8 @@ safeguard calls for a difference. The deliberate differences are:
 | Script output on folded ports | Not shown when the port's state is folded into `Not shown` | The port is listed with its output |
 | `fero.args.get` of a bare flag | `stdnse.get_script_args` returns `1` | Returns `true` |
 | `--script-help` | Prints a link to nmap.org's documentation of each script, and writes `-oX` XML | Prints where the script came from (built in, or its file); no XML |
+| Default scripts (`-sC`) | nmap's own set of over a hundred scripts, some reaching other ports (`ms-sql-info`: UDP 1434) or outside hosts (`http-open-proxy`) | FeroProbe's own, smaller set (see [Built-in scripts](#built-in-scripts)), within the scan's scope. `ftp-anon` lists no files, `sshv1` reads the greeting only, `smtp-commands` sends no HELP, `ssh-hostkey` has no `visual` or `bubble` form and offers no ECDH key exchange on NIST curves |
+| Script traffic signature | `SSH-2.0-Nmap-SSH2-Hostkey`; EHLO with the target's own name, else `nmap.scanme.org`; FTP password `IEUser@` | `SSH-2.0-FeroProbe_Scripting_Engine`, `EHLO feroprobe.invalid`, FTP password `feroprobe@` (see `docs/responsible-use.md`) |
 | `--resume` | Runs the recorded command line as it is, creating or appending to any report file it names | Prints the command line first; appends only to existing files that hold that scan's report (creates none); a recorded `--allow-public-evasion` or `--override-ics-protection` must be given again beside `--resume` |
 
 Behaviour that looks unusual but matches nmap includes: skipping discovery
@@ -2569,8 +2648,7 @@ These nmap options are refused as unknown:
 
 - Scans and discovery: `-sI` (idle scan, not planned), `-iR`,
   `--resolve-all`.
-- Scripting: `-sC` (FeroProbe's default scripts come in a later release),
-  `--script-trace` and `--script-updatedb` (planned).
+- Scripting: `--script-trace` and `--script-updatedb` (planned).
 - Output and misc: `--port-ratio`.
 
 [DEVELOPMENT.md](../DEVELOPMENT.md) tracks which of these are planned.

@@ -41,3 +41,11 @@ alert icmp any any -> $HOME_NET any (msg:"FeroProbe IPv6 ping probe (echo payloa
 
 # HTTP request from a FeroProbe script, by its User-Agent (plain HTTP only).
 alert http any any -> $HOME_NET any (msg:"FeroProbe script HTTP request (User-Agent)"; flow:established,to_server; http.user_agent; content:"FeroProbe Scripting Engine"; classtype:attempted-recon; metadata:tool FeroProbe; sid:9100006; rev:1;)
+
+# Default scripts (-sC): the client names it sends in clear text.
+# ssh-hostkey's SSH version line (sent before encryption starts).
+alert tcp any any -> $HOME_NET any (msg:"FeroProbe script SSH client (version string)"; flow:established,to_server; content:"SSH-2.0-FeroProbe_Scripting_Engine"; depth:34; classtype:attempted-recon; metadata:tool FeroProbe; sid:9100007; rev:1;)
+# smtp-commands' EHLO name (plain SMTP only; replaced by --script-args smtp.domain).
+alert tcp any any -> $HOME_NET any (msg:"FeroProbe script SMTP EHLO"; flow:established,to_server; content:"EHLO feroprobe.invalid"; depth:22; nocase; classtype:attempted-recon; metadata:tool FeroProbe; sid:9100008; rev:1;)
+# ftp-anon's anonymous password.
+alert tcp any any -> $HOME_NET any (msg:"FeroProbe script FTP anonymous login"; flow:established,to_server; content:"PASS feroprobe@"; depth:15; classtype:attempted-recon; metadata:tool FeroProbe; sid:9100009; rev:1;)

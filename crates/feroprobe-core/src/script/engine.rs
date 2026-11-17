@@ -208,6 +208,72 @@ fero.http.post = function(host, port, path, options, content)
   return raw_request("POST", host, port, path, o)
 end
 fero.http.form_encode = form_encode
+
+-- Bytes as lower-case hex, with an optional separator between bytes.
+fero.hex = function(s, sep)
+  local t = {}
+  for i = 1, #s do t[i] = string.format("%02x", s:byte(i)) end
+  return table.concat(t, sep or "")
+end
+
+-- A buffered reader over a connected socket, for line protocols and
+-- length-prefixed records: r:line() (without its CR LF), r:bytes(n), and
+-- r:reply() for FTP/SMTP-style replies ("250-..." lines up to "250 ...").
+-- Each returns nil and a message on a timeout, the end of the
+-- connection, or a line or reply too long to be one.
+local MAX_LINE, MAX_REPLY_LINES = 65536, 1000
+fero.reader = function(sock)
+  local buf = ""
+  local r = {}
+  local function fill()
+    local ok, data = sock:receive()
+    if not ok then return false, data end
+    buf = buf .. data
+    return true
+  end
+  function r:line()
+    while true do
+      local i = buf:find("\n", 1, true)
+      if i then
+        local line = buf:sub(1, i - 1)
+        buf = buf:sub(i + 1)
+        return (line:gsub("\r$", ""))
+      end
+      if #buf > MAX_LINE then return nil, "line too long" end
+      local ok, err = fill()
+      if not ok then return nil, err end
+    end
+  end
+  function r:bytes(n)
+    while #buf < n do
+      local ok, err = fill()
+      if not ok then return nil, err end
+    end
+    local out = buf:sub(1, n)
+    buf = buf:sub(n + 1)
+    return out
+  end
+  function r:reply()
+    local line, err = self:line()
+    if not line then return nil, err end
+    local code, sep = line:match("^(%d%d%d)([ -]?)")
+    if not code then return nil, "not a numbered reply: " .. line:sub(1, 80) end
+    local lines = { line }
+    if sep == "-" then
+      while #lines < MAX_REPLY_LINES do
+        line, err = self:line()
+        if not line then return nil, err end
+        lines[#lines + 1] = line
+        if line:sub(1, 4) == code .. " " or line == code then
+          return tonumber(code), lines
+        end
+      end
+      return nil, "reply too long"
+    end
+    return tonumber(code), lines
+  end
+  return r
+end
 "##;
 
 fn arg_to_lua(lua: &Lua, v: &ArgValue) -> mlua::Result<Value> {
@@ -330,6 +396,32 @@ pub(crate) fn install_library(
         })?,
     )?;
     fero.raw_set("base64", base64)?;
+    let crypto = lua.create_table()?;
+    crypto.raw_set(
+        "digest",
+        lua.create_function(|lua, (name, data): (String, mlua::LuaString)| {
+            match super::digest::digest(&name, &data.as_bytes()) {
+                Some(d) => Ok(Value::String(lua.create_string(d)?)),
+                None => Err(mlua::Error::runtime(format!(
+                    "fero.crypto.digest: unknown algorithm {name:?}"
+                ))),
+            }
+        })?,
+    )?;
+    crypto.raw_set(
+        "random_bytes",
+        lua.create_function(|lua, n: usize| {
+            if n > 65536 {
+                return Err(mlua::Error::runtime(
+                    "fero.crypto.random_bytes: at most 65536 bytes",
+                ));
+            }
+            let bytes = super::digest::random(n)
+                .ok_or_else(|| mlua::Error::runtime("no random bytes available"))?;
+            lua.create_string(bytes)
+        })?,
+    )?;
+    fero.raw_set("crypto", crypto)?;
     fero.raw_set(
         "verbosity",
         lua.create_function(|_, ()| Ok(crate::debug::verbosity()))?,
