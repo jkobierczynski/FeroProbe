@@ -1116,6 +1116,10 @@ fn open_report_as_root(path: &str, append: bool) -> Result<std::fs::File> {
     };
 
     let p = std::path::Path::new(path);
+    // A trailing "/" or "/." asks for a directory; components() would drop it.
+    if path.ends_with('/') || path.ends_with("/.") {
+        bail!("{path} does not name a file");
+    }
     if !matches!(p.components().next_back(), Some(Component::Normal(_))) {
         bail!("{path} does not name a file");
     }
@@ -1171,6 +1175,16 @@ fn open_report_as_root(path: &str, append: bool) -> Result<std::fs::File> {
                     .with_context(|| format!("reading the link {shown} in {path}"));
             }
             buf.truncate(n as usize);
+            if buf.ends_with(b"/") || buf.ends_with(b"/.") {
+                if last {
+                    bail!("{path}: the link {shown} does not lead to a file");
+                }
+                // A directory link's target may end in "/": drop it.
+                while buf.len() > 1 && (buf.ends_with(b"/") || buf.ends_with(b"/.")) {
+                    let cut = if buf.ends_with(b"/.") { 2 } else { 1 };
+                    buf.truncate(buf.len() - cut);
+                }
+            }
             let target = std::path::Path::new(std::ffi::OsStr::from_bytes(&buf));
             if target.has_root() {
                 dir = open_at(libc::AT_FDCWD, &root, dir_flags)
@@ -4359,6 +4373,15 @@ mod tests {
         std::os::unix::fs::symlink(&file_link, &current_file).unwrap();
         assert!(open(&current_file).is_err());
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep");
+        // A path or link target ending in "/" names a directory, not the
+        // regular file before it.
+        let important = dir.join("important");
+        std::fs::write(&important, "keep").unwrap();
+        assert!(open(std::path::Path::new(&format!("{}/", important.display()))).is_err());
+        let slash = dir.join("slash");
+        std::os::unix::fs::symlink(format!("{}/", important.display()), &slash).unwrap();
+        assert!(open(&slash).is_err());
+        assert_eq!(std::fs::read_to_string(&important).unwrap(), "keep");
         // /dev/stdout is root's link in root's /dev.
         if std::path::Path::new("/dev/stdout").is_symlink() {
             assert!(open(std::path::Path::new("/dev/stdout")).is_ok());
