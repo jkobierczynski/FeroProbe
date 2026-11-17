@@ -420,3 +420,21 @@ end"#;
     assert!(t.list.len() < 1000);
     assert_eq!(t.list.last(), Some(&ScriptValue::Str("...".into())));
 }
+
+#[tokio::test]
+async fn too_much_data_drops_the_connection() {
+    let flood: &'static [u8] = Box::leak(vec![b'x'; 17 * 1024 * 1024].into_boxed_slice());
+    let port = greeter(flood).await;
+    let src = format!(
+        "{PORT_SCRIPT} action = function(h, p) local s = fero.socket.new() \
+         s:connect(h, p) local _, e1 = s:receive_bytes(1000000000) \
+         local _, e2 = s:receive_bytes(1000000000) return e1 .. ';' .. e2 end"
+    );
+    let scan = ScriptScan::new(vec![script("t", &src)], ArgTable::default(), None).unwrap();
+    let mut hosts = vec![host_with(&[(port, PortState::Open)])];
+    scan.scan_hosts(&mut hosts).await;
+    assert_eq!(
+        hosts[0].ports[0].scripts[0].output,
+        "too much data;socket is not connected"
+    );
+}

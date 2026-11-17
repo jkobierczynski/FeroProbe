@@ -242,6 +242,14 @@ async fn receive(lua: Lua, state: Arc<Mutex<State>>, want: Want) -> mlua::Result
             let data = std::mem::take(&mut st.buf);
             ok_with(&lua, &data)
         }
+        // Too much data: the connection is dropped with what it sent, so
+        // retrying cannot pile up more than the limit.
+        Err(e) if e == "too much data" => {
+            st.conn = Conn::Closed;
+            st.buf = Vec::new();
+            st.slot = None;
+            fail(&lua, e)
+        }
         Err(e) => fail(&lua, e),
     }
 }
