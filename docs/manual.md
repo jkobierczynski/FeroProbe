@@ -1516,14 +1516,22 @@ reports and creates no files.
 
 Report files are written through the handles opened at the start, so the
 paths are not looked up again: replacing a report path with a link while
-the scan runs does not redirect the report. When FeroProbe runs as root
-(for example under `sudo`), it also refuses to write a report through a
-symbolic link that another user owns in a shared directory with the sticky
-bit, such as `/tmp` (for example `sudo feroprobe -oN /tmp/scan.txt` when
-someone else has made `/tmp/scan.txt` a link to a system file). Linux
-refuses this too when `fs.protected_symlinks` is on; FeroProbe checks it
-on every system. The files are created with the usual permissions from the
-umask and owned by root, as with nmap.
+the scan runs does not redirect the report.
+
+Under `sudo`, FeroProbe has already given up root when it opens the
+report files (see [Giving up root under sudo](#giving-up-root-under-sudo)),
+so it writes them as the user who ran `sudo`: they belong to that user,
+and a path that user cannot write to fails as it would for them. When it
+does run as root (`--keep-root`, or root without `sudo`), it refuses to
+follow a symbolic link anywhere in a report's path, for a directory or the
+file itself, unless root owns both the link and the directory holding it
+and no other user can write to that directory (so `/dev/stdout` works, but
+`sudo feroprobe --keep-root -oN /tmp/scan.txt` is refused when
+`/tmp/scan.txt` is a link, whoever made it). The path is opened one
+component at a time with `O_NOFOLLOW`, and an allowed link's target is
+walked the same way, so a link it leads through is checked too and a link
+swapped in at the last moment is refused, and a file root creates under `sudo --keep-root` is handed to
+the invoking user. nmap writes its reports as root through any link.
 
 #### `--append-output`
 
@@ -1579,7 +1587,11 @@ Leave the `xml-stylesheet` line out of the XML report.
 
 Carry on with a scan that was aborted (with Ctrl-C, a lost connection, a
 reboot), given its normal (`-oN`), XML (`-oX`) or grepable (`-oG`) report;
-for `-oA`, any of the three files. As in nmap, it takes no other options:
+for `-oA`, any of the three files. As in nmap, it takes no other options,
+except `--keep-root`: under `sudo`, root is given up before the report is
+read, so a scan whose report or files only root can reach is resumed with
+`sudo feroprobe --keep-root --resume FILE` (a `--keep-root` recorded in
+the report has no effect on this):
 
 ```
 feroprobe --resume scan.gnmap
@@ -1913,6 +1925,15 @@ Act as an ordinary user: no raw sockets, so the connect scan and connect
 pings by default, as without root. The last of `--privileged` and
 `--unprivileged` wins.
 
+#### `--keep-root`
+
+Under `sudo`, stay root for the whole run. Without it, FeroProbe reads
+its settings files as root and then becomes the user who ran `sudo`,
+keeping only the network capabilities a scan needs; see
+[Giving up root under sudo](#giving-up-root-under-sudo). Use it only when
+the run must read or write a file that only root can reach (for example
+`-oN /root/scan.txt`). nmap has no such option, since it always stays root.
+
 #### `-V`, `--version`
 
 Print the version and exit.
@@ -1936,9 +1957,22 @@ precedence first:
 3. `.feroproberc` in the current directory.
 
 A key in a later file replaces the same key from an earlier one, and
-command-line options win over all of them. A missing file is skipped; one
-that cannot be read, is not valid TOML or gives a value of the wrong type
-stops the run. Unknown keys only warn. `-v` prints which files were read
+command-line options win over all of them, with one exception: the
+directory's `.feroproberc` may switch `ics_protection` on but not off. A
+`ics_protection = false` there, when an earlier file switched it on, is
+ignored with a warning naming both files (a working directory may be
+shared, unpacked from an archive or cloned, and must not quietly undo your
+own setting). A missing file is skipped; one that cannot be read, is not
+valid TOML or gives a value of the wrong type stops the run. Unknown keys
+only warn.
+
+Since root reads these files under `sudo` from places an ordinary user
+controls, each file is checked first: as root, a symbolic link is refused;
+the file must be a regular file (not a pipe or device) of at most 64 KB,
+not writable by every user; and a file owned by anyone other than root or
+you (the user who ran `sudo`) is skipped with a warning. A TOML error
+names the line and column, and repeats the parser's message only for your
+own file. `-v` prints which files were read
 and whether ICS protection is on. nmap has no such files.
 
 The one setting is `ics_protection`, **off by default**: FeroProbe is a
@@ -1998,6 +2032,32 @@ Linux has every feature. On macOS and Windows FeroProbe runs the connect and
 UDP scans, discovery with its unprivileged probes, `-sV`, and every output
 format; the raw-socket features are Linux only.
 
+### Giving up root under sudo
+
+Only raw sockets need root. So when root runs FeroProbe under `sudo`, it
+reads its settings files first and then becomes the user who ran `sudo`
+(`SUDO_UID`, `SUDO_GID` and that user's groups) before it opens any other
+file or starts a thread. On Linux it keeps just `CAP_NET_RAW`,
+`CAP_NET_ADMIN` and `CAP_NET_BIND_SERVICE` (for `-g` below 1024), so every
+raw-socket feature still works; on other systems, where raw scans are not
+supported, it gives root up entirely. Everything else in the run (service
+and banner parsing, TLS, `-iL`, `--excludefile`, `--service-rules`,
+`--resume` and the report files) then happens as that user. `-v` prints a
+line saying so.
+
+This means a `sudo feroprobe` run reads and writes files with your own
+permissions: `-iL /root/targets.txt` or `-oN /root/scan.txt` fail unless
+you can reach them yourself. `--keep-root` stays root for such a run.
+Root without `sudo` (a root shell with no `SUDO_UID`) keeps root, as there
+is no other user to become.
+
+nmap stays root for the whole run, which is why a sudoers entry that allows
+only `nmap` is a well-known way to become root. Do not rely on a
+restricted sudoers entry for FeroProbe either: `--keep-root`, and options
+that read files, still put root's privileges in the hands of whoever runs
+it. Grant the capability with `setcap` instead (above), or give such users
+full `sudo`.
+
 ## Probe signature
 
 FeroProbe's probes carry a stable, documented signature so that network
@@ -2033,11 +2093,12 @@ safeguard calls for a difference. The deliberate differences are:
 | `--badsum` with `-O` | Also spoils the OS-detection probes (nmap's checksum routine applies it to every packet), which makes their answers meaningless | OS-detection probes keep correct checksums |
 | Unprivileged discovery | TCP connects to 80 and 443 only | The same, plus an ICMP echo through an unprivileged ping socket where the OS offers one |
 | `--explain`, `--dry-run` | No equivalent | FeroProbe's own planning and checking options |
-| Settings files, `ics_protection`, `--override-ics-protection` | No equivalent | FeroProbe's own; off by default, so default behaviour is unchanged |
+| Settings files, `ics_protection`, `--override-ics-protection` | No equivalent | FeroProbe's own; off by default, so default behaviour is unchanged. A `.feroproberc` in the working directory can switch protection on but not off |
 | JSON output (`-oJ`) | No equivalent | FeroProbe's own format |
 | XML `scanner` attribute | `nmap` | `feroprobe`, unless `--nmap-label` |
 | XML stylesheet | Links `nmap.xsl`; `--webxml` links nmap.org's copy | Links FeroProbe's own `feroprobe.xsl`; `--webxml` links FeroProbe's published copy |
-| Report files as root | Written through any symbolic link | A link another user owns in a sticky shared directory such as `/tmp` is refused (see `-oA` under Output options) |
+| Privileges under `sudo` | Stays root for the whole run | Becomes the user who ran `sudo` once the settings files are read, keeping only the network capabilities on Linux, so reports, `-iL` and other files are read and written as that user; `--keep-root` stays root (see [Giving up root under sudo](#giving-up-root-under-sudo)) |
+| Report files as root | Written through any symbolic link | With `--keep-root` or without `sudo`: a link is refused unless root owns it and its directory and no other user can write there (`/dev/stdout` works); a new file under `sudo` belongs to the invoking user (see `-oA` under Output options) |
 | Service and OS signatures | nmap's databases | FeroProbe's own (nmap's cannot be redistributed); the OS database is much smaller than nmap's, so fewer hosts get a perfect match |
 | UDP service payloads (`-sU`) | nmap's payload database: several probes per port (two DNS queries to 53, two NTP versions to 123, SNMPv1 and v3 to 161, three NetBIOS queries to 137), up to dozens with `-sV` | FeroProbe's own, one per port: DNS (53, 5353), NTP (123), SNMP (161) and SSDP (1900); every other port gets `FeroProbeScan/1\n`. nmap's payloads cannot be redistributed; one payload per service is enough to make it answer |
 | OS detection probes (`-O`) | About 16 probes per try (6 SYNs with varied options, ECN, T2-T7 to open and closed ports, 2 ICMP echoes, a UDP probe to a closed port), with closed ports picked at random outside the scan when none was found, and hosts without an open port probed too | At most 9 probes per try (4 SYNs, ECN and an ACK to the open port; a SYN and an ACK to a closed port the scan found; an ICMP echo only if discovery sends echo requests). No UDP probe, no T3/T5-T7-style odd flag combinations, no random ports, and hosts without an open TCP port are not probed. The price: fewer tests, so some systems nmap tells apart look alike |

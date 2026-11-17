@@ -12,11 +12,22 @@
 //! 2. `.feroproberc` in the current working directory.
 //!
 //! A key set in a later file overrides the same key in an earlier one, and
-//! a key set in neither keeps its built-in default. Command-line options
-//! always win over both files. A missing file is skipped; a file that
-//! cannot be read or parsed stops the run, so a protection someone set is
-//! never silently dropped. Unknown keys get a warning, not an error, so a
-//! file written for a newer version still works.
+//! a key set in neither keeps its built-in default, with one exception: a
+//! `.feroproberc` may switch ICS protection on but never off (a directory
+//! can be shared, unpacked from an archive or cloned, so its file must not
+//! weaken what the user's own file set). Command-line options always win
+//! over both files. A missing file is skipped; a file that cannot be read
+//! or parsed stops the run, so a protection someone set is never silently
+//! dropped. Unknown keys get a warning, not an error, so a file written for
+//! a newer version still works.
+//!
+//! The files are opened carefully, since under `sudo` root reads paths an
+//! ordinary user controls ([`read_settings_file`]): no symbolic links as
+//! root, regular files only, at most [`MAX_FILE_SIZE`] bytes, owned by
+//! root or the invoking user and not writable by everyone. A file owned by
+//! someone else is skipped with a warning; parse errors name the line and
+//! column, and quote the file's own message only when the invoking user
+//! owns it, so the error cannot be used to read someone else's file.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -25,6 +36,9 @@ use anyhow::{Context, Result, bail};
 
 /// The name of the per-directory settings file.
 pub const DIR_FILE: &str = ".feroproberc";
+
+/// The largest settings file FeroProbe reads. Real files are a few lines.
+pub const MAX_FILE_SIZE: u64 = 64 * 1024;
 
 /// Whether this binary was built with ICS protection always on (the
 /// `ics-protection-default` Cargo feature). Settings files cannot switch
@@ -182,24 +196,45 @@ pub fn load_from(files: &[PathBuf]) -> Result<Loaded> {
 /// [`load_from`], with `built_in` standing for [`ICS_BUILT_IN`] so both
 /// builds can be tested.
 fn load_with(files: &[PathBuf], built_in: bool) -> Result<Loaded> {
+    load_as(files, built_in, &Owners::of_this_process())
+}
+
+/// [`load_with`] for the given owners, so tests can act as root or not.
+fn load_as(files: &[PathBuf], built_in: bool, owners: &Owners) -> Result<Loaded> {
     let mut loaded = Loaded::default();
     loaded.settings.ics_protection = built_in;
     loaded.settings.ics_built_in = built_in;
     for path in files {
-        let text = match std::fs::read_to_string(path) {
-            Ok(text) => text,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(e) => {
-                return Err(e).with_context(|| format!("reading settings file {}", path.display()));
+        let Some(file) = read_settings_file(path, owners)? else {
+            continue;
+        };
+        let text = match file {
+            FileRead::Text(text) => text,
+            FileRead::Skipped(why) => {
+                loaded.warnings.push(why);
+                continue;
             }
         };
-        let (layer, warnings) = parse_layer(&text, path)?;
+        let (layer, warnings) = parse_layer(&text.text, path, text.quote_errors)?;
         loaded.warnings.extend(warnings);
+        let directory_file = is_directory_file(path);
         if built_in && layer.ics_protection == Some(false) {
             loaded.warnings.push(format!(
                 "settings file {}: ics_protection = false ignored: this FeroProbe was built \
                  with ICS protection always on; --override-ics-protection allows a single run",
                 path.display()
+            ));
+        } else if directory_file
+            && layer.ics_protection == Some(false)
+            && loaded.settings.ics_protection
+        {
+            // Tighten only: a directory's file may not undo the user's.
+            loaded.warnings.push(format!(
+                "settings file {}: ics_protection = false ignored: a {DIR_FILE} in the working \
+                 directory can switch ICS protection on but not off. It stays on ({}); \
+                 change that file, or pass --override-ics-protection for a single run",
+                path.display(),
+                source_text(loaded.settings.ics_protection_source.as_deref()),
             ));
         } else if let Some(on) = layer.ics_protection {
             loaded.settings.ics_protection = on;
@@ -210,11 +245,229 @@ fn load_with(files: &[PathBuf], built_in: bool) -> Result<Loaded> {
     Ok(loaded)
 }
 
+/// Whether `path` is a per-directory `.feroproberc` rather than a user's
+/// own settings file.
+fn is_directory_file(path: &Path) -> bool {
+    path.file_name().is_some_and(|n| n == DIR_FILE)
+}
+
+/// Where protection was switched on, for messages.
+fn source_text(source: Option<&Path>) -> String {
+    match source {
+        Some(p) => format!("ics_protection = true in {}", p.display()),
+        None => "built into this FeroProbe".to_string(),
+    }
+}
+
+/// Who may own a settings file: root, this process's user, and under
+/// `sudo` the user who ran it.
+#[derive(Debug, Clone)]
+// Off Unix files carry no owner, so nothing reads these.
+#[cfg_attr(not(unix), allow(dead_code))]
+struct Owners {
+    /// This process runs as root.
+    root: bool,
+    /// The user whose settings these are: `SUDO_UID` when root under
+    /// sudo, else the effective user.
+    invoking: u32,
+    trusted: Vec<u32>,
+}
+
+impl Owners {
+    #[cfg(unix)]
+    fn of_this_process() -> Owners {
+        // SAFETY: geteuid has no preconditions.
+        let euid = unsafe { libc::geteuid() };
+        let sudo = (euid == 0).then(crate::privdrop::sudo_ids).flatten();
+        let invoking = sudo.map_or(euid, |(uid, _)| uid);
+        let mut trusted = vec![0, euid, invoking];
+        trusted.dedup();
+        Owners {
+            root: euid == 0,
+            invoking,
+            trusted,
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn of_this_process() -> Owners {
+        Owners {
+            root: false,
+            invoking: 0,
+            trusted: Vec::new(),
+        }
+    }
+}
+
+/// A settings file's text, and whether its parse errors may quote it.
+struct Text {
+    text: String,
+    quote_errors: bool,
+}
+
+/// What [`read_settings_file`] found.
+// Off Unix a file is never skipped for its owner.
+#[cfg_attr(not(unix), allow(dead_code))]
+enum FileRead {
+    Text(Text),
+    /// Not read, with the warning that says why.
+    Skipped(String),
+}
+
+/// Read one settings file defensively. `Ok(None)` when it does not exist.
+///
+/// Under `sudo`, root opens paths an ordinary user controls: the working
+/// directory's `.feroproberc` and the invoking user's `config.toml`. So:
+///
+/// - a file owned by anyone but root or the invoking user is skipped with
+///   a warning (it is not theirs to trust, and someone else may have
+///   planted it in a shared directory);
+/// - as root, a symbolic link is refused (a link to `/etc/shadow` must not
+///   be opened); an ordinary user may link their settings, since they can
+///   only read what they could read anyway;
+/// - the file is opened with `O_NONBLOCK` and must be a regular file (a
+///   FIFO would hang the run, a device could be endless), at most
+///   [`MAX_FILE_SIZE`] bytes, and not writable by everyone.
+///
+/// Anything else wrong is an error that stops the run, as before: a
+/// protection someone set is never dropped quietly.
+#[cfg(unix)]
+fn read_settings_file(path: &Path, owners: &Owners) -> Result<Option<FileRead>> {
+    use std::io::Read;
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    let shown = path.display();
+    let link = match std::fs::symlink_metadata(path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e).with_context(|| format!("reading settings file {shown}")),
+    };
+    if !owners.trusted.contains(&link.uid()) {
+        return Ok(Some(FileRead::Skipped(format!(
+            "settings file {shown} ignored: it belongs to user id {}, not to you or root",
+            link.uid()
+        ))));
+    }
+    if link.file_type().is_symlink() && owners.root {
+        bail!(
+            "settings file {shown} is a symbolic link; running as root, FeroProbe does not \
+             follow links to settings files. Replace it with the file itself"
+        );
+    }
+    let mut flags = libc::O_NONBLOCK | libc::O_NOCTTY;
+    if owners.root {
+        flags |= libc::O_NOFOLLOW;
+    }
+    let file = match std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(flags)
+        .open(path)
+    {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        // ELOOP: swapped for a link since the check above.
+        Err(e) if e.raw_os_error() == Some(libc::ELOOP) => bail!(
+            "settings file {shown} is a symbolic link; running as root, FeroProbe does not \
+             follow links to settings files. Replace it with the file itself"
+        ),
+        Err(e) => return Err(e).with_context(|| format!("reading settings file {shown}")),
+    };
+    // Check what was opened, not the path: it may have changed meanwhile.
+    let meta = file
+        .metadata()
+        .with_context(|| format!("reading settings file {shown}"))?;
+    if !meta.file_type().is_file() {
+        bail!("settings file {shown} is not a regular file");
+    }
+    if !owners.trusted.contains(&meta.uid()) {
+        return Ok(Some(FileRead::Skipped(format!(
+            "settings file {shown} ignored: it belongs to user id {}, not to you or root",
+            meta.uid()
+        ))));
+    }
+    if meta.mode() & 0o002 != 0 {
+        bail!(
+            "settings file {shown} is writable by every user, so anyone could have changed \
+             it; remove that permission (chmod o-w {shown})"
+        );
+    }
+    if meta.len() > MAX_FILE_SIZE {
+        bail!(
+            "settings file {shown} is larger than {} KB; it cannot be a FeroProbe settings file",
+            MAX_FILE_SIZE / 1024
+        );
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_FILE_SIZE + 1)
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("reading settings file {shown}"))?;
+    if bytes.len() as u64 > MAX_FILE_SIZE {
+        bail!(
+            "settings file {shown} is larger than {} KB; it cannot be a FeroProbe settings file",
+            MAX_FILE_SIZE / 1024
+        );
+    }
+    let quote_errors = meta.uid() == owners.invoking;
+    let Ok(text) = String::from_utf8(bytes) else {
+        bail!("settings file {shown} is not valid TOML: it is not UTF-8 text");
+    };
+    Ok(Some(FileRead::Text(Text { text, quote_errors })))
+}
+
+#[cfg(not(unix))]
+fn read_settings_file(path: &Path, _owners: &Owners) -> Result<Option<FileRead>> {
+    use std::io::Read;
+    let shown = path.display();
+    let file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e).with_context(|| format!("reading settings file {shown}")),
+    };
+    let mut bytes = Vec::new();
+    file.take(MAX_FILE_SIZE + 1)
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("reading settings file {shown}"))?;
+    if bytes.len() as u64 > MAX_FILE_SIZE {
+        bail!(
+            "settings file {shown} is larger than {} KB; it cannot be a FeroProbe settings file",
+            MAX_FILE_SIZE / 1024
+        );
+    }
+    let Ok(text) = String::from_utf8(bytes) else {
+        bail!("settings file {shown} is not valid TOML: it is not UTF-8 text");
+    };
+    Ok(Some(FileRead::Text(Text {
+        text,
+        quote_errors: true,
+    })))
+}
+
 /// Parse one file. Returns the keys it sets and warnings for unknown keys.
-fn parse_layer(text: &str, path: &Path) -> Result<(Layer, Vec<String>)> {
-    let table: toml::Table = text
-        .parse()
-        .with_context(|| format!("settings file {} is not valid TOML", path.display()))?;
+/// A parse error names the line and column; it quotes the parser's message
+/// (which can repeat a key or value from the file) only when `quote` says
+/// the file is the invoking user's own, and never prints the source line.
+fn parse_layer(text: &str, path: &Path, quote: bool) -> Result<(Layer, Vec<String>)> {
+    let table: toml::Table = match text.parse() {
+        Ok(t) => t,
+        Err(e) => {
+            let e: toml::de::Error = e;
+            let at = e.span().map(|span| {
+                let before = &text[..span.start.min(text.len())];
+                let line = before.matches('\n').count() + 1;
+                let column = before.rsplit('\n').next().map_or(0, |l| l.chars().count()) + 1;
+                format!(" at line {line}, column {column}")
+            });
+            let what = if quote {
+                format!(": {}", e.message().trim_end())
+            } else {
+                String::new()
+            };
+            bail!(
+                "settings file {} is not valid TOML{}{what}",
+                path.display(),
+                at.unwrap_or_default()
+            );
+        }
+    };
     let mut layer = Layer::default();
     let mut warnings = Vec::new();
     for (key, value) in &table {
@@ -227,8 +480,14 @@ fn parse_layer(text: &str, path: &Path) -> Result<(Layer, Vec<String>)> {
                     value.type_str()
                 ),
             },
-            _ => warnings.push(format!(
+            // The key's name is the file's text: quoted only when it is
+            // the invoking user's own file, as with parse errors.
+            _ if quote => warnings.push(format!(
                 "settings file {}: unknown key \"{key}\", ignored",
+                path.display()
+            )),
+            _ => warnings.push(format!(
+                "settings file {}: an unknown key, ignored",
                 path.display()
             )),
         }
@@ -240,8 +499,13 @@ fn parse_layer(text: &str, path: &Path) -> Result<(Layer, Vec<String>)> {
 mod tests {
     use super::*;
 
-    /// The default build's loading, whatever features this test build has.
+    /// The default build's loading, whatever features this test build has,
+    /// with this test's user as the invoking one (CI also runs the tests
+    /// under `sudo -E`, where SUDO_UID would name someone else).
     fn load_from(files: &[PathBuf]) -> Result<Loaded> {
+        #[cfg(unix)]
+        return load_as(files, false, &owners(false));
+        #[cfg(not(unix))]
         load_with(files, false)
     }
 
@@ -293,13 +557,33 @@ mod tests {
     }
 
     #[test]
-    fn directory_file_overrides_user_file() {
+    fn directory_file_can_tighten_but_not_loosen() {
         let dir = temp_dir("both");
         let user = write(&dir, "config.toml", "ics_protection = true\n");
         let rc = write(&dir, DIR_FILE, "ics_protection = false\n");
         let loaded = load_from(&[user.clone(), rc.clone()]).unwrap();
+        assert!(loaded.settings.ics_protection);
+        assert_eq!(loaded.settings.ics_protection_source, Some(user.clone()));
+        assert_eq!(loaded.warnings.len(), 1, "{:?}", loaded.warnings);
+        assert!(
+            loaded.warnings[0].contains("can switch ICS protection on but not off"),
+            "{:?}",
+            loaded.warnings
+        );
+        assert!(loaded.warnings[0].contains("config.toml"));
+        assert_eq!(loaded.files, vec![user.clone(), rc.clone()]);
+
+        // false over an already-off setting is no change and no warning.
+        let off = write(&dir, "off.toml", "ics_protection = false\n");
+        let loaded = load_from(&[off, rc.clone()]).unwrap();
         assert!(!loaded.settings.ics_protection);
-        assert_eq!(loaded.settings.ics_protection_source, Some(rc.clone()));
+        assert!(loaded.warnings.is_empty(), "{:?}", loaded.warnings);
+
+        // A later user file (sudo: the invoking user's) may still switch
+        // off what root's file switched on; only the directory is limited.
+        let user2 = write(&dir, "config2.toml", "ics_protection = false\n");
+        let loaded = load_from(&[user.clone(), user2.clone()]).unwrap();
+        assert!(!loaded.settings.ics_protection);
 
         // And the other way round.
         let user = write(&dir, "config.toml", "ics_protection = false\n");
@@ -375,6 +659,132 @@ mod tests {
         let rc = write(&dir, DIR_FILE, "ics_protection = \n");
         let err = load_from(&[rc]).unwrap_err().to_string();
         assert!(err.contains("not valid TOML"), "{err}");
+    }
+
+    /// Owners as this test process sees them, acting as root (`root`) or
+    /// not; root's own uid stays trusted either way.
+    #[cfg(unix)]
+    fn owners(root: bool) -> Owners {
+        // SAFETY: geteuid has no preconditions.
+        let me = unsafe { libc::geteuid() };
+        Owners {
+            root,
+            invoking: me,
+            trusted: vec![0, me],
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn links_are_refused_as_root_and_followed_otherwise() {
+        let dir = temp_dir("link");
+        let target = write(&dir, "real.toml", "ics_protection = true\n");
+        let rc = dir.join(DIR_FILE);
+        std::os::unix::fs::symlink(&target, &rc).unwrap();
+        let err = load_as(std::slice::from_ref(&rc), false, &owners(true))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("symbolic link"), "{err}");
+        let loaded = load_as(&[rc], false, &owners(false)).unwrap();
+        assert!(loaded.settings.ics_protection);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_does_not_hang_the_run() {
+        let dir = temp_dir("fifo");
+        let rc = dir.join(DIR_FILE);
+        let c = std::ffi::CString::new(rc.to_str().unwrap()).unwrap();
+        // SAFETY: c is a valid C string.
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        for root in [true, false] {
+            let err = load_as(std::slice::from_ref(&rc), false, &owners(root))
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("not a regular file"), "{err}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn oversized_and_world_writable_files_stop_the_run() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp_dir("size");
+        let big = "# padding\n".repeat(8000);
+        let rc = write(&dir, DIR_FILE, &big);
+        let err = load_as(std::slice::from_ref(&rc), false, &owners(true))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("larger than 64 KB"), "{err}");
+        let rc = write(&dir, DIR_FILE, "ics_protection = true\n");
+        std::fs::set_permissions(&rc, std::fs::Permissions::from_mode(0o666)).unwrap();
+        let err = load_as(&[rc], false, &owners(true))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("writable by every user"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn someone_elses_file_is_skipped_with_a_warning() {
+        let dir = temp_dir("foreign");
+        let rc = write(&dir, DIR_FILE, "ics_protection = true\n");
+        // Trust nobody, so this test's own file counts as someone else's.
+        let nobody = Owners {
+            root: true,
+            invoking: u32::MAX - 1,
+            trusted: vec![u32::MAX - 1],
+        };
+        let loaded = load_as(&[rc], false, &nobody).unwrap();
+        assert!(!loaded.settings.ics_protection);
+        assert!(loaded.files.is_empty());
+        assert_eq!(loaded.warnings.len(), 1);
+        assert!(
+            loaded.warnings[0].contains("not to you or root"),
+            "{:?}",
+            loaded.warnings
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn parse_errors_quote_only_the_invoking_users_own_file() {
+        let dir = temp_dir("quote");
+        let rc = write(&dir, DIR_FILE, "root:$6$secrethash:19000:0:99999:7:::\n");
+        // Root's file read under sudo: line and column only.
+        let mut o = owners(true);
+        o.invoking = u32::MAX - 1;
+        let err = format!(
+            "{:#}",
+            load_as(std::slice::from_ref(&rc), false, &o).unwrap_err()
+        );
+        assert!(err.contains("not valid TOML at line 1, column"), "{err}");
+        assert!(
+            !err.contains("secrethash") && !err.contains("root:"),
+            "{err}"
+        );
+        // The user's own file: the parser's message too, still no source line.
+        let err = format!(
+            "{:#}",
+            load_as(std::slice::from_ref(&rc), false, &owners(false)).unwrap_err()
+        );
+        assert!(err.contains("not valid TOML at line 1"), "{err}");
+        assert!(!err.contains("secrethash"), "{err}");
+        // A file that parses: an unknown key is named only in the user's own.
+        let rc = write(&dir, DIR_FILE, "[\"private-project-name\"]\n");
+        let loaded = load_as(std::slice::from_ref(&rc), false, &o).unwrap();
+        assert_eq!(loaded.warnings.len(), 1);
+        assert!(
+            !loaded.warnings[0].contains("private-project-name"),
+            "{:?}",
+            loaded.warnings
+        );
+        let loaded = load_as(&[rc], false, &owners(false)).unwrap();
+        assert!(
+            loaded.warnings[0].contains("private-project-name"),
+            "{:?}",
+            loaded.warnings
+        );
     }
 
     // Absolute paths are spelled the Unix way here.

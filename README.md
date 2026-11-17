@@ -356,7 +356,8 @@ crash fragile PLCs and other control devices, and warns when a scan
 includes a well-known OT port (502, 102, 20000, 44818, 47808).
 `--override-ics-protection` allows one run anyway, with a warning. FeroProbe
 is not an ICS-specific tool and does not switch this on for you. Under
-`sudo`, your own settings file is read too. For a binary with protection
+`sudo`, your own settings file is read too. A `.feroproberc` in the working
+directory can switch protection on but not off. For a binary with protection
 always on, build with `--features ics-protection-default`. See
 [docs/ics-protection.md](docs/ics-protection.md).
 
@@ -369,6 +370,13 @@ Linux you can instead grant the binary just that capability:
 ```sh
 sudo setcap cap_net_raw+ep ./target/release/feroprobe
 ```
+
+Under `sudo`, FeroProbe reads its settings files and then gives root up:
+it becomes the user who ran `sudo` and, on Linux, keeps only the network
+capabilities a scan needs. Reports and other files are then read and
+written as you, not as root (nmap stays root throughout). `--keep-root`
+keeps root for a run that needs root-only files; see the manual's
+"Giving up root under sudo".
 
 Without it, a scan with no `-s` option uses a connect scan instead, and
 discovery connects to TCP ports 80 and 443 (plus an ICMP echo through an

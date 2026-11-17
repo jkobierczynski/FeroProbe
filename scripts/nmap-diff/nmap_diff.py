@@ -731,8 +731,12 @@ def run_tool(tool, binary, argv, target, privileged, outdir, tag, timeout, unpri
     full = ["ip", "netns", "exec", NS_SCAN] + cmd
     t0 = time.time()
     try:
+        # Without the SUDO_* variables FeroProbe runs as plain root and keeps
+        # root, like nmap, so the comparison stays like for like (under sudo
+        # it would give root up and could not write into outdir).
+        env = {k: v for k, v in os.environ.items() if not k.startswith("SUDO_")}
         r = subprocess.run(full, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=timeout,
-                           env={**os.environ, "HOME": "/tmp"})
+                           env={**env, "HOME": "/tmp"})
         out, code = r.stdout, r.returncode
     except subprocess.TimeoutExpired as e:
         out, code = (e.stdout or b"").decode() if isinstance(e.stdout, bytes) else (e.stdout or ""), "timeout"

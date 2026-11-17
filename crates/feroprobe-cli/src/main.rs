@@ -8,6 +8,7 @@ mod groups;
 mod help;
 mod keys;
 mod output;
+mod privdrop;
 mod report;
 mod resume;
 mod xml;
@@ -413,6 +414,12 @@ struct Args {
     /// scan and connect pings by default
     #[arg(long, overrides_with = "privileged")]
     unprivileged: bool,
+
+    /// --keep-root: under sudo, stay root for the whole run instead of
+    /// becoming the invoking user once the settings are read (needed only
+    /// to read or write files that only root can reach)
+    #[arg(long = "keep-root")]
+    keep_root: bool,
 
     /// --system-dns: resolve names with the system resolver (FeroProbe's
     /// default already; it also overrides --dns-servers)
@@ -933,14 +940,7 @@ impl Outputs {
             ..Default::default()
         };
         for path in self.files() {
-            refuse_planted_link(path)?;
-            let file = std::fs::OpenOptions::new()
-                .write(true)
-                .append(self.append)
-                .create(true)
-                .truncate(false)
-                .open(path)
-                .with_context(|| format!("opening {path}"))?;
+            let file = open_report(path, self.append)?;
             #[cfg(unix)]
             let id = {
                 use std::os::unix::fs::MetadataExt;
@@ -998,49 +998,250 @@ impl ReportFiles {
     }
 }
 
-/// Refuse, when running as root, to write a report through a symbolic link
-/// that another user owns in a sticky, world-writable directory such as
-/// `/tmp`: that is how someone tricks `sudo feroprobe -oN /tmp/scan.txt`
-/// into overwriting a file of root's choosing. Linux's
-/// `fs.protected_symlinks` refuses the same, but not every system has it
-/// switched on, and other systems lack it.
-#[cfg(unix)]
-fn refuse_planted_link(path: &str) -> Result<()> {
-    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+/// Open (creating, not truncating) one report file.
+///
+/// As root (`--keep-root`, root without sudo, or a failed hand-over), see
+/// [`open_report_as_root`]. Without root nothing changes: a report goes
+/// wherever the path leads.
+fn open_report(path: &str, append: bool) -> Result<std::fs::File> {
+    #[cfg(unix)]
     // SAFETY: geteuid has no preconditions.
-    let euid = unsafe { libc::geteuid() };
-    if euid != 0 {
-        return Ok(());
+    if unsafe { libc::geteuid() } == 0 {
+        return open_report_as_root(path, append);
     }
-    let p = std::path::Path::new(path);
-    let Ok(link) = std::fs::symlink_metadata(p) else {
-        return Ok(());
-    };
-    if !link.file_type().is_symlink() || link.uid() == euid {
-        return Ok(());
-    }
-    let dir = match p.parent() {
-        Some(d) if !d.as_os_str().is_empty() => d,
-        _ => std::path::Path::new("."),
-    };
-    let Ok(dir_meta) = std::fs::metadata(dir) else {
-        return Ok(());
-    };
-    let mode = dir_meta.permissions().mode();
-    // Sticky (o+t) and writable by everyone (o+w); the owner of the
-    // directory itself may link as it likes, as with protected_symlinks.
-    if mode & 0o1002 == 0o1002 && dir_meta.uid() != link.uid() {
-        bail!(
-            "{path} is a symbolic link owned by another user in a shared directory; \
-             refusing to write a report through it as root"
-        );
-    }
-    Ok(())
+    std::fs::OpenOptions::new()
+        .write(true)
+        .append(append)
+        .truncate(false)
+        .create(true)
+        .open(path)
+        .with_context(|| format!("opening {path}"))
 }
 
-#[cfg(not(unix))]
-fn refuse_planted_link(_path: &str) -> Result<()> {
-    Ok(())
+/// [`open_report`] as root. The path is walked one component at a time
+/// with `openat` and `O_NOFOLLOW`, so no symbolic link anywhere in it is
+/// followed, in a directory or as the file itself, unless root owns both
+/// the link and the directory holding it and no one else can write to that
+/// directory (as with `/dev/stdout`). An approved link's target is walked
+/// the same way, so a link it leads through is checked too; only the
+/// kernel's own links in `/proc` are left to the kernel. Someone else's link, or any link in a
+/// shared directory such as `/tmp`, could otherwise aim root's write at a
+/// system file; and since each step opens what it checked, a link swapped
+/// in meanwhile is refused too. A file root creates under `sudo` is handed
+/// to the invoking user (`SUDO_UID`/`SUDO_GID`), so the report is theirs.
+#[cfg(unix)]
+fn open_report_as_root(path: &str, append: bool) -> Result<std::fs::File> {
+    use std::ffi::CString;
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::unix::ffi::OsStrExt;
+    use std::path::Component;
+
+    let open_at = |dir: libc::c_int, name: &CString, flags: libc::c_int| {
+        // SAFETY: name is a valid C string; the descriptor is checked.
+        let fd = unsafe { libc::openat(dir, name.as_ptr(), flags | libc::O_CLOEXEC, 0o666) };
+        if fd < 0 {
+            Err(std::io::Error::last_os_error())
+        } else {
+            // SAFETY: a new descriptor that nothing else owns.
+            Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+        }
+    };
+    // lstat of `name` in `dir`.
+    let stat_at = |dir: &OwnedFd, name: &CString| {
+        // SAFETY: stat is plain data that fstatat fills in.
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        // SAFETY: valid descriptor, C string and stat buffer.
+        let rc = unsafe {
+            libc::fstatat(
+                dir.as_raw_fd(),
+                name.as_ptr(),
+                &mut st,
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        };
+        (rc == 0).then_some(st)
+    };
+    let is_link = |st: &libc::stat| st.st_mode & libc::S_IFMT == libc::S_IFLNK;
+    // Whether `dir` is on the /proc file system (Linux only).
+    let on_procfs = |dir: &OwnedFd| {
+        #[cfg(target_os = "linux")]
+        {
+            // SAFETY: statfs is plain data that fstatfs fills in.
+            let mut fs: libc::statfs = unsafe { std::mem::zeroed() };
+            // SAFETY: valid descriptor and buffer.
+            let ok = unsafe { libc::fstatfs(dir.as_raw_fd(), &mut fs) } == 0;
+            // f_type's integer type differs between architectures.
+            #[allow(clippy::unnecessary_cast)]
+            let proc = fs.f_type as i64 == libc::PROC_SUPER_MAGIC as i64;
+            ok && proc
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = dir;
+            false
+        }
+    };
+    // A link may be followed only if root owns it and its directory, and no
+    // one else can write to that directory.
+    let check_link = |dir: &OwnedFd, link: &libc::stat, shown: &str| -> Result<()> {
+        // SAFETY: stat is plain data that fstat fills in.
+        let mut d: libc::stat = unsafe { std::mem::zeroed() };
+        // SAFETY: valid descriptor and stat buffer.
+        let dir_ok = unsafe { libc::fstat(dir.as_raw_fd(), &mut d) } == 0
+            && d.st_uid == 0
+            && d.st_mode & 0o022 == 0;
+        if link.st_uid != 0 || !dir_ok {
+            bail!(
+                "{shown} is a symbolic link {}; running as root, FeroProbe does not write a \
+                 report through it. Give the real path",
+                if link.st_uid != 0 {
+                    "owned by another user"
+                } else {
+                    "in a directory other users can write to"
+                }
+            );
+        }
+        Ok(())
+    };
+    let cstr = |b: &[u8]| CString::new(b).with_context(|| format!("{path} contains a NUL byte"));
+    // Push a path's components onto the front of the queue.
+    let push_front = |queue: &mut std::collections::VecDeque<Vec<u8>>, p: &std::path::Path| {
+        for part in p.components().rev() {
+            match part {
+                Component::Normal(n) => queue.push_front(n.as_bytes().to_vec()),
+                Component::ParentDir => queue.push_front(b"..".to_vec()),
+                _ => {}
+            }
+        }
+    };
+
+    let p = std::path::Path::new(path);
+    // A trailing "/" or "/." asks for a directory; components() would drop it.
+    if path.ends_with('/') || path.ends_with("/.") {
+        bail!("{path} does not name a file");
+    }
+    if !matches!(p.components().next_back(), Some(Component::Normal(_))) {
+        bail!("{path} does not name a file");
+    }
+    let dir_flags = libc::O_RDONLY | libc::O_DIRECTORY;
+    let root = cstr(b"/")?;
+    let start = if p.has_root() {
+        root.clone()
+    } else {
+        cstr(b".")?
+    };
+    let mut dir =
+        open_at(libc::AT_FDCWD, &start, dir_flags).with_context(|| format!("opening {path}"))?;
+    let mut queue = std::collections::VecDeque::new();
+    push_front(&mut queue, p);
+    // Walk the queue; an approved link's target is put back on it, so the
+    // links it leads through are checked too.
+    let mut links = 0;
+    let (name, follow) = loop {
+        let Some(part) = queue.pop_front() else {
+            bail!("{path} does not name a file");
+        };
+        let name = cstr(&part)?;
+        let last = queue.is_empty();
+        let shown = String::from_utf8_lossy(&part).into_owned();
+        if let Some(st) = stat_at(&dir, &name).filter(&is_link) {
+            check_link(&dir, &st, &format!("{path} (at {shown})"))?;
+            // Links in /proc (/dev/stdout leads to /proc/self/fd/1) are the
+            // kernel's own and may name no path at all: let it follow them.
+            if on_procfs(&dir) {
+                if last {
+                    break (name, true);
+                }
+                dir = open_at(dir.as_raw_fd(), &name, dir_flags)
+                    .with_context(|| format!("opening {path}"))?;
+                continue;
+            }
+            links += 1;
+            if links > 40 {
+                bail!("{path}: too many levels of symbolic links");
+            }
+            let mut buf = vec![0u8; libc::PATH_MAX as usize];
+            // SAFETY: valid descriptor, C string and buffer of buf.len().
+            let n = unsafe {
+                libc::readlinkat(
+                    dir.as_raw_fd(),
+                    name.as_ptr(),
+                    buf.as_mut_ptr().cast(),
+                    buf.len(),
+                )
+            };
+            if n < 0 {
+                return Err(std::io::Error::last_os_error())
+                    .with_context(|| format!("reading the link {shown} in {path}"));
+            }
+            buf.truncate(n as usize);
+            if buf.ends_with(b"/") || buf.ends_with(b"/.") {
+                if last {
+                    bail!("{path}: the link {shown} does not lead to a file");
+                }
+                // A directory link's target may end in "/": drop it.
+                while buf.len() > 1 && (buf.ends_with(b"/") || buf.ends_with(b"/.")) {
+                    let cut = if buf.ends_with(b"/.") { 2 } else { 1 };
+                    buf.truncate((buf.len() - cut).max(1));
+                }
+            }
+            let target = std::path::Path::new(std::ffi::OsStr::from_bytes(&buf));
+            if target.has_root() {
+                dir = open_at(libc::AT_FDCWD, &root, dir_flags)
+                    .with_context(|| format!("opening {path}"))?;
+            }
+            push_front(&mut queue, target);
+            if queue.is_empty() {
+                bail!("{path}: the link {shown} does not lead to a file");
+            }
+            continue;
+        }
+        if last {
+            if part == b".." {
+                bail!("{path} does not name a file");
+            }
+            break (name, false);
+        }
+        dir = open_at(dir.as_raw_fd(), &name, dir_flags | libc::O_NOFOLLOW).map_err(|e| {
+            if e.raw_os_error() == Some(libc::ELOOP) {
+                anyhow::anyhow!("{path}: {shown} turned into a symbolic link while being opened")
+            } else {
+                anyhow::Error::new(e).context(format!("opening {path}"))
+            }
+        })?;
+    };
+    let mut flags = libc::O_WRONLY | if append { libc::O_APPEND } else { 0 };
+    if !follow {
+        flags |= libc::O_NOFOLLOW;
+    }
+    let refused = |e: std::io::Error| -> anyhow::Error {
+        if e.raw_os_error() == Some(libc::ELOOP) {
+            anyhow::anyhow!(
+                "{path} is a symbolic link; running as root, FeroProbe does not write a report \
+                 through it. Give the real path"
+            )
+        } else {
+            anyhow::Error::new(e).context(format!("opening {path}"))
+        }
+    };
+    // Create it ourselves if we can, to know whether to hand it over.
+    let fd = match open_at(dir.as_raw_fd(), &name, flags | libc::O_CREAT | libc::O_EXCL) {
+        Ok(fd) => {
+            if let Some((uid, gid)) = privdrop::sudo_ids() {
+                // SAFETY: a valid open descriptor.
+                if unsafe { libc::fchown(fd.as_raw_fd(), uid, gid) } != 0 {
+                    return Err(std::io::Error::last_os_error())
+                        .with_context(|| format!("handing {path} to SUDO_UID {uid}"));
+                }
+            }
+            fd
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            open_at(dir.as_raw_fd(), &name, flags).map_err(refused)?
+        }
+        Err(e) => return Err(refused(e)),
+    };
+    Ok(std::fs::File::from(fd))
 }
 
 /// Progress on standard error for -v.
@@ -2881,19 +3082,40 @@ fn dry_run(
     Ok(())
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     let raw: Vec<String> = std::env::args().collect();
     let first = debugging::parse_args(nmap_style_args(raw.clone()));
+    // Settings files first, while still root (root's own file may be
+    // readable by root only), then give root up before any other file is
+    // opened and before the runtime starts its threads.
+    let settings = config::load()?;
+    let privileges = privdrop::drop_to_invoking_user(first.keep_root)?;
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("starting the async runtime")?
+        .block_on(run(raw, first, settings, privileges))
+}
+
+async fn run(
+    raw: Vec<String>,
+    first: Args,
+    settings: config::Loaded,
+    privileges: privdrop::Outcome,
+) -> Result<()> {
     // --resume: the rest of the command line comes from the report.
     let (args, command, resumed) = match &first.resume {
         None => (first, raw, None),
         Some(path) => {
             // Like nmap, --resume takes no other options: the file has them.
-            let alone = raw.len() == 3 || (raw.len() == 2 && raw[1].starts_with("--resume="));
+            // --keep-root is the one exception: it decides, before the
+            // report is read, whether root is given up for the resumed run.
+            let rest: Vec<&String> = raw[1..].iter().filter(|a| *a != "--keep-root").collect();
+            let alone = rest.len() == 2 || (rest.len() == 1 && rest[0].starts_with("--resume="));
             if !alone {
                 bail!(
-                    "--resume cannot be combined with other options. Usage: feroprobe --resume FILE"
+                    "--resume cannot be combined with other options (except --keep-root). \
+                     Usage: feroprobe [--keep-root] --resume FILE"
                 );
             }
             let r = resume::read(path)?;
@@ -2922,8 +3144,8 @@ async fn main() -> Result<()> {
         );
         return Ok(());
     }
-    // Settings files, then the ICS guard: before anything is resolved or sent.
-    let settings = config::load()?;
+    // Settings files (read in main), then the ICS guard: before anything
+    // is resolved or sent.
     for w in &settings.warnings {
         eprintln!("Warning: {w}");
     }
@@ -2982,6 +3204,9 @@ async fn main() -> Result<()> {
         };
         format!("ICS protection {ics}; {read}")
     });
+    if let Some(line) = privileges.describe() {
+        progress.say(1, || line);
+    }
     // --privileged / --unprivileged: before anything checks for raw sockets.
     if args.unprivileged {
         feroprobe_core::assume_privileged(Some(false));
@@ -4069,42 +4294,114 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// As root, a link another user planted in a sticky shared directory is
-    /// refused; root's own links, and links in private directories, work.
+    /// As root, a report is not written through someone else's link, nor
+    /// through any link in a directory others can write to; a link root
+    /// owns in a root-only directory works. A file root creates under sudo
+    /// goes to the invoking user.
     #[cfg(unix)]
     #[test]
-    fn planted_links_are_refused_as_root() {
-        use std::os::unix::fs::PermissionsExt;
+    fn report_links_are_refused_as_root() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
         // SAFETY: geteuid has no preconditions.
         if unsafe { libc::geteuid() } != 0 {
             return;
         }
-        let dir = private_dir("sticky");
-        let shared = dir.join("shared");
-        std::fs::create_dir(&shared).unwrap();
-        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o1777)).unwrap();
+        let dir = private_dir("rootlinks");
         let target = dir.join("target");
         std::fs::write(&target, "keep").unwrap();
-        let link = shared.join("scan.txt");
-        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let open = |p: &std::path::Path| {
+            Outputs {
+                normal: vec![p.display().to_string()],
+                ..Default::default()
+            }
+            .open_files()
+        };
         let lchown = |p: &std::path::Path, uid: u32| {
             let c = std::ffi::CString::new(p.as_os_str().as_encoded_bytes()).unwrap();
             // SAFETY: c is a valid NUL-terminated path.
             assert_eq!(unsafe { libc::lchown(c.as_ptr(), uid, u32::MAX) }, 0);
         };
-        let name = link.display().to_string();
-        assert!(refuse_planted_link(&name).is_ok());
+        // Root's link in root's private directory: allowed.
+        let link = dir.join("own.txt");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(open(&link).is_ok());
+        // Someone else's link, even there: refused.
         lchown(&link, 65534);
-        assert!(refuse_planted_link(&name).is_err());
-        let o = Outputs {
-            normal: vec![name.clone()],
-            ..Default::default()
-        };
-        assert!(o.open_files().is_err());
+        let err = open(&link).err().unwrap().to_string();
+        assert!(err.contains("owned by another user"), "{err}");
+        // Root's own link in a shared sticky directory: refused.
+        let shared = dir.join("shared");
+        std::fs::create_dir(&shared).unwrap();
+        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o1777)).unwrap();
+        let link = shared.join("scan.txt");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let err = open(&link).err().unwrap().to_string();
+        assert!(err.contains("other users can write to"), "{err}");
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep");
-        // The directory's owner may link: same owner as the link.
-        lchown(&shared, 65534);
-        assert!(refuse_planted_link(&name).is_ok());
+        // A directory link in the path is held to the same rule: someone
+        // else's link to a directory is refused, root's own in a private
+        // directory is followed.
+        let real = dir.join("realdir");
+        std::fs::create_dir(&real).unwrap();
+        let sub = shared.join("sub");
+        std::os::unix::fs::symlink(&real, &sub).unwrap();
+        lchown(&sub, 65534);
+        let err = open(&sub.join("r.txt")).err().unwrap().to_string();
+        assert!(err.contains("owned by another user"), "{err}");
+        assert!(!real.join("r.txt").exists());
+        let own = dir.join("ownsub");
+        std::os::unix::fs::symlink(&real, &own).unwrap();
+        assert!(open(&own.join("r.txt")).is_ok());
+        assert!(real.join("r.txt").exists());
+        // Root's approved link whose target runs through someone else's
+        // link: the nested link is checked too, and refused.
+        let victim_dir = dir.join("victimdir");
+        std::fs::create_dir(&victim_dir).unwrap();
+        let redirect = shared.join("redirect");
+        std::os::unix::fs::symlink(&victim_dir, &redirect).unwrap();
+        lchown(&redirect, 65534);
+        let current = dir.join("current");
+        std::os::unix::fs::symlink(&redirect, &current).unwrap();
+        let err = open(&current.join("hosts")).err().unwrap().to_string();
+        assert!(err.contains("owned by another user"), "{err}");
+        assert!(!victim_dir.join("hosts").exists());
+        // The same as the report file itself.
+        let file_link = shared.join("file-redirect");
+        std::os::unix::fs::symlink(&target, &file_link).unwrap();
+        lchown(&file_link, 65534);
+        let current_file = dir.join("current-file");
+        std::os::unix::fs::symlink(&file_link, &current_file).unwrap();
+        assert!(open(&current_file).is_err());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep");
+        // A path or link target ending in "/" names a directory, not the
+        // regular file before it.
+        let important = dir.join("important");
+        std::fs::write(&important, "keep").unwrap();
+        assert!(open(std::path::Path::new(&format!("{}/", important.display()))).is_err());
+        let slash = dir.join("slash");
+        std::os::unix::fs::symlink(format!("{}/", important.display()), &slash).unwrap();
+        assert!(open(&slash).is_err());
+        assert_eq!(std::fs::read_to_string(&important).unwrap(), "keep");
+        // A directory link to "/." still resolves from "/", not from the
+        // link's own directory.
+        let to_root = dir.join("to-root");
+        std::os::unix::fs::symlink("/.", &to_root).unwrap();
+        let rel = dir.strip_prefix("/").unwrap().join("via-root.txt");
+        assert!(open(&to_root.join(&rel)).is_ok());
+        assert!(dir.join("via-root.txt").exists());
+        assert!(!dir.join(&rel).exists());
+        // /dev/stdout is root's link in root's /dev.
+        if std::path::Path::new("/dev/stdout").is_symlink() {
+            assert!(open(std::path::Path::new("/dev/stdout")).is_ok());
+        }
+        // A new file is handed to SUDO_UID/SUDO_GID; tests run in threads,
+        // so this reads the variables only if the environment has them.
+        if let Some((uid, gid)) = privdrop::sudo_ids() {
+            let new = dir.join("new.txt");
+            open(&new).unwrap();
+            let m = std::fs::metadata(&new).unwrap();
+            assert_eq!((m.uid(), m.gid()), (uid, gid));
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

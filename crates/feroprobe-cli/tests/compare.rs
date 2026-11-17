@@ -126,6 +126,12 @@ fn scan(port: u16, out: &Path) {
             "-oX",
         ])
         .arg(out)
+        // CI runs the tests again under `sudo -E`; without the SUDO_*
+        // variables FeroProbe keeps root rather than become the user who
+        // ran sudo, who could not write into this root-owned directory.
+        .env_remove("SUDO_UID")
+        .env_remove("SUDO_GID")
+        .env_remove("SUDO_USER")
         .output()
         .expect("run feroprobe");
     assert!(

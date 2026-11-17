@@ -48,3 +48,7 @@ jobs:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: sudo -E
           FEROPROBE_REQUIRE_RAW: "1"
           FEROPROBE_REQUIRE_IPV6: "1"
+      # Root under sudo: the hand-over to the invoking user and the
+      # settings-file checks (plays sudo with the nobody account).
+      - name: privilege drop test script
+        run: sudo ./scripts/test-privdrop.sh --bin target/debug/feroprobe -v
