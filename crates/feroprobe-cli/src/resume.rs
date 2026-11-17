@@ -122,7 +122,24 @@ pub fn parse(text: &str) -> Result<Resume> {
     let Some(end) = rest.find('\n') else {
         bail!("the command line is not complete; the run had not finished a host");
     };
-    let mut line = rest[..end].trim_end().to_string();
+    let args = command_line(&rest[..end])?;
+    if args
+        .iter()
+        .any(|a| a == "--resume" || a.starts_with("--resume="))
+    {
+        bail!("the recorded command line itself uses --resume");
+    }
+    let body = &text[at..];
+    Ok(Resume {
+        last: last_host(body)?,
+        args,
+    })
+}
+
+/// The arguments (without the program name) of a command line as a
+/// report records it after ` as: `, up to the end of its line.
+fn command_line(recorded: &str) -> Result<Vec<String>> {
+    let mut line = recorded.trim_end().to_string();
     // The XML report keeps it in a comment, escaped.
     if let Some(cut) = line.find("-->") {
         line.truncate(cut);
@@ -136,17 +153,63 @@ pub fn parse(text: &str) -> Result<Resume> {
     }
     // The program name.
     args.remove(0);
-    if args
-        .iter()
-        .any(|a| a == "--resume" || a.starts_with("--resume="))
-    {
-        bail!("the recorded command line itself uses --resume");
+    Ok(args)
+}
+
+/// The kinds of report file a resumed scan appends to, as far as
+/// [`continues_scan`] tells them apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileKind {
+    /// `-oN`, `-oG` and `-oX`: they start with the `scan initiated ... as:`
+    /// line (in XML, a comment).
+    Recorded,
+    /// `-oS`: the normal report in script kiddie spelling, which starts with
+    /// a mangled `Starting FeroProbe` line and records no command line.
+    Skid,
+    /// `-oJ`: written only when a run ends, so an aborted run leaves it
+    /// empty; a run resumed and finished before leaves a FeroProbe document.
+    Json,
+}
+
+/// Whether `head` (an existing file's text) is a report of the scan
+/// whose command line is `args`, so that a resumed run may append to it.
+///
+/// The command line comes from the report given to `--resume`, which may
+/// have been written by anyone: without this check it could name any file
+/// (a shell start-up file, a cron table) as a report and have the resumed
+/// run append text to it that the scanned hosts chose, such as a service's
+/// version string. A file that already holds this scan's report can only
+/// gain more of it.
+pub fn continues_scan(kind: FileKind, head: &str, args: &[String]) -> bool {
+    match kind {
+        FileKind::Recorded => {
+            // A resumed run records the command with --append-output added.
+            let without = |v: &[String]| -> Vec<String> {
+                v.iter()
+                    .filter(|a| *a != "--append-output")
+                    .cloned()
+                    .collect()
+            };
+            let want = without(args);
+            // Any header counts: with --append-output, earlier scans' reports
+            // may come first.
+            head.lines()
+                .filter_map(|l| {
+                    let header = l.starts_with("# FeroProbe ") || l.starts_with("<!-- FeroProbe ");
+                    let at = l.find(" as: ")?;
+                    (header && l[..at].contains(" scan initiated ")).then(|| &l[at + 5..])
+                })
+                .any(|recorded| command_line(recorded).is_ok_and(|r| without(&r) == want))
+        }
+        FileKind::Skid => {
+            let first = head.lines().next().unwrap_or("");
+            crate::output::could_be_skid("Starting FeroProbe ", first)
+        }
+        FileKind::Json => {
+            let t = head.trim_start();
+            t.is_empty() || (t.starts_with('{') && t.contains("\"scanner\": \"feroprobe\""))
+        }
     }
-    let body = &text[at..];
-    Ok(Resume {
-        last: last_host(body)?,
-        args,
-    })
 }
 
 /// The last host the report finished, in nmap's order of trying: grepable,
@@ -233,6 +296,49 @@ mod tests {
             strings(&["nmap", "a b", "c"])
         );
         assert_eq!(split_quoted("nmap \"open"), None);
+    }
+
+    #[test]
+    fn resumed_files_must_hold_the_same_scan() {
+        let args = strings(&["-oN", "r.nmap", "-oG", "r.gnmap", "10.0.0.0/24"]);
+        let normal = "# FeroProbe 0.5.0 scan initiated Mon Nov 16 10:00:00 2026 UTC as: feroprobe -oN r.nmap -oG r.gnmap 10.0.0.0/24\n\nScan report for 10.0.0.1\n";
+        assert!(continues_scan(FileKind::Recorded, normal, &args));
+        // Resumed before: the second header adds --append-output.
+        let again = "# FeroProbe 0.5.0 scan initiated Mon Nov 16 11:00:00 2026 UTC as: /usr/bin/feroprobe --append-output -oN r.nmap -oG r.gnmap 10.0.0.0/24\n";
+        assert!(continues_scan(FileKind::Recorded, again, &args));
+        let xml = "<?xml version=\"1.0\"?>\n<!-- FeroProbe 0.5.0 scan initiated Mon Nov 16 10:00:00 2026 UTC as: feroprobe -oN r.nmap -oG r.gnmap 10.0.0.0/24 -->\n<nmaprun>\n";
+        assert!(continues_scan(FileKind::Recorded, xml, &args));
+        // An older scan's report first (--append-output), then this one's.
+        let older = format!(
+            "# FeroProbe 0.5.0 scan initiated Sun Nov 15 10:00:00 2026 UTC as: feroprobe -oN r.nmap 10.9.9.9\n\n{normal}"
+        );
+        assert!(continues_scan(FileKind::Recorded, &older, &args));
+        // Another scan's report, or no report at all.
+        let other = normal.replace("10.0.0.0/24", "10.0.1.0/24");
+        assert!(!continues_scan(FileKind::Recorded, &other, &args));
+        assert!(!continues_scan(FileKind::Recorded, "", &args));
+        let bashrc =
+            "# ~/.bashrc\nalias ll='ls -l' # as: feroprobe -oN r.nmap -oG r.gnmap 10.0.0.0/24\n";
+        assert!(!continues_scan(FileKind::Recorded, bashrc, &args));
+        // -oS records no command line, only its mangled first line.
+        assert!(continues_scan(
+            FileKind::Skid,
+            "$tArt!ng F3r0Pr0b3 0.5.0\n",
+            &args
+        ));
+        assert!(!continues_scan(FileKind::Skid, "#!/bin/sh\n", &args));
+        // -oJ: empty after an aborted run, or a FeroProbe document.
+        assert!(continues_scan(FileKind::Json, "", &args));
+        assert!(continues_scan(
+            FileKind::Json,
+            "{\n  \"scanner\": \"feroprobe\",\n",
+            &args
+        ));
+        assert!(!continues_scan(
+            FileKind::Json,
+            "* * * * * root sh\n",
+            &args
+        ));
     }
 
     #[test]

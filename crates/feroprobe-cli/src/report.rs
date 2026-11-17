@@ -218,7 +218,7 @@ mod tests {
                 append,
                 ..Default::default()
             };
-            let mut reports = Reports::new(append, outputs.open_files().unwrap());
+            let mut reports = Reports::new(append, outputs.open_files(None).unwrap());
             for (format, name) in [(Format::Xml, "r.xml"), (Format::Grepable, "r.gnmap")] {
                 reports.add(Kind::Format(format), Some(path(name)));
             }

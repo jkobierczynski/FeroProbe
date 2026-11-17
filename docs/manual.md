@@ -1853,10 +1853,12 @@ Leave the `xml-stylesheet` line out of the XML report.
 Carry on with a scan that was aborted (with Ctrl-C, a lost connection, a
 reboot), given its normal (`-oN`), XML (`-oX`) or grepable (`-oG`) report;
 for `-oA`, any of the three files. As in nmap, it takes no other options,
-except `--keep-root`: under `sudo`, root is given up before the report is
-read, so a scan whose report or files only root can reach is resumed with
-`sudo feroprobe --keep-root --resume FILE` (a `--keep-root` recorded in
-the report has no effect on this):
+except `--keep-root`, `--allow-public-evasion` and
+`--override-ics-protection`. Under `sudo`, root is given up before the
+report is read, so a scan whose report or files only root can reach is
+resumed with `sudo feroprobe --keep-root --resume FILE` (a `--keep-root`
+recorded in the report has no effect on this). The two authorizations are
+explained below:
 
 ```
 feroprobe --resume scan.gnmap
@@ -1890,6 +1892,38 @@ probed again too. Other things to know:
   the hosts scanned since; a warning says so.
 - The settings files and ICS protection apply to the resumed scan as they
   would to the command typed again.
+
+A report is a plain text file that anyone can write, and resuming one runs
+the command line it records: its targets, its options and its report
+files. Treat a report you did not write yourself like a script someone
+handed you; FeroProbe prints the command line it resumes on standard error
+before anything else happens. Three safeguards, all differences from nmap:
+
+- **Only the scan's own reports are appended to.** Every report file the
+  recorded command line names (except `-` and `/dev/null`, `/dev/stdout`,
+  `/dev/stderr`) must already exist and hold the report of that same scan:
+  for `-oN`, `-oG` and `-oX`, a `scan initiated ... as:` line recording the
+  same command line; for `-oS`, the mangled `Starting FeroProbe` line; for
+  `-oJ`, nothing yet or a FeroProbe JSON document. Otherwise the resume is
+  refused before anything is sent, and a missing report file is not
+  created. nmap appends to whatever the recorded command line names, so a
+  forged report can make it add text to any file the user can write (as
+  root, any file), text the scanned hosts partly choose (a service's
+  version string, for example).
+- **Authorizations are given again.** If the recorded command line has
+  `--allow-public-evasion` or `--override-ics-protection`, the resume is
+  refused unless the same option is given beside `--resume`
+  (`feroprobe --allow-public-evasion --resume scan.nmap`). A deliberate
+  opt-in is not taken from a file. Given beside `--resume`, either option
+  applies to the resumed scan, as it would to the command typed again.
+- **Root is not kept for it.** Under `sudo`, the resumed scan runs as the
+  user who ran `sudo` like any other (see
+  [Giving up root under sudo](#giving-up-root-under-sudo)); with
+  `--keep-root` or a root shell, the checks above still apply.
+
+Files the command line reads (`-iL`, `--excludefile`, `--service-rules`,
+`--oui-file`) are read as they would be for the command typed again, so
+under `sudo` with root given up, only files the user could read anyway.
 
 #### `--nmap-label`
 
@@ -2394,6 +2428,7 @@ safeguard calls for a difference. The deliberate differences are:
 | Script output on folded ports | Not shown when the port's state is folded into `Not shown` | The port is listed with its output |
 | `fero.args.get` of a bare flag | `stdnse.get_script_args` returns `1` | Returns `true` |
 | `--script-help` | Prints a link to nmap.org's documentation of each script, and writes `-oX` XML | Prints where the script came from (built in, or its file); no XML |
+| `--resume` | Runs the recorded command line as it is, creating or appending to any report file it names | Prints the command line first; appends only to existing files that hold that scan's report (creates none); a recorded `--allow-public-evasion` or `--override-ics-protection` must be given again beside `--resume` |
 
 Behaviour that looks unusual but matches nmap includes: skipping discovery
 for this machine as root (`localhost-response`), ARP or neighbour discovery

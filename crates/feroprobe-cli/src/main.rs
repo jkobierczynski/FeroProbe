@@ -725,7 +725,9 @@ struct Args {
 
     /// Carry on with an aborted scan from its -oN, -oG or -oX report: the
     /// command line is read from the file, the hosts it finished are
-    /// skipped and the reports are appended to. Takes no other options
+    /// skipped and the reports are appended to (only files that already
+    /// hold that scan's report). Takes no other options except --keep-root,
+    /// --allow-public-evasion and --override-ics-protection
     #[arg(long, value_name = "FILE")]
     resume: Option<String>,
 
@@ -939,10 +941,23 @@ impl Outputs {
     }
 
     fn files(&self) -> impl Iterator<Item = &String> {
-        [&self.normal, &self.xml, &self.grep, &self.json, &self.skid]
-            .into_iter()
-            .flat_map(|v| v.iter())
-            .filter(|p| *p != "-")
+        self.files_by_kind().map(|(_, p)| p)
+    }
+
+    /// The report files, each with the kind of report `--resume` checks it
+    /// holds.
+    fn files_by_kind(&self) -> impl Iterator<Item = (resume::FileKind, &String)> {
+        use resume::FileKind::{Json, Recorded, Skid};
+        [
+            (Recorded, &self.normal),
+            (Recorded, &self.xml),
+            (Recorded, &self.grep),
+            (Json, &self.json),
+            (Skid, &self.skid),
+        ]
+        .into_iter()
+        .flat_map(|(k, v)| v.iter().map(move |p| (k, p)))
+        .filter(|(_, p)| *p != "-")
     }
 
     /// Open (creating, not truncating) every report file before the scan,
@@ -961,14 +976,29 @@ impl Outputs {
     /// appending (nmap's `fopen(..., "a")`); otherwise each file is emptied
     /// only when its report is written, so a scan that fails leaves the old
     /// report in place.
-    fn open_files(&self) -> Result<ReportFiles> {
+    ///
+    /// A resumed scan (`resumed` holds the command line its report records)
+    /// only appends to files that already hold that scan's report: see
+    /// [`resume::continues_scan`]. They are opened without being created,
+    /// and checked through the handle the report is then written to.
+    fn open_files(&self, resumed: Option<&[String]>) -> Result<ReportFiles> {
         let mut seen = std::collections::HashSet::new();
         let mut files = ReportFiles {
             append: self.append,
             ..Default::default()
         };
-        for path in self.files() {
-            let file = open_report(path, self.append)?;
+        for (kind, path) in self.files_by_kind() {
+            let mode = if resumed.is_some() {
+                OpenMode::Resume
+            } else {
+                OpenMode::Create {
+                    append: self.append,
+                }
+            };
+            let file = open_report(path, mode)?;
+            if let Some(args) = resumed {
+                check_resumed_file(&file, path, kind, args)?;
+            }
             #[cfg(unix)]
             let id = {
                 use std::os::unix::fs::MetadataExt;
@@ -1026,24 +1056,107 @@ impl ReportFiles {
     }
 }
 
+/// How [`open_report`] opens a report file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OpenMode {
+    /// Create it if needed, never truncate; append with `--append-output`.
+    Create { append: bool },
+    /// `--resume`: the file must exist; open it to read and append.
+    Resume,
+}
+
+/// The paths of the system's own non-file outputs that a resumed command
+/// line may name as a report: there is nothing in them to check.
+const RESUME_DEVICES: [&str; 3] = ["/dev/null", "/dev/stdout", "/dev/stderr"];
+
+/// `--resume`: refuse to append to `file` (opened from `path`) unless it
+/// already holds the report of the scan being resumed. The recorded
+/// command line could have been written by anyone, and its report paths
+/// could otherwise name any file the user (or root) can write.
+fn check_resumed_file(
+    file: &std::fs::File,
+    path: &str,
+    kind: resume::FileKind,
+    args: &[String],
+) -> Result<()> {
+    let refuse = |why: &str| -> Result<()> {
+        bail!(
+            "the scan being resumed names {path} as a report file, but {why}. \
+             --resume only appends to the existing reports of the scan it resumes; \
+             run the scan again instead"
+        )
+    };
+    // Where the standard streams go is the person's own choice (a
+    // redirection to a new, empty file included).
+    if RESUME_DEVICES.contains(&path) {
+        return Ok(());
+    }
+    let meta = file.metadata().with_context(|| format!("reading {path}"))?;
+    if !meta.is_file() {
+        return refuse("it is not a regular file");
+    }
+    // The whole file: with --append-output it may hold earlier scans first.
+    let mut text = Vec::with_capacity(meta.len() as usize);
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let at = text.len() as u64;
+        #[cfg(unix)]
+        let n = {
+            use std::os::unix::fs::FileExt;
+            file.read_at(&mut buf, at)
+        };
+        #[cfg(windows)]
+        let n = {
+            use std::os::windows::fs::FileExt;
+            file.seek_read(&mut buf, at)
+        };
+        match n.with_context(|| format!("reading {path}"))? {
+            0 => break,
+            n => text.extend_from_slice(&buf[..n]),
+        }
+    }
+    if !resume::continues_scan(kind, &String::from_utf8_lossy(&text), args) {
+        return refuse("it does not hold that scan's report");
+    }
+    Ok(())
+}
+
 /// Open (creating, not truncating) one report file.
 ///
 /// As root (`--keep-root`, root without sudo, or a failed hand-over), see
 /// [`open_report_as_root`]. Without root nothing changes: a report goes
 /// wherever the path leads.
-fn open_report(path: &str, append: bool) -> Result<std::fs::File> {
+fn open_report(path: &str, mode: OpenMode) -> Result<std::fs::File> {
+    let missing = |e: anyhow::Error| -> anyhow::Error {
+        let not_found = e
+            .root_cause()
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound);
+        if mode == OpenMode::Resume && not_found {
+            anyhow::anyhow!(
+                "the scan being resumed names {path} as a report file, but it does not exist. \
+                 --resume only appends to the existing reports of the scan it resumes; \
+                 run the scan again instead"
+            )
+        } else {
+            e
+        }
+    };
     #[cfg(unix)]
     // SAFETY: geteuid has no preconditions.
     if unsafe { libc::geteuid() } == 0 {
-        return open_report_as_root(path, append);
+        return open_report_as_root(path, mode).map_err(missing);
     }
+    let resume = mode == OpenMode::Resume;
     std::fs::OpenOptions::new()
+        .read(resume)
         .write(true)
-        .append(append)
+        .append(resume || mode == OpenMode::Create { append: true })
         .truncate(false)
-        .create(true)
+        .create(!resume)
         .open(path)
         .with_context(|| format!("opening {path}"))
+        .map_err(missing)
 }
 
 /// [`open_report`] as root. The path is walked one component at a time
@@ -1058,7 +1171,7 @@ fn open_report(path: &str, append: bool) -> Result<std::fs::File> {
 /// in meanwhile is refused too. A file root creates under `sudo` is handed
 /// to the invoking user (`SUDO_UID`/`SUDO_GID`), so the report is theirs.
 #[cfg(unix)]
-fn open_report_as_root(path: &str, append: bool) -> Result<std::fs::File> {
+fn open_report_as_root(path: &str, mode: OpenMode) -> Result<std::fs::File> {
     use std::ffi::CString;
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
     use std::os::unix::ffi::OsStrExt;
@@ -1238,7 +1351,11 @@ fn open_report_as_root(path: &str, append: bool) -> Result<std::fs::File> {
             }
         })?;
     };
-    let mut flags = libc::O_WRONLY | if append { libc::O_APPEND } else { 0 };
+    let mut flags = match mode {
+        OpenMode::Create { append: false } => libc::O_WRONLY,
+        OpenMode::Create { append: true } => libc::O_WRONLY | libc::O_APPEND,
+        OpenMode::Resume => libc::O_RDWR | libc::O_APPEND,
+    };
     if !follow {
         flags |= libc::O_NOFOLLOW;
     }
@@ -1252,6 +1369,12 @@ fn open_report_as_root(path: &str, append: bool) -> Result<std::fs::File> {
             anyhow::Error::new(e).context(format!("opening {path}"))
         }
     };
+    // A resumed scan never creates a report.
+    if mode == OpenMode::Resume {
+        return Ok(std::fs::File::from(
+            open_at(dir.as_raw_fd(), &name, flags).map_err(refused)?,
+        ));
+    }
     // Create it ourselves if we can, to know whether to hand it over.
     let fd = match open_at(dir.as_raw_fd(), &name, flags | libc::O_CREAT | libc::O_EXCL) {
         Ok(fd) => {
@@ -2984,6 +3107,22 @@ fn hostgroup_limits(args: &Args) -> Result<(usize, usize)> {
     Ok((min, max))
 }
 
+/// The options `--resume` accepts beside it: `--keep-root`, and the two
+/// authorizations, which a recorded one needs given again; given, they apply.
+const RESUME_ALSO: [&str; 3] = [
+    "--keep-root",
+    "--allow-public-evasion",
+    "--override-ics-protection",
+];
+
+/// `s` with control characters (a terminal's escape sequences among them)
+/// shown as `?`, for text from a file that is printed to the terminal.
+fn printable(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_control() { '?' } else { c })
+        .collect()
+}
+
 /// `--resume`: drop the targets the aborted run finished, up to and
 /// including the last host its report lists, as nmap does.
 fn resume_targets(
@@ -3261,21 +3400,59 @@ async fn run(
         None => (first, raw, None),
         Some(path) => {
             // Like nmap, --resume takes no other options: the file has them.
-            // --keep-root is the one exception: it decides, before the
-            // report is read, whether root is given up for the resumed run.
-            let rest: Vec<&String> = raw[1..].iter().filter(|a| *a != "--keep-root").collect();
+            // The exceptions: --keep-root decides, before the report is
+            // read, whether root is given up for the resumed run; and the
+            // two authorizations are given again (see below).
+            let rest: Vec<&String> = raw[1..]
+                .iter()
+                .filter(|a| !RESUME_ALSO.contains(&a.as_str()))
+                .collect();
             let alone = rest.len() == 2 || (rest.len() == 1 && rest[0].starts_with("--resume="));
             if !alone {
                 bail!(
-                    "--resume cannot be combined with other options (except --keep-root). \
-                     Usage: feroprobe [--keep-root] --resume FILE"
+                    "--resume cannot be combined with other options (except {}). \
+                     Usage: feroprobe [--keep-root] [--allow-public-evasion] \
+                     [--override-ics-protection] --resume FILE",
+                    RESUME_ALSO.join(", ")
                 );
             }
             let r = resume::read(path)?;
             // As nmap: the recorded command line, appending to its reports.
             let mut command = vec![raw[0].clone(), "--append-output".to_string()];
             command.extend(r.args.iter().filter(|a| *a != "--append-output").cloned());
-            let args = debugging::parse_args(nmap_style_args(command.clone()));
+            let mut args = debugging::parse_args(nmap_style_args(command.clone()));
+            // Anyone can write a report, so say what is about to run.
+            eprintln!(
+                "Resuming the scan recorded in {path}: {}",
+                printable(&resume::join_quoted(&command))
+            );
+            // The deliberate opt-ins are not taken from a file: the person
+            // resuming gives them again (a nmap divergence).
+            for (recorded, given, flag) in [
+                (
+                    args.allow_public_evasion,
+                    first.allow_public_evasion,
+                    "--allow-public-evasion",
+                ),
+                (
+                    args.override_ics_protection,
+                    first.override_ics_protection,
+                    "--override-ics-protection",
+                ),
+            ] {
+                if recorded && !given {
+                    bail!(
+                        "the scan recorded in {path} was authorized with {flag}; \
+                         an authorization is not taken from a file, so give it again \
+                         if you mean it: feroprobe {flag} --resume {path}"
+                    );
+                }
+            }
+            // An authorization given beside --resume applies to the resumed
+            // scan, as it would to the command typed again. The recorded
+            // command line (which the report checks compare) is unchanged.
+            args.allow_public_evasion |= first.allow_public_evasion;
+            args.override_ics_protection |= first.override_ics_protection;
             // Reports mask the FTP relay password, so it cannot be resumed
             // from them: say so rather than log in with "****".
             if args.bounce.as_deref().is_some_and(|b| b.contains(":****@")) {
@@ -3340,7 +3517,7 @@ async fn run(
     let report_files = if args.dry_run {
         ReportFiles::default()
     } else {
-        outputs.open_files()?
+        outputs.open_files(resumed.as_ref().map(|_| &command[1..]))?
     };
     let group_limits = hostgroup_limits(&args)?;
     let progress = Progress {
@@ -4438,7 +4615,7 @@ mod tests {
             ..Default::default()
         };
         // Opening keeps the old report until the new one is written.
-        let mut files = outputs(false).open_files().unwrap();
+        let mut files = outputs(false).open_files(None).unwrap();
         assert_eq!(
             std::fs::read_to_string(&path).unwrap(),
             "a much longer old report\n"
@@ -4446,7 +4623,7 @@ mod tests {
         files.write(&name, "new\n").unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "new\n");
         drop(files);
-        let mut files = outputs(true).open_files().unwrap();
+        let mut files = outputs(true).open_files(None).unwrap();
         files.write(&name, "more\n").unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "new\nmore\n");
         // The handle opened up front is what gets written, even if the
@@ -4465,7 +4642,7 @@ mod tests {
                 normal: vec!["/dev/null".into()],
                 ..Default::default()
             };
-            let mut files = null.open_files().unwrap();
+            let mut files = null.open_files(None).unwrap();
             files.write("/dev/null", "report\n").unwrap();
         }
         let _ = std::fs::remove_dir_all(&dir);
@@ -4491,7 +4668,7 @@ mod tests {
                 normal: vec![p.display().to_string()],
                 ..Default::default()
             }
-            .open_files()
+            .open_files(None)
         };
         let lchown = |p: &std::path::Path, uid: u32| {
             let c = std::ffi::CString::new(p.as_os_str().as_encoded_bytes()).unwrap();
@@ -4656,15 +4833,15 @@ mod tests {
             let dangling = dir.join("dangling");
             std::os::unix::fs::symlink(dir.join("later"), &dangling).unwrap();
             let o = out(&dangling, &dir.join("later"));
-            assert!(o.open_files().is_err());
+            assert!(o.open_files(None).is_err());
             let hard = dir.join("hard");
             std::fs::hard_link(&plain, &hard).unwrap();
             assert!(
                 out(&hard, std::path::Path::new(&plain))
-                    .open_files()
+                    .open_files(None)
                     .is_err()
             );
-            assert!(out(&dir.join("a"), &dir.join("b")).open_files().is_ok());
+            assert!(out(&dir.join("a"), &dir.join("b")).open_files(None).is_ok());
         }
         // Windows file systems ignore case: report and REPORT are one file.
         #[cfg(windows)]
@@ -4674,7 +4851,7 @@ mod tests {
                 xml: vec![dir.join("REPORT").display().to_string()],
                 ..Default::default()
             };
-            assert!(o.open_files().is_err());
+            assert!(o.open_files(None).is_err());
         }
         let _ = std::fs::remove_dir_all(&dir);
     }

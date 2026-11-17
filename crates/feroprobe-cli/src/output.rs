@@ -800,6 +800,28 @@ fn skid_with(text: &str, rng: &mut Rng) -> String {
     out
 }
 
+/// Whether `got` starts with a spelling [`skid`] could have given `orig`,
+/// so that `--resume` recognizes an `-oS` report.
+pub fn could_be_skid(orig: &str, got: &str) -> bool {
+    let mut got = got.chars();
+    orig.chars().all(|o| {
+        let Some(g) = got.next() else {
+            return false;
+        };
+        let look_alike = match o {
+            'A' => g == '4',
+            'e' | 'E' => g == '3',
+            'i' | 'I' => matches!(g, '!' | '|' | '1'),
+            'o' | 'O' => g == '0',
+            's' | 'S' => matches!(g, 'z' | '$'),
+            'z' => g == 's',
+            'Z' => g == 'S',
+            _ => false,
+        };
+        g == o || look_alike || (o.is_ascii_alphabetic() && g.eq_ignore_ascii_case(&o))
+    })
+}
+
 fn skid_char(c: char, next: Option<char>, rng: &mut Rng) -> char {
     if rng.next() & 1 == 0 {
         match c {
@@ -850,6 +872,16 @@ impl Rng {
 pub(crate) mod tests {
     use super::*;
     use std::time::UNIX_EPOCH;
+
+    #[test]
+    fn skid_spelling_is_recognized() {
+        for _ in 0..200 {
+            let text = skid("Starting FeroProbe 0.5.0\n");
+            assert!(could_be_skid("Starting FeroProbe ", &text), "{text}");
+        }
+        assert!(!could_be_skid("Starting FeroProbe ", "Starting"));
+        assert!(!could_be_skid("Starting FeroProbe ", "export PATH=/x"));
+    }
 
     #[test]
     fn skid_spelling() {
