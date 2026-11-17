@@ -2300,6 +2300,20 @@ servers answer STAT only after a login; then only SYST is shown).
 Argument: \f[V]ftp-syst.timeout\f[R]
 T}
 T{
+\f[V]http-headers\f[R]
+T}@T{
+discovery, safe
+T}@T{
+web ports
+T}@T{
+Lists the headers of the front page\[aq]s answer as they came, then the
+request used: HEAD, or GET when HEAD gets an error status or no answer.
+Follows no redirect.
+Not in \f[V]default\f[R], as in nmap.
+Arguments: \f[V]http-headers.path\f[R] (default \f[V]/\f[R]),
+\f[V]http-headers.useget\f[R] (GET straight away)
+T}
+T{
 \f[V]http-methods\f[R]
 T}@T{
 default, safe
@@ -2321,6 +2335,22 @@ web ports
 T}@T{
 Fetches \f[V]/robots.txt\f[R] and lists its \f[V]Disallow\f[R] paths (at
 most 100)
+T}
+T{
+\f[V]http-server-header\f[R]
+T}@T{
+discovery, safe, version
+T}@T{
+web ports
+T}@T{
+One GET of the front page; shows each different \f[V]Server\f[R] header
+value (the software the server names), or nothing when there is none.
+Follows no redirect.
+nmap runs its \f[V]version\f[R] scripts with every \f[V]-sV\f[R] and
+lets this one fill in an empty version column; FeroProbe runs it only
+when chosen (\f[V]--script http-server-header\f[R] or
+\f[V]--script version\f[R]) and leaves the version column to
+\f[V]-sV\f[R]
 T}
 T{
 \f[V]http-title\f[R]

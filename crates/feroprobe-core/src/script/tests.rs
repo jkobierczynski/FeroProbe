@@ -1898,6 +1898,53 @@ async fn http_robots_and_methods() {
     assert_eq!(output_of("http-methods", port, "http").await, None);
 }
 
+#[tokio::test]
+async fn http_headers_and_server_header() {
+    let (port, seen) = web(|req| {
+        if req.starts_with("HEAD / ") {
+            b"HTTP/1.1 200 OK\r\nServer: nginx/1.24.0\r\nX-Frame-Options: DENY\r\nContent-Length: 5\r\n\r\n"
+                .to_vec()
+        } else if req.starts_with("GET / ") {
+            b"HTTP/1.1 200 OK\r\nServer: nginx/1.24.0\r\nserver: extra\r\nServer: nginx/1.24.0\r\nContent-Length: 5\r\n\r\nhello"
+                .to_vec()
+        } else {
+            b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".to_vec()
+        }
+    })
+    .await;
+    assert_eq!(
+        output_of("http-headers", port, "http").await.as_deref(),
+        Some(
+            "\n  Server: nginx/1.24.0\n  X-Frame-Options: DENY\n  Content-Length: 5\n  \n  (Request type: HEAD)"
+        )
+    );
+    // Repeats left out, other spellings kept.
+    assert_eq!(
+        output_of("http-server-header", port, "http")
+            .await
+            .as_deref(),
+        Some("nginx/1.24.0\nextra")
+    );
+    assert_eq!(seen.lock().unwrap().len(), 2);
+
+    // HEAD refused: GET instead, and said so.
+    let (port, seen) = web(|req| {
+        if req.starts_with("HEAD ") {
+            b"HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\n\r\n".to_vec()
+        } else {
+            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok".to_vec()
+        }
+    })
+    .await;
+    assert_eq!(
+        output_of("http-headers", port, "http").await.as_deref(),
+        Some("\n  Content-Length: 2\n  \n  (Request type: GET)")
+    );
+    assert_eq!(seen.lock().unwrap().len(), 2);
+    // No Server header: nothing.
+    assert_eq!(output_of("http-server-header", port, "http").await, None);
+}
+
 #[test]
 fn the_default_category() {
     let defaults: Vec<String> = choose("default")
