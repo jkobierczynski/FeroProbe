@@ -1761,6 +1761,43 @@ async fn ntp_info_asks_for_the_time_and_the_system_variables() {
 }
 
 #[tokio::test]
+async fn ntp_info_drops_overlapping_fragments() {
+    let server = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let port = server.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        let mut buf = [0u8; 512];
+        while let Ok((_, from)) = server.recv_from(&mut buf).await {
+            if buf[0] & 7 != 6 {
+                continue;
+            }
+            for (more, offset, part) in [(0x20, 0u16, &b"version=ab"[..]), (0, 9, b"bc, stratum=2")]
+            {
+                let mut r = vec![0x16, 0x82 | more, 0, 1, 0, 0, 0, 0];
+                r.extend(offset.to_be_bytes());
+                r.extend((part.len() as u16).to_be_bytes());
+                r.extend(part);
+                let _ = server.send_to(&r, from).await;
+            }
+        }
+    });
+    let mut host = host_with(&[(port, PortState::Open)]);
+    host.ports[0].protocol = Protocol::Udp;
+    host.ports[0].service = Some(crate::service::ServiceInfo {
+        name: "ntp".into(),
+        ..Default::default()
+    });
+    let args = super::args::parse("ntp-info.timeout=300").unwrap();
+    let scan = ScriptScan::new(vec![built_in("ntp-info")], args, None).unwrap();
+    let mut hosts = vec![host];
+    scan.scan_hosts(&mut hosts).await;
+    assert!(
+        hosts[0].ports[0].scripts.is_empty(),
+        "{:?}",
+        hosts[0].ports[0].scripts
+    );
+}
+
+#[tokio::test]
 async fn http_robots_and_methods() {
     let (port, seen) = web(|req| {
         if req.starts_with("GET /robots.txt ") {

@@ -93,9 +93,10 @@ action = function(host, port)
     local function covered()
       table.sort(parts, function(a, b) return a[1] < b[1] end)
       local at = 0
+      -- Back to back: a gap waits for more, an overlap never completes.
       for _, p in ipairs(parts) do
-        if p[1] > at then return false end
-        at = math.max(at, p[1] + #p[2])
+        if p[1] ~= at then return false end
+        at = at + #p[2]
       end
       return at >= last_end
     end
