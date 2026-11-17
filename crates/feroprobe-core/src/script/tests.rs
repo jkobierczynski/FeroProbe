@@ -592,17 +592,37 @@ fn debug_output_is_bounded() {
     assert_eq!(engine::debug_text(b"more", &mut room), "...");
 }
 
+#[tokio::test]
+async fn print_stops_converting_once_the_line_is_full() {
+    crate::debug::set_debugging(1);
+    // The first argument fills the line exactly: the second's __tostring
+    // must not run.
+    let src = r#"
+categories = {"safe"}
+hostrule = function() return true end
+action = function()
+  local called = false
+  local late = setmetatable({}, {__tostring = function() called = true return "x" end})
+  print(string.rep("a", 64 * 1024), late)
+  return called and "called" or "not called"
+end"#;
+    let scan = ScriptScan::new(vec![script("t", src)], ArgTable::default(), None).unwrap();
+    let mut hosts = vec![host_with(&[])];
+    scan.scan_hosts(&mut hosts).await;
+    assert_eq!(hosts[0].scripts[0].output, "not called");
+}
+
 #[test]
 fn print_lines_are_bounded_tabs_included() {
     let lua = mlua::Lua::new();
     let empty = lua.create_string("").unwrap();
-    let line = engine::debug_join((0..200_000).map(|_| Some(empty.clone())));
+    let line = engine::debug_join(0..200_000, |_| Some(empty.clone()));
     assert!(line.len() <= 64 * 1024 + 3, "{}", line.len());
     assert!(line.ends_with("..."));
     let a = lua.create_string("a").unwrap();
     let b = lua.create_string("b").unwrap();
     assert_eq!(
-        engine::debug_join([Some(a), None, Some(b)].into_iter()),
+        engine::debug_join([Some(a), None, Some(b)].into_iter(), |s| s),
         "a\t\tb"
     );
 }

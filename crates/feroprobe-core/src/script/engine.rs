@@ -139,8 +139,12 @@ pub(crate) fn debug_text(bytes: &[u8], room: &mut usize) -> String {
 
 /// `print`'s arguments as one tab-separated line of at most
 /// [`MAX_DEBUG_BYTES`] (then "..."), tabs counted, converting each only as
-/// far as the line still has room.
-pub(crate) fn debug_join(parts: impl Iterator<Item = Option<mlua::LuaString>>) -> String {
+/// far as the line still has room: `convert` (`tostring` for `print`) is
+/// not called once the line is full.
+pub(crate) fn debug_join<T>(
+    parts: impl Iterator<Item = T>,
+    mut convert: impl FnMut(T) -> Option<mlua::LuaString>,
+) -> String {
     let mut room = MAX_DEBUG_BYTES;
     let mut line = String::new();
     for (i, part) in parts.enumerate() {
@@ -152,7 +156,7 @@ pub(crate) fn debug_join(parts: impl Iterator<Item = Option<mlua::LuaString>>) -
             line.push('\t');
             room -= 1;
         }
-        if let Some(s) = part {
+        if let Some(s) = convert(part) {
             line.push_str(&debug_text(&s.as_bytes(), &mut room));
         }
         if room == 0 && line.ends_with("...") {
@@ -211,10 +215,9 @@ pub(crate) fn install_library(
             if crate::debug::debugging() < 1 {
                 return Ok(());
             }
-            let line = debug_join(
-                vals.iter()
-                    .map(|v| tostring.call::<mlua::LuaString>(v.clone()).ok()),
-            );
+            let line = debug_join(vals.iter(), |v| {
+                tostring.call::<mlua::LuaString>(v.clone()).ok()
+            });
             eprintln!("{who}: {line}");
             Ok(())
         })?,
