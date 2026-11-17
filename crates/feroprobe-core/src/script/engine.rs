@@ -283,6 +283,14 @@ fn tostring(lua: &Lua, v: &Value) -> String {
         .unwrap_or_default()
 }
 
+/// A Lua string as text, cut before copying to what the budget still
+/// allows (plus one byte, so [`Kept::text`] sees that it overflowed).
+fn budgeted_text(s: &mlua::LuaString, kept: &Kept) -> String {
+    let b = s.as_bytes();
+    let room = MAX_OUTPUT_BYTES.saturating_sub(kept.bytes);
+    bytes_to_text(&b[..b.len().min(room + 1)])
+}
+
 fn convert(lua: &Lua, v: &Value, depth: usize, kept: &mut Kept) -> ScriptValue {
     kept.values += 1;
     if kept.full() {
@@ -291,11 +299,7 @@ fn convert(lua: &Lua, v: &Value, depth: usize, kept: &mut Kept) -> ScriptValue {
     let Value::Table(t) = v else {
         let text = match v {
             // Cut before copying, so a huge string is never copied whole.
-            Value::String(s) => {
-                let b = s.as_bytes();
-                let room = MAX_OUTPUT_BYTES.saturating_sub(kept.bytes);
-                bytes_to_text(&b[..b.len().min(room + 1)])
-            }
+            Value::String(s) => budgeted_text(s, kept),
             other => tostring(lua, other),
         };
         return ScriptValue::Str(kept.text(text));
@@ -318,20 +322,22 @@ fn convert(lua: &Lua, v: &Value, depth: usize, kept: &mut Kept) -> ScriptValue {
             Ok(x) => out.list.push(convert(lua, &x, depth + 1, kept)),
         }
     }
-    let mut named: Vec<(String, Value)> = t
+    // The names stay Lua strings (references, not copies) until kept, so
+    // the budget bounds them too.
+    let mut named: Vec<(mlua::LuaString, Value)> = t
         .pairs::<Value, Value>()
         .filter_map(Result::ok)
         .filter_map(|(k, v)| match k {
-            Value::String(s) => Some((bytes_to_text(&s.as_bytes()), v)),
+            Value::String(s) => Some((s, v)),
             _ => None,
         })
         .collect();
-    named.sort_by(|a, b| a.0.cmp(&b.0));
+    named.sort_by(|a, b| a.0.as_bytes()[..].cmp(&b.0.as_bytes()[..]));
     for (k, x) in named {
         if kept.full() {
             break;
         }
-        let k = kept.text(k);
+        let k = kept.text(budgeted_text(&k, kept));
         out.named.push((k, convert(lua, &x, depth + 1, kept)));
     }
     ScriptValue::Table(out)

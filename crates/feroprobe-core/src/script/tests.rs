@@ -438,3 +438,40 @@ async fn too_much_data_drops_the_connection() {
         "too much data;socket is not connected"
     );
 }
+
+#[tokio::test]
+async fn shared_names_in_output_are_bounded() {
+    // Nested tables all named by the same 1 MiB keys.
+    let src = r#"
+categories = {"safe"}
+hostrule = function() return true end
+action = function()
+  local keys = {}
+  for i = 1, 8 do keys[i] = ("k"):rep(1024 * 1024 - 1) .. i end
+  local t = "leaf"
+  for depth = 1, 20 do
+    local n = {}
+    for _, k in ipairs(keys) do n[k] = t end
+    t = n
+  end
+  return t
+end"#;
+    let scan = ScriptScan::new(vec![script("t", src)], ArgTable::default(), None).unwrap();
+    let mut hosts = vec![host_with(&[])];
+    scan.scan_hosts(&mut hosts).await;
+    fn text_bytes(v: &ScriptValue) -> usize {
+        match v {
+            ScriptValue::Str(s) => s.len(),
+            ScriptValue::Table(t) => {
+                t.list.iter().map(text_bytes).sum::<usize>()
+                    + t.named
+                        .iter()
+                        .map(|(k, v)| k.len() + text_bytes(v))
+                        .sum::<usize>()
+            }
+        }
+    }
+    let data = hosts[0].scripts[0].data.as_ref().unwrap();
+    let kept = text_bytes(data);
+    assert!(kept <= 17 * 1024 * 1024, "{kept}");
+}
