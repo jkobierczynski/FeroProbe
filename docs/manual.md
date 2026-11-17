@@ -1180,8 +1180,11 @@ in `<nmaprun>`, with a returned table as nested `<elem key="...">` and
 port and host, and `prescript` and `postscript` lists at the top, each
 entry with `id`, `output` and, for a table, `data` (an array for a table
 with only numbered entries, else an object with the numbered entries under
-`"1"`, `"2"`, ...; a name that would clash with one of those, as Lua lets
-`t["1"]` and `t[1]` both exist, is written in double quotes, `"\"1\""`).
+`"1"`, `"2"`, .... Lua lets `t["1"]` and `t[1]` both exist, so in such a
+table a name that is one of those numbers, or that starts with a double
+quote, is written in an added pair of double quotes: `t["1"]` as
+`"\"1\""`. A bare number is then always a numbered entry and a quoted key
+a name with the outer quotes removed).
 At most 100,000 values and 16 MiB of text are kept from one result; the
 rest is shown as `...`. The grepable report has no script results, as in
 nmap.

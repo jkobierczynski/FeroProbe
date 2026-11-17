@@ -44,10 +44,11 @@ impl Serialize for ScriptValue {
 
 /// A table with only numbered entries is a JSON array; otherwise an
 /// object, the numbered entries under their numbers ("1", "2", ...).
-/// Lua keeps `t[1]` and `t["1"]` apart, so a name that is already taken
-/// by a numbered entry (or by an earlier such name) is written in double
-/// quotes (`"\"1\""`), again until it is free: no entry is lost or
-/// written twice.
+/// Lua keeps `t[1]` and `t["1"]` apart, so in a table with numbered
+/// entries a name that is one of those numbers, or that starts with a
+/// double quote, is written in double quotes (`"1"` as `"\"1\""`). That
+/// is reversible: a key in quotes is a name with one pair of quotes
+/// added, a bare number is a numbered entry, anything else a name.
 impl Serialize for ScriptTable {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         if self.named.is_empty() {
@@ -58,28 +59,20 @@ impl Serialize for ScriptTable {
             return seq.end();
         }
         let mut map = s.serialize_map(Some(self.list.len() + self.named.len()))?;
-        let mut used: std::collections::HashSet<String> = (1..=self.list.len())
-            .map(|i| i.to_string())
-            .chain(self.named.iter().map(|(k, _)| k.clone()))
-            .collect();
         for (i, v) in self.list.iter().enumerate() {
             map.serialize_entry(&(i + 1).to_string(), v)?;
         }
+        let n = self.list.len();
         let numbered = |k: &str| {
             k.parse::<usize>()
-                .is_ok_and(|n| (1..=self.list.len()).contains(&n) && n.to_string() == k)
+                .is_ok_and(|i| (1..=n).contains(&i) && i.to_string() == k)
         };
         for (k, v) in &self.named {
-            if !numbered(k) {
+            if n > 0 && (numbered(k) || k.starts_with('"')) {
+                map.serialize_entry(&format!("\"{k}\""), v)?;
+            } else {
                 map.serialize_entry(k, v)?;
-                continue;
             }
-            let mut key = format!("\"{k}\"");
-            while used.contains(&key) {
-                key = format!("\"{key}\"");
-            }
-            used.insert(key.clone());
-            map.serialize_entry(&key, v)?;
         }
         map.end()
     }
@@ -247,15 +240,32 @@ mod tests {
             serde_json::to_string(&mixed).unwrap(),
             "{\"1\":\"a\",\"k\":\"v\"}"
         );
-        // t[1], t["1"] and t['"1"'] stay three entries.
-        let clash = ScriptValue::Table(ScriptTable {
-            list: vec![s("a")],
-            named: vec![("\"1\"".into(), s("c")), ("1".into(), s("b"))],
+        // t[1], t["1"] and t['"1"'] stay three distinct keys, and a table
+        // without t["1"] cannot give the same JSON as one with it.
+        let table = |named: Vec<(&str, &str)>| {
+            ScriptValue::Table(ScriptTable {
+                list: vec![s("a")],
+                named: named.into_iter().map(|(k, v)| (k.into(), s(v))).collect(),
+            })
+        };
+        let json = |t: &ScriptValue| serde_json::to_value(t).unwrap();
+        let both = json(&table(vec![("\"1\"", "c"), ("1", "b")]));
+        assert_eq!(both["1"], "a");
+        assert_eq!(both["\"1\""], "b");
+        assert_eq!(both["\"\"1\"\""], "c");
+        assert_eq!(both.as_object().unwrap().len(), 3);
+        assert_ne!(
+            json(&table(vec![("1", "b")])),
+            json(&table(vec![("\"1\"", "b")]))
+        );
+        // Names that are not numbered keys, and all names of a table
+        // without numbered entries, are written as they are.
+        assert_eq!(json(&table(vec![("2", "b")]))["2"], "b");
+        let named = ScriptValue::Table(ScriptTable {
+            list: vec![],
+            named: vec![("\"1\"".into(), s("x")), ("1".into(), s("y"))],
         });
-        let json: serde_json::Value = serde_json::to_value(&clash).unwrap();
-        assert_eq!(json["1"], "a");
-        assert_eq!(json["\"1\""], "c");
-        assert_eq!(json["\"\"1\"\""], "b");
-        assert_eq!(json.as_object().unwrap().len(), 3);
+        assert_eq!(json(&named)["1"], "y");
+        assert_eq!(json(&named)["\"1\""], "x");
     }
 }
