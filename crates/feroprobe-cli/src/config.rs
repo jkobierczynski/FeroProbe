@@ -306,6 +306,8 @@ struct Text {
 }
 
 /// What [`read_settings_file`] found.
+// Off Unix a file is never skipped for its owner.
+#[cfg_attr(not(unix), allow(dead_code))]
 enum FileRead {
     Text(Text),
     /// Not read, with the warning that says why.
