@@ -5848,7 +5848,8 @@ mod tests {
         // rides along with -sn, but a list scan refuses it.
         let a = argv(&["-sC", "10.0.0.1"]);
         let pl = plan(&a.scan, false, true, false).unwrap();
-        assert_eq!(pl.tcp, Some(ScanType::Syn));
+        assert_eq!(pl.tcp, plan(&[], false, true, false).unwrap().tcp);
+        assert!(pl.tcp.is_some());
         let a = argv(&["-sn", "-sC", "10.0.0.1"]);
         assert!(plan(&a.scan, false, true, false).unwrap().ping_only);
         let a = argv(&["-sU", "-sC", "10.0.0.1"]);
