@@ -510,3 +510,24 @@ end"#;
     assert!(kept <= 16 * 1024 * 1024 + 64, "{kept}");
     assert!(t.list.len() < 100);
 }
+
+#[tokio::test]
+async fn an_invalid_byte_table_value_is_bounded() {
+    // 16 MiB of invalid bytes in a table: 64 MiB as \xHH text, uncut.
+    let src = r#"
+categories = {"safe"}
+hostrule = function() return true end
+action = function() return {bad = ("\255"):rep(16 * 1024 * 1024)} end"#;
+    let scan = ScriptScan::new(vec![script("t", src)], ArgTable::default(), None).unwrap();
+    let mut hosts = vec![host_with(&[])];
+    scan.scan_hosts(&mut hosts).await;
+    let Some(ScriptValue::Table(t)) = &hosts[0].scripts[0].data else {
+        panic!()
+    };
+    let ScriptValue::Str(bad) = &t.named[0].1 else {
+        panic!()
+    };
+    assert_eq!(t.named[0].0, "bad");
+    assert!(bad.len() <= 16 * 1024 * 1024 + 3, "{}", bad.len());
+    assert!(bad.starts_with("\\xFF\\xFF") && bad.ends_with("..."));
+}
