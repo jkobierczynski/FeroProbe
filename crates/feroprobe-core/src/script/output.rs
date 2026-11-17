@@ -143,23 +143,19 @@ pub fn name_to_text_max(bytes: &[u8], max: usize) -> String {
 fn convert_bytes(bytes: &[u8], max: usize, double_backslash: bool) -> String {
     let mut out = String::with_capacity(bytes.len().min(max.saturating_add(1)));
     for chunk in bytes.utf8_chunks() {
-        let doubled;
-        let valid = if double_backslash && chunk.valid().contains('\\') {
-            doubled = chunk.valid().replace('\\', "\\\\");
-            doubled.as_str()
-        } else {
-            chunk.valid()
-        };
-        let room = max.saturating_add(1).saturating_sub(out.len());
-        if valid.len() > room {
-            let mut end = room;
-            while !valid.is_char_boundary(end) {
-                end += 1;
+        if double_backslash {
+            // Each piece ends in at most one `\`, doubled as it is copied,
+            // so nothing longer than the room left is ever built.
+            for piece in chunk.valid().split_inclusive('\\') {
+                if !push_bounded(&mut out, piece, max)
+                    || (piece.ends_with('\\') && !push_bounded(&mut out, "\\", max))
+                {
+                    return out;
+                }
             }
-            out.push_str(&valid[..end]);
+        } else if !push_bounded(&mut out, chunk.valid(), max) {
             return out;
         }
-        out.push_str(valid);
         for b in chunk.invalid() {
             if out.len() > max {
                 return out;
@@ -171,6 +167,22 @@ fn convert_bytes(bytes: &[u8], max: usize, double_backslash: bool) -> String {
         }
     }
     out
+}
+
+/// Appends `text` to `out` while `out` is at most `max` bytes, cutting at
+/// the first character boundary past `max`. False once `out` is full.
+fn push_bounded(out: &mut String, text: &str, max: usize) -> bool {
+    let room = max.saturating_add(1).saturating_sub(out.len());
+    if text.len() > room {
+        let mut end = room;
+        while !text.is_char_boundary(end) {
+            end += 1;
+        }
+        out.push_str(&text[..end]);
+        return false;
+    }
+    out.push_str(text);
+    out.len() <= max
 }
 
 /// A script's output for a terminal: control characters other than tab
@@ -220,6 +232,20 @@ mod tests {
 
     fn s(v: &str) -> ScriptValue {
         ScriptValue::Str(v.into())
+    }
+
+    #[test]
+    fn names_with_backslashes_stay_within_the_limit() {
+        // One long run of text before the backslash: the cut comes before
+        // anything past the limit is copied.
+        let mut name = "a".repeat(1_000_000);
+        name.push('\\');
+        assert_eq!(name_to_text_max(name.as_bytes(), 5), "aaaaaa");
+        assert_eq!(name_to_text_max(br"a\b", 2), r"a\\");
+        assert_eq!(name_to_text_max(br"a\b", 10), r"a\\b");
+        assert_eq!(name_to_text_max(br"\\", 1), r"\\");
+        assert_eq!(name_to_text_max(b"\\\xff", 10), r"\\\xFF");
+        assert_eq!(bytes_to_text_max(br"a\b", 10), r"a\b");
     }
 
     #[test]
