@@ -283,7 +283,13 @@ struct Args {
     /// Targets: IPv4 or IPv6 addresses, CIDR blocks (10.0.0.0/24, 2001:db8::/120),
     /// ranges (10.0.0.1-20), link-local addresses with their interface
     /// (fe80::1%eth0) or hostnames
-    #[arg(required_unless_present_any = ["input_file", "iflist", "resume", "script_help"])]
+    #[arg(required_unless_present_any = [
+        "input_file",
+        "iflist",
+        "resume",
+        "script_help",
+        "script_updatedb"
+    ])]
     targets: Vec<String>,
 
     /// -iL FILE: read more targets from FILE (one or more per line, # starts
@@ -558,6 +564,18 @@ struct Args {
     /// e.g. 30s or 5m [default: none; 10m with -T5, as in nmap]
     #[arg(long = "script-timeout", value_name = "TIME", value_parser = parse_duration)]
     script_timeout: Option<Duration>,
+
+    /// Print everything the scripts' connections send and receive (NSE:
+    /// lines on standard output), like nmap's --script-trace.
+    /// --packet-trace turns it on too
+    #[arg(long = "script-trace")]
+    script_trace: bool,
+
+    /// Index the scripts in your scripts directory
+    /// (~/.local/share/feroprobe/scripts) by category, so --script and -sC
+    /// can choose them by category, then stop. Needs no target
+    #[arg(long = "script-updatedb")]
+    script_updatedb: bool,
 
     /// Ports to scan, e.g. "22", "1-1024", "22,80,443", "-" for all.
     /// T: and U: mark TCP and UDP ports: "22,U:53,T:80" (unmarked ports
@@ -2521,6 +2539,28 @@ fn script_selection(args: &Args) -> Vec<String> {
     chosen
 }
 
+/// `--script-updatedb`: index the scripts directory's scripts by
+/// category, saying what was left out and why.
+fn update_script_db() -> Result<()> {
+    use feroprobe_core::script::{self, db};
+    let dir = db::user_dir().ok_or_else(|| {
+        anyhow::anyhow!("--script-updatedb: no scripts directory: set HOME or XDG_DATA_HOME")
+    })?;
+    let built_in = script::Script::built_in().map_err(|e| anyhow::anyhow!("{e}"))?;
+    let names: Vec<&str> = built_in.iter().map(|s| s.id.as_str()).collect();
+    println!("Updating the script database in {}.", dir.display());
+    let done = db::update(&dir, &names).map_err(|e| anyhow::anyhow!("--script-updatedb: {e}"))?;
+    for why in &done.skipped {
+        eprintln!("Warning: left out {why}");
+    }
+    let n = done.entries.len();
+    println!(
+        "Script database updated: {n} script{}.",
+        if n == 1 { "" } else { "s" }
+    );
+    Ok(())
+}
+
 /// The scripts `--script`, `-sC` or `-A` choose, loaded with their
 /// `--script-args`, or `None` when no script was asked for.
 fn script_scan(args: &Args) -> Result<Option<feroprobe_core::script::ScriptScan>> {
@@ -2531,6 +2571,7 @@ fn script_scan(args: &Args) -> Result<Option<feroprobe_core::script::ScriptScan>
             (args.script_args.is_some(), "--script-args"),
             (args.script_args_file.is_some(), "--script-args-file"),
             (args.script_timeout.is_some(), "--script-timeout"),
+            (args.script_trace, "--script-trace"),
         ] {
             if given {
                 eprintln!("Warning: {option} has no effect without --script or -sC");
@@ -3428,7 +3469,20 @@ fn main() -> Result<()> {
     // readable by root only), then give root up before any other file is
     // opened and before the runtime starts its threads.
     let settings = config::load()?;
+    let invoking_home = config::invoking_user_home()?;
     let privileges = privdrop::drop_to_invoking_user(first.keep_root)?;
+    // Once root is given up, the scripts directory is the invoking user's:
+    // root's (sudo's HOME) could not be read any more.
+    if matches!(privileges, privdrop::Outcome::Dropped { .. })
+        && let Some(home) = invoking_home
+    {
+        let xdg = std::env::var_os("XDG_DATA_HOME");
+        feroprobe_core::script::db::set_dir(feroprobe_core::script::db::dir_for(
+            xdg,
+            Some(home.into_os_string()),
+            None,
+        ));
+    }
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -3526,6 +3580,9 @@ async fn run(
     for w in &settings.warnings {
         eprintln!("Warning: {w}");
     }
+    if args.script_updatedb {
+        return update_script_db();
+    }
     if !args.script_help.is_empty() {
         let chosen = feroprobe_core::script::choose(&args.script_help.join(","))
             .map_err(|e| anyhow::anyhow!("--script-help: {e}"))?;
@@ -3540,6 +3597,9 @@ async fn run(
     let outputs = Outputs::from_args(&args)?;
     if args.packet_trace {
         feroprobe_core::packet_trace::enable();
+    }
+    if args.script_trace {
+        feroprobe_core::script::trace::enable();
     }
     // Like nmap, packet tracing or debugging shows the IPv4 options up
     // front: the bytes (once there is room for an address) and their reading.
@@ -5772,6 +5832,9 @@ mod tests {
         let a = argv(&["--script-help", "banner"]);
         assert_eq!(a.script_help, ["banner"]);
         assert!(Args::try_parse_from(["feroprobe", "--script", "banner"]).is_err());
+        // --script-updatedb needs no target; --script-trace is a flag.
+        assert!(argv(&["--script-updatedb"]).script_updatedb);
+        assert!(argv(&["--script", "banner", "--script-trace", "10.0.0.1"]).script_trace);
 
         let engine = script_scan(&argv(&["--script", "banner", "10.0.0.1"]))
             .unwrap()

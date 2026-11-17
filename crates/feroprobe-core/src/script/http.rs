@@ -20,6 +20,7 @@ use mlua::{Lua, MultiValue, Table, Value};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use super::socket::{Scope, Slot, host_arg, port_arg, tls_handshake};
+use super::trace::{Dir, Ends, Traced};
 use crate::model::Protocol;
 
 /// The `User-Agent` script requests send: FeroProbe's script engine
@@ -501,15 +502,29 @@ async fn attempt(
     req: &Request,
     bytes: &[u8],
 ) -> Result<Response, String> {
-    let tcp = crate::netif::connect_tcp(addr)
-        .await
-        .map_err(|e| e.to_string())?;
+    let tcp = match crate::netif::connect_tcp(addr).await {
+        Ok(t) => t,
+        Err(e) => {
+            Ends::tcp(None, addr).event(Dir::Out, &e.to_string());
+            return Err(e.to_string());
+        }
+    };
+    let ends = Ends::tcp(tcp.local_addr().ok(), addr);
+    ends.event(Dir::Out, "CONNECT");
     let head_only = req.method == "HEAD";
     if ssl {
-        let tls = tls_handshake(tcp, sni, req.timeout, true).await?;
-        exchange(tls, bytes, head_only, req.max_body).await
+        let tls = match tls_handshake(tcp, sni, req.timeout, true).await {
+            Ok(t) => t,
+            Err(e) => {
+                ends.event(Dir::Out, &e);
+                return Err(e);
+            }
+        };
+        let io = Traced { inner: tls, ends };
+        exchange(io, bytes, head_only, req.max_body).await
     } else {
-        exchange(tcp, bytes, head_only, req.max_body).await
+        let io = Traced { inner: tcp, ends };
+        exchange(io, bytes, head_only, req.max_body).await
     }
 }
 

@@ -1549,11 +1549,14 @@ Without the slash it is refused, as in nmap, so that a directory named
 like a category is never picked by mistake.
 .PP
 Names, categories and expressions choose among the scripts built into
-FeroProbe.
+FeroProbe and the scripts installed in your scripts directory that its
+index lists.
 An item that matches none of them is tried as a file, then as a
-directory; one that matches nothing at all stops the run before anything
-is sent, as does a script that fails to load, or two scripts with the
-same name.
+directory, then as the name of a script in the scripts directory
+(\f[V]--script my-check\f[R] finds \f[V]my-check.lua\f[R] there even
+before it is indexed, as nmap does); one that matches nothing at all
+stops the run before anything is sent, as does a script that fails to
+load, or two scripts with the same name.
 A \f[V]+\f[R] before an item runs its scripts on every host and port
 whatever their rules say (scripts with a \f[V]portrule\f[R] still only
 see the ports that may be open).
@@ -1611,6 +1614,89 @@ Built into FeroProbe
   opens, ...
 \f[R]
 .fi
+.SS \f[V]--script-trace\f[R]
+.PP
+Print everything the scripts\[aq] connections do on standard output, one
+line each, in nmap\[aq]s script-trace layout: the protocol, the local
+and remote ends, \f[V]>\f[R] towards the target or \f[V]<\f[R] from it,
+and after the \f[V]|\f[R] either an event (\f[V]CONNECT\f[R],
+\f[V]CLOSE\f[R], \f[V]EOF\f[R], \f[V]TIMEOUT\f[R] or the error) or the
+data sent or received.
+.IP
+.nf
+\f[C]
+NSE: TCP 192.0.2.1:40312 > 192.0.2.10:21 | CONNECT
+NSE: TCP 192.0.2.1:40312 < 192.0.2.10:21 | 220 (vsFTPd 3.0.5)\[rs]r\[rs]n
+NSE: TCP 192.0.2.1:40312 > 192.0.2.10:21 | USER anonymous\[rs]r\[rs]n
+NSE: TCP 192.0.2.1:40312 > 192.0.2.10:21 | CLOSE
+\f[R]
+.fi
+.PP
+Data that is mostly text (at most 5% of its bytes unprintable, as nmap
+decides) is shown on one line, with line ends and tabs as
+\f[V]\[rs]r\f[R], \f[V]\[rs]n\f[R], \f[V]\[rs]t\f[R], a backslash as
+\f[V]\[rs]\[rs]\f[R] and other bytes as \f[V]\[rs]xHH\f[R].
+Other data is shown as a hex dump, sixteen bytes a line with their
+printable characters.
+Connections that speak TLS show the data inside the TLS, as nmap\[aq]s
+do.
+The HTTP library\[aq]s connections are traced too.
+The \f[V]NSE:\f[R] prefix is nmap\[aq]s, kept so that tools reading
+nmap\[aq]s trace read FeroProbe\[aq]s.
+.PP
+\f[V]--packet-trace\f[R] turns the script trace on as well, as in nmap
+(and the \f[V]p\f[R] key while a scan runs turns both on and off).
+Without \f[V]--script\f[R] or \f[V]-sC\f[R] the option does nothing, and
+a warning says so.
+.SS \f[V]--script-updatedb\f[R]
+.PP
+Index the scripts in your scripts directory by category, then stop.
+It needs no target and sends nothing.
+.PP
+The scripts directory is \f[V]$XDG_DATA_HOME/feroprobe/scripts\f[R],
+which is \f[V]\[ti]/.local/share/feroprobe/scripts\f[R] when
+\f[V]XDG_DATA_HOME\f[R] is not set (on Windows,
+\f[V]%APPDATA%\[rs]feroprobe\[rs]scripts\f[R]).
+Put your own \f[V].lua\f[R] scripts there, then run:
+.IP
+.nf
+\f[C]
+$ feroprobe --script-updatedb
+Updating the script database in /home/me/.local/share/feroprobe/scripts.
+Script database updated: 2 scripts.
+\f[R]
+.fi
+.PP
+Each script is loaded in the sandbox (as when it runs, with no network)
+to read its categories, and the result is written to \f[V]script.db\f[R]
+in that directory, one line per script, in nmap\[aq]s layout:
+.IP
+.nf
+\f[C]
+Entry { filename = \[dq]my-check.lua\[dq], categories = { \[dq]discovery\[dq], \[dq]safe\[dq], } }
+\f[R]
+.fi
+.PP
+From then on \f[V]--script\f[R] and \f[V]-sC\f[R] choose those scripts
+by category and expression as well as by name: a script of yours in
+\f[V]default\f[R] runs with \f[V]-sC\f[R], as in nmap.
+A script added or whose categories changed is chosen by category only
+after the next \f[V]--script-updatedb\f[R]; by name it is found at once.
+A script that does not load, or that has a built-in script\[aq]s name,
+is left out of the index with a warning (give its path to
+\f[V]--script\f[R] to run it anyway).
+A \f[V]script.db\f[R] that FeroProbe cannot read stops the run with a
+message naming the fix, and one that lists a script that has gone does
+too.
+FeroProbe reads the index as data and never runs it.
+.PP
+Under \f[V]sudo\f[R], FeroProbe gives up root for the user who ran
+\f[V]sudo\f[R] (see Privileges and platforms), and uses that user\[aq]s
+scripts directory, so \f[V]sudo feroprobe --script-updatedb\f[R] and
+\f[V]sudo feroprobe -sC ...\f[R] see your own scripts.
+With \f[V]--keep-root\f[R], or as root without \f[V]sudo\f[R], it is
+root\[aq]s.
+nmap uses the \f[V]\[ti]/.nmap\f[R] of whoever it runs as.
 .SS \f[V]--script-timeout <time>\f[R]
 .PP
 The longest one script may run against one host or port, counted from
@@ -3571,6 +3657,7 @@ RCVD (0.0545s) TCP 10.0.0.5:22 > 10.0.0.2:48100 SA seq=1290442 win=64240 ttl=64
 .PP
 With \f[V]-f\f[R]/\f[V]--mtu\f[R] every fragment gets its own line (see
 Firewall/IDS evasion and spoofing).
+As in nmap, \f[V]--packet-trace\f[R] also turns on the script trace.
 .SS \f[V]--dry-run\f[R]
 .PP
 Send nothing.
@@ -4435,9 +4522,6 @@ These nmap options are refused as unknown:
 .IP \[bu] 2
 Scans and discovery: \f[V]-sI\f[R] (idle scan, not planned),
 \f[V]-iR\f[R], \f[V]--resolve-all\f[R].
-.IP \[bu] 2
-Scripting: \f[V]--script-trace\f[R] and \f[V]--script-updatedb\f[R]
-(planned).
 .IP \[bu] 2
 Output and misc: \f[V]--port-ratio\f[R].
 .PP

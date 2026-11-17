@@ -158,6 +158,72 @@ fn choosing_scripts() {
 }
 
 #[test]
+fn installed_scripts_and_their_index() {
+    let built = || {
+        vec![script(
+            "alpha",
+            &format!("{PORT_SCRIPT} action = function() end"),
+        )]
+    };
+    let dir = std::env::temp_dir().join(format!("feroprobe-installed-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    // No directory: --script-updatedb says so; choosing still works.
+    let e = db::update(&dir, &["alpha"]).unwrap_err();
+    assert!(e.0.contains("no scripts directory"), "{e}");
+    assert_eq!(choose_in("alpha", built(), Some(&dir)).unwrap().len(), 1);
+    std::fs::create_dir_all(&dir).unwrap();
+    let mine = "description = 'mine' categories = {'default', 'safe'} \
+                hostrule = function() return true end action = function() return 'x' end";
+    std::fs::write(dir.join("mine.lua"), mine).unwrap();
+    std::fs::write(dir.join("broken.lua"), "syntax error here").unwrap();
+    std::fs::write(dir.join("alpha.lua"), mine).unwrap();
+    std::fs::write(dir.join("notes.txt"), "not a script").unwrap();
+    let ids = |spec: &str| -> Vec<String> {
+        choose_in(spec, built(), Some(&dir))
+            .unwrap()
+            .into_iter()
+            .map(|s| s.id)
+            .collect()
+    };
+    // By name without the index, as nmap; not by category yet.
+    assert_eq!(ids("mine"), ["mine"]);
+    assert_eq!(ids("mine.lua"), ["mine"]);
+    assert_eq!(ids("safe"), ["alpha"]);
+    // Only a plain name is looked up in the directory.
+    assert!(choose_in("../mine", built(), Some(&dir)).is_err());
+
+    let done = db::update(&dir, &["alpha"]).unwrap();
+    let names: Vec<&str> = done.entries.iter().map(|e| e.filename.as_str()).collect();
+    assert_eq!(names, ["mine.lua"]);
+    assert_eq!(done.skipped.len(), 2, "{:?}", done.skipped);
+    assert!(done.skipped.iter().any(|s| s.contains("broken.lua")));
+    assert!(done.skipped.iter().any(|s| s.contains("built-in")));
+    assert_eq!(
+        std::fs::read_to_string(dir.join(db::DB_FILE)).unwrap(),
+        "Entry { filename = \"mine.lua\", categories = { \"default\", \"safe\", } }\n"
+    );
+    // Now by category and expression too; the built-in alpha keeps its name.
+    assert_eq!(ids("safe"), ["alpha", "mine"]);
+    assert_eq!(ids("default and not alpha"), ["mine"]);
+    let chosen = choose_in("default", built(), Some(&dir)).unwrap();
+    assert_eq!(chosen[0].selection, Selection::Category);
+    assert_eq!(chosen[0].path, Some(dir.join("mine.lua")));
+    assert!(help_text(&chosen).contains("File: "));
+    // The same file by index and by path is loaded once.
+    let path = dir.join("mine.lua").display().to_string();
+    assert_eq!(ids(&format!("safe,{path}")), ["alpha", "mine"]);
+    // A script the index lists but that is gone names the fix.
+    std::fs::remove_file(dir.join("mine.lua")).unwrap();
+    let e = choose_in("safe", built(), Some(&dir)).unwrap_err();
+    assert!(e.0.contains("--script-updatedb"), "{e}");
+    // A damaged index is an error, not a silent empty one.
+    std::fs::write(dir.join(db::DB_FILE), "os.exit()").unwrap();
+    let e = choose_in("alpha", built(), Some(&dir)).unwrap_err();
+    assert!(e.0.contains("not an Entry line"), "{e}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
 fn dependencies_set_the_order() {
     let mk = |id: &str, deps: &str| {
         Arc::new(script(

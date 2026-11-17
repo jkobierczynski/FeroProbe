@@ -15,6 +15,7 @@
 
 pub mod args;
 mod base64;
+pub mod db;
 mod digest;
 mod engine;
 mod http;
@@ -24,6 +25,7 @@ mod sandbox;
 pub mod select;
 mod socket;
 mod tls;
+pub mod trace;
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -272,13 +274,25 @@ impl Script {
 
 /// The scripts `--script` chooses, in the order nmap would: the built-in
 /// scripts any rule matches (by name, category or expression), then the
-/// files and directories the other rules name. A rule that matches
-/// nothing is an error, as in nmap.
+/// installed scripts the index ([`db`]) says match, then the files and
+/// directories the other rules name, and last a script of that name in
+/// the scripts directory. A rule that matches nothing is an error, as in
+/// nmap.
 pub fn choose(spec: &str) -> Result<Vec<Script>, ScriptError> {
-    choose_from(spec, Script::built_in()?)
+    choose_in(spec, Script::built_in()?, db::user_dir().as_deref())
 }
 
+#[cfg(test)]
 fn choose_from(spec: &str, built_in: Vec<Script>) -> Result<Vec<Script>, ScriptError> {
+    choose_in(spec, built_in, None)
+}
+
+/// [`choose`] with these built-in scripts and this scripts directory.
+fn choose_in(
+    spec: &str,
+    built_in: Vec<Script>,
+    installed: Option<&Path>,
+) -> Result<Vec<Script>, ScriptError> {
     let rules = select::split_rules(spec);
     if rules.is_empty() {
         return err("--script needs at least one script, category or path");
@@ -286,6 +300,7 @@ fn choose_from(spec: &str, built_in: Vec<Script>) -> Result<Vec<Script>, ScriptE
     let parsed: Vec<Option<select::Expr>> = rules.iter().map(|r| select::parse(&r.text)).collect();
     let mut used = vec![false; rules.len()];
     let mut chosen: Vec<Script> = Vec::new();
+    let built_in_ids: Vec<String> = built_in.iter().map(|s| s.id.clone()).collect();
     for script in built_in {
         let mut pick: Option<(bool, Selection)> = None;
         for (i, rule) in rules.iter().enumerate() {
@@ -303,6 +318,47 @@ fn choose_from(spec: &str, built_in: Vec<Script>) -> Result<Vec<Script>, ScriptE
             }
         }
         if let Some((forced, selection)) = pick {
+            chosen.push(Script {
+                forced,
+                selection,
+                ..script
+            });
+        }
+    }
+    // The installed scripts, by their index: loaded only when chosen. A
+    // built-in script's name stays the built-in script's.
+    let entries = match installed {
+        Some(dir) if dir.is_dir() => db::read(dir)?,
+        _ => Vec::new(),
+    };
+    for entry in &entries {
+        if built_in_ids.iter().any(|id| id == entry.id()) {
+            continue;
+        }
+        let mut pick: Option<(bool, Selection)> = None;
+        for (i, rule) in rules.iter().enumerate() {
+            let Some(e) = &parsed[i] else { continue };
+            let mut by_name = false;
+            if e.matches(entry.id(), &entry.categories, &mut by_name) {
+                used[i] = true;
+                let sel = if by_name {
+                    Selection::Name
+                } else {
+                    Selection::Category
+                };
+                let forced = rule.forced || pick.is_some_and(|(f, _)| f);
+                pick = Some((forced, pick.map_or(sel, |(_, s)| s)));
+            }
+        }
+        if let Some((forced, selection)) = pick
+            && let Some(dir) = installed
+        {
+            let script = Script::from_file(&dir.join(&entry.filename)).map_err(|e| {
+                ScriptError(format!(
+                    "{e} (listed in {}; run feroprobe --script-updatedb if it changed)",
+                    dir.join(db::DB_FILE).display()
+                ))
+            })?;
             chosen.push(Script {
                 forced,
                 selection,
@@ -337,6 +393,10 @@ fn choose_from(spec: &str, built_in: Vec<Script>) -> Result<Vec<Script>, ScriptE
             found.push((Script::from_file(path)?, Selection::File));
         } else if with_ext.is_file() {
             found.push((Script::from_file(&with_ext)?, Selection::File));
+        } else if let Some(f) = installed.and_then(|dir| in_dir(dir, text)) {
+            // A script in the scripts directory, by name, as nmap finds
+            // one there without its index.
+            found.push((Script::from_file(&f)?, Selection::Name));
         } else {
             return err(format!(
                 "'{text}' did not match a category, filename, or directory"
@@ -364,6 +424,22 @@ fn choose_from(spec: &str, built_in: Vec<Script>) -> Result<Vec<Script>, ScriptE
         return err(format!("duplicate script ID: '{}'", w[0]));
     }
     Ok(chosen)
+}
+
+/// The file of the script named `name` (with or without `.lua`) in the
+/// scripts directory `dir`, if there is one. Only a plain name is looked
+/// up, never a path.
+fn in_dir(dir: &Path, name: &str) -> Option<PathBuf> {
+    if name.is_empty() || name.contains(['/', '\\']) || name.starts_with('.') {
+        return None;
+    }
+    let file = if name.ends_with(&format!(".{EXTENSION}")) {
+        name.to_string()
+    } else {
+        format!("{name}.{EXTENSION}")
+    };
+    let path = dir.join(file);
+    path.is_file().then_some(path)
 }
 
 /// `--script-help`: each script's name, categories and description, in
