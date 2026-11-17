@@ -1832,6 +1832,9 @@ Control characters other than tab and newline are shown as
 \f[V]\[rs]xHH\f[R], so a service cannot send terminal escape sequences
 through a script.
 Results are listed by script name.
+In the names of a returned table, a backslash is doubled, so a name
+holding the byte 0xFF (\f[V]\[rs]xFF\f[R]) stays apart from one holding
+the text \f[V]\[rs]xFF\f[R] (\f[V]\[rs]\[rs]xFF\f[R]).
 .PP
 The XML report has nmap\[aq]s elements:
 \f[V]<script id=\[dq]...\[dq] output=\[dq]...\[dq]>\f[R] in
@@ -2244,6 +2247,12 @@ A timed-out host is reported without port or OS results:
 \f[V]timedout=\[dq]true\[dq]\f[R] in XML.
 It is not traced.
 \f[V]0\f[R] means no limit, as in nmap.
+.PP
+The host timeout does not yet cover scripts (\f[V]--script\f[R]): a host
+that finished its scans in time runs its scripts with their own limit,
+\f[V]--script-timeout\f[R], per script.
+Use that option to bound the script phase (but see the note on Lua\[aq]s
+pattern functions under Script sandbox and scope).
 .SS \f[V]--min-hostgroup <size>\f[R], \f[V]--max-hostgroup <size>\f[R]
 .PP
 As in nmap, hosts are pinged in batches of up to 4096 targets, then

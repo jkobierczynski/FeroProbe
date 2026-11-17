@@ -130,9 +130,26 @@ pub fn bytes_to_text(bytes: &[u8]) -> String {
 /// [`bytes_to_text`], stopping once the text is longer than `max` bytes
 /// (an invalid byte takes four), so a long input is never converted whole.
 pub fn bytes_to_text_max(bytes: &[u8], max: usize) -> String {
+    convert_bytes(bytes, max, false)
+}
+
+/// A table name as text, like [`bytes_to_text_max`] but with every `\`
+/// doubled, so a name holding the byte 0xFF (`\xFF`) and one holding the
+/// four characters `\xFF` (`\\xFF`) stay apart.
+pub fn name_to_text_max(bytes: &[u8], max: usize) -> String {
+    convert_bytes(bytes, max, true)
+}
+
+fn convert_bytes(bytes: &[u8], max: usize, double_backslash: bool) -> String {
     let mut out = String::with_capacity(bytes.len().min(max.saturating_add(1)));
     for chunk in bytes.utf8_chunks() {
-        let valid = chunk.valid();
+        let doubled;
+        let valid = if double_backslash && chunk.valid().contains('\\') {
+            doubled = chunk.valid().replace('\\', "\\\\");
+            doubled.as_str()
+        } else {
+            chunk.valid()
+        };
         let room = max.saturating_add(1).saturating_sub(out.len());
         if valid.len() > room {
             let mut end = room;
@@ -245,6 +262,10 @@ mod tests {
         assert_eq!(bytes_to_text_max(b"\xff\xff\xff\xff", 5), "\\xFF\\xFF");
         assert_eq!(bytes_to_text_max("abcé".as_bytes(), 3), "abcé");
         assert_eq!(bytes_to_text_max(b"abcdef", 2), "abc");
+        // A name with the byte 0xFF and one with the text \xFF differ.
+        assert_eq!(name_to_text_max(b"\xff", 100), "\\xFF");
+        assert_eq!(name_to_text_max(b"\\xFF", 100), "\\\\xFF");
+        assert_eq!(bytes_to_text_max(b"\\xFF", 100), "\\xFF");
         let empty = ScriptResult {
             id: "x".into(),
             output: String::new(),

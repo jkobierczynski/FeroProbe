@@ -9,7 +9,7 @@ use futures::StreamExt;
 use mlua::{Function, Lua, MultiValue, Table, Value};
 
 use super::args::{ArgTable, ArgValue};
-use super::output::{ScriptResult, ScriptTable, ScriptValue, bytes_to_text, bytes_to_text_max};
+use super::output::{ScriptResult, ScriptTable, ScriptValue, bytes_to_text_max, name_to_text_max};
 use super::sandbox::{self, Budget};
 use super::socket::{Scope, ScriptSocket};
 use super::{Script, ScriptError};
@@ -115,6 +115,28 @@ fn args_to_lua(lua: &Lua, t: &ArgTable) -> mlua::Result<Table> {
     Ok(out)
 }
 
+/// Most text one `print` or `fero.debug` call writes to the debugging
+/// output.
+const MAX_DEBUG_BYTES: usize = 64 * 1024;
+
+/// `bytes` as text for the debugging output, at most `room` bytes of it
+/// (then "..."), taking what it uses from `room`.
+pub(crate) fn debug_text(bytes: &[u8], room: &mut usize) -> String {
+    let mut text = bytes_to_text_max(bytes, *room);
+    if text.len() > *room {
+        let mut end = *room;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text.truncate(end);
+        text.push_str("...");
+        *room = 0;
+    } else {
+        *room -= text.len();
+    }
+    text
+}
+
 /// Set up the `fero` library and the script's globals in a new state.
 pub(crate) fn install_library(
     lua: &Lua,
@@ -145,8 +167,11 @@ pub(crate) fn install_library(
     )?;
     let who = id.to_string();
     let debug = lua.create_function(move |_, (level, msg): (u8, mlua::LuaString)| {
-        let msg = bytes_to_text(&msg.as_bytes());
-        crate::debug::debug(level, || format!("{who}: {msg}"));
+        if crate::debug::debugging() >= level {
+            let mut room = MAX_DEBUG_BYTES;
+            let msg = debug_text(&msg.as_bytes(), &mut room);
+            eprintln!("{who}: {msg}");
+        }
         Ok(())
     })?;
     fero.raw_set("debug", debug)?;
@@ -156,16 +181,24 @@ pub(crate) fn install_library(
     g.raw_set(
         "print",
         lua.create_function(move |_, vals: MultiValue| {
-            let parts: Vec<String> = vals
-                .iter()
-                .map(|v| {
-                    tostring
-                        .call::<mlua::LuaString>(v.clone())
-                        .map(|s| bytes_to_text(&s.as_bytes()))
-                        .unwrap_or_default()
-                })
-                .collect();
-            crate::debug::debug(1, || format!("{who}: {}", parts.join("\t")));
+            // Nothing is converted unless it is shown, and then at most
+            // MAX_DEBUG_BYTES of it.
+            if crate::debug::debugging() < 1 {
+                return Ok(());
+            }
+            let mut room = MAX_DEBUG_BYTES;
+            let mut parts = Vec::new();
+            for v in vals.iter() {
+                if room == 0 {
+                    break;
+                }
+                let text = tostring
+                    .call::<mlua::LuaString>(v.clone())
+                    .map(|s| debug_text(&s.as_bytes(), &mut room))
+                    .unwrap_or_default();
+                parts.push(text);
+            }
+            eprintln!("{who}: {}", parts.join("\t"));
             Ok(())
         })?,
     )?;
@@ -349,7 +382,8 @@ fn convert(lua: &Lua, v: &Value, depth: usize, kept: &mut Kept) -> ScriptValue {
         if kept.full() {
             break;
         }
-        let k = budgeted_text(&k, kept);
+        let room = MAX_OUTPUT_BYTES.saturating_sub(kept.bytes);
+        let k = kept.text(name_to_text_max(&k.as_bytes(), room));
         out.named.push((k, convert(lua, &x, depth + 1, kept)));
     }
     ScriptValue::Table(out)
@@ -580,6 +614,8 @@ impl ScriptScan {
                     };
                     defined && {
                         let budget = Budget::new();
+                        // Loading the rule state runs the script's top level.
+                        budget.reset(self.rule_deadline());
                         match self.state(s, on, &budget) {
                             Ok(lua) => self.rule_says(&lua, &budget, s, on),
                             Err(e) => {
@@ -636,6 +672,8 @@ impl ScriptScan {
                         continue;
                     }
                     let budget = Budget::new();
+                    // Loading the rule state runs the script's top level.
+                    budget.reset(self.rule_deadline());
                     let lua = match self.state(s, Against::Host(h), &budget) {
                         Ok(l) => l,
                         Err(e) => {

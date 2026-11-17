@@ -80,6 +80,7 @@ pub fn parse(text: &str) -> Result<ArgTable, ArgsError> {
     let mut p = Parser {
         s: text.as_bytes(),
         i: 0,
+        depth: 0,
     };
     let table = p.fields(None)?;
     p.space();
@@ -89,9 +90,14 @@ pub fn parse(text: &str) -> Result<ArgTable, ArgsError> {
     Ok(table)
 }
 
+/// Deepest nesting of `{...}` tables in script arguments.
+const MAX_NESTING: usize = 100;
+
 struct Parser<'a> {
     s: &'a [u8],
     i: usize,
+    /// Tables open around the current position.
+    depth: usize,
 }
 
 impl Parser<'_> {
@@ -160,8 +166,13 @@ impl Parser<'_> {
         self.hws();
         match self.peek() {
             Some(b'{') => {
+                if self.depth >= MAX_NESTING {
+                    return Err(self.err("tables nested too deeply"));
+                }
                 self.i += 1;
+                self.depth += 1;
                 let t = self.fields(Some(b'}'))?;
+                self.depth -= 1;
                 self.space();
                 if self.peek() != Some(b'}') {
                     return Err(self.err("missing '}'"));
@@ -276,5 +287,10 @@ mod tests {
         assert!(parse("a=\"b").is_err());
         assert!(parse("a}").is_err());
         assert!(parse("{a}=b").is_err());
+        // Deep nesting is an error, not a stack overflow.
+        let deep = format!("a={}{}", "{".repeat(100_000), "}".repeat(100_000));
+        assert_eq!(parse(&deep).unwrap_err().what, "tables nested too deeply");
+        let ok = format!("a={}{}", "{".repeat(100), "}".repeat(100));
+        assert!(parse(&ok).is_ok());
     }
 }

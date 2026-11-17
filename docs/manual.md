@@ -1171,7 +1171,10 @@ results:` before the first host and `Post-scan script results:` after the
 last, in nmap's layout: `|_name: output` for one line, and `| ` before
 every line but the last for more. Control characters other than tab and
 newline are shown as `\xHH`, so a service cannot send terminal escape
-sequences through a script. Results are listed by script name.
+sequences through a script. Results are listed by script name. In the
+names of a returned table, a backslash is doubled, so a name holding the
+byte 0xFF (`\xFF`) stays apart from one holding the text `\xFF`
+(`\\xFF`).
 
 The XML report has nmap's elements: `<script id="..." output="...">` in
 `<port>`, `<hostscript>` in `<host>`, and `<prescript>` and `<postscript>`
@@ -1429,6 +1432,12 @@ sharing `--concurrency` and the packet rate. A timed-out host is reported
 without port or OS results: `Skipping host <addr> due to host timeout` in
 normal output, `Status: Timeout` in grepable output and `timedout="true"`
 in XML. It is not traced. `0` means no limit, as in nmap.
+
+The host timeout does not yet cover scripts (`--script`): a host that
+finished its scans in time runs its scripts with their own limit,
+`--script-timeout`, per script. Use that option to bound the script
+phase (but see the note on Lua's pattern functions under
+[Script sandbox and scope](#script-sandbox-and-scope)).
 
 #### `--min-hostgroup <size>`, `--max-hostgroup <size>`
 

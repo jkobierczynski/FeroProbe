@@ -531,3 +531,63 @@ action = function() return {bad = ("\255"):rep(16 * 1024 * 1024)} end"#;
     assert!(bad.len() <= 16 * 1024 * 1024 + 3, "{}", bad.len());
     assert!(bad.starts_with("\\xFF\\xFF") && bad.ends_with("..."));
 }
+
+#[tokio::test]
+async fn loading_the_rule_state_has_a_deadline() {
+    // The top level runs at load (refused here, to get past it), then
+    // again for the rule state, where it would loop for a second.
+    let src = r#"
+categories = {"safe"}
+hostrule = function() return true end
+action = function() return "ran" end
+if SCRIPT_TYPE ~= "load" then
+  local t = os.clock() while os.clock() - t < 1 do end
+end"#;
+    let scan = ScriptScan::new(
+        vec![script("t", src)],
+        ArgTable::default(),
+        Some(Duration::from_millis(20)),
+    )
+    .unwrap();
+    let mut hosts = vec![host_with(&[])];
+    let started = std::time::Instant::now();
+    scan.scan_hosts(&mut hosts).await;
+    // Rule state stopped at 20 ms; the action's state likewise.
+    assert!(
+        started.elapsed() < Duration::from_millis(900),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+#[tokio::test]
+async fn binary_and_escaped_names_stay_apart() {
+    let src = r#"
+categories = {"safe"}
+hostrule = function() return true end
+action = function() return {[string.char(255)] = "byte", ["\\xFF"] = "text"} end"#;
+    let scan = ScriptScan::new(vec![script("t", src)], ArgTable::default(), None).unwrap();
+    let mut hosts = vec![host_with(&[])];
+    scan.scan_hosts(&mut hosts).await;
+    let Some(ScriptValue::Table(t)) = &hosts[0].scripts[0].data else {
+        panic!()
+    };
+    let names: Vec<&str> = t.named.iter().map(|(k, _)| k.as_str()).collect();
+    assert_eq!(names, ["\\\\xFF", "\\xFF"]);
+    assert_eq!(t.named[0].1, ScriptValue::Str("text".into()));
+    assert_eq!(t.named[1].1, ScriptValue::Str("byte".into()));
+}
+
+#[test]
+fn debug_output_is_bounded() {
+    let mut room = 10;
+    assert_eq!(engine::debug_text(b"hello", &mut room), "hello");
+    assert_eq!(room, 5);
+    // Cut at 5 bytes, inside the second \xFF, then "...".
+    assert_eq!(
+        engine::debug_text(&[0xff; 1_000_000], &mut room),
+        "\\xFF\\..."
+    );
+    assert_eq!(room, 0);
+    assert_eq!(engine::debug_text(b"more", &mut room), "...");
+}
