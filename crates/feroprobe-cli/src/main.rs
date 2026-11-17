@@ -1182,7 +1182,7 @@ fn open_report_as_root(path: &str, append: bool) -> Result<std::fs::File> {
                 // A directory link's target may end in "/": drop it.
                 while buf.len() > 1 && (buf.ends_with(b"/") || buf.ends_with(b"/.")) {
                     let cut = if buf.ends_with(b"/.") { 2 } else { 1 };
-                    buf.truncate(buf.len() - cut);
+                    buf.truncate((buf.len() - cut).max(1));
                 }
             }
             let target = std::path::Path::new(std::ffi::OsStr::from_bytes(&buf));
@@ -4382,6 +4382,14 @@ mod tests {
         std::os::unix::fs::symlink(format!("{}/", important.display()), &slash).unwrap();
         assert!(open(&slash).is_err());
         assert_eq!(std::fs::read_to_string(&important).unwrap(), "keep");
+        // A directory link to "/." still resolves from "/", not from the
+        // link's own directory.
+        let to_root = dir.join("to-root");
+        std::os::unix::fs::symlink("/.", &to_root).unwrap();
+        let rel = dir.strip_prefix("/").unwrap().join("via-root.txt");
+        assert!(open(&to_root.join(&rel)).is_ok());
+        assert!(dir.join("via-root.txt").exists());
+        assert!(!dir.join(&rel).exists());
         // /dev/stdout is root's link in root's /dev.
         if std::path::Path::new("/dev/stdout").is_symlink() {
             assert!(open(std::path::Path::new("/dev/stdout")).is_ok());
