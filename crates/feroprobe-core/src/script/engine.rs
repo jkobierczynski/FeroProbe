@@ -149,7 +149,9 @@ pub(crate) fn debug_join<T>(
     let mut line = String::new();
     for (i, part) in parts.enumerate() {
         if i > 0 {
-            if room == 0 {
+            // No room for the tab and at least one byte of the next value:
+            // stop before converting it.
+            if room <= 1 {
                 line.push_str("...");
                 break;
             }

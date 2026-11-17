@@ -595,8 +595,8 @@ fn debug_output_is_bounded() {
 #[tokio::test]
 async fn print_stops_converting_once_the_line_is_full() {
     crate::debug::set_debugging(1);
-    // The first argument fills the line exactly: the second's __tostring
-    // must not run.
+    // The first argument fills the line exactly, or all but the byte the
+    // tab takes: the second's __tostring must not run.
     let src = r#"
 categories = {"safe"}
 hostrule = function() return true end
@@ -604,6 +604,8 @@ action = function()
   local called = false
   local late = setmetatable({}, {__tostring = function() called = true return "x" end})
   print(string.rep("a", 64 * 1024), late)
+  -- The tab after this one takes the last byte.
+  print(string.rep("a", 64 * 1024 - 1), late)
   return called and "called" or "not called"
 end"#;
     let scan = ScriptScan::new(vec![script("t", src)], ArgTable::default(), None).unwrap();
