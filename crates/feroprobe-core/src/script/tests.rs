@@ -1041,3 +1041,64 @@ action = function(host, port) return port.service end
         .collect();
     assert_eq!(ran, [7, 8, 80, 8081, 993, 5555]);
 }
+
+#[tokio::test]
+async fn title_references_decode_once() {
+    let (port, _) = web(|_| {
+        b"HTTP/1.1 200 OK\r\nContent-Length: 66\r\n\r\n<title>&#38;lt; &#xFFFFFFFFFFFFFFFF; &#x41;&AMP;&#99999999;</title>"
+            .to_vec()
+    })
+    .await;
+    let scan = ScriptScan::new(vec![built_in("http-title")], ArgTable::default(), None).unwrap();
+    let mut hosts = vec![host_with_services(&[(port, "http")])];
+    scan.scan_hosts(&mut hosts).await;
+    assert_eq!(
+        hosts[0].ports[0].scripts[0].output,
+        "&lt; &#xFFFFFFFFFFFFFFFF; A&&#99999999;"
+    );
+}
+
+#[tokio::test]
+async fn credentials_stay_on_their_port_and_forms_keep_values() {
+    // The second server's port, filled in once both are up.
+    static NEXT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
+    let (other, seen_other) =
+        web(|_| b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok".to_vec()).await;
+    NEXT.store(other, std::sync::atomic::Ordering::Relaxed);
+    let (port, seen) = web(|req| {
+        if req.starts_with("POST") {
+            let body = req.split("\r\n\r\n").nth(1).unwrap_or("").to_string();
+            return format!("HTTP/1.1 200 OK\r\n\r\n{body}").into_bytes();
+        }
+        let to = NEXT.load(std::sync::atomic::Ordering::Relaxed);
+        format!(
+            "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:{to}/\r\nContent-Length: 0\r\n\r\n"
+        )
+        .into_bytes()
+    })
+    .await;
+    let src = format!(
+        r#"{PORT_SCRIPT}
+action = function(host, port)
+  if port.number ~= {port} then return nil end
+  local r = fero.http.get(host, port, "/", {{ auth = {{ username = "u", password = "p" }},
+    cookies = "s=1" }})
+  local f = fero.http.post(host, port, "/", nil, {{ "a", "b", x = "y" }})
+  return r.status .. " " .. f.body
+end"#
+    );
+    let scan = ScriptScan::new(vec![script("c", &src)], ArgTable::default(), None).unwrap();
+    let mut hosts = vec![host_with(&[
+        (port, PortState::Open),
+        (other, PortState::Open),
+    ])];
+    scan.scan_hosts(&mut hosts).await;
+    assert_eq!(hosts[0].ports[0].scripts[0].output, "200 1=a&2=b&x=y");
+    assert!(seen.lock().unwrap()[0].contains("\r\nAuthorization: Basic dTpw\r\n"));
+    let o = seen_other.lock().unwrap();
+    assert!(
+        !o[0].contains("Authorization") && !o[0].contains("Cookie"),
+        "{}",
+        o[0]
+    );
+}

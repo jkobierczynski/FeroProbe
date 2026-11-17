@@ -173,10 +173,15 @@ local function form_encode(t)
       return string.format("%%%02X", c:byte())
     end))
   end
-  local keys = {}
-  for k in pairs(t) do keys[#keys + 1] = tostring(k) end
-  table.sort(keys)
-  for _, k in ipairs(keys) do parts[#parts + 1] = enc(k) .. "=" .. enc(t[k]) end
+  local items = {}
+  for k, v in pairs(t) do items[#items + 1] = { tostring(k), v } end
+  table.sort(items, function(a, b)
+    if a[1] ~= b[1] then return a[1] < b[1] end
+    return tostring(a[2]) < tostring(b[2])
+  end)
+  for _, kv in ipairs(items) do
+    parts[#parts + 1] = enc(kv[1]) .. "=" .. enc(kv[2])
+  end
   return table.concat(parts, "&")
 end
 fero.http.request = function(method, host, port, path, options)

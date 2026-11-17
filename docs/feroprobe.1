@@ -1944,6 +1944,10 @@ This is the script engine\[aq]s signature (see
 A request goes over TLS or not as the port suggests: TLS when
 \f[V]-sV\f[R] found it, or the service name or port number is a TLS one;
 if that attempt gets no HTTP answer, the other is tried, as nmap does.
+A request carrying credentials (\f[V]Authorization\f[R],
+\f[V]Proxy-Authorization\f[R] or \f[V]Cookie\f[R]) that started over TLS
+never falls back to plain text, and a redirect that leaves TLS for plain
+text, or goes to another port, drops those headers.
 The options table takes:
 .PP
 .TS
@@ -1968,8 +1972,8 @@ T}
 T{
 \f[V]timeout\f[R]
 T}@T{
-Milliseconds for the whole request, both attempts included (default
-30000)
+Milliseconds for the whole request, both attempts included; a first
+attempt gets at most half while a second may follow (default 30000)
 T}
 T{
 \f[V]ssl\f[R]

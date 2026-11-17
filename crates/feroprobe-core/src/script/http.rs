@@ -74,6 +74,13 @@ impl Response {
     }
 }
 
+/// Headers that carry credentials.
+fn is_credential(name: &str) -> bool {
+    ["Authorization", "Proxy-Authorization", "Cookie"]
+        .iter()
+        .any(|c| name.eq_ignore_ascii_case(c))
+}
+
 fn is_token(s: &str) -> bool {
     !s.is_empty()
         && s.bytes()
@@ -598,13 +605,18 @@ pub(crate) async fn request(
             }
         };
         let sni_now = (name.parse::<IpAddr>().is_err()).then_some(name.as_str());
+        // Credentials never fall back from TLS to plain text: a request
+        // that carries them and started over TLS stays there.
+        let credentials = req.headers.iter().any(|(k, _)| is_credential(k));
         let modes: Vec<bool> = match ssl_choice {
             Some(s) => vec![s],
+            None if first_ssl && credentials => vec![true],
             None => vec![first_ssl, !first_ssl],
         };
         let mut last_err = String::new();
         let mut got = None;
-        for ssl in modes {
+        let tries = modes.len();
+        for (i, ssl) in modes.into_iter().enumerate() {
             let _slot = match Slot::take(&open) {
                 Ok(s) => s,
                 Err(e) => return nil_err(&lua, e),
@@ -614,8 +626,10 @@ pub(crate) async fn request(
                 last_err = "TIMEOUT".into();
                 break;
             }
+            // A first try that hangs leaves half the time to the other.
+            let budget = if i + 1 < tries { left / 2 } else { left };
             let bytes = request_bytes(&req, &name, port_n, ssl);
-            match tokio::time::timeout(left, attempt(addr, sni_now, ssl, &req, &bytes)).await {
+            match tokio::time::timeout(budget, attempt(addr, sni_now, ssl, &req, &bytes)).await {
                 Err(_) => last_err = "TIMEOUT".into(),
                 Ok(Err(e)) => last_err = e,
                 Ok(Ok(r)) => {
@@ -646,6 +660,11 @@ pub(crate) async fn request(
         {
             let target = h.trim_end_matches('.').to_string();
             redirects_left -= 1;
+            // Credentials go no further than where the script sent them:
+            // not down from TLS to plain text, not to another port.
+            if (ssl && !s) || p != port_n {
+                req.headers.retain(|(k, _)| !is_credential(k));
+            }
             let scheme = if s { "https" } else { "http" };
             followed.push(format!("{scheme}://{}{}", host_header(&target, p, s), path));
             host_s = target.clone();

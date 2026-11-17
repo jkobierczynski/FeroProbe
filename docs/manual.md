@@ -1216,13 +1216,17 @@ Mozilla/5.0 (compatible; FeroProbe Scripting Engine; https://github.com/jkobierc
 This is the script engine's signature (see `docs/responsible-use.md`).
 A request goes over TLS or not as the port suggests: TLS when `-sV` found
 it, or the service name or port number is a TLS one; if that attempt gets
-no HTTP answer, the other is tried, as nmap does. The options table takes:
+no HTTP answer, the other is tried, as nmap does. A request carrying
+credentials (`Authorization`, `Proxy-Authorization` or `Cookie`) that
+started over TLS never falls back to plain text, and a redirect that
+leaves TLS for plain text, or goes to another port, drops those headers.
+The options table takes:
 
 | Option | |
 | --- | --- |
 | `header` | A table of extra headers, name to value; a `Host` or `User-Agent` here replaces FeroProbe's |
 | `content` | The request body |
-| `timeout` | Milliseconds for the whole request, both attempts included (default 30000) |
+| `timeout` | Milliseconds for the whole request, both attempts included; a first attempt gets at most half while a second may follow (default 30000) |
 | `ssl` | `true` or `false` to use TLS or not, with no second attempt |
 | `redirect_ok` | `false` to follow no redirect, or how many to follow (default 3) |
 | `max_body_size` | The most body bytes kept (default 2 MiB, at most 16 MiB) |

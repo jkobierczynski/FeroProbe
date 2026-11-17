@@ -24,12 +24,14 @@ pub(crate) fn encode(data: &[u8]) -> String {
 }
 
 /// Decode, ignoring whitespace; `None` for any other character outside
-/// the alphabet or misplaced padding.
+/// the alphabet, or for anything but whole groups of four characters with
+/// at most two `=` of padding at the very end.
 pub(crate) fn decode(text: &[u8]) -> Option<Vec<u8>> {
     let mut out = Vec::with_capacity(text.len() / 4 * 3);
     let mut acc = 0u32;
     let mut bits = 0;
     let mut pad = 0;
+    let mut count = 0usize;
     for &c in text {
         let v = match c {
             b'A'..=b'Z' => c - b'A',
@@ -39,6 +41,7 @@ pub(crate) fn decode(text: &[u8]) -> Option<Vec<u8>> {
             b'/' => 63,
             b'=' => {
                 pad += 1;
+                count += 1;
                 continue;
             }
             b' ' | b'\t' | b'\r' | b'\n' => continue,
@@ -47,6 +50,7 @@ pub(crate) fn decode(text: &[u8]) -> Option<Vec<u8>> {
         if pad > 0 {
             return None;
         }
+        count += 1;
         acc = (acc << 6) | u32::from(v);
         bits += 6;
         if bits >= 8 {
@@ -54,7 +58,13 @@ pub(crate) fn decode(text: &[u8]) -> Option<Vec<u8>> {
             out.push((acc >> bits) as u8);
         }
     }
-    (pad <= 2).then_some(out)
+    // Whole quartets only; padding only where data ran short. Leftover
+    // bits must be zero, as an encoder leaves them.
+    let ok = count.is_multiple_of(4)
+        && pad <= 2
+        && (pad == 0 || count >= 4)
+        && acc & ((1 << bits) - 1) == 0;
+    ok.then_some(out)
 }
 
 #[cfg(test)]
@@ -78,5 +88,8 @@ mod tests {
         assert_eq!(decode(b"Zm9v\nYmFy").unwrap(), b"foobar");
         assert!(decode(b"Zm9v!").is_none());
         assert!(decode(b"Zg==Zg").is_none());
+        for bad in [&b"="[..], b"Zm9v=", b"A", b"Zg=", b"Zm9vY", b"Z==="] {
+            assert!(decode(bad).is_none(), "{:?}", String::from_utf8_lossy(bad));
+        }
     }
 }

@@ -20,19 +20,23 @@ portrule = fero.portrule.http
 
 local entities = { amp = "&", lt = "<", gt = ">", quot = '"', apos = "'", nbsp = " " }
 
+-- Character references, each decoded once, in one pass, so the text one
+-- produces is never read as another. Unknown or invalid ones stay as
+-- they are.
 local function decode(s)
-  s = s:gsub("&#[xX](%x+);", function(h)
-    local n = tonumber(h, 16)
-    return n and n < 0x110000 and utf8.char(n) or ""
-  end)
-  s = s:gsub("&#(%d+);", function(d)
-    local n = tonumber(d)
-    return n and n < 0x110000 and utf8.char(n) or ""
-  end)
-  s = s:gsub("&(%a+);", function(name)
-    return entities[name:lower()]
-  end)
-  return s
+  return (s:gsub("&(#?)([xX]?)(%w+);", function(hash, x, body)
+    if hash == "" then
+      return entities[(x .. body):lower()]
+    end
+    local n
+    if x ~= "" then
+      if #body <= 6 and not body:find("%X") then n = tonumber(body, 16) end
+    elseif #body <= 7 and not body:find("%D") then
+      n = tonumber(body)
+    end
+    if n and n >= 0 and n < 0x110000 then return utf8.char(n) end
+    return nil
+  end))
 end
 
 action = function(host, port)
