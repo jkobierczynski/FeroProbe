@@ -1045,7 +1045,7 @@ action = function(host, port) return port.service end
 #[tokio::test]
 async fn title_references_decode_once() {
     let (port, _) = web(|_| {
-        b"HTTP/1.1 200 OK\r\nContent-Length: 66\r\n\r\n<title>&#38;lt; &#xFFFFFFFFFFFFFFFF; &#x41;&AMP;&#99999999;</title>"
+        b"HTTP/1.1 200 OK\r\nContent-Length: 90\r\n\r\n<title>&#38;lt; &#xFFFFFFFFFFFFFFFF; &#x41;&AMP;&#99999999;&#00000066;&#x00000043;</title>"
             .to_vec()
     })
     .await;
@@ -1054,7 +1054,7 @@ async fn title_references_decode_once() {
     scan.scan_hosts(&mut hosts).await;
     assert_eq!(
         hosts[0].ports[0].scripts[0].output,
-        "&lt; &#xFFFFFFFFFFFFFFFF; A&&#99999999;"
+        "&lt; &#xFFFFFFFFFFFFFFFF; A&&#99999999;BC"
     );
 }
 

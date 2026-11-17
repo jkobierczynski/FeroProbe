@@ -29,6 +29,8 @@ local function decode(s)
       return entities[(x .. body):lower()]
     end
     local n
+    -- Leading zeros are allowed and do not count toward the digit limit.
+    body = body:gsub("^0+(.)", "%1")
     if x ~= "" then
       if #body <= 6 and not body:find("%X") then n = tonumber(body, 16) end
     elseif #body <= 7 and not body:find("%D") then
