@@ -64,6 +64,13 @@ SERVICE/VERSION DETECTION:
   --version-all: Every probe (intensity 9)
   --version-trace: Print each service probe, reply and matching rule
   --service-rules <file>: Use these probes and rules instead of the built-in ones
+SCRIPT SCAN:
+  --script <Lua scripts>: Run these scripts after the scan: a comma-separated
+     list of names, categories, files, directories and expressions
+  --script-args <n1=v1,[n2=v2,...]>: Provide arguments to scripts
+  --script-args-file <filename>: Provide script arguments in a file
+  --script-help <Lua scripts>: Show help about scripts
+  --script-timeout <time>: Stop a script that runs longer on one host or port
 OS DETECTION:
   -O: Enable OS detection
   --osscan-limit: Limit OS detection to promising targets
@@ -110,7 +117,7 @@ OUTPUT:
 MISC:
   -6: Scan the IPv6 address of hostnames
   -A: Version and OS detection plus traceroute
-  --override-ics-protection: Allow -sV/-O/-A once despite ics_protection = true
+  --override-ics-protection: Allow -sV/-O/-A/--script once despite ICS protection
   --oui-file <file>: IEEE OUI list for MAC vendor names
   --privileged: Assume raw sockets work
   --unprivileged: Act as an ordinary user, with no raw sockets

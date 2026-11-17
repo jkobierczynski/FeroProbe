@@ -262,6 +262,7 @@ async fn probe_udp_tries(
         reason,
         rtt_ms,
         service: None,
+        scripts: Vec::new(),
     };
     let classify = |e: io::Error, rtt| {
         if is_port_unreachable(&e) {

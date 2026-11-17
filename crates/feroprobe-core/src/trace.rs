@@ -599,6 +599,7 @@ mod tests {
             reason: reason::RESET,
             rtt_ms: None,
             service: None,
+            scripts: Vec::new(),
         };
         let mut h = HostResult::new("10.0.0.1".parse().unwrap(), None);
         assert_eq!(trace_port(&h, Some(80)), Some(80));

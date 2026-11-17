@@ -29,6 +29,7 @@ no external binaries.
 | Service and version detection, `-sV`, with our own probes and rules | ✅ |
 | OS detection, `-O`, a multi-probe fingerprint matched against our own OS database, with `--osscan-limit`, `--osscan-guess`, `--max-os-tries`, IPv4 and IPv6 (Linux, root) | ✅ |
 | Traceroute, `--traceroute`, IPv4 and IPv6 (Linux, root), and `-A` (`-sV -O --traceroute`) | ✅ |
+| Script scanning, `--script`, `--script-args`, `--script-help`, `--script-timeout`: sandboxed Lua scripts that can only reach the scanned host's probed ports, with our own script library (one script so far, `banner`; `-sC` and default scripts are coming) | ✅ |
 
 **[The FeroProbe manual](docs/manual.md)** documents every option, its
 default and how options interact, laid out like nmap's reference guide. It
@@ -340,6 +341,24 @@ bare IP header.
 sudo feroprobe -sO -p P:1,6,17,47,50,132 10.0.0.5
 ```
 
+### Scripts
+
+`--script` runs Lua scripts after the scan, against the hosts and ports it
+found, as nmap's scripting engine does, with nmap's selection syntax (names,
+categories, files, directories, `"safe and not intrusive"`):
+
+```sh
+feroprobe -p 22,25 --script banner 192.0.2.10
+feroprobe --script ./my-scripts/ --script-args 'mine.depth=2' 192.0.2.10
+feroprobe --script-help banner
+```
+
+The scripts are FeroProbe's own, written for its `fero` library (nmap's
+scripts cannot be shipped under their licence and do not run unchanged).
+Each script runs in a sandbox, without file or command access, and the
+engine lets it connect only to the host it runs against and only to the
+ports the scan probed there. See the manual's "Script scanning" section.
+
 ### Settings file and ICS protection
 
 FeroProbe reads optional settings from `~/.config/feroprobe/config.toml`
@@ -351,8 +370,8 @@ win over both. The one setting today is `ics_protection`, off by default:
 ics_protection = true
 ```
 
-With it on, FeroProbe refuses `-sV`, `-O` and `-A`, whose probes can hang or
-crash fragile PLCs and other control devices, and warns when a scan
+With it on, FeroProbe refuses `-sV`, `-O`, `-A` and `--script`, whose probes
+can hang or crash fragile PLCs and other control devices, and warns when a scan
 includes a well-known OT port (502, 102, 20000, 44818, 47808).
 `--override-ics-protection` allows one run anyway, with a warning. FeroProbe
 is not an ICS-specific tool and does not switch this on for you. Under

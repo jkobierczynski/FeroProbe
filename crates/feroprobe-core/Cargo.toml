@@ -13,6 +13,8 @@ categories.workspace = true
 dns-lookup = "4.0.2"
 futures = "0.3.34"
 ipnet = "2.12.2"
+# The script engine: Lua 5.4 built in (MIT), run on the scan's tokio runtime.
+mlua = { version = "0.12.2", features = ["lua54", "vendored", "async", "send"] }
 regex = { version = "1.13.1", default-features = false, features = ["std", "perf", "unicode-perl"] }
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
 serde = { version = "1.0.229", features = ["derive"] }

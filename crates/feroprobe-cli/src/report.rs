@@ -10,9 +10,17 @@ use std::time::SystemTime;
 
 use anyhow::{Context, Result};
 use feroprobe_core::HostResult;
+use feroprobe_core::script::ScriptResult;
 
 use crate::output::{self, RunInfo, counted_up};
 use crate::{Format, ReportFiles, grep, xml};
+
+/// Which scripts of the whole run: those before the scan or after it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum RunScripts {
+    Pre,
+    Post,
+}
 
 /// What a report holds.
 #[derive(Clone, Copy)]
@@ -35,6 +43,10 @@ pub struct Reports {
     files: ReportFiles,
     /// The hosts so far, for the JSON reports (empty if there are none).
     json: Vec<HostResult>,
+    /// The output of the scripts run before and after the scan, for the
+    /// JSON reports.
+    pre: Vec<ScriptResult>,
+    post: Vec<ScriptResult>,
     /// Hosts written so far, and how many of them were reported up.
     total: usize,
     up: usize,
@@ -49,6 +61,8 @@ impl Reports {
             list: Vec::new(),
             files,
             json: Vec::new(),
+            pre: Vec::new(),
+            post: Vec::new(),
             total: 0,
             up: 0,
             resuming,
@@ -126,6 +140,39 @@ impl Reports {
         Ok(())
     }
 
+    /// Write the output of the scripts run before or after the scan, as
+    /// nmap does: before the first host or after the last one.
+    pub fn run_scripts(&mut self, when: RunScripts, results: &[ScriptResult]) -> Result<()> {
+        let (title, tag) = match when {
+            RunScripts::Pre => ("Pre-scan", "prescript"),
+            RunScripts::Post => ("Post-scan", "postscript"),
+        };
+        // After the last host, a blank line first, as the hosts end
+        // without one.
+        let normal = || {
+            let text = output::run_scripts(title, results);
+            match when {
+                RunScripts::Post if !text.is_empty() => format!("\n{text}"),
+                _ => text,
+            }
+        };
+        for r in &self.list {
+            let text = match r.kind {
+                Kind::Format(Format::Table) => normal(),
+                Kind::Skid => output::skid(&normal()),
+                // nmap's grepable output has no script results.
+                Kind::Format(Format::Grepable) | Kind::Format(Format::Json) => String::new(),
+                Kind::Format(Format::Xml) => xml::run_scripts(tag, results),
+            };
+            Self::write(&mut self.files, &r.path, &text)?;
+        }
+        match when {
+            RunScripts::Pre => self.pre = results.to_vec(),
+            RunScripts::Post => self.post = results.to_vec(),
+        }
+        Ok(())
+    }
+
     /// Write the end of every report, and the JSON ones.
     pub fn finish(&mut self, info: &RunInfo) -> Result<()> {
         let (total, up) = (self.total, self.up);
@@ -136,7 +183,9 @@ impl Reports {
                 Kind::Skid => output::skid(&output::table_footer(total, up, info, false)),
                 Kind::Format(Format::Grepable) => grep::footer(total, up, info),
                 Kind::Format(Format::Xml) => xml::footer(total, up, info),
-                Kind::Format(Format::Json) => output::render_json(&self.json, info)?,
+                Kind::Format(Format::Json) => {
+                    output::render_json(&self.json, info, &self.pre, &self.post)?
+                }
             };
             Self::write(&mut self.files, &r.path, &text)?;
         }

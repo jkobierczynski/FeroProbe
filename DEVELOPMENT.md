@@ -103,6 +103,19 @@ the SCTP, IP protocol, IPv6 OS detection and probe-signature work).
 | Network distance | | 0 for this machine, 1 with a known MAC address, else from the TTL |
 | Aggressive mode | `-A` | `-sV -O --traceroute`; only `-sV` without raw-socket privileges, with a warning naming what was skipped |
 
+### Script scanning
+
+| Feature | Options | Notes |
+| --- | --- | --- |
+| Script engine | `--script` | Lua 5.4 through `mlua` (vendored, async, send), `crates/feroprobe-core/src/script/`. Scripts in nmap's shape (`description`, `categories`, `author`, `license`, `dependencies`, `prerule`/`hostrule`/`portrule`/`postrule`, `action`) with our own `fero` library. Selection as nmap's (`select.rs`): names with `*`, categories, `all`, expressions with nmap's right-grouping `and`/`or`, files, directories with a trailing `/`, `+` to force, duplicate names refused, unmatched rules an error. Runs last in each host group (after `-sV`, `-O`, traceroute), prerules before discovery, postrules after the last group; run levels from `dependencies`. Each action gets a fresh sandbox; rule checks share one sandbox per script and host (its hostrule and portrules, `SCRIPT_TYPE` set before each); up to 32 actions at once. `-sL` refuses it; `-sn` runs hostrules |
+| Script sandbox | | `sandbox.rs`: `string`, `table`, `math`, `utf8`, `coroutine`, `os.time/clock/date/difftime`; no `io`, other `os`, `require`, `debug`, `dofile`, `loadfile`, `collectgarbage`, `string.dump`; `load` text only. 64 MB, 2^30 instructions, rules 10 s, loading 2 s; a tripped limit cannot be caught by `pcall`/`xpcall`/`coroutine.resume`. `pattern.rs`: own `string.find`/`match`/`gmatch`/`gsub` (Lua 5.4 semantics and error messages, checked against Lua's own in a test) that charge every matching step to the instruction limit and check the deadline, since Lua's run as one uninterruptible C call; `gsub` results capped at the memory limit |
+| Script scope | | `socket.rs`: `fero.socket` (TCP, UDP; `connect`/`send`/`receive`/`receive_bytes`/`receive_lines`/`set_timeout`/`close`, nmap's `status, value` returns). Only the host the script runs against (address, given name or PTR name, no lookups) and ports of that protocol the scan probed there; prerule/postrule scripts get no network; refusals warn. Sockets honour `-e`. At most 32 per run |
+| Script arguments | `--script-args`, `--script-args-file` | nmap's syntax (`args.rs`), file first then the command line; `fero.args.get` with nmap's lookup (exact name, bare flag, `script.arg` falls back to `arg`); a flag is `true` (nmap: `1`) |
+| Script help | `--script-help` | nmap's layout, with the origin (built in or file) in place of nmap's URL; no target needed; not refused by ICS protection. No XML (nmap also writes `-oX`) |
+| Script timeout | `--script-timeout` | Per script per host or port; `0` none; `-T5` sets 10 minutes as nmap. Timed-out and failed scripts give no output (`-d` names them), as nmap |
+| Script output | | Normal `\|_` lines (control characters as `\xHH`), `Host script results`, `Pre-scan`/`Post-scan script results`; XML `<script>` with `<elem>`/`<table>`, `<hostscript>`, `<prescript>`, `<postscript>`; JSON `scripts`, `prescript`, `postscript` (table as `data`). Grepable has none, as nmap. Named table entries sorted by name; in JSON a name that reads as a whole number (`2`, not `02`) or starts with `"` gets an added pair of quotes, so bare numbers are always numbered entries (reversible); a backslash in a table name is doubled so binary and `\xHH` text names stay apart. `print`/`fero.debug` convert nothing unless shown, at most 64 KiB per call; `--script-args` tables nest at most 100 deep. At most 100,000 values and 16 MiB of text kept per result. A folded (`Not shown`) port with script output is listed anyway |
+| Built-in scripts | | `crates/feroprobe-core/lua-scripts/`, compiled in: `banner` (discovery, safe). Written for FeroProbe |
+
 ### Timing and performance
 
 | Feature | Options | Notes |
@@ -173,7 +186,7 @@ the SCTP, IP protocol, IPv6 OS detection and probe-signature work).
 | IDS rules | Suricata (`rules/feroprobe.rules`) and Snort (`rules/feroprobe.snort.rules`) |
 | Settings files | `~/.config/feroprobe/config.toml` (XDG), under sudo also the invoking user's (`SUDO_USER`), then `./.feroproberc`; CLI wins; `-v` shows what was read. FeroProbe's own, nmap has none. `.feroproberc` can switch ICS protection on but not off (warns). Opened defensively (security review M1): as root no symbolic links, `O_NONBLOCK`, regular files of at most 64 KB, not world-writable, owned by root or the invoking user (else skipped with a warning); TOML errors give line and column and quote the parser only for the invoking user's own file. `crates/feroprobe-cli/src/config.rs` |
 | Giving up root | Under sudo, after the settings files are read and before any other file or thread: becomes `SUDO_UID`/`SUDO_GID` with the invoking user's groups; on Linux keeps only `CAP_NET_RAW`, `CAP_NET_ADMIN`, `CAP_NET_BIND_SERVICE` (raw sockets still open per phase); elsewhere drops root entirely. `--keep-root` opts out (independent of `--privileged`/`--unprivileged` and of option order; the one option `--resume` accepts beside it); root without sudo keeps root. `-v` says what happened. Root report paths are walked with `openat` + `O_NOFOLLOW` per component. `crates/feroprobe-cli/src/privdrop.rs` (security review M3) |
-| ICS protection | `ics_protection = true` refuses `-sV`, `-O`, `-A` (future script scanning too); `--override-ics-protection` allows one run with a warning; `--dry-run` is not refused but warns; warns on OT ports 102, 502, 20000, 44818, 47808. Off by default, so nmap behaviour is unchanged; Cargo feature `ics-protection-default` builds it always on (files cannot switch it off). `docs/ics-protection.md` |
+| ICS protection | `ics_protection = true` refuses `-sV`, `-O`, `-A` and `--script` (`-sC` too once it exists); `--override-ics-protection` allows one run with a warning; `--dry-run` is not refused but warns; warns on OT ports 102, 502, 20000, 44818, 47808. Off by default, so nmap behaviour is unchanged; Cargo feature `ics-protection-default` builds it always on (files cannot switch it off). `docs/ics-protection.md` |
 | Evasion options behind an authorization flag | `-f`, `--mtu`, `-D`, `-S` (raw IPv4 TCP scans), the FTP bounce scan `-b` (targets and relay) and `--spoof-mac`. Private ranges (RFC 1918, loopback, link-local, CGNAT, IPv6 ULA) work as is; a public target, decoy or spoofed source needs `--allow-public-evasion` (`scope.rs`, `evasion.rs`) |
 
 ### Platform and project
@@ -196,7 +209,10 @@ the SCTP, IP protocol, IPv6 OS detection and probe-signature work).
 | FTP bounce scan against public addresses | Allowed | A public target or relay needs `--allow-public-evasion` | Same safeguard: it scans a network through someone else's server |
 | `--badsum` with `-O` | Also spoils OS-detection probes (nmap's checksum routine applies it globally) | OS-detection probes keep correct checksums | nmap's answers would be meaningless there; treated as an nmap bug |
 | `--spoof-mac` | Any address; IPv6 frames too; `0` may pick a multicast address | Behind the evasion gate; IPv4 and ARP only, IPv6 probes keep the real MAC (warned); `0` always unicast | IPv6 needs neighbour discovery and Ethernet sending for IPv6 too: left for later. A multicast source MAC is invalid |
-| Probes outside the requested ports | `-A`'s scripts probe other ports (`ms-sql-info` sends a 1-byte UDP datagram to 1434 on every host, seen in Jurgen's tcpdump of `nmap -A -p 502,102`); `-O` picks a random UDP port, and for IPv4 also TCP (30000-44780, regardless of `-p`), when the scan found no closed or unfiltered one | Never. `-sV` probes only open ports the scan found; `-O` probes an open TCP port the scan found and, when it found one, a closed TCP port (plus an ICMP echo only when discovery sends echo requests); there are no scripts. Traceroute falls back to a TCP port of the command: a scanned port, the `-p` port with `-sn` (even with `-Pn`, where nothing else probes it), or a discovery port, else skips the host with a warning (it used to fall back to port 80) | An OT operator must be able to rely on the command's ports (`-p` plus the documented host-discovery ports, which `-Pn` or `-P*` control) being the whole scope (Jurgen, 2026-11-15). When script scanning is added, scripts must default to the scanned ports (like nmap's `mssql.scanned-ports-only`) |
+| Probes outside the requested ports | `-A`'s scripts probe other ports (`ms-sql-info` sends a 1-byte UDP datagram to 1434 on every host, seen in Jurgen's tcpdump of `nmap -A -p 502,102`); `-O` picks a random UDP port, and for IPv4 also TCP (30000-44780, regardless of `-p`), when the scan found no closed or unfiltered one | Never. `-sV` probes only open ports the scan found; `-O` probes an open TCP port the scan found and, when it found one, a closed TCP port (plus an ICMP echo only when discovery sends echo requests); scripts may connect only to the host they run against, on ports the scan probed there, and prerule/postrule scripts nowhere. Traceroute falls back to a TCP port of the command: a scanned port, the `-p` port with `-sn` (even with `-Pn`, where nothing else probes it), or a discovery port, else skips the host with a warning (it used to fall back to port 80) | An OT operator must be able to rely on the command's ports (`-p` plus the documented host-discovery ports, which `-Pn` or `-P*` control) being the whole scope (Jurgen, 2026-11-15). Scripts are held to the scanned ports by the engine (stricter than nmap's `mssql.scanned-ports-only`, which only one library honours) |
+| Script library and sandbox | NSE libraries (`stdnse`, `shortport`, `nmap.new_socket`, ...); scripts may use `io` and `os` | FeroProbe's own `fero` library; no files, commands or environment, memory and instruction limits | nmap's libraries and scripts cannot be shipped (NPSL); a sandbox because scripts parse hostile replies |
+| Script output text | Every byte outside printable ASCII as `\xHH`; named table entries in Lua's traversal order | UTF-8 kept, control characters and invalid bytes as `\xHH`; named entries sorted by name | nmap mangles non-English text; its order is not reproducible |
+| `--script-help` | A link to nmap.org per script; also written to `-oX` | The script's origin (built in or its file); no XML | No online script documentation yet |
 | Privileges under sudo | Stays root for the whole run | Becomes the invoking user after reading the settings files, keeping only the network capabilities on Linux; `--keep-root` stays root | Only raw sockets need root; banner parsing, TLS and file reads and writes should not run as root. nmap's behaviour is why a restricted sudoers entry for it is a known escalation path (security review M3, Jurgen asked for the fix 2026-11-17) |
 | Report files as root | Written through any symbolic link (`fopen`) | Under sudo written as the invoking user (root was given up). Still root (`--keep-root`, no sudo): refuses any symbolic link unless root owns it and its directory and no one else can write there (`/dev/stdout` works), walks the path with `openat` and `O_NOFOLLOW` (directory links included, and an allowed link's target walked the same way; only `/proc`'s own links are left to the kernel), and a new file under sudo is handed to `SUDO_UID` | A planted link would let another user aim root's write at a system file. Sticky-directory refusal confirmed by Jurgen 2026-11-16; tightened with the security review M3 fix |
 | `.feroproberc` and ICS protection | (no settings files) | The directory's file can switch ICS protection on, never off; a `false` there is ignored with a warning | A working directory can be shared or come from an archive or clone (security review M2). Tighten-only confirmed by Jurgen, 2026-11-17 |
@@ -266,11 +282,12 @@ release.
 
 | Step | Feature | nmap options | Plan |
 | --- | --- | --- | --- |
-| 7.1 | Engine and script format | `--script`, `--script-args`, `--script-args-file`, `--script-help`, `--script-timeout` | Embedded Lua, see [Script engine design](#script-engine-design). The engine, the sandbox, script selection and output in every format |
-| 7.2 | Script libraries | | Sockets (TCP, UDP, TLS), port-rule helpers, HTTP client, output tables, shared registry, `--script-args` access; raw packets only as root and only to scanned targets |
+| 7.1 | Engine and script format | `--script`, `--script-args`, `--script-args-file`, `--script-help`, `--script-timeout` | **Done** (see [Script scanning](#script-scanning)). Embedded Lua, see [Script engine design](#script-engine-design). The engine, the sandbox, script selection, output in every format, and the scope-checked TCP and UDP sockets (moved here from 7.2, since the scope rule lives in them), with one script, `banner`. Not done: `--host-timeout` does not yet cover the script phase (scripts are bounded by `--script-timeout`) |
+| 7.2 | Script libraries | | TLS sockets, port-rule helpers, HTTP client, output tables, shared registry, `--script-args` access; raw packets only as root and only to scanned targets |
 | 7.3 | Default scripts | `-sC`, `-A` | Our own scripts in the `default` category, written from protocol documentation; `-A` then adds `-sC`, as in nmap |
 | 7.4 | More scripts | `--script <category>` | Grows script by script, each with a test against a local service |
 | 7.5 | Script tracing and updates | `--script-trace`, `--script-updatedb` | Trace of every script socket call in the `--packet-trace` layout; an index of installed scripts and their categories |
+| 7.6 | NSE compatibility layer | | Requested by the maintainer 2026-11-17. Our own Lua module offering the common NSE calls under nmap's names (`nmap.new_socket`, `stdnse.get_script_args`, `stdnse.debug`, `shortport.port_or_service`, ...) mapped onto `fero.*`, plus `require` of those names only, so simple NSE scripts run with few or no changes. Written from nmap's public API documentation, never from nselib (NPSL); same sandbox and scope rules. Needs 7.2 for the protocol helpers most real scripts use |
 
 ### Script engine design
 
@@ -295,8 +312,8 @@ libraries (`stdnse`, `shortport`, `http`, …), which FeroProbe cannot ship (see
 **Selection.** `--script` takes script names, file or directory paths,
 categories and boolean expressions (`"default and safe"`, `"not intrusive"`),
 like nmap. `-sC` means `--script default`. Users can load their own scripts
-from a path; FeroProbe's own live in a `lua-scripts/` directory in the repository
-(name to be settled) and are compiled into the binary.
+from a path; FeroProbe's own live in `crates/feroprobe-core/lua-scripts/`
+(inside the crate, so it can be published) and are compiled into the binary.
 
 **Sandbox.** Scripts get Lua's `string`, `table`, `math`, `utf8` and coroutine
 libraries, and FeroProbe's libraries. No `io`, `os.execute`, `package.loadlib`
@@ -313,9 +330,11 @@ the candidate scripts for each host and port and the scope each one is
 allowed, without running them. It cannot say which of them will actually
 run, because a `portrule` usually depends on what the scan finds. It cannot list a script's individual
 requests, because a script picks them from the replies it gets; the dry-run
-section of the manual says so.
-Discovery-style `prerule` scripts that broadcast are off unless named
-explicitly.
+section of the manual says so. As built (7.1), the dry run lists the
+scripts once, with their rules and their scope, rather than per host and
+port. Discovery-style `prerule` scripts that broadcast are off unless named
+explicitly; as built, prerule and postrule scripts get no network access at
+all, until a broadcast scope exists.
 
 **ICS protection.** With `ics_protection = true`, every script run is refused
 (`-sC`, `--script`, and the scripts `-A` adds) unless

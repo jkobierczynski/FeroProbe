@@ -240,6 +240,7 @@ async fn open_filtered_udp_that_answers_becomes_open() {
         reason: reason::NO_RESPONSE,
         rtt_ms: None,
         service: None,
+        scripts: Vec::new(),
     }];
     let vs = VersionScan {
         wait: Duration::from_millis(100),
@@ -354,6 +355,7 @@ async fn fills_open_ports_only() {
         reason: reason::SYN_ACK,
         rtt_ms: None,
         service: None,
+        scripts: Vec::new(),
     };
     let mut hosts = vec![HostResult::new(addr.ip(), None)];
     hosts[0].ports = vec![

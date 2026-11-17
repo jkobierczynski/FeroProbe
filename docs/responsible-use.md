@@ -86,8 +86,8 @@ serves that.
 
 ### Opt-in ICS protection
 
-Version detection (`-sV`), OS detection (`-O`) and `-A` send probes that can
-hang or crash fragile industrial devices: a PLC whose Modbus handler on
+Version detection (`-sV`), OS detection (`-O`), `-A` and scripts
+(`--script`) send probes that can hang or crash fragile industrial devices: a PLC whose Modbus handler on
 port 502 receives an HTTP request may fault or stop until it is
 power-cycled. Reports on penetration testing of control systems have
 described routine scans that upset production equipment for twenty years.
@@ -151,6 +151,18 @@ Two scans carry no marker, on purpose:
   SYNs so the target's response can be read, so they do not carry the
   window marker. The OS-detection echo request, sent only when host
   discovery sends echo requests too, carries the usual `feroprobe` payload.
+
+**Script traffic** (`--script`) is ordinary application traffic over the
+operating system's own TCP and UDP sockets, like the connect scan, so the
+raw-probe markers cannot apply to it. What it looks like depends on the
+script: the built-in `banner` script only opens a TCP connection and
+reads, sending nothing. Script traffic is bounded instead: a script can
+connect only to the host it runs against, and only to ports the scan
+probed there, and scripts that run before or after the scan get no network
+access at all, so no script broadcasts or wanders to other hosts. Later
+script libraries that speak a protocol themselves (such as HTTP) will
+identify FeroProbe where the protocol has a place for it, as a
+`User-Agent` naming FeroProbe's script engine.
 
 ### Detection rules for defenders
 

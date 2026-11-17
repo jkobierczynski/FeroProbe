@@ -139,6 +139,7 @@ mod tests {
             reason: "syn-ack",
             rtt_ms: None,
             service,
+            scripts: Vec::new(),
         }
     }
 

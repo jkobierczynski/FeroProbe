@@ -160,7 +160,80 @@ fn write_port(x: &mut String, p: &PortResult) {
             );
         }
     }
+    for r in &p.scripts {
+        write_script(x, r);
+    }
     x.push_str("</port>\n");
+}
+
+/// [`esc`], keeping line breaks and tabs as character references, since
+/// an XML reader turns them into spaces in an attribute value. nmap writes
+/// script output the same way.
+fn esc_lines(s: &str) -> String {
+    esc(s)
+        .replace('\n', "&#xa;")
+        .replace('\r', "&#xd;")
+        .replace('\t', "&#9;")
+}
+
+/// A script's `<script>` element: its output as an attribute and its
+/// table, if it returned one, as nested `<elem>` and `<table>` elements,
+/// in nmap's layout.
+fn write_script(x: &mut String, r: &feroprobe_core::script::ScriptResult) {
+    use feroprobe_core::script::ScriptValue;
+    let _ = write!(
+        x,
+        "<script id=\"{}\" output=\"{}\"",
+        esc(&r.id),
+        esc_lines(&r.output)
+    );
+    match &r.data {
+        None => x.push_str("/>"),
+        Some(ScriptValue::Str(v)) => {
+            let _ = write!(x, ">{}</script>", esc(v));
+        }
+        Some(ScriptValue::Table(t)) => {
+            x.push('>');
+            write_script_table(x, t);
+            x.push_str("</script>");
+        }
+    }
+}
+
+fn write_script_table(x: &mut String, t: &feroprobe_core::script::ScriptTable) {
+    use feroprobe_core::script::ScriptValue;
+    let entries = t
+        .list
+        .iter()
+        .map(|v| (None, v))
+        .chain(t.named.iter().map(|(k, v)| (Some(k), v)));
+    for (key, v) in entries {
+        let key = key.map_or(String::new(), |k| format!(" key=\"{}\"", esc(k)));
+        match v {
+            ScriptValue::Str(s) => {
+                let _ = writeln!(x, "<elem{key}>{}</elem>", esc(s));
+            }
+            ScriptValue::Table(inner) => {
+                let _ = writeln!(x, "<table{key}>");
+                write_script_table(x, inner);
+                x.push_str("</table>\n");
+            }
+        }
+    }
+}
+
+/// `<prescript>` or `<postscript>`: the output of the scripts that ran
+/// before or after the scan. Empty when none gave any.
+pub fn run_scripts(tag: &str, results: &[feroprobe_core::script::ScriptResult]) -> String {
+    if results.is_empty() {
+        return String::new();
+    }
+    let mut x = format!("<{tag}>");
+    for r in results {
+        write_script(&mut x, r);
+    }
+    let _ = writeln!(x, "</{tag}>");
+    x
 }
 
 fn write_host(x: &mut String, host: &HostResult, info: &RunInfo, start: u64, end: u64) {
@@ -236,6 +309,13 @@ fn write_host(x: &mut String, host: &HostResult, info: &RunInfo, start: u64, end
     }
     if let Some(os) = &host.os {
         write_os(x, os);
+    }
+    if !host.scripts.is_empty() && !host.timed_out {
+        x.push_str("<hostscript>");
+        for r in &host.scripts {
+            write_script(x, r);
+        }
+        x.push_str("</hostscript>\n");
     }
     if let Some(t) = &host.trace
         && !t.hops.is_empty()
@@ -549,6 +629,7 @@ mod tests {
             reason: "syn-ack",
             rtt_ms: None,
             service,
+            scripts: Vec::new(),
         }
     }
 
@@ -681,6 +762,61 @@ mod tests {
             time_str(UNIX_EPOCH + Duration::from_secs(951_782_400)),
             "Tue Feb 29 00:00:00 2000 UTC"
         );
+    }
+
+    #[test]
+    fn script_elements_like_nmap() {
+        use feroprobe_core::script::{ScriptResult, ScriptTable, ScriptValue};
+        let table = ScriptValue::Table(ScriptTable {
+            list: vec![ScriptValue::Str("a<b".into())],
+            named: vec![(
+                "keys".into(),
+                ScriptValue::Table(ScriptTable {
+                    list: vec![ScriptValue::Str("x".into())],
+                    named: vec![],
+                }),
+            )],
+        });
+        let demo = ScriptResult {
+            id: "demo".into(),
+            output: table.layout(),
+            data: Some(table),
+        };
+        let banner = ScriptResult {
+            id: "banner".into(),
+            output: "SSH \"x\"".into(),
+            data: None,
+        };
+        let mut host = HostResult::new("10.0.0.5".parse().unwrap(), None);
+        host.up_reason = Some("echo-reply");
+        let mut p = port(22, PortState::Open, None);
+        p.scripts.push(banner.clone());
+        host.ports.push(p);
+        host.scripts.push(demo);
+        let xml = render(&[host], &info());
+        assert!(
+            xml.contains("<service name=\"ssh\" method=\"table\" conf=\"3\"/><script id=\"banner\" output=\"SSH &quot;x&quot;\"/></port>"),
+            "{xml}"
+        );
+        assert!(
+            xml.contains(
+                "<hostscript><script id=\"demo\" output=\"&#xa;  a&lt;b&#xa;  keys: &#xa;    x\"><elem>a&lt;b</elem>\n<table key=\"keys\">\n<elem>x</elem>\n</table>\n</script></hostscript>\n"
+            ),
+            "{xml}"
+        );
+        roxmltree::Document::parse_with_options(
+            &xml,
+            roxmltree::ParsingOptions {
+                allow_dtd: true,
+                ..Default::default()
+            },
+        )
+        .expect("well-formed XML");
+        assert_eq!(
+            run_scripts("postscript", &[banner]),
+            "<postscript><script id=\"banner\" output=\"SSH &quot;x&quot;\"/></postscript>\n"
+        );
+        assert_eq!(run_scripts("prescript", &[]), "");
     }
 
     #[test]

@@ -11,6 +11,7 @@ macro_rules! w {
 }
 
 use anyhow::Result;
+use feroprobe_core::script::ScriptResult;
 use feroprobe_core::{HostResult, OsResult, PortResult, PortState, Protocol, service_name};
 use serde::Serialize;
 
@@ -121,12 +122,20 @@ pub(crate) fn port_rows<'a>(
     if info.only_open {
         hidden.clear();
     }
+    // A port with script output is listed even in a folded state, so the
+    // output is not lost (nmap drops it there); the summary counts the
+    // rest.
+    let folded = |p: &PortResult| hidden.iter().any(|&(_, s)| s == p.state);
+    let rows: Vec<&PortResult> = visible(host, info.only_open)
+        .filter(|p| !folded(p) || !p.scripts.is_empty())
+        .collect();
+    for (n, s) in &mut hidden {
+        *n -= rows.iter().filter(|p| p.state == *s).count();
+    }
+    hidden.retain(|&(n, _)| n > 0);
     // Most ports first, as nmap orders its "Not shown" line (stable, so a
     // tie keeps the order above).
     hidden.sort_by_key(|&(n, _)| std::cmp::Reverse(n));
-    let rows = visible(host, info.only_open)
-        .filter(|p| !hidden.iter().any(|&(_, s)| s == p.state))
-        .collect();
     (hidden, rows)
 }
 
@@ -194,6 +203,9 @@ pub fn table_hosts(hosts: &[HostResult], info: &RunInfo) -> String {
         if info.show_version && !host.timed_out {
             print_service_info(out, host);
         }
+        if !host.timed_out {
+            print_host_scripts(out, host);
+        }
         if info.show_trace {
             print_trace(out, host);
         }
@@ -239,6 +251,42 @@ pub fn render_table(hosts: &[HostResult], info: &RunInfo) -> String {
     table_header(info, false)
         + &table_hosts(hosts, info)
         + &table_footer(hosts.len(), up, info, false)
+}
+
+/// nmap's "Host script results" section: the output of the scripts that
+/// ran on the host as a whole.
+fn print_host_scripts(out: &mut String, host: &HostResult) {
+    let lines: Vec<String> = host
+        .scripts
+        .iter()
+        .filter_map(feroprobe_core::script::output::normal_lines)
+        .collect();
+    if lines.is_empty() {
+        return;
+    }
+    w!(out, "\nHost script results:");
+    for l in lines {
+        w!(out, "{l}");
+    }
+}
+
+/// nmap's "Pre-scan script results" or "Post-scan script results": the
+/// output of the scripts that ran before or after the scan.
+pub fn run_scripts(title: &str, results: &[feroprobe_core::script::ScriptResult]) -> String {
+    let lines: Vec<String> = results
+        .iter()
+        .filter_map(feroprobe_core::script::output::normal_lines)
+        .collect();
+    if lines.is_empty() {
+        return String::new();
+    }
+    let mut s = String::new();
+    let out = &mut s;
+    w!(out, "{title} script results:");
+    for l in lines {
+        w!(out, "{l}");
+    }
+    s
 }
 
 /// nmap's "Not shown" list: `98 filtered ports, 30 closed ports`.
@@ -313,6 +361,11 @@ fn print_ports(out: &mut String, host: &HostResult, info: &RunInfo) {
             }
         }
         w!(out, "{}", line.join(" ").trim_end());
+        for r in &p.scripts {
+            if let Some(lines) = feroprobe_core::script::output::normal_lines(r) {
+                w!(out, "{lines}");
+            }
+        }
     }
     if !unrecognized.is_empty() {
         w!(out, "Unrecognized service replies:");
@@ -576,7 +629,13 @@ struct JsonReport<'a> {
     version: &'static str,
     scan_types: &'a [&'static str],
     elapsed_secs: f64,
+    /// The output of the scripts that ran before the scan.
+    #[serde(skip_serializing_if = "<[ScriptResult]>::is_empty")]
+    prescript: &'a [ScriptResult],
     hosts: Vec<JsonHost<'a>>,
+    /// The output of the scripts that ran after the scan.
+    #[serde(skip_serializing_if = "<[ScriptResult]>::is_empty")]
+    postscript: &'a [ScriptResult],
 }
 
 #[derive(Serialize)]
@@ -591,6 +650,9 @@ struct JsonHost<'a> {
     os: Option<&'a OsResult>,
     #[serde(skip_serializing_if = "Option::is_none")]
     trace: Option<&'a feroprobe_core::Trace>,
+    /// The output of the host scripts.
+    #[serde(skip_serializing_if = "<[ScriptResult]>::is_empty")]
+    scripts: &'a [ScriptResult],
 }
 
 #[derive(Serialize)]
@@ -635,6 +697,8 @@ struct JsonPort<'a> {
     tunnel: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     fingerprint: Option<&'a str>,
+    #[serde(skip_serializing_if = "<[ScriptResult]>::is_empty")]
+    scripts: &'a [ScriptResult],
 }
 
 impl<'a> JsonPort<'a> {
@@ -659,17 +723,27 @@ impl<'a> JsonPort<'a> {
             cpe: s.map_or(&[][..], |s| &s.cpe[..]),
             tunnel: s.and_then(|s| s.tunnel),
             fingerprint: s.and_then(|s| s.fingerprint.as_deref()),
+            scripts: &p.scripts,
         }
     }
 }
 
 /// The report as JSON (`-o json`, `-oJ`).
-pub fn render_json(hosts: &[HostResult], info: &RunInfo) -> Result<String> {
+/// `pre` and `post` are the output of the scripts that ran before and
+/// after the scan.
+pub fn render_json(
+    hosts: &[HostResult],
+    info: &RunInfo,
+    pre: &[ScriptResult],
+    post: &[ScriptResult],
+) -> Result<String> {
     let report = JsonReport {
         scanner: "feroprobe",
         version: env!("CARGO_PKG_VERSION"),
         scan_types: &info.scan_types,
         elapsed_secs: info.elapsed.as_secs_f64(),
+        prescript: pre,
+        postscript: post,
         hosts: hosts
             .iter()
             .map(|h| JsonHost {
@@ -685,6 +759,7 @@ pub fn render_json(hosts: &[HostResult], info: &RunInfo) -> Result<String> {
                 timed_out: h.timed_out,
                 os: h.os.as_ref(),
                 trace: h.trace.as_ref(),
+                scripts: if h.timed_out { &[] } else { &h.scripts },
                 ports: visible(h, info.only_open).map(JsonPort::new).collect(),
             })
             .collect(),
@@ -895,6 +970,7 @@ pub(crate) mod tests {
             reason: "reset",
             rtt_ms: None,
             service: None,
+            scripts: Vec::new(),
         }
     }
 
@@ -976,6 +1052,30 @@ pub(crate) mod tests {
             x.contains("portid=\"1100\"><state state=\"open|filtered\""),
             "{x}"
         );
+
+        // A folded port with script output is still listed, with its output.
+        host.ports[205]
+            .scripts
+            .push(feroprobe_core::script::ScriptResult {
+                id: "demo".into(),
+                output: "hello".into(),
+                data: None,
+            });
+        let table = render_table(std::slice::from_ref(&host), &info());
+        assert!(
+            table.contains("Not shown: 200 closed ports, 100 open|filtered ports"),
+            "{table}"
+        );
+        assert!(
+            table.contains("1005/tcp   open|filtered") && table.contains("|_demo: hello"),
+            "{table}"
+        );
+        let x = crate::xml::render(std::slice::from_ref(&host), &info());
+        assert!(
+            x.contains("<extraports state=\"open|filtered\" count=\"100\">"),
+            "{x}"
+        );
+        assert!(x.contains("<script id=\"demo\" output=\"hello\""), "{x}");
     }
 
     #[test]
@@ -996,6 +1096,62 @@ pub(crate) mod tests {
         assert!(!render_table(&two, &info()).contains("seems down"));
     }
 
+    fn script_results() -> (ScriptResult, ScriptResult) {
+        use feroprobe_core::script::{ScriptTable, ScriptValue};
+        let table = ScriptValue::Table(ScriptTable {
+            list: vec![ScriptValue::Str("a".into())],
+            named: vec![("k".into(), ScriptValue::Str("v".into()))],
+        });
+        (
+            ScriptResult {
+                id: "banner".into(),
+                output: "SSH-2.0-x".into(),
+                data: None,
+            },
+            ScriptResult {
+                id: "demo".into(),
+                output: table.layout(),
+                data: Some(table),
+            },
+        )
+    }
+
+    #[test]
+    fn script_output_like_nmap() {
+        let (banner, demo) = script_results();
+        let mut host = HostResult::new("10.0.0.5".parse().unwrap(), None);
+        host.up_reason = Some("echo-reply");
+        let mut p = tcp(22, PortState::Open);
+        p.scripts.push(banner.clone());
+        host.ports = vec![p, tcp(80, PortState::Open)];
+        host.scripts.push(demo.clone());
+        let table = render_table(std::slice::from_ref(&host), &info());
+        assert!(
+            table.contains("22/tcp     open           ssh\n|_banner: SSH-2.0-x\n80/tcp"),
+            "{table}"
+        );
+        assert!(
+            table.contains("\nHost script results:\n| demo: \n|   a\n|_  k: v\n"),
+            "{table}"
+        );
+        assert_eq!(
+            run_scripts("Pre-scan", std::slice::from_ref(&banner)),
+            "Pre-scan script results:\n|_banner: SSH-2.0-x\n"
+        );
+        assert_eq!(run_scripts("Post-scan", &[]), "");
+        let json = render_json(std::slice::from_ref(&host), &info(), &[banner], &[]).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["prescript"][0]["id"], "banner");
+        assert!(v.get("postscript").is_none());
+        assert_eq!(
+            v["hosts"][0]["ports"][0]["scripts"][0]["output"],
+            "SSH-2.0-x"
+        );
+        assert!(v["hosts"][0]["ports"][1].get("scripts").is_none());
+        assert_eq!(v["hosts"][0]["scripts"][0]["data"]["k"], "v");
+        assert_eq!(v["hosts"][0]["scripts"][0]["data"]["1"], "a");
+    }
+
     #[test]
     fn timed_out_hosts_have_no_port_results() {
         let mut host = HostResult::new("10.0.0.9".parse().unwrap(), None);
@@ -1007,10 +1163,10 @@ pub(crate) mod tests {
             "{table}"
         );
         assert!(!table.contains("PORT"), "{table}");
-        let json = render_json(std::slice::from_ref(&host), &info()).unwrap();
+        let json = render_json(std::slice::from_ref(&host), &info(), &[], &[]).unwrap();
         assert!(json.contains("\"timed_out\": true"), "{json}");
         host.timed_out = false;
-        let json = render_json(&[host], &info()).unwrap();
+        let json = render_json(&[host], &info(), &[], &[]).unwrap();
         assert!(!json.contains("timed_out"), "{json}");
     }
     #[test]
@@ -1048,7 +1204,7 @@ pub(crate) mod tests {
             ),
             "{table}"
         );
-        let json = render_json(std::slice::from_ref(&host), &info()).unwrap();
+        let json = render_json(std::slice::from_ref(&host), &info(), &[], &[]).unwrap();
         assert!(json.contains("\"cpe\": [\n"), "{json}");
         assert!(json.contains("\"hostname\": \"mail.example\""), "{json}");
         // Without -sV there is no Service Info.

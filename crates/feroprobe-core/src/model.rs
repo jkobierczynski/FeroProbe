@@ -7,6 +7,7 @@ use serde::Serialize;
 
 use crate::arp::MacInfo;
 use crate::os::OsResult;
+use crate::script::ScriptResult;
 use crate::service::ServiceInfo;
 use crate::trace::Trace;
 
@@ -123,6 +124,9 @@ pub struct PortResult {
     /// What version detection (`-sV`) found, if it ran and learned anything.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub service: Option<ServiceInfo>,
+    /// The output of the scripts (`--script`) that ran on this port.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub scripts: Vec<ScriptResult>,
 }
 
 /// All results for one host, ports sorted by protocol then port.
@@ -150,6 +154,10 @@ pub struct HostResult {
     /// The route to the host, if `--traceroute` ran.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trace: Option<Trace>,
+    /// The output of the host scripts (`--script` scripts with a
+    /// hostrule) that ran on this host.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub scripts: Vec<ScriptResult>,
     /// The scan of this host was cut short by `--host-timeout`: its port
     /// and OS results were dropped.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
@@ -168,6 +176,7 @@ impl HostResult {
             ports: Vec::new(),
             os: None,
             trace: None,
+            scripts: Vec::new(),
             timed_out: false,
         }
     }

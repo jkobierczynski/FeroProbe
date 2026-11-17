@@ -41,6 +41,7 @@ pub mod raw;
 mod rawscan;
 pub mod rtt;
 pub mod scope;
+pub mod script;
 pub mod sctp;
 pub mod service;
 pub mod spoofmac;

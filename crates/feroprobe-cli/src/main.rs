@@ -279,7 +279,7 @@ struct Args {
     /// Targets: IPv4 or IPv6 addresses, CIDR blocks (10.0.0.0/24, 2001:db8::/120),
     /// ranges (10.0.0.1-20), link-local addresses with their interface
     /// (fe80::1%eth0) or hostnames
-    #[arg(required_unless_present_any = ["input_file", "iflist", "resume"])]
+    #[arg(required_unless_present_any = ["input_file", "iflist", "resume", "script_help"])]
     targets: Vec<String>,
 
     /// -iL FILE: read more targets from FILE (one or more per line, # starts
@@ -521,10 +521,38 @@ struct Args {
     aggressive: bool,
 
     /// Run this once despite `ics_protection = true` in a settings file,
-    /// allowing -sV, -O and -A. Prints a warning naming what it allowed.
+    /// allowing -sV, -O, -A and --script. Prints a warning naming what it allowed.
     /// The settings file is not changed
     #[arg(long = "override-ics-protection")]
     override_ics_protection: bool,
+
+    /// Run these Lua scripts after the scan: a comma-separated list of
+    /// script names (with * wildcards), categories, script files,
+    /// directories (ending in /) and expressions such as "safe and not
+    /// intrusive". A + before one runs it whatever its rules say. Given
+    /// more than once, the lists add up
+    #[arg(long, value_name = "SCRIPTS")]
+    script: Vec<String>,
+
+    /// Arguments for the scripts: name=value pairs, bare flags and {...}
+    /// tables, comma-separated, as in nmap
+    #[arg(long = "script-args", value_name = "ARGS")]
+    script_args: Option<String>,
+
+    /// Read script arguments from FILE (same syntax; newlines separate them
+    /// too). --script-args are added after them
+    #[arg(long = "script-args-file", value_name = "FILE")]
+    script_args_file: Option<String>,
+
+    /// Show the name, categories and description of these scripts (chosen
+    /// as with --script), then stop. Needs no target
+    #[arg(long = "script-help", value_name = "SCRIPTS")]
+    script_help: Vec<String>,
+
+    /// Stop a script that runs longer than this against one host or port,
+    /// e.g. 30s or 5m [default: none; 10m with -T5, as in nmap]
+    #[arg(long = "script-timeout", value_name = "TIME", value_parser = parse_duration)]
+    script_timeout: Option<Duration>,
 
     /// Ports to scan, e.g. "22", "1-1024", "22,80,443", "-" for all.
     /// T: and U: mark TCP and UDP ports: "22,U:53,T:80" (unmarked ports
@@ -1551,6 +1579,7 @@ fn list_scan_checks(args: &Args) -> Result<Vec<String>> {
         (args.aggressive, "-A"),
         (args.os, "-O"),
         (args.traceroute, "--traceroute"),
+        (!args.script.is_empty(), "--script"),
     ] {
         if given {
             bail!("-sL sends nothing to the targets, so it cannot be combined with {option}");
@@ -2446,11 +2475,62 @@ fn os_option_warnings(args: &Args, os: bool) -> Vec<String> {
     .collect()
 }
 
+/// nmap's script timeout under `-T5`: ten minutes.
+const INSANE_SCRIPT_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// The scripts `--script` chooses, loaded with their `--script-args`, or
+/// `None` without `--script`.
+fn script_scan(args: &Args) -> Result<Option<feroprobe_core::script::ScriptScan>> {
+    use feroprobe_core::script;
+    if args.script.is_empty() {
+        for (given, option) in [
+            (args.script_args.is_some(), "--script-args"),
+            (args.script_args_file.is_some(), "--script-args-file"),
+            (args.script_timeout.is_some(), "--script-timeout"),
+        ] {
+            if given {
+                eprintln!("Warning: {option} has no effect without --script");
+            }
+        }
+        return Ok(None);
+    }
+    let chosen =
+        script::choose(&args.script.join(",")).map_err(|e| anyhow::anyhow!("--script: {e}"))?;
+    let file = args
+        .script_args_file
+        .as_ref()
+        .map(|path| {
+            std::fs::read_to_string(path)
+                .with_context(|| format!("reading --script-args-file {path}"))
+        })
+        .transpose()?;
+    let table = script::args::parse_combined(file.as_deref(), args.script_args.as_deref())
+        .map_err(|e| anyhow::anyhow!("--script-args did not parse: {e}"))?;
+    feroprobe_core::debug::debug(1, || {
+        format!(
+            "Script arguments: {}",
+            [file.as_deref(), args.script_args.as_deref()]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join(",")
+        )
+    });
+    // As in nmap: 0 is no limit, and -T5 limits scripts to ten minutes.
+    let timeout = match args.script_timeout {
+        Some(d) => Some(d).filter(|d| !d.is_zero()),
+        None => matches!(args.timing, Some(Timing::Insane)).then_some(INSANE_SCRIPT_TIMEOUT),
+    };
+    let engine = script::ScriptScan::new(chosen, table, timeout)
+        .map_err(|e| anyhow::anyhow!("--script: {e}"))?;
+    Ok(Some(engine))
+}
+
 /// The options that send probes able to upset fragile OT/ICS devices
 /// (PLCs, RTUs, protocol gateways), in the order they appear in the help.
 /// Version detection talks application protocols (HTTP, TLS, ...) to
 /// whatever answers; OS detection sends a raw SYN loaded with TCP options.
-/// Script scanning belongs here too once it exists.
+/// Scripts talk to whatever answers in whatever way they are written to.
 fn device_hostile_options(args: &Args) -> Vec<&'static str> {
     let mut found = Vec::new();
     if args.scan.contains(&ScanType::Version) {
@@ -2461,6 +2541,9 @@ fn device_hostile_options(args: &Args) -> Vec<&'static str> {
     }
     if args.aggressive {
         found.push("-A");
+    }
+    if !args.script.is_empty() {
+        found.push("--script");
     }
     found
 }
@@ -2501,16 +2584,17 @@ fn gate_ics(settings: &config::Settings, args: &Args) -> Result<Vec<String>> {
         // run would do: the habit is the thing to teach.
         return Ok(vec![format!(
             "Warning: ICS protection is on ({}): a real run with {list} would be refused, \
-             since version and OS detection send probes that can hang or crash fragile \
-             OT/ICS devices such as PLCs. This dry run sends nothing, so it goes ahead. \
+             since version detection, OS detection and scripts send probes that can hang \
+             or crash fragile OT/ICS devices such as PLCs. This dry run sends nothing, so it goes ahead. \
              For the real scan, leave out {list} or pass --override-ics-protection",
             ics_source(settings)
         )]);
     }
     if !args.override_ics_protection {
         bail!(
-            "ICS protection is on ({}), so {list} is refused: version and OS detection \
-             send probes that can hang or crash fragile OT/ICS devices such as PLCs. \
+            "ICS protection is on ({}), so {list} is refused: version detection, OS \
+             detection and scripts send probes that can hang or crash fragile OT/ICS \
+             devices such as PLCs. \
              Leave out {list}, or pass --override-ics-protection to run this once anyway",
             ics_source(settings)
         );
@@ -2897,9 +2981,11 @@ struct GroupRun<'a> {
     trace: bool,
     trace_fallback: Option<u16>,
     progress: Progress,
+    /// `--script`: the scripts to run once the group is scanned.
+    scripts: Option<&'a feroprobe_core::script::ScriptScan>,
 }
 
-/// Resolve names, port-scan and trace one host group: `targets` and their
+/// Resolve names, port-scan, trace and run scripts on one host group: `targets` and their
 /// discovery results `hosts`, one per target. Returns how many hosts could
 /// not be traced for want of a port.
 async fn scan_group(
@@ -2984,6 +3070,22 @@ async fn scan_group(
         done(&progress);
         for (&i, h) in keep.iter().zip(traced) {
             hosts[i] = h;
+        }
+    }
+    if let Some(engine) = g.scripts.filter(|e| e.has_host_scripts()) {
+        // Like nmap, the scripts run last, on the hosts that are up (all
+        // of them with -Pn) and were not given up on by --host-timeout.
+        let keep: Vec<usize> = (0..hosts.len())
+            .filter(|&i| (!plan.discovery || hosts[i].is_up()) && !hosts[i].timed_out)
+            .collect();
+        if !keep.is_empty() {
+            let mut group: Vec<HostResult> = keep.iter().map(|&i| hosts[i].clone()).collect();
+            let done = progress.phase("script scan", group.len());
+            engine.scan_hosts(&mut group).await;
+            done(&progress);
+            for (&i, h) in keep.iter().zip(group) {
+                hosts[i] = h;
+            }
         }
     }
     Ok(untraced)
@@ -3077,6 +3179,8 @@ struct DryOrder<'a> {
     version: &'a VersionScan,
     /// `-b`: the FTP relay's address.
     bounce: Option<SocketAddr>,
+    /// `--script`: the scripts a real run would run.
+    scripts: Option<&'a feroprobe_core::script::ScriptScan>,
 }
 
 /// The notes a dry run prints above its probes: what it cannot show (steps
@@ -3120,6 +3224,9 @@ fn dry_run_notes(args: &Args, plan: &Plan, d: &DryOrder, privileged: bool) -> Ve
             ),
         });
     }
+    if let Some(engine) = d.scripts {
+        notes.extend(script_dry_run_lines(engine, plan, d));
+    }
     if !args.no_resolve {
         notes.push(if plan.list {
             "Not shown: reverse DNS of every target, which is all a list scan does (no DNS query \
@@ -3149,6 +3256,52 @@ fn dry_run_notes(args: &Args, plan: &Plan, d: &DryOrder, privileged: bool) -> Ve
         );
     }
     notes
+}
+
+/// What a dry run says about `--script`: which scripts would load, when
+/// they would run, and where their sockets could go. What they send is
+/// not shown: it depends on what the scan finds and on the replies they
+/// get.
+fn script_dry_run_lines(
+    engine: &feroprobe_core::script::ScriptScan,
+    plan: &Plan,
+    d: &DryOrder,
+) -> Vec<String> {
+    let list: Vec<String> = engine
+        .scripts()
+        .iter()
+        .map(|s| {
+            let forced = if s.forced { ", forced with +" } else { "" };
+            format!("{} ({}{forced})", s.id, s.rules.names().join(", "))
+        })
+        .collect();
+    let mut lines = vec![format!(
+        "Scripts (--script) a real run would load: {}",
+        list.join(", ")
+    )];
+    let mut ports = Vec::new();
+    let scan = !plan.ping_only;
+    if scan && (plan.tcp.is_some() || d.bounce.is_some()) {
+        ports.push(format!("{} TCP", d.tcp.len()));
+    }
+    if scan && plan.udp {
+        ports.push(format!("{} UDP", d.udp.len()));
+    }
+    let scope = if ports.is_empty() {
+        "no ports at all, since this scan probes no TCP or UDP port".to_string()
+    } else {
+        format!(
+            "the {} port(s) this scan probes on that host",
+            ports.join(" and ")
+        )
+    };
+    lines.push(format!(
+        "Not shown: what the scripts send. Their rules pick the hosts and ports they run \
+         on from what the scan finds, and what they send depends on the replies they get. \
+         A script may connect only to the host it runs against, and only to {scope}; \
+         prerule and postrule scripts get no network access"
+    ));
+    lines
 }
 
 /// `--dry-run`: print the probes and stop. Nothing is sent and no report
@@ -3326,9 +3479,17 @@ async fn run(
     for w in &settings.warnings {
         eprintln!("Warning: {w}");
     }
+    if !args.script_help.is_empty() {
+        let chosen = feroprobe_core::script::choose(&args.script_help.join(","))
+            .map_err(|e| anyhow::anyhow!("--script-help: {e}"))?;
+        print!("{}", feroprobe_core::script::help_text(&chosen));
+        return Ok(());
+    }
     for w in gate_ics(&settings.settings, &args)? {
         eprintln!("{w}");
     }
+    // Load the scripts now, so a bad one fails before anything is sent.
+    let scripts = script_scan(&args)?;
     let outputs = Outputs::from_args(&args)?;
     if args.packet_trace {
         feroprobe_core::packet_trace::enable();
@@ -3383,6 +3544,12 @@ async fn run(
     });
     if let Some(line) = privileges.describe() {
         progress.say(1, || line);
+    }
+    if let Some(s) = &scripts {
+        let n = s.scripts().len();
+        progress.say(1, || {
+            format!("Loaded {n} script{} for scanning.", plural(n))
+        });
     }
     // --privileged / --unprivileged: before anything checks for raw sockets.
     if args.unprivileged {
@@ -3776,6 +3943,7 @@ async fn run(
                 trace_fallback,
                 version: &version_scan,
                 bounce: bounce.as_ref().map(|(a, _)| *a),
+                scripts: scripts.as_ref(),
             },
         );
     }
@@ -3896,6 +4064,10 @@ async fn run(
         }
     }
     reports.start(&info)?;
+    if let Some(engine) = &scripts {
+        let pre = engine.pre_scan().await;
+        reports.run_scripts(report::RunScripts::Pre, &pre)?;
+    }
 
     // Like nmap: discovery takes the targets a batch at a time, and the
     // hosts are then scanned and reported a group at a time.
@@ -3951,6 +4123,7 @@ async fn run(
                     trace,
                     trace_fallback,
                     progress,
+                    scripts: scripts.as_ref(),
                 },
             )
             .await?;
@@ -3982,6 +4155,10 @@ async fn run(
     }
     if let Some(k) = keys {
         k.stop();
+    }
+    if let Some(engine) = &scripts {
+        let post = engine.post_scan().await;
+        reports.run_scripts(report::RunScripts::Post, &post)?;
     }
     info.elapsed = started.elapsed();
     reports.finish(&info)?;
@@ -4825,6 +5002,7 @@ mod tests {
             &["-O"],
             &["-A"],
             &["--traceroute"],
+            &["--script", "banner"],
         ] {
             assert!(list_scan_checks(&args(bad)).is_err(), "{bad:?}");
         }
@@ -5109,6 +5287,7 @@ mod tests {
             trace_fallback: Some(80),
             version: &VERSION,
             bounce: None,
+            scripts: None,
         }
     }
 
@@ -5425,6 +5604,7 @@ mod tests {
             reason: "stale",
             rtt_ms: None,
             service: None,
+            scripts: Vec::new(),
         });
         slow.run_each(
             std::slice::from_ref(&target),
@@ -5492,6 +5672,8 @@ mod tests {
             (&["-O"], "-O"),
             (&["-A"], "-A"),
             (&["-sS", "-sV", "-O"], "-sV, -O"),
+            (&["--script", "banner"], "--script"),
+            (&["-sV", "--script=safe"], "-sV, --script"),
         ] {
             let mut a = opts.to_vec();
             a.push("10.0.0.1");
@@ -5509,6 +5691,90 @@ mod tests {
             a.push("10.0.0.1");
             assert!(gate_ics(&ics(true), &argv(&a)).unwrap().is_empty(), "{a:?}");
         }
+    }
+
+    #[test]
+    fn ics_dry_run_with_scripts_warns() {
+        let a = argv(&["--script", "banner", "--dry-run", "10.0.0.1"]);
+        let lines = gate_ics(&ics(true), &a).unwrap();
+        assert_eq!(lines.len(), 1);
+        assert!(
+            lines[0].contains("a real run with --script would be refused"),
+            "{}",
+            lines[0]
+        );
+        // --script-help sends nothing and is never refused.
+        let a = argv(&["--script-help", "banner"]);
+        assert!(gate_ics(&ics(true), &a).unwrap().is_empty());
+    }
+
+    #[test]
+    fn script_options() {
+        // --script adds up; --script-help needs no target.
+        let a = argv(&["--script", "banner", "--script=safe,+x", "10.0.0.1"]);
+        assert_eq!(a.script, ["banner", "safe,+x"]);
+        let a = argv(&["--script-help", "banner"]);
+        assert_eq!(a.script_help, ["banner"]);
+        assert!(Args::try_parse_from(["feroprobe", "--script", "banner"]).is_err());
+
+        let engine = script_scan(&argv(&["--script", "banner", "10.0.0.1"]))
+            .unwrap()
+            .unwrap();
+        assert_eq!(engine.scripts()[0].id, "banner");
+        assert_eq!(engine.timeout, None);
+        let t = |extra: &[&str]| {
+            let mut a = vec!["--script", "banner"];
+            a.extend_from_slice(extra);
+            a.push("10.0.0.1");
+            script_scan(&argv(&a)).unwrap().unwrap().timeout
+        };
+        assert_eq!(
+            t(&["--script-timeout", "30s"]),
+            Some(Duration::from_secs(30))
+        );
+        assert_eq!(t(&["--script-timeout", "0"]), None);
+        // -T5 sets ten minutes, as in nmap; --script-timeout still wins.
+        assert_eq!(t(&["-T5"]), Some(INSANE_SCRIPT_TIMEOUT));
+        assert_eq!(
+            t(&["-T5", "--script-timeout", "1m"]),
+            Some(Duration::from_secs(60))
+        );
+        assert_eq!(t(&["-T4"]), None);
+
+        let e = script_scan(&argv(&["--script", "nosuch", "10.0.0.1"])).unwrap_err();
+        assert!(e.to_string().contains("'nosuch' did not match"), "{e}");
+        let e = script_scan(&argv(&[
+            "--script",
+            "banner",
+            "--script-args",
+            "a={b",
+            "10.0.0.1",
+        ]))
+        .unwrap_err();
+        assert!(e.to_string().contains("--script-args did not parse"), "{e}");
+        assert!(
+            script_scan(&argv(&["--script-args", "a=1", "10.0.0.1"]))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn dry_run_lists_scripts_and_their_scope() {
+        let engine = script_scan(&argv(&["--script", "banner", "10.0.0.1"]))
+            .unwrap()
+            .unwrap();
+        let plan = plan_with_tcp(Some(ScanType::Connect));
+        let d = DryOrder {
+            scripts: Some(&engine),
+            ..dry_order()
+        };
+        let notes = dry_run_notes(&args(&["-n"]), &plan, &d, true).join("\n");
+        assert!(notes.contains("would load: banner (portrule)"), "{notes}");
+        assert!(
+            notes.contains("only to the 1 TCP port(s) this scan probes"),
+            "{notes}"
+        );
     }
 
     #[test]

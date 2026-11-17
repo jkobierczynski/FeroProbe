@@ -379,6 +379,7 @@ mod imp {
             reason,
             rtt_ms,
             service: None,
+            scripts: Vec::new(),
         }
     }
 
