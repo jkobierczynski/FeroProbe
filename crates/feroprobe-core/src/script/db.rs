@@ -243,9 +243,15 @@ mod tests {
             d(None, Some("/home/u"), None),
             Some(PathBuf::from("/home/u/.local/share/feroprobe/scripts"))
         );
+        // An absolute path on this platform (C:\... on Windows).
+        let data = std::env::temp_dir();
         assert_eq!(
-            d(Some("/data"), Some("/home/u"), None),
-            Some(PathBuf::from("/data/feroprobe/scripts"))
+            dir_for(
+                Some(data.clone().into_os_string()),
+                Some("/home/u".into()),
+                None
+            ),
+            Some(data.join("feroprobe").join("scripts"))
         );
         // A relative XDG_DATA_HOME is ignored, as the spec says.
         assert_eq!(
