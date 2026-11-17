@@ -15,6 +15,7 @@
 
 pub mod args;
 mod base64;
+mod digest;
 mod engine;
 mod http;
 pub mod output;
@@ -39,11 +40,49 @@ pub use socket::Scope;
 /// The scripts built into FeroProbe, written for it: (id, source).
 const BUILT_IN: &[(&str, &str)] = &[
     ("banner", include_str!("../../lua-scripts/banner.lua")),
+    ("ftp-anon", include_str!("../../lua-scripts/ftp-anon.lua")),
+    ("ftp-syst", include_str!("../../lua-scripts/ftp-syst.lua")),
+    (
+        "http-methods",
+        include_str!("../../lua-scripts/http-methods.lua"),
+    ),
+    (
+        "http-robots.txt",
+        include_str!("../../lua-scripts/http-robots.txt.lua"),
+    ),
     (
         "http-title",
         include_str!("../../lua-scripts/http-title.lua"),
     ),
+    (
+        "imap-capabilities",
+        include_str!("../../lua-scripts/imap-capabilities.lua"),
+    ),
+    (
+        "mysql-info",
+        include_str!("../../lua-scripts/mysql-info.lua"),
+    ),
+    ("ntp-info", include_str!("../../lua-scripts/ntp-info.lua")),
+    (
+        "pop3-capabilities",
+        include_str!("../../lua-scripts/pop3-capabilities.lua"),
+    ),
+    ("rpcinfo", include_str!("../../lua-scripts/rpcinfo.lua")),
+    (
+        "smtp-commands",
+        include_str!("../../lua-scripts/smtp-commands.lua"),
+    ),
+    (
+        "ssh-hostkey",
+        include_str!("../../lua-scripts/ssh-hostkey.lua"),
+    ),
     ("ssl-cert", include_str!("../../lua-scripts/ssl-cert.lua")),
+    ("sshv1", include_str!("../../lua-scripts/sshv1.lua")),
+    ("vnc-info", include_str!("../../lua-scripts/vnc-info.lua")),
+    (
+        "x11-access",
+        include_str!("../../lua-scripts/x11-access.lua"),
+    ),
 ];
 
 /// The file name extension of scripts.

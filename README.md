@@ -28,8 +28,8 @@ no external binaries.
 | `feroprobe-diff`: compare two XML reports (FeroProbe's or nmap's) and show what changed, like nmap's `ndiff` | ✅ |
 | Service and version detection, `-sV`, with our own probes and rules | ✅ |
 | OS detection, `-O`, a multi-probe fingerprint matched against our own OS database, with `--osscan-limit`, `--osscan-guess`, `--max-os-tries`, IPv4 and IPv6 (Linux, root) | ✅ |
-| Traceroute, `--traceroute`, IPv4 and IPv6 (Linux, root), and `-A` (`-sV -O --traceroute`) | ✅ |
-| Script scanning, `--script`, `--script-args`, `--script-help`, `--script-timeout`: sandboxed Lua scripts that can only reach the scanned host's probed ports, with our own script library (sockets, TLS, an HTTP client; scripts `banner`, `http-title`, `ssl-cert`; `-sC` and more scripts are coming) | ✅ |
+| Traceroute, `--traceroute`, IPv4 and IPv6 (Linux, root), and `-A` (`-sV -O -sC --traceroute`) | ✅ |
+| Script scanning, `--script`, `--script-args`, `--script-help`, `--script-timeout`, `-sC`: sandboxed Lua scripts that can only reach the scanned host's probed ports, with our own script library (sockets, TLS, an HTTP client) and our own default scripts (SSH host keys, FTP, SMTP, POP3, IMAP, MySQL, VNC, X11, RPC, NTP, HTTP title, methods and robots.txt, TLS certificates) | ✅ |
 
 **[The FeroProbe manual](docs/manual.md)** documents every option, its
 default and how options interact, laid out like nmap's reference guide. It

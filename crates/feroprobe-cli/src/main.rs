@@ -81,6 +81,9 @@ enum ScanType {
     /// -sV: detect service and version on open ports
     #[value(name = "V")]
     Version,
+    /// -sC: run the default scripts, the same as --script=default
+    #[value(name = "C")]
+    Scripts,
 }
 
 impl ScanType {
@@ -127,6 +130,7 @@ impl ScanType {
             ScanType::PingOnly => "-sn",
             ScanType::List => "-sL",
             ScanType::Version => "-sV",
+            ScanType::Scripts => "-sC",
         }
     }
 }
@@ -303,7 +307,8 @@ struct Args {
 
     /// Scan technique, nmap style: -sS (SYN), -sT (connect), -sU (UDP), -sn (no port scan),
     /// -sL (list the targets and send them nothing),
-    /// -sV (also detect service versions on open ports), and the raw TCP scans
+    /// -sV (also detect service versions on open ports), -sC (also run the
+    /// default scripts, as --script=default), and the raw TCP scans
     /// -sF (FIN), -sN (NULL), -sX (Xmas), -sA (ACK), -sW (Window), -sM (Maimon).
     /// Can be repeated, e.g. -sS -sU -sV, with one TCP scan at most.
     /// Default: -sS when run as root on Linux, else -sT
@@ -515,13 +520,13 @@ struct Args {
     #[arg(long)]
     traceroute: bool,
 
-    /// -A: aggressive detection, the same as -sV -O --traceroute. Without
-    /// raw-socket privileges only -sV runs, with a warning
+    /// -A: aggressive detection, the same as -sV -O -sC --traceroute.
+    /// Without raw-socket privileges only -sV and -sC run, with a warning
     #[arg(short = 'A')]
     aggressive: bool,
 
     /// Run this once despite `ics_protection = true` in a settings file,
-    /// allowing -sV, -O, -A and --script. Prints a warning naming what it allowed.
+    /// allowing -sV, -O, -A, -sC and --script. Prints a warning naming what it allowed.
     /// The settings file is not changed
     #[arg(long = "override-ics-protection")]
     override_ics_protection: bool,
@@ -818,6 +823,9 @@ struct Args {
 /// nmap's two-letter options (`-iL`, `-oN`, `-oX`, `-oG`, `-oA`) clash with
 /// clap's short flags, so they are renamed to their long forms before
 /// parsing. Only whole arguments before `--` are touched.
+/// The letters of the `-s` scan types, for combined ones such as `-sCV`.
+const SCAN_LETTERS: &str = "STFNXAWMYZOUnLVC";
+
 fn nmap_style_args(argv: impl IntoIterator<Item = String>) -> Vec<String> {
     let mut out = Vec::new();
     let mut rest = false;
@@ -843,6 +851,14 @@ fn nmap_style_args(argv: impl IntoIterator<Item = String>) -> Vec<String> {
             "-d" => Some("--debug"),
             d if d.starts_with("-d") => {
                 out.push(format!("--debug={}", &d[2..]));
+                continue;
+            }
+            // nmap reads -sCV, -sSU and the like as one -s per letter.
+            s if s.len() > 3
+                && s.starts_with("-s")
+                && s[2..].chars().all(|c| SCAN_LETTERS.contains(c)) =>
+            {
+                out.extend(s[2..].chars().map(|c| format!("-s{c}")));
                 continue;
             }
             _ => None,
@@ -1496,6 +1512,15 @@ struct Plan {
 /// `syn_ok` says whether a SYN scan can serve as the default: the process is
 /// privileged, and the system has IPv6 if any target needs it.
 fn plan(scan: &[ScanType], skip_discovery: bool, syn_ok: bool, scanflags: bool) -> Result<Plan> {
+    // -sC chooses scripts, not a scan: like nmap, it rides along with -sn
+    // (host scripts). Only -sL, which sends nothing, refuses it.
+    let list_asked = scan.contains(&ScanType::List);
+    let scan: Vec<ScanType> = scan
+        .iter()
+        .copied()
+        .filter(|&t| t != ScanType::Scripts || list_asked)
+        .collect();
+    let scan = scan.as_slice();
     let has = |t| scan.contains(&t);
     let tcp_types: Vec<ScanType> = ScanType::TCP.into_iter().filter(|&t| has(t)).collect();
     if tcp_types.len() > 1 {
@@ -2427,7 +2452,8 @@ fn version_option(args: &Args) -> Option<&'static str> {
 
 /// Apply `-A`: version detection, plus OS detection and traceroute when
 /// raw sockets are available (with a warning when they are not). Returns
-/// whether OS detection and traceroute run.
+/// whether OS detection and traceroute run. Its default scripts (`-sC`)
+/// come from [`script_selection`], since they load before the scan.
 fn aggressive(plan: &mut Plan, args: &Args, privileged: bool) -> Result<(bool, bool)> {
     if !args.aggressive {
         return Ok((args.os, args.traceroute));
@@ -2478,24 +2504,42 @@ fn os_option_warnings(args: &Args, os: bool) -> Vec<String> {
 /// nmap's script timeout under `-T5`: ten minutes.
 const INSANE_SCRIPT_TIMEOUT: Duration = Duration::from_secs(600);
 
-/// The scripts `--script` chooses, loaded with their `--script-args`, or
-/// `None` without `--script`.
+/// Whether the default scripts run: `-sC`, or `-A`, which includes it as
+/// in nmap.
+fn default_scripts(args: &Args) -> bool {
+    args.scan.contains(&ScanType::Scripts) || args.aggressive
+}
+
+/// The script selection of the command line: the `--script` lists, plus
+/// `default` for `-sC` or `-A` (nmap adds it the same way, so `-sC
+/// --script banner` runs both).
+fn script_selection(args: &Args) -> Vec<String> {
+    let mut chosen = args.script.clone();
+    if default_scripts(args) {
+        chosen.push("default".to_string());
+    }
+    chosen
+}
+
+/// The scripts `--script`, `-sC` or `-A` choose, loaded with their
+/// `--script-args`, or `None` when no script was asked for.
 fn script_scan(args: &Args) -> Result<Option<feroprobe_core::script::ScriptScan>> {
     use feroprobe_core::script;
-    if args.script.is_empty() {
+    let selection = script_selection(args);
+    if selection.is_empty() {
         for (given, option) in [
             (args.script_args.is_some(), "--script-args"),
             (args.script_args_file.is_some(), "--script-args-file"),
             (args.script_timeout.is_some(), "--script-timeout"),
         ] {
             if given {
-                eprintln!("Warning: {option} has no effect without --script");
+                eprintln!("Warning: {option} has no effect without --script or -sC");
             }
         }
         return Ok(None);
     }
     let chosen =
-        script::choose(&args.script.join(",")).map_err(|e| anyhow::anyhow!("--script: {e}"))?;
+        script::choose(&selection.join(",")).map_err(|e| anyhow::anyhow!("--script: {e}"))?;
     let file = args
         .script_args_file
         .as_ref()
@@ -2541,6 +2585,9 @@ fn device_hostile_options(args: &Args) -> Vec<&'static str> {
     }
     if args.aggressive {
         found.push("-A");
+    }
+    if args.scan.contains(&ScanType::Scripts) {
+        found.push("-sC");
     }
     if !args.script.is_empty() {
         found.push("--script");
@@ -2655,8 +2702,8 @@ fn tcp_scan_label(kind: TcpScanKind) -> &'static str {
 /// What `-A` drops without raw sockets. nmap drops the same parts but says
 /// nothing; FeroProbe names them, so the downgrade is never a surprise.
 const AGGRESSIVE_UNPRIVILEGED: &str = "-A without root or CAP_NET_RAW skips OS detection (-O) \
-     and traceroute (--traceroute), which send raw packets; only version detection (-sV) runs. \
-     Run as root, or grant CAP_NET_RAW, to include them";
+     and traceroute (--traceroute), which send raw packets; only version detection (-sV) and \
+     the default scripts (-sC) run. Run as root, or grant CAP_NET_RAW, to include them";
 
 /// The TCP port traceroute falls back to for a host where the scan found
 /// no open or closed TCP port: always one the command names (-p, the scan or discovery), so
@@ -3276,7 +3323,7 @@ fn script_dry_run_lines(
         })
         .collect();
     let mut lines = vec![format!(
-        "Scripts (--script) a real run would load: {}",
+        "Scripts (--script, -sC or -A) a real run would load: {}",
         list.join(", ")
     )];
     let mut ports = Vec::new();
@@ -4498,6 +4545,13 @@ mod tests {
     #[test]
     fn nmap_two_letter_options() {
         let argv = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        // Combined scan letters, as nmap reads them; anything else stays.
+        assert_eq!(
+            nmap_style_args(argv(&["feroprobe", "-sCV", "-sSU", "-sn", "-sQZ", "x"])),
+            argv(&["feroprobe", "-sC", "-sV", "-sS", "-sU", "-sn", "-sQZ", "x"])
+        );
+        let a = Args::parse_from(nmap_style_args(argv(&["feroprobe", "-sCV", "x"])));
+        assert_eq!(a.scan, [ScanType::Scripts, ScanType::Version]);
         assert_eq!(
             nmap_style_args(argv(&[
                 "feroprobe",
@@ -5674,6 +5728,8 @@ mod tests {
             (&["-sS", "-sV", "-O"], "-sV, -O"),
             (&["--script", "banner"], "--script"),
             (&["-sV", "--script=safe"], "-sV, --script"),
+            (&["-sC"], "-sC"),
+            (&["-sC", "--script", "banner"], "-sC, --script"),
         ] {
             let mut a = opts.to_vec();
             a.push("10.0.0.1");
@@ -5757,6 +5813,47 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn default_scripts_from_sc_and_aggressive() {
+        let ids = |a: &[&str]| -> Vec<String> {
+            let mut v = a.to_vec();
+            v.push("10.0.0.1");
+            script_scan(&argv(&v))
+                .unwrap()
+                .map(|e| e.scripts().iter().map(|s| s.id.clone()).collect())
+                .unwrap_or_default()
+        };
+        let defaults = ids(&["-sC"]);
+        assert!(defaults.contains(&"ssh-hostkey".to_string()), "{defaults:?}");
+        assert!(!defaults.contains(&"banner".to_string()), "{defaults:?}");
+        // -A includes -sC, as in nmap; --script adds to it.
+        assert_eq!(ids(&["-A"]), defaults);
+        assert_eq!(ids(&["-sC", "-A"]), defaults);
+        let both = ids(&["-sC", "--script", "banner"]);
+        assert_eq!(both.len(), defaults.len() + 1);
+        assert!(both.contains(&"banner".to_string()));
+        assert!(ids(&["-sV"]).is_empty());
+        // Script arguments count as used with -sC.
+        assert!(
+            script_scan(&argv(&["-sC", "--script-args", "a=1", "10.0.0.1"]))
+                .unwrap()
+                .is_some()
+        );
+        // -sC is no scan type: it leaves the default scan in place and
+        // rides along with -sn, but a list scan refuses it.
+        let a = argv(&["-sC", "10.0.0.1"]);
+        let pl = plan(&a.scan, false, true, false).unwrap();
+        assert_eq!(pl.tcp, Some(ScanType::Syn));
+        let a = argv(&["-sn", "-sC", "10.0.0.1"]);
+        assert!(plan(&a.scan, false, true, false).unwrap().ping_only);
+        let a = argv(&["-sU", "-sC", "10.0.0.1"]);
+        let pl = plan(&a.scan, false, true, false).unwrap();
+        assert!(pl.udp && pl.tcp.is_none());
+        let a = argv(&["-sL", "-sC", "10.0.0.1"]);
+        let e = plan(&a.scan, false, true, false).unwrap_err().to_string();
+        assert!(e.contains("cannot be combined with -sC"), "{e}");
     }
 
     #[test]

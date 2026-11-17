@@ -16,6 +16,9 @@ teams can flag FeroProbe scans without writing their own.
 | UDP scans to ports with no service-specific probe | payload `FeroProbeScan/1` |
 | ICMP / ICMPv6 echo requests (host discovery, `-PE`, `-PO` and the defaults) | payload `feroprobe` (9 bytes) |
 | HTTP requests from scripts (`--script`, `fero.http`) | `User-Agent: Mozilla/5.0 (compatible; FeroProbe Scripting Engine; https://github.com/jkobierczynski/FeroProbe)` |
+| `ssh-hostkey` (default script) | SSH client version `SSH-2.0-FeroProbe_Scripting_Engine` |
+| `smtp-commands` (default script) | `EHLO feroprobe.invalid` |
+| `ftp-anon` (default script) | `PASS feroprobe@` |
 
 The TCP window of a scan probe is otherwise meaningless, because the scan
 never completes a handshake, so the fixed window does not change how the
@@ -31,8 +34,12 @@ Two scans carry **no** marker, by design:
 Script HTTP requests over TLS (HTTPS) carry the same `User-Agent`, but
 encrypted, so the rules can match only plain HTTP. A script, or
 `--script-args http.useragent=...`, can set another `User-Agent`, as in
-nmap; the request then carries only what was asked for. Other script
-traffic (raw sockets, TLS handshakes) carries no marker.
+nmap; the request then carries only what was asked for. Likewise
+`--script-args smtp.domain=...` replaces the EHLO name. SMTP over TLS
+(port 465, or after STARTTLS) hides the EHLO from the rules; the SSH
+version line and the FTP password are always in clear text. Other script
+traffic (TLS handshakes, protocols with no field for a client name)
+carries no marker.
 
 A custom payload (`--data`, `--data-string` or `--data-length`) replaces the
 UDP and ICMP echo markers, exactly as it replaces nmap's payloads, so those

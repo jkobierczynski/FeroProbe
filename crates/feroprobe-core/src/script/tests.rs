@@ -1133,3 +1133,566 @@ end"#
     assert!(seen.iter().all(|r| !r.contains("secret")), "{seen:?}");
     assert!(seen.iter().any(|r| r.starts_with("GET /plain ")));
 }
+
+// ---- The default scripts (-sC), each against a local stand-in server ----
+
+/// Run one built-in script on `host`; the outputs per port, by number.
+async fn run_built_in(id: &str, host: HostResult) -> Vec<(u16, String)> {
+    let scan = ScriptScan::new(vec![built_in(id)], ArgTable::default(), None).unwrap();
+    let mut hosts = vec![host];
+    scan.scan_hosts(&mut hosts).await;
+    hosts[0]
+        .ports
+        .iter()
+        .flat_map(|p| p.scripts.iter().map(move |s| (p.port, s.output.clone())))
+        .collect()
+}
+
+/// The one output of `id` on a host whose only port is `port`, known as
+/// `service`.
+async fn output_of(id: &str, port: u16, service: &str) -> Option<String> {
+    let out = run_built_in(id, host_with_services(&[(port, service)])).await;
+    assert!(out.len() <= 1, "{out:?}");
+    out.into_iter().next().map(|(_, o)| o)
+}
+
+/// A line-protocol server on 127.0.0.1: sends `greeting`, then answers
+/// each line it reads with `answer(line)` (closing on `None`), keeping
+/// every line it got.
+async fn line_server(greeting: &'static str, answer: fn(&str) -> Option<String>) -> (u16, Seen) {
+    use tokio::io::AsyncBufReadExt;
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = l.local_addr().unwrap().port();
+    let seen: Seen = Default::default();
+    let keep = seen.clone();
+    tokio::spawn(async move {
+        while let Ok((s, _)) = l.accept().await {
+            let keep = keep.clone();
+            tokio::spawn(async move {
+                let (rd, mut wr) = s.into_split();
+                let mut rd = tokio::io::BufReader::new(rd);
+                if wr.write_all(greeting.as_bytes()).await.is_err() {
+                    return;
+                }
+                let mut line = String::new();
+                while rd.read_line(&mut line).await.unwrap_or(0) > 0 {
+                    let got = line.trim_end().to_string();
+                    keep.lock().unwrap().push(got.clone());
+                    line.clear();
+                    match answer(&got) {
+                        Some(reply) => {
+                            if wr.write_all(reply.as_bytes()).await.is_err() {
+                                return;
+                            }
+                        }
+                        None => return,
+                    }
+                }
+            });
+        }
+    });
+    (port, seen)
+}
+
+/// A TCP server on 127.0.0.1 running `talk` on each connection.
+async fn tcp_server<F, Fut>(talk: F) -> u16
+where
+    F: Fn(tokio::net::TcpStream) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = l.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        while let Ok((s, _)) = l.accept().await {
+            tokio::spawn(talk(s));
+        }
+    });
+    port
+}
+
+#[tokio::test]
+async fn ftp_anon_and_ftp_syst() {
+    let (port, seen) = line_server("220 Lab FTP\r\n", |line| {
+        Some(
+            match line.split(' ').next().unwrap() {
+                "USER" => "331 Password please\r\n",
+                "PASS" => "230 Welcome\r\n",
+                "SYST" => "215 UNIX Type: L8\r\n",
+                "STAT" => {
+                    "211-FTP server status:\r\n     Connected to 127.0.0.1\r\n211 End of status\r\n"
+                }
+                "QUIT" => return None,
+                _ => "500 ?\r\n",
+            }
+            .to_string(),
+        )
+    })
+    .await;
+    assert_eq!(
+        output_of("ftp-anon", port, "ftp").await.as_deref(),
+        Some("Anonymous FTP login allowed (FTP code 230)")
+    );
+    {
+        let seen = seen.lock().unwrap();
+        assert_eq!(&seen[..2], ["USER anonymous", "PASS feroprobe@"]);
+    }
+    assert_eq!(
+        output_of("ftp-syst", port, "ftp").await.as_deref(),
+        Some("SYST: UNIX Type: L8\nSTAT:\n  FTP server status:\n       Connected to 127.0.0.1\n  End of status")
+    );
+
+    // A refused login, and STAT refused before login: nothing, and SYST
+    // only.
+    let (port, _) = line_server("220-Lab\r\n220 FTP\r\n", |line| {
+        Some(
+            match line.split(' ').next().unwrap() {
+                "USER" => "530 Not allowed\r\n",
+                "SYST" => "215 Windows_NT\r\n",
+                "QUIT" => return None,
+                _ => "530 Log in first\r\n",
+            }
+            .to_string(),
+        )
+    })
+    .await;
+    assert_eq!(output_of("ftp-anon", port, "ftp").await, None);
+    assert_eq!(
+        output_of("ftp-syst", port, "ftp").await.as_deref(),
+        Some("SYST: Windows_NT")
+    );
+}
+
+#[tokio::test]
+async fn smtp_pop3_and_imap_capabilities() {
+    let (port, seen) = line_server("220-mail.lab ESMTP\r\n220 ready\r\n", |line| {
+        if line.starts_with("EHLO") {
+            Some("250-mail.lab\r\n250-PIPELINING\r\n250-SIZE 1000\r\n250 STARTTLS\r\n".into())
+        } else {
+            None
+        }
+    })
+    .await;
+    assert_eq!(
+        output_of("smtp-commands", port, "smtp").await.as_deref(),
+        Some("mail.lab, PIPELINING, SIZE 1000, STARTTLS")
+    );
+    assert_eq!(seen.lock().unwrap()[0], "EHLO feroprobe.invalid");
+
+    let (port, _) = line_server("+OK ready <1.2@lab>\r\n", |line| match line {
+        "CAPA" => Some("+OK List\r\nTOP\r\nUIDL\r\nSASL PLAIN LOGIN\r\n.\r\n".into()),
+        _ => None,
+    })
+    .await;
+    assert_eq!(
+        output_of("pop3-capabilities", port, "pop3").await.as_deref(),
+        Some("TOP UIDL SASL(PLAIN LOGIN) APOP")
+    );
+
+    let (port, seen) = line_server("* OK ready\r\n", |line| match line {
+        "fp1 CAPABILITY" => {
+            Some("* CAPABILITY IMAP4rev1 IDLE AUTH=PLAIN\r\nfp1 OK done\r\n".into())
+        }
+        _ => Some("* BYE\r\nfp2 OK\r\n".into()),
+    })
+    .await;
+    assert_eq!(
+        output_of("imap-capabilities", port, "imap").await.as_deref(),
+        Some("IMAP4rev1 IDLE AUTH=PLAIN")
+    );
+    assert_eq!(seen.lock().unwrap()[0], "fp1 CAPABILITY");
+}
+
+#[tokio::test]
+async fn sshv1_reads_the_greeting_only() {
+    let port = greeter(b"SSH-1.99-OldServer\r\n").await;
+    assert_eq!(
+        output_of("sshv1", port, "ssh").await.as_deref(),
+        Some("Server supports SSHv1 (announces protocol 1.99)")
+    );
+    let port = greeter(b"Hello\r\nSSH-2.0-NewServer\r\n").await;
+    assert_eq!(output_of("sshv1", port, "ssh").await, None);
+}
+
+/// An SSH packet (RFC 4253 section 6) around `payload`, unencrypted.
+fn ssh_packet(payload: &[u8]) -> Vec<u8> {
+    let mut pad = 8 - (5 + payload.len()) % 8;
+    if pad < 4 {
+        pad += 8;
+    }
+    let mut out = ((1 + payload.len() + pad) as u32).to_be_bytes().to_vec();
+    out.push(pad as u8);
+    out.extend_from_slice(payload);
+    out.extend(std::iter::repeat_n(0, pad));
+    out
+}
+
+fn ssh_string(s: &[u8]) -> Vec<u8> {
+    let mut out = (s.len() as u32).to_be_bytes().to_vec();
+    out.extend_from_slice(s);
+    out
+}
+
+/// The test server's host keys: an Ed25519 key and a 2048-bit RSA key.
+fn ssh_test_keys() -> (Vec<u8>, Vec<u8>) {
+    let ed = [ssh_string(b"ssh-ed25519"), ssh_string(&[0x11; 32])].concat();
+    let mut n = vec![0u8, 0xc0];
+    n.extend(std::iter::repeat_n(0x5a, 255));
+    let rsa = [ssh_string(b"ssh-rsa"), ssh_string(&[1, 0, 1]), ssh_string(&n)].concat();
+    (ed, rsa)
+}
+
+#[tokio::test]
+async fn ssh_hostkey_reads_each_key_from_the_key_exchange() {
+    use tokio::io::AsyncBufReadExt;
+    let idents: Seen = Default::default();
+    let keep = idents.clone();
+    let port = tcp_server(move |s| {
+        let keep = keep.clone();
+        async move {
+            let mut s = tokio::io::BufReader::new(s);
+            if s.write_all(b"SSH-2.0-LabSSH\r\n").await.is_err() {
+                return;
+            }
+            let mut ident = String::new();
+            if s.read_line(&mut ident).await.is_err() {
+                return;
+            }
+            keep.lock().unwrap().push(ident.trim_end().to_string());
+            let mut kexinit = vec![20u8];
+            kexinit.extend([0u8; 16]);
+            for list in [
+                &b"diffie-hellman-group14-sha256,curve25519-sha256"[..],
+                b"ssh-ed25519,rsa-sha2-256",
+                b"aes128-ctr",
+                b"aes128-ctr",
+                b"hmac-sha2-256",
+                b"hmac-sha2-256",
+                b"none",
+                b"none",
+                b"",
+                b"",
+            ] {
+                kexinit.extend(ssh_string(list));
+            }
+            kexinit.extend([0, 0, 0, 0, 0]);
+            if s.write_all(&ssh_packet(&kexinit)).await.is_err() {
+                return;
+            }
+            let (ed, rsa) = ssh_test_keys();
+            let mut key = None;
+            loop {
+                let mut head = [0u8; 5];
+                if s.read_exact(&mut head).await.is_err() {
+                    return;
+                }
+                let len = u32::from_be_bytes(head[..4].try_into().unwrap()) as usize;
+                let mut rest = vec![0u8; len - 1];
+                if s.read_exact(&mut rest).await.is_err() {
+                    return;
+                }
+                let payload = &rest[..len - 1 - head[4] as usize];
+                match payload[0] {
+                    20 => {
+                        // The client's host key algorithms: the second
+                        // name-list.
+                        let text = String::from_utf8_lossy(payload);
+                        key = Some(if text.contains("ssh-ed25519") {
+                            ed.clone()
+                        } else {
+                            rsa.clone()
+                        });
+                        keep.lock().unwrap().push(format!(
+                            "kex {}",
+                            text.contains("curve25519-sha256,")
+                        ));
+                    }
+                    30 => {
+                        // curve25519: a 32-byte public value.
+                        assert_eq!(payload.len(), 1 + 4 + 32);
+                        let mut reply = vec![31u8];
+                        reply.extend(ssh_string(key.as_ref().unwrap()));
+                        reply.extend(ssh_string(&[0x22; 32]));
+                        reply.extend(ssh_string(b"signature"));
+                        let _ = s.write_all(&ssh_packet(&reply)).await;
+                        return;
+                    }
+                    _ => return,
+                }
+            }
+        }
+    })
+    .await;
+    let out = output_of("ssh-hostkey", port, "ssh").await.unwrap();
+    let (ed, rsa) = ssh_test_keys();
+    let md5 = |k: &[u8]| {
+        super::digest::md5(k)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<Vec<_>>()
+            .join(":")
+    };
+    assert_eq!(
+        out,
+        format!("\n  2048 {} (RSA)\n  256 {} (ED25519)", md5(&rsa), md5(&ed))
+    );
+    // Three connections: the first learns there is no DSA key, the ECDSA
+    // one is skipped since the server offers none.
+    let idents = idents.lock().unwrap();
+    assert_eq!(
+        idents
+            .iter()
+            .filter(|i| *i == "SSH-2.0-FeroProbe_Scripting_Engine")
+            .count(),
+        3,
+        "{idents:?}"
+    );
+    assert!(idents.iter().all(|i| i != "kex false"), "{idents:?}");
+}
+
+#[tokio::test]
+async fn mysql_info_reads_the_greeting() {
+    let port = tcp_server(|mut s| async move {
+        let mut p = vec![10u8];
+        p.extend(b"8.0.36\0");
+        p.extend(7u32.to_le_bytes());
+        p.extend(b"abcdefgh");
+        p.push(0);
+        p.extend(0xffffu16.to_le_bytes());
+        p.push(0xff);
+        p.extend(2u16.to_le_bytes());
+        p.extend(0x0008u16.to_le_bytes());
+        p.push(21);
+        p.extend([0u8; 10]);
+        p.extend(b"ijklmnopqrst\0");
+        p.extend(b"caching_sha2_password\0");
+        let mut packet = (p.len() as u32).to_le_bytes()[..3].to_vec();
+        packet.push(0);
+        packet.extend(p);
+        let _ = s.write_all(&packet).await;
+    })
+    .await;
+    let out = output_of("mysql-info", port, "mysql").await.unwrap();
+    for want in [
+        "\n  Protocol: 10\n  Version: 8.0.36\n  Thread ID: 7\n  Capabilities flags: 589823\n",
+        "PROTOCOL_41",
+        "PLUGIN_AUTH",
+        "\n  Status: Autocommit\n  Salt: abcdefghijklmnopqrst\n  Auth Plugin Name: caching_sha2_password",
+    ] {
+        assert!(out.contains(want), "{want:?} in {out}");
+    }
+
+    // A server that refuses the connection says why.
+    let port = tcp_server(|mut s| async move {
+        let msg = b"Host 'x' is not allowed to connect";
+        let mut p = vec![0xffu8];
+        p.extend(1130u16.to_le_bytes());
+        p.extend(msg);
+        let mut packet = (p.len() as u32).to_le_bytes()[..3].to_vec();
+        packet.push(0);
+        packet.extend(p);
+        let _ = s.write_all(&packet).await;
+    })
+    .await;
+    assert_eq!(
+        output_of("mysql-info", port, "mysql").await.as_deref(),
+        Some("Error 1130: Host 'x' is not allowed to connect")
+    );
+}
+
+#[tokio::test]
+async fn vnc_info_and_x11_access() {
+    let port = tcp_server(|mut s| async move {
+        let _ = s.write_all(b"RFB 003.008\n").await;
+        let mut v = [0u8; 12];
+        if s.read_exact(&mut v).await.is_ok() && &v == b"RFB 003.008\n" {
+            let _ = s.write_all(&[2, 2, 1]).await;
+        }
+        let _ = s.read(&mut v).await;
+    })
+    .await;
+    assert_eq!(
+        output_of("vnc-info", port, "vnc").await.as_deref(),
+        Some(
+            "\n  Protocol version: 3.8\n  Security types:\n    VNC Authentication (2)\n    None (1)\n  \
+             WARNING: the server accepts connections without authentication"
+        )
+    );
+
+    let port = tcp_server(|mut s| async move {
+        let mut req = [0u8; 12];
+        if s.read_exact(&mut req).await.is_ok() && req[0] == b'l' && req[2] == 11 {
+            let _ = s.write_all(&[1, 0, 11, 0, 0, 0, 0, 0]).await;
+        }
+    })
+    .await;
+    assert_eq!(
+        output_of("x11-access", port, "X11").await.as_deref(),
+        Some("X server access is granted")
+    );
+    let port = tcp_server(|mut s| async move {
+        let mut req = [0u8; 12];
+        let _ = s.read_exact(&mut req).await;
+        let _ = s.write_all(&[0, 20, 11, 0, 0, 0, 5, 0]).await;
+    })
+    .await;
+    assert_eq!(output_of("x11-access", port, "X11").await, None);
+}
+
+#[tokio::test]
+async fn rpcinfo_dumps_the_portmapper_over_tcp() {
+    let port = tcp_server(|mut s| async move {
+        let mut mark = [0u8; 4];
+        if s.read_exact(&mut mark).await.is_err() {
+            return;
+        }
+        let n = (u32::from_be_bytes(mark) & 0x7fff_ffff) as usize;
+        let mut call = vec![0u8; n];
+        if s.read_exact(&mut call).await.is_err() {
+            return;
+        }
+        // Program 100000 version 2 procedure 4 (DUMP).
+        assert_eq!(&call[12..24], &[0, 1, 0x86, 0xa0, 0, 0, 0, 2, 0, 0, 0, 4]);
+        let mut reply = call[..4].to_vec();
+        for w in [1u32, 0, 0, 0, 0] {
+            reply.extend(w.to_be_bytes());
+        }
+        for (prog, vers, prot, port) in [
+            (100000u32, 4u32, 6u32, 111u32),
+            (100000, 3, 6, 111),
+            (100000, 2, 6, 111),
+            (100000, 2, 17, 111),
+            (100003, 3, 6, 2049),
+        ] {
+            for w in [1, prog, vers, prot, port] {
+                reply.extend(w.to_be_bytes());
+            }
+        }
+        reply.extend(0u32.to_be_bytes());
+        // Two record fragments.
+        let (a, b) = reply.split_at(30);
+        let mut out = (a.len() as u32).to_be_bytes().to_vec();
+        out.extend(a);
+        out.extend((0x8000_0000 | b.len() as u32).to_be_bytes());
+        out.extend(b);
+        let _ = s.write_all(&out).await;
+    })
+    .await;
+    assert_eq!(
+        output_of("rpcinfo", port, "rpcbind").await.as_deref(),
+        Some(
+            "\n  program  version      port/proto  service\
+             \n  100000   2,3,4          111/tcp   rpcbind\
+             \n  100000   2              111/udp   rpcbind\
+             \n  100003   3             2049/tcp   nfs"
+        )
+    );
+}
+
+#[tokio::test]
+async fn ntp_info_asks_for_the_time_and_the_system_variables() {
+    let server = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let port = server.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        let mut buf = [0u8; 512];
+        while let Ok((n, from)) = server.recv_from(&mut buf).await {
+            let reply = match buf[0] & 7 {
+                3 if n == 48 => {
+                    let mut r = vec![0u8; 48];
+                    r[0] = 0x24;
+                    // 2026-01-01T00:00:00Z in NTP seconds.
+                    r[32..36].copy_from_slice(&3_976_214_400u32.to_be_bytes());
+                    r
+                }
+                6 => {
+                    let data = b"version=\"ntpd 4.2.8p15\", stratum=2,\r\nrefid=192.0.2.1";
+                    let mut r = vec![0x16, 0x82, 0, 1, 0, 0, 0, 0, 0, 0];
+                    r.extend((data.len() as u16).to_be_bytes());
+                    r.extend(data);
+                    r
+                }
+                _ => continue,
+            };
+            let _ = server.send_to(&reply, from).await;
+        }
+    });
+    let mut host = host_with(&[(port, PortState::Open)]);
+    host.ports[0].protocol = Protocol::Udp;
+    host.ports[0].service = Some(crate::service::ServiceInfo {
+        name: "ntp".into(),
+        ..Default::default()
+    });
+    let out = run_built_in("ntp-info", host).await;
+    assert_eq!(
+        out,
+        [(
+            port,
+            "\n  receive time stamp: 2026-01-01T00:00:00\n  version: ntpd 4.2.8p15\
+             \n  stratum: 2\n  refid: 192.0.2.1"
+                .to_string()
+        )]
+    );
+}
+
+#[tokio::test]
+async fn http_robots_and_methods() {
+    let (port, seen) = web(|req| {
+        if req.starts_with("GET /robots.txt ") {
+            b"HTTP/1.1 200 OK\r\nContent-Length: 70\r\n\r\nUser-agent: *\nDisallow: /admin # private\nDisallow: /tmp/\nAllow: /pub\n"
+                .to_vec()
+        } else if req.starts_with("OPTIONS / ") {
+            b"HTTP/1.1 200 OK\r\nAllow: GET, HEAD, POST, OPTIONS, TRACE, put\r\nContent-Length: 0\r\n\r\n"
+                .to_vec()
+        } else {
+            b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".to_vec()
+        }
+    })
+    .await;
+    assert_eq!(
+        output_of("http-robots.txt", port, "http").await.as_deref(),
+        Some("2 disallowed entries\n/admin /tmp/")
+    );
+    assert_eq!(
+        output_of("http-methods", port, "http").await.as_deref(),
+        Some("\n  Supported Methods: GET HEAD POST OPTIONS TRACE PUT\n  Potentially risky methods: TRACE PUT")
+    );
+    assert_eq!(seen.lock().unwrap().len(), 2);
+
+    // No robots.txt: nothing.
+    let (port, _) = web(|_| b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".to_vec()).await;
+    assert_eq!(output_of("http-robots.txt", port, "http").await, None);
+    assert_eq!(output_of("http-methods", port, "http").await, None);
+}
+
+#[test]
+fn the_default_category() {
+    let defaults: Vec<String> = choose("default")
+        .unwrap()
+        .into_iter()
+        .map(|s| s.id)
+        .collect();
+    assert_eq!(
+        defaults,
+        [
+            "ftp-anon",
+            "ftp-syst",
+            "http-methods",
+            "http-robots.txt",
+            "http-title",
+            "imap-capabilities",
+            "mysql-info",
+            "ntp-info",
+            "pop3-capabilities",
+            "rpcinfo",
+            "smtp-commands",
+            "ssh-hostkey",
+            "ssl-cert",
+            "sshv1",
+            "vnc-info",
+            "x11-access",
+        ]
+    );
+    // Every default script is also safe, as in nmap.
+    for s in choose("default").unwrap() {
+        assert!(s.categories.iter().any(|c| c == "safe"), "{}", s.id);
+    }
+}
