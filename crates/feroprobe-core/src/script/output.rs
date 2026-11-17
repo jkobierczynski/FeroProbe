@@ -124,11 +124,33 @@ fn layout_value(v: &ScriptValue, indent: &str, out: &mut String) {
 /// Bytes from a script as text: valid UTF-8 as it is, any other byte as
 /// `\xHH`, so nothing is lost silently.
 pub fn bytes_to_text(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len());
+    bytes_to_text_max(bytes, usize::MAX)
+}
+
+/// [`bytes_to_text`], stopping once the text is longer than `max` bytes
+/// (an invalid byte takes four), so a long input is never converted whole.
+pub fn bytes_to_text_max(bytes: &[u8], max: usize) -> String {
+    let mut out = String::with_capacity(bytes.len().min(max.saturating_add(1)));
     for chunk in bytes.utf8_chunks() {
-        out.push_str(chunk.valid());
+        let valid = chunk.valid();
+        let room = max.saturating_add(1).saturating_sub(out.len());
+        if valid.len() > room {
+            let mut end = room;
+            while !valid.is_char_boundary(end) {
+                end += 1;
+            }
+            out.push_str(&valid[..end]);
+            return out;
+        }
+        out.push_str(valid);
         for b in chunk.invalid() {
+            if out.len() > max {
+                return out;
+            }
             out.push_str(&format!("\\x{b:02X}"));
+        }
+        if out.len() > max {
+            return out;
         }
     }
     out
@@ -220,6 +242,9 @@ mod tests {
         assert_eq!(normal_lines(&r).unwrap(), "|_banner: SSH-2.0\\x0D\\x1B[2J");
         assert_eq!(bytes_to_text(b"ok\xff\xfe"), "ok\\xFF\\xFE");
         assert_eq!(bytes_to_text("é".as_bytes()), "é");
+        assert_eq!(bytes_to_text_max(b"\xff\xff\xff\xff", 5), "\\xFF\\xFF");
+        assert_eq!(bytes_to_text_max("abcé".as_bytes(), 3), "abcé");
+        assert_eq!(bytes_to_text_max(b"abcdef", 2), "abc");
         let empty = ScriptResult {
             id: "x".into(),
             output: String::new(),

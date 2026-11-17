@@ -9,7 +9,7 @@ use futures::StreamExt;
 use mlua::{Function, Lua, MultiValue, Table, Value};
 
 use super::args::{ArgTable, ArgValue};
-use super::output::{ScriptResult, ScriptTable, ScriptValue, bytes_to_text};
+use super::output::{ScriptResult, ScriptTable, ScriptValue, bytes_to_text, bytes_to_text_max};
 use super::sandbox::{self, Budget};
 use super::socket::{Scope, ScriptSocket};
 use super::{Script, ScriptError};
@@ -42,11 +42,18 @@ impl Kept {
         self.values > MAX_VALUES || self.bytes > MAX_OUTPUT_BYTES
     }
 
-    /// `text` if it still fits, else "...", and from then on nothing more.
-    fn text(&mut self, text: String) -> String {
+    /// `text` if it still fits, else as much as fits followed by "...",
+    /// and from then on nothing more.
+    fn text(&mut self, mut text: String) -> String {
+        let room = MAX_OUTPUT_BYTES.saturating_sub(self.bytes);
         self.bytes = self.bytes.saturating_add(text.len());
         if self.bytes > MAX_OUTPUT_BYTES {
-            return "...".into();
+            let mut end = room.min(text.len());
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            text.truncate(end);
+            text.push_str("...");
         }
         text
     }
@@ -276,19 +283,24 @@ fn truthy(v: &Value) -> bool {
     !matches!(v, Value::Nil | Value::Boolean(false))
 }
 
-fn tostring(lua: &Lua, v: &Value) -> String {
-    let f: Option<Function> = lua.globals().get("tostring").ok();
-    f.and_then(|f| f.call::<mlua::LuaString>(v.clone()).ok())
-        .map(|s| bytes_to_text(&s.as_bytes()))
-        .unwrap_or_default()
+/// `tostring(v)` as Lua gives it, before any copy is made.
+fn lua_tostring(lua: &Lua, v: &Value) -> Option<mlua::LuaString> {
+    let f: Function = lua.globals().get("tostring").ok()?;
+    f.call::<mlua::LuaString>(v.clone()).ok()
 }
 
-/// A Lua string as text, cut before copying to what the budget still
-/// allows (plus one byte, so [`Kept::text`] sees that it overflowed).
-fn budgeted_text(s: &mlua::LuaString, kept: &Kept) -> String {
-    let b = s.as_bytes();
+/// A Lua string as text, converted only as far as the budget still
+/// allows, and counted against it.
+fn budgeted_text(s: &mlua::LuaString, kept: &mut Kept) -> String {
     let room = MAX_OUTPUT_BYTES.saturating_sub(kept.bytes);
-    bytes_to_text(&b[..b.len().min(room + 1)])
+    kept.text(bytes_to_text_max(&s.as_bytes(), room))
+}
+
+/// `tostring(v)` as text, within the budget.
+fn tostring(lua: &Lua, v: &Value, kept: &mut Kept) -> String {
+    lua_tostring(lua, v)
+        .map(|s| budgeted_text(&s, kept))
+        .unwrap_or_default()
 }
 
 fn convert(lua: &Lua, v: &Value, depth: usize, kept: &mut Kept) -> ScriptValue {
@@ -300,14 +312,14 @@ fn convert(lua: &Lua, v: &Value, depth: usize, kept: &mut Kept) -> ScriptValue {
         let text = match v {
             // Cut before copying, so a huge string is never copied whole.
             Value::String(s) => budgeted_text(s, kept),
-            other => tostring(lua, other),
+            other => tostring(lua, other, kept),
         };
-        return ScriptValue::Str(kept.text(text));
+        return ScriptValue::Str(text);
     };
     if t.metatable()
         .is_some_and(|m| m.raw_get::<Value>("__tostring").is_ok_and(|f| !f.is_nil()))
     {
-        return ScriptValue::Str(kept.text(tostring(lua, v)));
+        return ScriptValue::Str(tostring(lua, v, kept));
     }
     if depth >= MAX_DEPTH {
         return ScriptValue::Str("...".into());
@@ -337,7 +349,7 @@ fn convert(lua: &Lua, v: &Value, depth: usize, kept: &mut Kept) -> ScriptValue {
         if kept.full() {
             break;
         }
-        let k = kept.text(budgeted_text(&k, kept));
+        let k = budgeted_text(&k, kept);
         out.named.push((k, convert(lua, &x, depth + 1, kept)));
     }
     ScriptValue::Table(out)
@@ -354,17 +366,18 @@ fn to_result(lua: &Lua, id: &str, ret: MultiValue) -> Option<ScriptResult> {
     let mut kept = Kept::default();
     let (data, output) = if !r2.is_nil() {
         let data = (!r1.is_nil()).then(|| convert(lua, &r1, 0, &mut kept));
-        (data, tostring(lua, &r2))
+        // The text has a budget of its own, as large as the data's.
+        (data, tostring(lua, &r2, &mut Kept::default()))
     } else {
         match &r1 {
             Value::Nil => return None,
-            Value::String(s) => (None, bytes_to_text(&s.as_bytes())),
+            Value::String(s) => (None, budgeted_text(s, &mut kept)),
             Value::Table(_) => {
                 let d = convert(lua, &r1, 0, &mut kept);
                 let text = d.layout();
                 (Some(d), text)
             }
-            other => (None, tostring(lua, other)),
+            other => (None, tostring(lua, other, &mut kept)),
         }
     };
     (!output.is_empty() || data.is_some()).then(|| ScriptResult {

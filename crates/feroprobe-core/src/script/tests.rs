@@ -475,3 +475,38 @@ end"#;
     let kept = text_bytes(data);
     assert!(kept <= 17 * 1024 * 1024, "{kept}");
 }
+
+#[tokio::test]
+async fn invalid_bytes_and_tostring_output_are_bounded() {
+    // 16 MiB of invalid UTF-8 would be 64 MiB as \xHH text; a table whose
+    // __tostring gives 8 MiB, referenced 100 times, 800 MiB.
+    let src = r#"
+categories = {"safe"}
+hostrule = function() return true end
+action = function()
+  local big = setmetatable({}, {__tostring = function() return ("y"):rep(8 * 1024 * 1024) end})
+  local t = {bad = ("\255"):rep(16 * 1024 * 1024)}
+  for i = 1, 100 do t[i] = big end
+  return t, ("\255"):rep(20 * 1024 * 1024)
+end"#;
+    let scan = ScriptScan::new(vec![script("t", src)], ArgTable::default(), None).unwrap();
+    let mut hosts = vec![host_with(&[])];
+    scan.scan_hosts(&mut hosts).await;
+    let r = &hosts[0].scripts[0];
+    assert!(r.output.len() <= 16 * 1024 * 1024 + 8, "{}", r.output.len());
+    assert!(r.output.starts_with("\\xFF") && r.output.ends_with("..."));
+    let Some(ScriptValue::Table(t)) = &r.data else {
+        panic!()
+    };
+    let kept: usize = t
+        .list
+        .iter()
+        .chain(t.named.iter().map(|(_, v)| v))
+        .map(|v| match v {
+            ScriptValue::Str(s) => s.len(),
+            ScriptValue::Table(_) => 0,
+        })
+        .sum();
+    assert!(kept <= 16 * 1024 * 1024 + 64, "{kept}");
+    assert!(t.list.len() < 100);
+}
