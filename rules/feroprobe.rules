@@ -13,6 +13,9 @@
 #     marker "FeroProbeScan/1".
 #   * ICMP and ICMPv6 echo requests (host discovery, -PO included) carry the 9-byte payload
 #     "feroprobe"; nmap's are empty.
+#   * HTTP requests from scripts (--script) carry the User-Agent
+#     "Mozilla/5.0 (compatible; FeroProbe Scripting Engine; https://github.com/jkobierczynski/FeroProbe)".
+#     Over HTTPS the header is encrypted, so only plain HTTP can be matched.
 #
 # Note: the TCP *connect* scan (-sT) uses the operating system's own TCP
 # stack and completes a normal handshake, so it carries no window marker and
@@ -35,3 +38,6 @@ alert udp any any -> $HOME_NET any (msg:"FeroProbe UDP scan probe (payload marke
 # ICMP echo request (host discovery, -PO included) carrying FeroProbe's 9-byte payload.
 alert icmp any any -> $HOME_NET any (msg:"FeroProbe ping probe (echo payload marker)"; itype:8; dsize:9; content:"feroprobe"; depth:9; classtype:attempted-recon; metadata:tool FeroProbe; sid:9100004; rev:1;)
 alert icmp any any -> $HOME_NET any (msg:"FeroProbe IPv6 ping probe (echo payload marker)"; itype:128; dsize:9; content:"feroprobe"; depth:9; classtype:attempted-recon; metadata:tool FeroProbe; sid:9100005; rev:1;)
+
+# HTTP request from a FeroProbe script, by its User-Agent (plain HTTP only).
+alert http any any -> $HOME_NET any (msg:"FeroProbe script HTTP request (User-Agent)"; flow:established,to_server; http.user_agent; content:"FeroProbe Scripting Engine"; classtype:attempted-recon; metadata:tool FeroProbe; sid:9100006; rev:1;)

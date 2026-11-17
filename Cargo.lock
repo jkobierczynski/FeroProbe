@@ -382,6 +382,7 @@ dependencies = [
  "mlua",
  "rcgen",
  "regex",
+ "ring",
  "rustls",
  "serde",
  "serde_json",
@@ -389,6 +390,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-rustls",
+ "x509-parser",
 ]
 
 [[package]]

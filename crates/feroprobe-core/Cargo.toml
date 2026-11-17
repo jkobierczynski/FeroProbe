@@ -16,12 +16,16 @@ ipnet = "2.12.2"
 # The script engine: Lua 5.4 built in (MIT), run on the scan's tokio runtime.
 mlua = { version = "0.12.2", features = ["lua54", "vendored", "async", "send"] }
 regex = { version = "1.13.1", default-features = false, features = ["std", "perf", "unicode-perl"] }
+# Certificate fingerprints (SHA-1, SHA-256) for scripts; already used by rustls.
+ring = "0.17.14"
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
 serde = { version = "1.0.229", features = ["derive"] }
 socket2 = { version = "0.6.5", features = ["all"] }
 thiserror = "2.0.21"
 tokio = { version = "1.54.1", features = ["net", "time", "rt-multi-thread", "macros", "sync", "io-util"] }
 tokio-rustls = { version = "0.26.6", default-features = false, features = ["ring", "tls12"] }
+# Certificate fields for the scripts' TLS library (MIT or Apache-2.0).
+x509-parser = "0.18.1"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2.191"

@@ -1448,8 +1448,10 @@ nmap\[aq]s scripts do not run unchanged: they are built on nmap\[aq]s
 libraries (\f[V]stdnse\f[R], \f[V]shortport\f[R],
 \f[V]nmap.new_socket\f[R] and the rest), which FeroProbe does not have
 and cannot ship under their licence.
-FeroProbe ships one script so far, \f[V]banner\f[R]; more come in later
-releases, as does \f[V]-sC\f[R] (the \f[V]default\f[R] category).
+FeroProbe ships three scripts so far, \f[V]banner\f[R],
+\f[V]http-title\f[R] and \f[V]ssl-cert\f[R] (see Built-in scripts); more
+come in later releases, as does \f[V]-sC\f[R] (the \f[V]default\f[R]
+category).
 You can run your own: see Writing scripts.
 .PP
 Scripts run in a sandbox and can only reach the host they run against,
@@ -1620,11 +1622,14 @@ A script running against a host may connect only to that host (its
 address, the name it was given on the command line or its reverse DNS
 name; no name is looked up) and only to a port of the same protocol that
 the scan probed on it, in any state.
-Only TCP and UDP sockets exist.
+Only TCP sockets (plain or TLS) and UDP sockets exist.
+The HTTP library goes through the same check, and follows a redirect
+only when it points inside the scope; one that points elsewhere is not
+followed and is returned to the script as it came.
 Scripts with a \f[V]prerule\f[R] or \f[V]postrule\f[R], which run
 without a host, have no network access at all, so nothing broadcasts.
-A connection outside the scope fails, and FeroProbe prints a warning
-naming the script and the address.
+A connection the script asks for outside the scope fails, and FeroProbe
+prints a warning naming the script and the address.
 A wider scope may come later as an explicit option.
 .SS Writing scripts
 .PP
@@ -1734,8 +1739,34 @@ T{
 T}@T{
 Connect to \f[V]host\f[R] (a host table or an address) on \f[V]port\f[R]
 (a port table or a number), over \f[V]\[dq]tcp\[dq]\f[R] (default, or
-the port table\[aq]s protocol) or \f[V]\[dq]udp\[dq]\f[R].
+the port table\[aq]s protocol), \f[V]\[dq]udp\[dq]\f[R], or
+\f[V]\[dq]ssl\[dq]\f[R] for TLS over TCP.
 Returns \f[V]true\f[R], or \f[V]false\f[R] and a message
+T}
+T{
+\f[V]sock:reconnect_ssl()\f[R]
+T}@T{
+Start TLS on a connected TCP socket, as after a STARTTLS exchange.
+Returns \f[V]true\f[R], or \f[V]false\f[R] and a message
+T}
+T{
+\f[V]sock:get_ssl_certificate()\f[R]
+T}@T{
+The server\[aq]s certificate as a table (see TLS), or \f[V]false\f[R]
+and a message
+T}
+T{
+\f[V]sock:get_tls_info()\f[R]
+T}@T{
+The session\[aq]s \f[V]version\f[R] (\f[V]\[dq]TLSv1.2\[dq]\f[R],
+\f[V]\[dq]TLSv1.3\[dq]\f[R]), \f[V]cipher\f[R] (its IANA name) and
+\f[V]alpn\f[R]
+T}
+T{
+\f[V]sock:get_info()\f[R]
+T}@T{
+\f[V]true\f[R], the local address and port, and the remote address and
+port
 T}
 T{
 \f[V]sock:send(data)\f[R]
@@ -1783,6 +1814,51 @@ T}@T{
 All the arguments, as a table
 T}
 T{
+\f[V]fero.http.get(host, port, path [, options])\f[R]
+T}@T{
+An HTTP GET; returns the response table, or \f[V]nil\f[R] and a message
+(see HTTP)
+T}
+T{
+\f[V]fero.http.head(host, port, path [, options])\f[R]
+T}@T{
+The same with HEAD
+T}
+T{
+\f[V]fero.http.post(host, port, path, options, content)\f[R]
+T}@T{
+A POST of \f[V]content\f[R]: a string, or a table sent form-encoded
+T}
+T{
+\f[V]fero.http.request(method, host, port, path [, options])\f[R]
+T}@T{
+Any method
+T}
+T{
+\f[V]fero.http.USER_AGENT\f[R]
+T}@T{
+The \f[V]User-Agent\f[R] requests send by default
+T}
+T{
+\f[V]fero.portrule.match(ports, services [, protos [, states]])\f[R]
+T}@T{
+A port rule: true for a port whose number is in \f[V]ports\f[R] or whose
+service is in \f[V]services\f[R] (a value or a list each), of a protocol
+in \f[V]protos\f[R] (default \f[V]\[dq]tcp\[dq]\f[R]) and a state in
+\f[V]states\f[R] (default \f[V]open\f[R] and \f[V]open|filtered\f[R])
+T}
+T{
+\f[V]fero.portrule.http\f[R], \f[V]fero.portrule.ssl\f[R]
+T}@T{
+Ready-made port rules for web ports and for TLS ports (TLS found by
+\f[V]-sV\f[R], or a TLS service name or port number)
+T}
+T{
+\f[V]fero.base64.encode(s)\f[R], \f[V]fero.base64.decode(s)\f[R]
+T}@T{
+Base64 (decode gives \f[V]nil\f[R] for text that is not base64)
+T}
+T{
 \f[V]fero.verbosity()\f[R], \f[V]fero.debugging()\f[R]
 T}@T{
 The \f[V]-v\f[R] and \f[V]-d\f[R] levels
@@ -1824,6 +1900,141 @@ action = function(host, port)
 end
 \f[R]
 .fi
+.SS Script TLS and HTTP
+.PP
+\f[B]TLS.\f[R] Script TLS (\f[V]\[dq]ssl\[dq]\f[R] sockets,
+\f[V]reconnect_ssl\f[R], the HTTP library) speaks TLS 1.2 and 1.3.
+It accepts any certificate without checking it, offers no client
+certificate, and sends the host\[aq]s name as SNI when it has one (the
+name given on the command line, else its reverse DNS name; never an
+address).
+nmap, through OpenSSL, can also speak older versions, so a device that
+only knows SSLv3 to TLS 1.1 answers nmap\[aq]s scripts but not
+FeroProbe\[aq]s.
+.PP
+\f[V]sock:get_ssl_certificate()\f[R] returns \f[V]subject\f[R] and
+\f[V]issuer\f[R] (tables of attribute names such as
+\f[V]commonName\f[R], \f[V]organizationName\f[R] and
+\f[V]countryName\f[R] to their values), \f[V]subject_text\f[R] and
+\f[V]issuer_text\f[R] (every attribute in the certificate\[aq]s order,
+as \f[V]name=value/name=value\f[R]), \f[V]serial\f[R] (hex),
+\f[V]version\f[R], \f[V]sig_algorithm\f[R] (such as
+\f[V]sha256WithRSAEncryption\f[R]), \f[V]pubkey\f[R] (\f[V]type\f[R]:
+\f[V]rsa\f[R], \f[V]ec\f[R], \f[V]dsa\f[R], \f[V]ed25519\f[R]...;
+\f[V]bits\f[R]; \f[V]curve\f[R] for EC keys), \f[V]validity\f[R]
+(\f[V]notBefore\f[R] and \f[V]notAfter\f[R], as
+\f[V]YYYY-MM-DDTHH:MM:SS\f[R] in UTC), \f[V]san\f[R] (the subject
+alternative names, as \f[V]DNS:name\f[R], \f[V]IP:address\f[R],
+\f[V]email:...\f[R], \f[V]URI:...\f[R]), \f[V]sha1\f[R] and
+\f[V]sha256\f[R] (fingerprints in hex), \f[V]pem\f[R] and \f[V]der\f[R].
+.PP
+\f[B]HTTP.\f[R] \f[V]fero.http\f[R] speaks HTTP/1.1, one request per
+connection (\f[V]Connection: close\f[R]), and sends a \f[V]Host\f[R]
+header (the host\[aq]s name, else its address, with the port unless it
+is 80, or 443 over TLS) and a \f[V]User-Agent\f[R] that names FeroProbe:
+.IP
+.nf
+\f[C]
+Mozilla/5.0 (compatible; FeroProbe Scripting Engine; https://github.com/jkobierczynski/FeroProbe)
+\f[R]
+.fi
+.PP
+This is the script engine\[aq]s signature (see
+\f[V]docs/responsible-use.md\f[R]).
+A request goes over TLS or not as the port suggests: TLS when
+\f[V]-sV\f[R] found it, or the service name or port number is a TLS one;
+if that attempt gets no HTTP answer, the other is tried, as nmap does.
+The options table takes:
+.PP
+.TS
+tab(@);
+l l.
+T{
+Option
+T}@T{
+T}
+_
+T{
+\f[V]header\f[R]
+T}@T{
+A table of extra headers, name to value; a \f[V]Host\f[R] or
+\f[V]User-Agent\f[R] here replaces FeroProbe\[aq]s
+T}
+T{
+\f[V]content\f[R]
+T}@T{
+The request body
+T}
+T{
+\f[V]timeout\f[R]
+T}@T{
+Milliseconds for the whole request, both attempts included (default
+30000)
+T}
+T{
+\f[V]ssl\f[R]
+T}@T{
+\f[V]true\f[R] or \f[V]false\f[R] to use TLS or not, with no second
+attempt
+T}
+T{
+\f[V]redirect_ok\f[R]
+T}@T{
+\f[V]false\f[R] to follow no redirect, or how many to follow (default 3)
+T}
+T{
+\f[V]max_body_size\f[R]
+T}@T{
+The most body bytes kept (default 2 MiB, at most 16 MiB)
+T}
+T{
+\f[V]truncated_ok\f[R]
+T}@T{
+Return a body cut at \f[V]max_body_size\f[R]; without it a longer body
+is an error, as in nmap
+T}
+T{
+\f[V]auth\f[R]
+T}@T{
+\f[V]{username = ..., password = ...}\f[R] for basic authentication
+T}
+T{
+\f[V]cookies\f[R]
+T}@T{
+A \f[V]Cookie\f[R] header, as a string or a table of names to values
+T}
+T{
+\f[V]user_agent\f[R]
+T}@T{
+Another \f[V]User-Agent\f[R]
+T}
+.TE
+.PP
+The response table has \f[V]status\f[R] (a number),
+\f[V]status-line\f[R], \f[V]version\f[R] (\f[V]\[dq]1.1\[dq]\f[R]),
+\f[V]header\f[R] (names in lower case; a repeated header\[aq]s values
+joined with \f[V], \f[R]), \f[V]rawheader\f[R] (every header line as
+sent), \f[V]cookies\f[R] (one table per \f[V]Set-Cookie\f[R], with
+\f[V]name\f[R], \f[V]value\f[R] and its attributes in lower case, flags
+such as \f[V]httponly\f[R] as \f[V]true\f[R]), \f[V]body\f[R],
+\f[V]ssl\f[R] (whether TLS was used), \f[V]truncated\f[R], and
+\f[V]location\f[R] (the URLs of the redirects followed, in order; the
+response is the last one\[aq]s).
+A request that fails returns \f[V]nil\f[R] and a message, such as
+\f[V]\[dq]TIMEOUT\[dq]\f[R] or a scope refusal; in nmap the response
+table comes back with no \f[V]status\f[R].
+Bodies are not decompressed; FeroProbe sends no
+\f[V]Accept-Encoding\f[R], so servers send them plain.
+A method, path or header value holding a control character (such as CR
+or LF) is refused.
+.PP
+Script arguments that apply to every HTTP request, as in nmap:
+\f[V]http.useragent\f[R] (another \f[V]User-Agent\f[R]),
+\f[V]http.host\f[R] (another \f[V]Host\f[R] header),
+\f[V]http.max-body-size\f[R] and \f[V]http.truncated-ok\f[R].
+A \f[V]User-Agent\f[R] set this way, or by the script, replaces the
+FeroProbe signature: like \f[V]--data\f[R], it is a deliberate choice,
+and the request carries exactly what was asked for.
 .SS Script output
 .PP
 In the normal report each script\[aq]s output follows its port, or comes
@@ -1890,7 +2101,50 @@ without sending anything.
 Arguments: \f[V]banner.timeout\f[R] (ms, default 5000),
 \f[V]banner.length\f[R] (characters, default 200)
 T}
+T{
+\f[V]http-title\f[R]
+T}@T{
+default, discovery, safe
+T}@T{
+Fetches a web server\[aq]s front page and shows its title, following
+redirects within scope (and saying where the page came from), or where a
+redirect it did not follow points.
+Argument: \f[V]http-title.path\f[R] (default \f[V]/\f[R])
+T}
+T{
+\f[V]ssl-cert\f[R]
+T}@T{
+default, discovery, safe
+T}@T{
+Shows the certificate of a TLS port: subject, alternative names, issuer,
+key type and size, signature algorithm, validity dates, SHA-1 and
+SHA-256 fingerprints, and with \f[V]-v\f[R] the PEM.
+Direct TLS only for now (no STARTTLS); nmap\[aq]s also shows MD5,
+FeroProbe\[aq]s SHA-256 instead
+T}
 .TE
+.IP
+.nf
+\f[C]
+$ feroprobe -sV -p 80,443 --script http-title,ssl-cert 192.0.2.10
+PORT       STATE          SERVICE        VERSION
+80/tcp     open           http           nginx 1.24.0
+|_http-title: Did not follow redirect to https://www.example.test/
+443/tcp    open           ssl/http       nginx 1.24.0
+| http-title: Example
+|_Requested resource was https://192.0.2.10/start
+| ssl-cert: Subject: commonName=www.example.test/organizationName=Example
+| Subject Alternative Name: DNS:www.example.test, DNS:example.test
+| Issuer: countryName=US/organizationName=Example CA/commonName=Example CA R1
+| Public Key type: ec
+| Public Key bits: 256
+| Signature Algorithm: ecdsa-with-SHA384
+| Not valid before: 2026-09-01T00:00:00
+| Not valid after:  2026-11-30T23:59:59
+| SHA-1:   3c1f...
+|_SHA-256: 9a07...
+\f[R]
+.fi
 .SH TIMING AND PERFORMANCE
 .SS Timing templates (\f[V]-T<0-5>\f[R])
 .PP

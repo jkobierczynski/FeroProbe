@@ -56,7 +56,9 @@ impl ServerCertVerifier for AcceptAnyCert {
     }
 }
 
-static CONNECTOR: LazyLock<TlsConnector> = LazyLock::new(|| {
+/// A client configuration that accepts any certificate, offering
+/// `alpn` (if any) as the application protocols.
+fn connector_with(alpn: &[&[u8]]) -> TlsConnector {
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let schemes = provider
         .signature_verification_algorithms
@@ -67,9 +69,18 @@ static CONNECTOR: LazyLock<TlsConnector> = LazyLock::new(|| {
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(AcceptAnyCert(schemes)))
         .with_no_client_auth();
-    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    config.alpn_protocols = alpn.iter().map(|p| p.to_vec()).collect();
     TlsConnector::from(Arc::new(config))
-});
+}
+
+static CONNECTOR: LazyLock<TlsConnector> = LazyLock::new(|| connector_with(&[b"http/1.1"]));
+static PLAIN_CONNECTOR: LazyLock<TlsConnector> = LazyLock::new(|| connector_with(&[]));
+
+/// The TLS client for scripts, which accepts any certificate: offering
+/// ALPN `http/1.1` when `http`, else no ALPN at all.
+pub(crate) fn connector(http: bool) -> &'static TlsConnector {
+    if http { &CONNECTOR } else { &PLAIN_CONNECTOR }
+}
 
 /// Connect to `addr` and complete a TLS handshake. Returns the stream and
 /// the certificate's subject common name, or `None` if the port does not

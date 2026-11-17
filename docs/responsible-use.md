@@ -159,10 +159,26 @@ script: the built-in `banner` script only opens a TCP connection and
 reads, sending nothing. Script traffic is bounded instead: a script can
 connect only to the host it runs against, and only to ports the scan
 probed there, and scripts that run before or after the scan get no network
-access at all, so no script broadcasts or wanders to other hosts. Later
-script libraries that speak a protocol themselves (such as HTTP) will
-identify FeroProbe where the protocol has a place for it, as a
-`User-Agent` naming FeroProbe's script engine.
+access at all, so no script broadcasts or wanders to other hosts. HTTP
+redirects are followed only within the same bounds.
+
+Where a protocol has a place to name the client, script traffic names
+FeroProbe. Every request of the script HTTP library (`fero.http`, used by
+the built-in `http-title` script) carries
+
+```
+User-Agent: Mozilla/5.0 (compatible; FeroProbe Scripting Engine; https://github.com/jkobierczynski/FeroProbe)
+```
+
+the counterpart of nmap's `Nmap Scripting Engine` agent. Over HTTPS the
+header is encrypted, so a network sensor sees it only in plain HTTP; the
+web server's own logs show it either way. As with `--data`, a
+`User-Agent` the user chooses replaces it (`--script-args
+http.useragent=...`, or a script that sets the header), as in nmap: a
+value typed on purpose is sent exactly as given. TLS handshakes (the
+`ssl-cert` script, `fero.socket` with `"ssl"`) carry no marker: a TLS
+ClientHello has no field for one. They offer no client certificate and
+check nothing about the server's.
 
 ### Detection rules for defenders
 

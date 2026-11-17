@@ -628,3 +628,416 @@ fn print_lines_are_bounded_tabs_included() {
         "a\t\tb"
     );
 }
+
+// ---- Script libraries: TLS, HTTP, port rules (step 7.2) ----
+
+type Seen = std::sync::Arc<std::sync::Mutex<Vec<String>>>;
+
+/// Read one HTTP request (head and Content-Length body) from `s`.
+async fn read_http<S: tokio::io::AsyncRead + Unpin>(s: &mut S) -> String {
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 4096];
+    loop {
+        if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+            let head = String::from_utf8_lossy(&buf[..i]).to_lowercase();
+            let len: usize = head
+                .lines()
+                .find_map(|l| l.strip_prefix("content-length:"))
+                .map_or(0, |v| v.trim().parse().unwrap());
+            if buf.len() >= i + 4 + len {
+                break;
+            }
+        }
+        match s.read(&mut chunk).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+        }
+    }
+    String::from_utf8_lossy(&buf).into_owned()
+}
+
+/// An HTTP server on 127.0.0.1 answering each request with
+/// `answer(request)`, keeping every request it got.
+async fn web(answer: fn(&str) -> Vec<u8>) -> (u16, Seen) {
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = l.local_addr().unwrap().port();
+    let seen: Seen = Default::default();
+    let keep = seen.clone();
+    tokio::spawn(async move {
+        while let Ok((mut s, _)) = l.accept().await {
+            let keep = keep.clone();
+            tokio::spawn(async move {
+                let req = read_http(&mut s).await;
+                let reply = answer(&req);
+                keep.lock().unwrap().push(req);
+                let _ = s.write_all(&reply).await;
+                let _ = s.shutdown().await;
+            });
+        }
+    });
+    (port, seen)
+}
+
+fn tls_acceptor() -> tokio_rustls::TlsAcceptor {
+    let mut params = rcgen::CertificateParams::new(vec!["localhost".into()]).unwrap();
+    params
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, "localhost");
+    params
+        .distinguished_name
+        .push(rcgen::DnType::OrganizationName, "FeroProbe Lab");
+    let key = rcgen::KeyPair::generate().unwrap();
+    let cert = params.self_signed(&key).unwrap();
+    let der = rustls::pki_types::PrivateKeyDer::Pkcs8(key.serialize_der().into());
+    let config = rustls::ServerConfig::builder_with_provider(std::sync::Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .unwrap()
+    .with_no_client_auth()
+    .with_single_cert(vec![cert.der().clone()], der)
+    .unwrap();
+    tokio_rustls::TlsAcceptor::from(std::sync::Arc::new(config))
+}
+
+/// A TLS server on 127.0.0.1. With `starttls`, it first greets in plain
+/// text and waits for `STARTTLS`. Inside TLS it answers one HTTP request
+/// with a page titled "Secure", keeping the request.
+async fn tls_web(starttls: bool) -> (u16, Seen) {
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = l.local_addr().unwrap().port();
+    let acceptor = tls_acceptor();
+    let seen: Seen = Default::default();
+    let keep = seen.clone();
+    tokio::spawn(async move {
+        while let Ok((mut s, _)) = l.accept().await {
+            let acceptor = acceptor.clone();
+            let keep = keep.clone();
+            tokio::spawn(async move {
+                if starttls {
+                    let _ = s.write_all(b"220 ready\r\n").await;
+                    let mut buf = [0u8; 64];
+                    let n = s.read(&mut buf).await.unwrap_or(0);
+                    if &buf[..n] != b"STARTTLS\r\n" {
+                        return;
+                    }
+                    let _ = s.write_all(b"220 go ahead\r\n").await;
+                }
+                let Ok(mut tls) = acceptor.accept(s).await else {
+                    return;
+                };
+                let req = read_http(&mut tls).await;
+                keep.lock().unwrap().push(req);
+                let _ = tls
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 30\r\n\r\n<html><title>Secure</title>hi",
+                    )
+                    .await;
+                let _ = tls.shutdown().await;
+            });
+        }
+    });
+    (port, seen)
+}
+
+fn built_in(id: &str) -> Script {
+    Script::built_in()
+        .unwrap()
+        .into_iter()
+        .find(|s| s.id == id)
+        .unwrap()
+}
+
+fn named<'a>(v: &'a ScriptValue, k: &str) -> &'a ScriptValue {
+    let ScriptValue::Table(t) = v else {
+        panic!("{v:?}")
+    };
+    &t.named
+        .iter()
+        .find(|(n, _)| n == k)
+        .unwrap_or_else(|| panic!("no {k} in {t:?}"))
+        .1
+}
+
+fn text(v: &ScriptValue) -> &str {
+    match v {
+        ScriptValue::Str(s) => s,
+        other => panic!("{other:?}"),
+    }
+}
+
+/// A host whose open ports carry the service name `-sV` would give.
+fn host_with_services(ports: &[(u16, &str)]) -> HostResult {
+    let mut h = host_with(
+        &ports
+            .iter()
+            .map(|&(p, _)| (p, PortState::Open))
+            .collect::<Vec<_>>(),
+    );
+    for (p, &(_, name)) in h.ports.iter_mut().zip(ports) {
+        p.service = Some(crate::service::ServiceInfo {
+            name: name.to_string(),
+            ..Default::default()
+        });
+    }
+    h
+}
+
+#[tokio::test]
+async fn http_title_follows_redirects_in_scope_only() {
+    let (port, seen) = web(|req| {
+        if req.starts_with("GET / ") {
+            b"HTTP/1.1 302 Found\r\nLocation: /home\r\nContent-Length: 0\r\n\r\n".to_vec()
+        } else if req.starts_with("GET /home ") {
+            // Chunked, with an entity and spread-out whitespace.
+            let mut r = b"HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n\
+                          Transfer-Encoding: chunked\r\n\r\n"
+                .to_vec();
+            for part in ["<html><TITLE>\n ", "Lab &amp; Test</ti", "tle>.", ""] {
+                r.extend(format!("{:x}\r\n{part}\r\n", part.len()).bytes());
+            }
+            r
+        } else {
+            b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".to_vec()
+        }
+    })
+    .await;
+    let scan = ScriptScan::new(vec![built_in("http-title")], ArgTable::default(), None).unwrap();
+    let mut hosts = vec![host_with_services(&[(port, "http")])];
+    scan.scan_hosts(&mut hosts).await;
+    let r = &hosts[0].ports[0].scripts[0];
+    assert_eq!(
+        r.output,
+        format!("Lab & Test\nRequested resource was http://localhost:{port}/home")
+    );
+    assert_eq!(text(named(r.data.as_ref().unwrap(), "title")), "Lab & Test");
+    {
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        assert!(
+            seen[0].contains(&format!("\r\nHost: localhost:{port}\r\n")),
+            "{}",
+            seen[0]
+        );
+        assert!(seen[0].contains(&format!("\r\nUser-Agent: {USER_AGENT}\r\n")));
+        assert!(seen[0].contains("\r\nConnection: close\r\n"));
+    }
+
+    // A redirect to a port the scan did not probe is not followed.
+    let (port, seen) = web(|_| {
+        b"HTTP/1.1 301 Moved\r\nLocation: http://localhost:1/x\r\nContent-Length: 0\r\n\r\n"
+            .to_vec()
+    })
+    .await;
+    let mut hosts = vec![host_with_services(&[(port, "http")])];
+    scan.scan_hosts(&mut hosts).await;
+    assert_eq!(
+        hosts[0].ports[0].scripts[0].output,
+        "Did not follow redirect to http://localhost:1/x"
+    );
+    assert_eq!(seen.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn http_library_calls() {
+    let (port, seen) = web(|req| {
+        if req.starts_with("HEAD ") {
+            b"HTTP/1.1 200 OK\r\nContent-Length: 999\r\nSet-Cookie: id=7; Path=/; HttpOnly\r\nX-A: 1\r\nX-A: 2\r\n\r\n".to_vec()
+        } else if req.starts_with("POST ") {
+            let body = req.split("\r\n\r\n").nth(1).unwrap_or("").to_string();
+            format!("HTTP/1.1 201 Created\r\n\r\n{body}").into_bytes()
+        } else {
+            let mut r = b"HTTP/1.1 200 OK\r\nContent-Length: 5000\r\n\r\n".to_vec();
+            r.extend(std::iter::repeat_n(b'x', 5000));
+            r
+        }
+    })
+    .await;
+    let src = format!(
+        r#"{PORT_SCRIPT}
+action = function(host, port)
+  local out = {{}}
+  local r = fero.http.head(host, port, "/")
+  out.head = r.status .. " " .. #r.body .. " " .. r.header["x-a"] .. " "
+    .. r.cookies[1].name .. "=" .. r.cookies[1].value .. " " .. tostring(r.cookies[1].httponly)
+  r = fero.http.post(host, port, "/f", nil, {{ b = "x y", a = "&" }})
+  out.post = r.status .. " " .. r.body
+  local ok, err = fero.http.get(host, port, "/big", {{ max_body_size = 100 }})
+  out.big = tostring(ok) .. " " .. err
+  r = fero.http.get(host, port, "/big", {{ max_body_size = 100, truncated_ok = true }})
+  out.cut = #r.body .. " " .. tostring(r.truncated)
+  ok, err = fero.http.get(host, 1, "/")
+  out.scope = tostring(ok) .. " " .. err
+  ok, err = fero.http.get(host, port, "/a b")
+  out.bad = tostring(ok) .. " " .. err
+  r = fero.http.get(host, port, "/", {{ header = {{ ["User-Agent"] = "custom" }} }})
+  out.b64 = fero.base64.encode("foobar") .. " " .. fero.base64.decode("Zm9vYmFy")
+  out.ua = fero.http.USER_AGENT
+  return out
+end"#
+    );
+    let scan = ScriptScan::new(
+        vec![script("h", &src)],
+        args::parse("http.host=vhost.test").unwrap(),
+        None,
+    )
+    .unwrap();
+    let mut hosts = vec![host_with(&[(port, PortState::Open)])];
+    scan.scan_hosts(&mut hosts).await;
+    let r = &hosts[0].ports[0].scripts[0];
+    let d = r.data.as_ref().unwrap_or_else(|| panic!("{r:?}"));
+    assert_eq!(text(named(d, "head")), "200 0 1, 2 id=7 true");
+    assert_eq!(text(named(d, "post")), "201 a=%26&b=x%20y");
+    assert_eq!(
+        text(named(d, "big")),
+        "nil body exceeds the maximum size of 100 bytes"
+    );
+    assert_eq!(text(named(d, "cut")), "100 true");
+    assert!(
+        text(named(d, "scope")).starts_with("nil tcp port 1 is outside"),
+        "{}",
+        text(named(d, "scope"))
+    );
+    assert!(text(named(d, "bad")).starts_with("nil bad request path"));
+    assert_eq!(text(named(d, "b64")), "Zm9vYmFy foobar");
+    assert_eq!(text(named(d, "ua")), USER_AGENT);
+    let seen = seen.lock().unwrap();
+    // --script-args http.host sets the Host header.
+    assert!(seen[0].contains("\r\nHost: vhost.test\r\n"), "{}", seen[0]);
+    let post = seen.iter().find(|r| r.starts_with("POST")).unwrap();
+    assert!(post.contains("\r\nContent-Type: application/x-www-form-urlencoded\r\n"));
+    assert!(post.contains("\r\nContent-Length: 13\r\n"));
+    // A User-Agent the script sets replaces the signature, as in nmap.
+    let last = seen.last().unwrap();
+    assert!(last.contains("\r\nUser-Agent: custom\r\n"), "{last}");
+    assert!(!last.contains("FeroProbe"));
+}
+
+#[tokio::test]
+async fn ssl_cert_and_https_fallback() {
+    let (port, seen) = tls_web(false).await;
+    // The port number and its service ("unknown") suggest plain HTTP: the
+    // client tries that first, gets no HTTP answer, then tries TLS.
+    let scan = ScriptScan::new(
+        vec![built_in("http-title"), built_in("ssl-cert")],
+        ArgTable::default(),
+        None,
+    )
+    .unwrap();
+    let mut hosts = vec![host_with_services(&[(port, "http")])];
+    scan.scan_hosts(&mut hosts).await;
+    let scripts = &hosts[0].ports[0].scripts;
+    assert_eq!(scripts.len(), 1, "{scripts:?}");
+    assert_eq!(scripts[0].output, "Secure");
+    assert!(seen.lock().unwrap()[0].contains(&format!("Host: localhost:{port}")));
+
+    // ssl-cert runs where -sV found TLS.
+    let mut hosts = vec![host_with_services(&[(port, "http")])];
+    hosts[0].ports[0].service.as_mut().unwrap().tunnel = Some("ssl");
+    scan.scan_hosts(&mut hosts).await;
+    let scripts = &hosts[0].ports[0].scripts;
+    assert_eq!(scripts.len(), 2, "{scripts:?}");
+    let cert = &scripts[1];
+    assert_eq!(cert.id, "ssl-cert");
+    let lines: Vec<&str> = cert.output.lines().collect();
+    assert_eq!(
+        lines[0],
+        "Subject: commonName=localhost/organizationName=FeroProbe Lab"
+    );
+    assert_eq!(lines[1], "Subject Alternative Name: DNS:localhost");
+    assert_eq!(lines[3], "Public Key type: ec");
+    assert_eq!(lines[4], "Public Key bits: 256");
+    assert_eq!(lines[5], "Signature Algorithm: ecdsa-with-SHA256");
+    assert!(lines[6].starts_with("Not valid before: "));
+    assert!(lines[9].starts_with("SHA-256: ") && lines[9].len() == 9 + 64);
+    let data = cert.data.as_ref().unwrap();
+    assert_eq!(
+        text(named(named(data, "subject"), "commonName")),
+        "localhost"
+    );
+    // The http-title fetch, already over TLS this time, went first.
+    assert_eq!(scripts[0].output, "Secure");
+}
+
+#[tokio::test]
+async fn sockets_upgrade_to_tls() {
+    let (port, _) = tls_web(true).await;
+    let src = format!(
+        r#"{PORT_SCRIPT}
+action = function(host, port)
+  local out = {{}}
+  local s = fero.socket.new()
+  s:set_timeout(5000)
+  assert(s:connect(host, port))
+  local _, greeting = s:receive_lines(1)
+  out.greeting = greeting
+  local ok, err = s:get_ssl_certificate()
+  out.plain = tostring(ok) .. " " .. err
+  s:send("STARTTLS\r\n")
+  s:receive_lines(1)
+  out.upgrade = tostring(s:reconnect_ssl())
+  local info = s:get_tls_info()
+  out.version = info.version
+  out.cipher = tostring(info.cipher ~= nil)
+  local st, lip, lport, rip, rport = s:get_info()
+  out.info = tostring(st) .. " " .. lip .. " " .. rip .. " " .. tostring(rport == port.number)
+  out.cn = s:get_ssl_certificate().subject.commonName
+  s:send("GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+  local _, page = s:receive_bytes(20)
+  out.page = page:match("^HTTP/1.1 200") ~= nil
+  out.again = select(2, s:reconnect_ssl())
+  local u = fero.socket.new()
+  out.ssludp = select(2, u:connect(host, port, "dtls"))
+  return out
+end"#
+    );
+    let scan = ScriptScan::new(vec![script("t", &src)], ArgTable::default(), None).unwrap();
+    let mut hosts = vec![host_with(&[(port, PortState::Open)])];
+    scan.scan_hosts(&mut hosts).await;
+    let r = &hosts[0].ports[0].scripts[0];
+    let d = r.data.as_ref().unwrap_or_else(|| panic!("{r:?}"));
+    assert_eq!(text(named(d, "greeting")), "220 ready\r\n");
+    assert_eq!(text(named(d, "plain")), "false not an SSL socket");
+    assert_eq!(text(named(d, "upgrade")), "true");
+    assert_eq!(text(named(d, "version")), "TLSv1.3");
+    assert_eq!(text(named(d, "cipher")), "true");
+    assert_eq!(text(named(d, "info")), "true 127.0.0.1 127.0.0.1 true");
+    assert_eq!(text(named(d, "cn")), "localhost");
+    assert_eq!(text(named(d, "page")), "true");
+    assert_eq!(text(named(d, "again")), "socket already speaks TLS");
+    assert_eq!(text(named(d, "ssludp")), "unsupported protocol dtls");
+}
+
+#[tokio::test]
+async fn port_rule_helpers() {
+    let src = r#"
+description = "t"
+categories = {"safe"}
+portrule = function(host, port)
+  return fero.portrule.match({7}, "echo-ish")(host, port)
+    or fero.portrule.http(host, port)
+    or fero.portrule.ssl(host, port)
+end
+action = function(host, port) return port.service end
+"#;
+    let scan = ScriptScan::new(vec![script("r", src)], ArgTable::default(), None).unwrap();
+    let mut hosts = vec![host_with_services(&[
+        (7, "echo"),
+        (8, "echo-ish"),
+        (9, "discard"),
+        (80, "unknown"),
+        (8081, "https-alt"),
+        (993, "imaps"),
+        (5555, "foo"),
+    ])];
+    hosts[0].ports[6].service.as_mut().unwrap().tunnel = Some("ssl");
+    // Port rules only see the ports their rule sets accept.
+    scan.scan_hosts(&mut hosts).await;
+    let ran: Vec<u16> = hosts[0]
+        .ports
+        .iter()
+        .filter(|p| !p.scripts.is_empty())
+        .map(|p| p.port)
+        .collect();
+    assert_eq!(ran, [7, 8, 80, 8081, 993, 5555]);
+}

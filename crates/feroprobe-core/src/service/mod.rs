@@ -22,7 +22,7 @@
 pub mod db;
 mod parsers;
 mod rules;
-mod tls;
+pub(crate) mod tls;
 mod udp_info;
 
 use std::net::SocketAddr;

@@ -95,6 +95,114 @@ fero.args = {
     return table.unpack(out, 1, n)
   end,
 }
+
+-- Port-rule helpers.
+local function set_of(x)
+  if x == nil then return nil end
+  if type(x) ~= "table" then x = { x } end
+  local s = {}
+  for _, v in ipairs(x) do s[v] = true end
+  return s
+end
+local function rule_for(ports, services, protos, states)
+  local P, S = set_of(ports), set_of(services)
+  local PR = set_of(protos or "tcp")
+  local ST = set_of(states or { "open", "open|filtered" })
+  return function(host, port)
+    if not (PR[port.protocol] and ST[port.state]) then return false end
+    return (P ~= nil and P[port.number] == true)
+      or (S ~= nil and S[port.service] == true)
+  end
+end
+local http_rule = rule_for(
+  { 80, 443, 591, 631, 3000, 5000, 7080, 8000, 8008, 8080, 8081, 8088, 8180,
+    8443, 8888, 9000, 9443 },
+  { "http", "https", "http-alt", "https-alt", "http-proxy", "http-mgmt",
+    "ssl/http", "ipp" })
+local ssl_rule = rule_for(
+  { 443, 465, 636, 989, 990, 992, 993, 995, 4443, 5061, 6697, 8443, 9443 },
+  { "https", "https-alt", "ssl", "ssl/http", "imaps", "pop3s", "smtps",
+    "submissions", "ldaps", "ftps", "ftps-data", "ircs", "sip-tls", "telnets" })
+fero.portrule = {
+  match = rule_for,
+  http = function(host, port) return http_rule(host, port) end,
+  ssl = function(host, port)
+    if port.protocol == "tcp" and (port.state == "open" or port.state == "open|filtered")
+      and type(port.version) == "table" and port.version.service_tunnel == "ssl" then
+      return true
+    end
+    return ssl_rule(host, port)
+  end,
+}
+
+-- HTTP: the defaults --script-args give, around the client.
+local raw_request = fero.http.request
+local function truthy_arg(v)
+  return v == true or v == "true" or v == "1" or v == "yes"
+end
+local function with_defaults(options)
+  local o = {}
+  if options ~= nil then
+    for k, v in pairs(options) do o[k] = v end
+  end
+  local header = {}
+  if type(o.header) == "table" then
+    for k, v in pairs(o.header) do header[k] = v end
+  end
+  o.header = header
+  local ua, maxbody, truncok, hosthdr = fero.args.get(
+    "http.useragent", "http.max-body-size", "http.truncated-ok", "http.host")
+  if o.user_agent == nil and type(ua) == "string" then o.user_agent = ua end
+  if o.max_body_size == nil and tonumber(maxbody) then
+    o.max_body_size = math.tointeger(tonumber(maxbody))
+  end
+  if o.truncated_ok == nil and truthy_arg(truncok) then o.truncated_ok = true end
+  if type(hosthdr) == "string" then
+    local has = false
+    for k in pairs(header) do
+      if type(k) == "string" and k:lower() == "host" then has = true end
+    end
+    if not has then header.Host = hosthdr end
+  end
+  return o
+end
+local function form_encode(t)
+  local parts = {}
+  local function enc(s)
+    return (tostring(s):gsub("[^%w%-%._~]", function(c)
+      return string.format("%%%02X", c:byte())
+    end))
+  end
+  local keys = {}
+  for k in pairs(t) do keys[#keys + 1] = tostring(k) end
+  table.sort(keys)
+  for _, k in ipairs(keys) do parts[#parts + 1] = enc(k) .. "=" .. enc(t[k]) end
+  return table.concat(parts, "&")
+end
+fero.http.request = function(method, host, port, path, options)
+  return raw_request(method, host, port, path, with_defaults(options))
+end
+fero.http.get = function(host, port, path, options)
+  return raw_request("GET", host, port, path, with_defaults(options))
+end
+fero.http.head = function(host, port, path, options)
+  return raw_request("HEAD", host, port, path, with_defaults(options))
+end
+fero.http.post = function(host, port, path, options, content)
+  local o = with_defaults(options)
+  if type(content) == "table" then
+    o.content = form_encode(content)
+    local has = false
+    for k in pairs(o.header) do
+      if type(k) == "string" and k:lower() == "content-type" then has = true end
+    end
+    if not has then o.header["Content-Type"] = "application/x-www-form-urlencoded" end
+  elseif content ~= nil then
+    o.content = content
+  end
+  return raw_request("POST", host, port, path, o)
+end
+fero.http.form_encode = form_encode
 "##;
 
 fn arg_to_lua(lua: &Lua, v: &ArgValue) -> mlua::Result<Value> {
@@ -181,13 +289,42 @@ pub(crate) fn install_library(
     g.raw_set("SCRIPT_TYPE", kind)?;
     let fero = lua.create_table()?;
     let socket = lua.create_table()?;
-    let scope = scope.clone();
     let open = Arc::new(AtomicUsize::new(0));
-    socket.raw_set(
-        "new",
-        lua.create_function(move |_, ()| Ok(ScriptSocket::new(scope.clone(), open.clone())))?,
-    )?;
+    {
+        let scope = scope.clone();
+        let open = open.clone();
+        socket.raw_set(
+            "new",
+            lua.create_function(move |_, ()| Ok(ScriptSocket::new(scope.clone(), open.clone())))?,
+        )?;
+    }
     fero.raw_set("socket", socket)?;
+    let http = lua.create_table()?;
+    {
+        let scope = scope.clone();
+        http.raw_set(
+            "request",
+            lua.create_async_function(move |lua, args| {
+                super::http::request(lua, scope.clone(), open.clone(), args)
+            })?,
+        )?;
+    }
+    http.raw_set("USER_AGENT", super::http::USER_AGENT)?;
+    fero.raw_set("http", http)?;
+    let base64 = lua.create_table()?;
+    base64.raw_set(
+        "encode",
+        lua.create_function(|_, s: mlua::LuaString| Ok(super::base64::encode(&s.as_bytes())))?,
+    )?;
+    base64.raw_set(
+        "decode",
+        lua.create_function(|lua, s: mlua::LuaString| {
+            super::base64::decode(&s.as_bytes())
+                .map(|b| lua.create_string(b))
+                .transpose()
+        })?,
+    )?;
+    fero.raw_set("base64", base64)?;
     fero.raw_set(
         "verbosity",
         lua.create_function(|_, ()| Ok(crate::debug::verbosity()))?,

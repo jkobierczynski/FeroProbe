@@ -14,12 +14,15 @@
 //! ([`socket::Scope`]).
 
 pub mod args;
+mod base64;
 mod engine;
+mod http;
 pub mod output;
 mod pattern;
 mod sandbox;
 pub mod select;
 mod socket;
+mod tls;
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -28,12 +31,20 @@ use std::time::{Duration, Instant};
 
 pub use args::{ArgTable, ArgValue, ArgsError};
 pub use engine::ScriptScan;
+pub use http::USER_AGENT;
 pub use output::{ScriptResult, ScriptTable, ScriptValue};
 pub use sandbox::{INSTRUCTION_LIMIT, MEMORY_LIMIT};
 pub use socket::Scope;
 
 /// The scripts built into FeroProbe, written for it: (id, source).
-const BUILT_IN: &[(&str, &str)] = &[("banner", include_str!("../../lua-scripts/banner.lua"))];
+const BUILT_IN: &[(&str, &str)] = &[
+    ("banner", include_str!("../../lua-scripts/banner.lua")),
+    (
+        "http-title",
+        include_str!("../../lua-scripts/http-title.lua"),
+    ),
+    ("ssl-cert", include_str!("../../lua-scripts/ssl-cert.lua")),
+];
 
 /// The file name extension of scripts.
 pub const EXTENSION: &str = "lua";
