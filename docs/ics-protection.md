@@ -116,8 +116,9 @@ line asks for any of these options:
 | `-sV` | Application-protocol probes (HTTP requests, TLS handshakes, banner prompts and more) to every open port |
 | `-O` | Raw TCP SYNs carrying every common TCP option (one, plus retries if unanswered) to one open TCP port per host. Lighter than nmap's `-O`, which also sends odd flag combinations and probes a closed port, but still a packet a minimal stack may not expect |
 | `-A` | Both of the above, plus traceroute |
+| `--script` | Whatever the chosen scripts send: they connect to the open ports the scan found and talk to the services there, in whatever way they are written to |
 
-Script scanning will join this list if FeroProbe ever gets it.
+`--script-help` only prints the scripts' descriptions and is never refused.
 
 The refusal happens before any name is resolved or any packet is sent
 (a `--dry-run` gets a warning instead; see below), and
@@ -126,9 +127,9 @@ names the options that caused it (the message is one line; wrapped here):
 ```text
 $ feroprobe -sV 10.20.0.0/24
 Error: ICS protection is on (ics_protection = true in /home/me/.config/feroprobe/config.toml),
-so -sV is refused: version and OS detection send probes that can hang or crash fragile
-OT/ICS devices such as PLCs. Leave out -sV, or pass --override-ics-protection to run this
-once anyway
+so -sV is refused: version detection, OS detection and scripts send probes that can hang
+or crash fragile OT/ICS devices such as PLCs. Leave out -sV, or pass
+--override-ics-protection to run this once anyway
 ```
 
 Host discovery and plain port scans (`-sS`, `-sT`, `-sU`, `-sn`, and the
@@ -140,16 +141,16 @@ choose gentle timing (`-T2` or slower) there anyway.
 `--dry-run` sends no scan probes, so it is never refused. (Hostname
 targets are still resolved through the system resolver, which can send DNS
 queries; use numeric targets where no DNS traffic is allowed.) With protection on and
-`-sV`, `-O` or `-A` on the command line, it prints the preview as usual plus
+`-sV`, `-O`, `-A` or `--script` on the command line, it prints the preview as usual plus
 a warning that a real run would be refused, so the habit is learned before
 it matters:
 
 ```text
 $ feroprobe --dry-run -sV 10.20.0.15
 Warning: ICS protection is on (ics_protection = true in .feroproberc): a real run with -sV
-would be refused, since version and OS detection send probes that can hang or crash fragile
-OT/ICS devices such as PLCs. This dry run sends nothing, so it goes ahead. For the real scan,
-leave out -sV or pass --override-ics-protection
+would be refused, since version detection, OS detection and scripts send probes that can
+hang or crash fragile OT/ICS devices such as PLCs. This dry run sends nothing, so it goes
+ahead. For the real scan, leave out -sV or pass --override-ics-protection
 ```
 
 ### Override for one run

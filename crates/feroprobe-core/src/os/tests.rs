@@ -237,6 +237,7 @@ fn osscan_limit_and_tries() {
         reason: crate::model::reason::SYN_ACK,
         rtt_ms: None,
         service: None,
+        scripts: Vec::new(),
     };
     let opts = OsOptions::default();
     let limit = OsOptions {
@@ -403,6 +404,7 @@ async fn detect_local(addr: &str) -> Option<OsResult> {
             reason: crate::model::reason::SYN_ACK,
             rtt_ms: None,
             service: None,
+            scripts: Vec::new(),
         });
     }
     let mut hosts = vec![host];
@@ -466,6 +468,7 @@ async fn stops_at_the_host_deadline() {
         reason: crate::model::reason::SYN_ACK,
         rtt_ms: None,
         service: None,
+        scripts: Vec::new(),
     });
     let cfg = ScanConfig {
         deadline: Some(Instant::now()),

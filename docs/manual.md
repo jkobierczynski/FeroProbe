@@ -26,6 +26,7 @@ every such case in one place.
 - [Service and version detection](#service-and-version-detection)
 - [OS detection](#os-detection)
 - [Traceroute and aggressive mode](#traceroute-and-aggressive-mode)
+- [Script scanning](#script-scanning)
 - [Timing and performance](#timing-and-performance)
 - [Firewall/IDS evasion and spoofing](#firewallids-evasion-and-spoofing)
 - [Output](#output)
@@ -931,8 +932,252 @@ silently, FeroProbe prints a warning naming them:
 Warning: -A without root or CAP_NET_RAW skips OS detection (-O) and traceroute (--traceroute), which send raw packets; only version detection (-sV) runs. Run as root, or grant CAP_NET_RAW, to include them
 ```
 
-nmap's `-A` also runs its default scripts (`-sC`); FeroProbe has no
-scripts. Cannot be combined with `-sn`.
+nmap's `-A` also runs its default scripts (`-sC`); FeroProbe's does not
+run scripts yet, since its default scripts come in a later release. Cannot
+be combined with `-sn`.
+
+## Script scanning
+
+After the scan, FeroProbe can run scripts against the hosts and ports it
+found, like nmap's scripting engine. Scripts are written in Lua 5.4, which
+is built into FeroProbe. Each script decides from what the scan found
+whether it runs on a host or a port (its *rule*), then its *action* talks
+to the service and returns a result, which the report shows under the port
+or the host.
+
+The scripts are FeroProbe's own, with FeroProbe's own script library
+(`fero`). nmap's scripts do not run unchanged: they are built on nmap's
+libraries (`stdnse`, `shortport`, `nmap.new_socket` and the rest), which
+FeroProbe does not have and cannot ship under their licence. FeroProbe
+ships one script so far, `banner`; more come in later releases, as does
+`-sC` (the `default` category). You can run your own: see
+[Writing scripts](#writing-scripts).
+
+Scripts run in a sandbox and can only reach the host they run against, and
+only the ports the scan probed there: see
+[Script sandbox and scope](#script-sandbox-and-scope).
+
+Scripts run last for each host group, after version and OS detection and
+traceroute, on the hosts found up (every host with `-Pn`) that were not
+given up on by `--host-timeout`, as in nmap. Scripts with a `prerule` run
+once before host discovery, and scripts with a `postrule` once after the
+last host. With `-sn`, scripts with a `hostrule` still run, but no port is
+probed, so they can open no socket. A list scan (`-sL`) refuses `--script`,
+since it sends the targets nothing. With ICS protection on, `--script` is
+refused (see [Settings files and ICS protection](#settings-files-and-ics-protection)).
+
+```
+$ feroprobe -p 22,25 --script banner 192.0.2.10
+PORT       STATE          SERVICE
+22/tcp     open           ssh
+|_banner: SSH-2.0-OpenSSH_9.6
+25/tcp     open           smtp
+|_banner: 220 mail.example ESMTP Postfix
+```
+
+#### `--script <scripts>`
+
+Choose the scripts to run: a comma-separated list where each item is
+
+- a script name, such as `banner`, with `*` matching any run of characters
+  (`http-*`); a trailing `.lua` is allowed;
+- a category, such as `safe` or `discovery`, or `all` for every script;
+- a boolean expression of names and categories with `and`, `or`, `not` and
+  parentheses, such as `"safe and not intrusive"`. As in nmap, `and` and
+  `or` bind equally and group from the right (`a and b or c` is
+  `a and (b or c)`), so use parentheses when mixing them;
+- a script file, given by its path, with or without `.lua`;
+- a directory, given by its path with a trailing `/`, for every `.lua`
+  file in it. Without the slash it is refused, as in nmap, so that a
+  directory named like a category is never picked by mistake.
+
+Names, categories and expressions choose among the scripts built into
+FeroProbe. An item that matches none of them is tried as a file, then as a
+directory; one that matches nothing at all stops the run before anything is
+sent, as does a script that fails to load, or two scripts with the same
+name. A `+` before an item runs its scripts on every host and port whatever
+their rules say (scripts with a `portrule` still only see the ports that
+may be open). `--script` may be given more than once; the lists add up.
+`-v` prints how many scripts were loaded.
+
+Each script is loaded (its file run in the sandbox to read its fields)
+when FeroProbe starts, and again in a fresh sandbox for every host or port
+it runs on, so scripts share nothing with each other or between runs.
+
+#### `--script-args <args>`
+
+Arguments for the scripts, in nmap's syntax: comma-separated `name=value`
+pairs and bare names (flags), where a value is a word, a quoted string
+(`"a,b"` or `'a,b'`, with `\` escaping the next character) or a `{...}`
+table of the same:
+
+```sh
+feroprobe --script banner --script-args 'banner.timeout=2000,banner.length=80' 192.0.2.10
+feroprobe --script mine.lua --script-args 'paths={/,/admin},user=admin,unsafe' 192.0.2.10
+```
+
+Names are usually prefixed with the script's name, as above. A later name
+replaces an earlier one. Arguments that do not parse stop the run. A
+script reads them with `fero.args.get` (see [Writing scripts](#writing-scripts)).
+
+#### `--script-args-file <file>`
+
+Read script arguments from a file, in the same syntax, where newlines
+separate arguments as commas do. Trailing commas are ignored. Arguments
+given with `--script-args` are added after the file's, so they win.
+
+#### `--script-help <scripts>`
+
+Print each chosen script's name, categories, origin (built into FeroProbe,
+or the file it came from) and description, then stop. `<scripts>` is read
+as for `--script`. It needs no target, sends nothing and is never refused
+by ICS protection.
+
+```
+$ feroprobe --script-help banner
+
+banner
+Categories: discovery safe
+Built into FeroProbe
+  Shows the first line of text a TCP service sends when a connection
+  opens, ...
+```
+
+#### `--script-timeout <time>`
+
+The longest one script may run against one host or port, counted from its
+start. A script that runs longer is stopped, and gives no output, as in
+nmap; `-d` names it. `0` means no limit. By default there is none, except
+that `-T5` sets ten minutes, as in nmap; `--script-timeout` overrides that.
+
+### Script sandbox and scope
+
+Every script runs in its own Lua state with:
+
+- Lua's `string`, `table`, `math`, `utf8` and `coroutine` libraries, the
+  basic functions, `os.time`, `os.clock`, `os.date` and `os.difftime`, and
+  FeroProbe's `fero` library;
+- no `io`, no other `os` functions (no commands, environment, files or
+  exit), no `require`, `package`, `debug`, `dofile`, `loadfile` or
+  `collectgarbage`, no `string.dump`, and `load` for source text only,
+  never precompiled bytecode;
+- 64 MB of memory, and about a billion Lua instructions (some seconds of
+  pure computation; time spent waiting on the network does not count);
+- for rules, ten seconds (or `--script-timeout`, if shorter); for loading a
+  script, two seconds;
+- at most 32 sockets open at once.
+
+When a limit is reached the script is stopped, and `pcall`, `xpcall` and
+`coroutine.resume` pass that error on rather than catching it, so a
+script cannot carry on past it.
+
+**Scope.** The engine checks every connection, rather than trusting the
+script. A script running against a host may connect only to that host
+(its address, the name it was given on the command line or its reverse
+DNS name; no name is looked up) and only to a port of the same protocol
+that the scan probed on it, in any state. Only TCP and UDP sockets exist.
+Scripts with a `prerule` or `postrule`, which run without a host, have no
+network access at all, so nothing broadcasts. A connection outside the
+scope fails, and FeroProbe prints a warning naming the script and the
+address. A wider scope may come later as an explicit option.
+
+### Writing scripts
+
+A script is a `.lua` file that sets these globals (the names are nmap's,
+so the shape is familiar):
+
+| Field | |
+| --- | --- |
+| `description` | What the script does; `--script-help` prints it |
+| `categories` | A list of categories, such as `{"discovery", "safe"}` (required) |
+| `author`, `license` | Optional: a string or list of strings, and a string |
+| `dependencies` | Optional: names of scripts that must finish first when they are chosen too |
+| `prerule()` | Runs the script once before the scan if it returns true |
+| `hostrule(host)` | Runs the script against `host` if it returns true |
+| `portrule(host, port)` | Runs the script against `port` if it returns true; asked for every port that is `open`, `open\|filtered` or `unfiltered` |
+| `postrule()` | Runs the script once after the scan if it returns true |
+| `action(host, port)` | The work; `host` and `port` as for its rule (none for pre- and postrule) |
+
+At least one rule and `action` are required. Rules cannot use sockets.
+While a script runs, `SCRIPT_NAME` holds its name and `SCRIPT_TYPE` the
+rule it runs under (`"prerule"`, `"hostrule"`, `"portrule"`, `"postrule"`).
+
+**The host table:** `ip` (the address as text), `name` (its reverse DNS
+name, or `""`), `targetname` (the name given on the command line, if
+any), `mac_addr` (if known) and `os` (the names of the OS matches, best
+first, with `-O`).
+
+**The port table:** `number`, `protocol` (`"tcp"`, `"udp"`, ...), `state`
+(`"open"`, ...), `reason`, `service` (the service name) and `version`, a
+table with `name`, `product`, `version`, `extrainfo`, `hostname`, `ostype`,
+`devicetype`, `service_tunnel` (`"ssl"` or `"none"`) and `cpe` (a list), as
+far as `-sV` found them.
+
+**The `fero` library:**
+
+| Call | |
+| --- | --- |
+| `fero.socket.new()` | A new socket |
+| `sock:connect(host, port [, proto])` | Connect to `host` (a host table or an address) on `port` (a port table or a number), over `"tcp"` (default, or the port table's protocol) or `"udp"`. Returns `true`, or `false` and a message |
+| `sock:send(data)` | Send. Returns `true`, or `false` and a message |
+| `sock:receive()` | Whatever arrives next. Returns `true` and the data, or `false` and `"TIMEOUT"`, `"EOF"` or another message |
+| `sock:receive_bytes(n)`, `sock:receive_lines(n)` | Wait for at least `n` bytes or `n` lines; returns all data read. What arrived before a timeout or the end of the connection is returned too |
+| `sock:set_timeout(ms)` | How long each call waits (default 30 seconds) |
+| `sock:close()` | Close the socket (also done when the script ends) |
+| `fero.args.get(name, ...)` | The `--script-args` values of the given names, one per name; an item may be a list of names, the first found wins. A name given as a bare flag returns `true`; `"script.arg"` falls back to `"arg"`, as in nmap |
+| `fero.args.table` | All the arguments, as a table |
+| `fero.verbosity()`, `fero.debugging()` | The `-v` and `-d` levels |
+| `fero.debug(level, message)` | Print `message` with `-d` at `level` or more; `print(...)` prints at level 1 |
+
+**Output.** `action` returns a string, which is the output as it is; a
+table, which the report lays out as indented lines (its numbered entries
+first, as their value alone, then its named entries in name order, as
+`name: value`) and which XML and JSON keep as structured data; or a table
+and a string, the string being the text shown. Returning nothing gives no
+output. An error in a rule or action gives no output either; `-d` shows it.
+
+```lua
+description = [[Says whether a TCP service greets first.]]
+categories = {"safe"}
+
+portrule = function(host, port)
+  return port.protocol == "tcp" and port.state == "open"
+end
+
+action = function(host, port)
+  local sock = fero.socket.new()
+  sock:set_timeout(tonumber(fero.args.get(SCRIPT_NAME .. ".timeout")) or 3000)
+  if not sock:connect(host, port) then return nil end
+  local ok, data = sock:receive()
+  sock:close()
+  return { greets = tostring(ok), bytes = ok and #data or 0 }
+end
+```
+
+### Script output
+
+In the normal report each script's output follows its port, or comes under
+`Host script results:` after the host's other results, `Pre-scan script
+results:` before the first host and `Post-scan script results:` after the
+last, in nmap's layout: `|_name: output` for one line, and `| ` before
+every line but the last for more. Control characters other than tab and
+newline are shown as `\xHH`, so a service cannot send terminal escape
+sequences through a script. Results are listed by script name.
+
+The XML report has nmap's elements: `<script id="..." output="...">` in
+`<port>`, `<hostscript>` in `<host>`, and `<prescript>` and `<postscript>`
+in `<nmaprun>`, with a returned table as nested `<elem key="...">` and
+`<table key="...">` elements. The JSON report has a `scripts` list in each
+port and host, and `prescript` and `postscript` lists at the top, each
+entry with `id`, `output` and, for a table, `data` (an array for a table
+with only numbered entries, else an object). The grepable report has no
+script results, as in nmap.
+
+### Built-in scripts
+
+| Script | Categories | What it does |
+| --- | --- | --- |
+| `banner` | discovery, safe | Connects to open TCP ports and shows the first line the service sends, without sending anything. Arguments: `banner.timeout` (ms, default 5000), `banner.length` (characters, default 200) |
 
 ## Timing and performance
 
@@ -1840,6 +2085,10 @@ since they go only to the TCP ports found open and the UDP ports found
 `open` or `open|filtered`: at the intensity in use, the
 TLS-first ports, the probes meant for each scanned port, the listen probe,
 then the other probes in the order they would be tried, for TCP and UDP.
+With `--script`, the scripts are loaded (so a bad one fails the dry run)
+and a note names each with its rules and the scope its sockets would have;
+what scripts send is not listed, since their rules depend on what the scan
+finds and what they send on the replies they get.
 
 **A dry run is not a preview of nmap.** It lists FeroProbe's probes. nmap
 run with the same options sends different packets, and some of its
@@ -1863,6 +2112,7 @@ per option:
 | `-g 0` with `-sU` or `-PU` | Sends the UDP probes from port 0 (FeroProbe cannot, and uses a random port, with a warning) |
 | Default discovery without root | Only TCP connects to 80 and 443, no ICMP echo |
 | `-PO` with protocol 1 | Its ICMP echo request is empty (FeroProbe's carries `feroprobe`) |
+| `--script` | Its scripts may connect to any host and port they choose, beyond the scan's ports, and some prerule scripts broadcast on the local network (FeroProbe's scripts may reach only the host they run against, on ports the scan probed) |
 | `-sL` with `-sV` or `--traceroute`, as root | Drops them, but the route lookup they cause can send ARP requests to local targets (FeroProbe refuses the combination) |
 
 These come from nmap 7.99's source.
@@ -1898,7 +2148,7 @@ Version detection, OS detection and traceroute; see
 
 #### `--override-ics-protection`
 
-Run once despite ICS protection, allowing `-sV`, `-O` and `-A`, with a
+Run once despite ICS protection, allowing `-sV`, `-O`, `-A` and `--script`, with a
 prominent warning naming what it allowed. Changes no settings file. See
 [Settings files and ICS protection](#settings-files-and-ics-protection).
 
@@ -1984,11 +2234,13 @@ ics_protection = true
 
 With it on:
 
-- `-sV`, `-O` and `-A` are refused before any name is resolved or packet
-  sent, with a message naming the option and where protection was turned
-  on. Version detection sends application-protocol probes (HTTP, TLS, ...)
-  to every open port, and fragile PLCs and RTUs can fault or hang when,
-  for example, their Modbus handler on port 502 receives an HTTP request.
+- `-sV`, `-O`, `-A` and `--script` are refused before any name is
+  resolved or packet sent, with a message naming the option and where
+  protection was turned on. Version detection sends application-protocol
+  probes (HTTP, TLS, ...) to every open port, and fragile PLCs and RTUs can
+  fault or hang when, for example, their Modbus handler on port 502
+  receives an HTTP request; scripts talk to services in whatever way they
+  are written to. `--script-help` sends nothing and is never refused.
 - `--override-ics-protection` lets a single run through with a warning.
 - `--dry-run` is not refused, since it sends no probes, but warns that the
   real run would be.
@@ -2108,12 +2360,19 @@ safeguard calls for a difference. The deliberate differences are:
 | Congestion control, `--max-retries`, `--max-scan-delay` | Windows per host and group between `--min-parallelism` and `--max-parallelism`; resends as losses show up, up to `--max-retries`; raises a lossy host's scan delay, saying so with `-v` | The same, except: a connect or UDP probe that already gave up is not sent again when its host's resends go up later; no timing pings to detect losses; the raised delays are not reported |
 | `-g` with UDP scans | Raw UDP packets from the port, any port including 0 | UDP probes go through the system's sockets, which share the port between them; port 0 cannot be used and falls back to a random port, with a warning |
 | Old-style IPv4 numbers as targets (`2222`, `10.1.2`, `010.0.0.1`) | Passed to the resolver | Refused with an explanation |
-| Probes outside the requested ports | `-A`'s scripts can probe other ports (`ms-sql-info`: UDP 1434 on every host); `-O` picks a random UDP port (and for IPv4 also TCP), regardless of `-p`, when the scan found no closed or unfiltered one | Never beyond the command's own ports (`-p` plus the host-discovery ports): `-sV` probes only open ports the scan found, `-O` an open TCP port the scan found and, when it found one, a closed one (and ICMP echo only when discovery sends it), traceroute only a scanned port, a discovery port, or (with `-sn`) the `-p` port, and FeroProbe has no scripts |
+| Probes outside the requested ports | `-A`'s scripts can probe other ports (`ms-sql-info`: UDP 1434 on every host); `-O` picks a random UDP port (and for IPv4 also TCP), regardless of `-p`, when the scan found no closed or unfiltered one | Never beyond the command's own ports (`-p` plus the host-discovery ports): `-sV` probes only open ports the scan found, `-O` an open TCP port the scan found and, when it found one, a closed one (and ICMP echo only when discovery sends it), traceroute only a scanned port, a discovery port, or (with `-sn`) the `-p` port, and scripts only the ports the scan probed on the host they run against |
 | Traceroute port | The probe that got the best answer during discovery or the scan, else ICMP echo | TCP SYNs to an open or closed scanned port, else a TCP port the command names (`-p` with `-sn`, or a discovery port), else the host is not traced (FeroProbe used to fall back to port 80) |
 | `-A` without root | Silently drops `-O` and traceroute | Drops them with a warning naming them |
 | `-sL` with `-P` options | Ignores them silently | Ignores them with a warning per option |
 | `-sL` with `-sV` or `--traceroute` | Silently drops them (and as root still looks up routes, so local targets can get ARP requests) | Refuses the combination; a list scan sends the targets nothing at all |
 | `-PR` | A no-op; says so only with `-v` | A no-op; says so on every run |
+| Script library | nmap's NSE libraries (`stdnse`, `shortport`, `nmap.new_socket`, ...) and its own scripts | FeroProbe's own `fero` library and scripts (nmap's cannot be shipped under their licence); nmap's scripts do not run unchanged |
+| Script sockets | A script may connect anywhere; prerule scripts may broadcast | Only to the host the script runs against, on ports the scan probed there; prerule and postrule scripts get no network access. A refused connection prints a warning |
+| Script sandbox | Scripts may read and write files and run commands (`io`, `os`) | No files, commands or environment; memory and instruction limits per run |
+| Script output text | Every byte outside printable ASCII shown as `\xHH` | UTF-8 text kept; control characters and invalid bytes shown as `\xHH` |
+| Script table output | Named entries in Lua's traversal order (unpredictable) unless the script orders them | Named entries sorted by name |
+| `fero.args.get` of a bare flag | `stdnse.get_script_args` returns `1` | Returns `true` |
+| `--script-help` | Prints a link to nmap.org's documentation of each script, and writes `-oX` XML | Prints where the script came from (built in, or its file); no XML |
 
 Behaviour that looks unusual but matches nmap includes: skipping discovery
 for this machine as root (`localhost-response`), ARP or neighbour discovery
@@ -2127,8 +2386,8 @@ These nmap options are refused as unknown:
 
 - Scans and discovery: `-sI` (idle scan, not planned), `-iR`,
   `--resolve-all`.
-- Scripting: `-sC`, `--script` and related options (nmap's scripts cannot
-  be shipped under their licence).
+- Scripting: `-sC` (FeroProbe's default scripts come in a later release),
+  `--script-trace` and `--script-updatedb` (planned).
 - Output and misc: `--port-ratio`.
 
 [DEVELOPMENT.md](../DEVELOPMENT.md) tracks which of these are planned.
@@ -2153,8 +2412,9 @@ output.
 | `~/.config/feroprobe/config.toml` (`$XDG_CONFIG_HOME`), the invoking user's under `sudo`, and `./.feroproberc` | Settings; see [Settings files and ICS protection](#settings-files-and-ics-protection) |
 | The system resolver's configuration (`/etc/resolv.conf` on Unix) | Resolving target hostnames, and reverse DNS without `--dns-servers` |
 
-FeroProbe needs no other data files: its port rankings, service rules and
-OS signatures are built into the binary.
+FeroProbe needs no other data files: its port rankings, service rules,
+OS signatures and scripts are built into the binary. Scripts of your own
+are read from the files and directories `--script` names.
 
 ## Examples
 

@@ -93,6 +93,7 @@ async fn probe_port_tries(
         reason,
         rtt_ms,
         service: None,
+        scripts: Vec::new(),
     };
     for tryno in 0..=cfg.retries {
         // cfg.retries is a cap: resend only as often as the host's losses
@@ -313,6 +314,7 @@ mod tests {
             reason: reason::NO_RESPONSE,
             rtt_ms: None,
             service: None,
+            scripts: Vec::new(),
         };
         assert_eq!(
             serde_json::to_string(&r).unwrap(),

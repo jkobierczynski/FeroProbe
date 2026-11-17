@@ -79,6 +79,7 @@ pub(crate) fn run(
         reason: why,
         rtt_ms,
         service: None,
+        scripts: Vec::new(),
     };
     let mut results: HashMap<(usize, u16), PortResult> = HashMap::new();
 

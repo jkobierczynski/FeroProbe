@@ -506,6 +506,13 @@ pub(crate) fn explain(args: &Args, f: &Facts) -> Vec<String> {
     if f.trace {
         extras.push("traceroute to each host that is up (--traceroute)".to_string());
     }
+    if !args.script.is_empty() {
+        extras.push(format!(
+            "the scripts chosen by --script {}, on the hosts and ports their rules pick; each \
+             may connect only to the host it runs against, on ports this scan probes there",
+            args.script.join(",")
+        ));
+    }
     if !extras.is_empty() {
         head(&mut out, "After the port scan");
         for e in extras {

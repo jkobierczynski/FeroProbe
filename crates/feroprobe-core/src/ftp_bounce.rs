@@ -365,6 +365,7 @@ pub async fn bounce_scan(
                     reason: REASON,
                     rtt_ms: None,
                     service: None,
+                    scripts: Vec::new(),
                 }),
                 Verdict::State(state, why) => {
                     if port < 1024 {
@@ -377,6 +378,7 @@ pub async fn bounce_scan(
                         reason: why,
                         rtt_ms: None,
                         service: None,
+                        scripts: Vec::new(),
                     });
                 }
             }
