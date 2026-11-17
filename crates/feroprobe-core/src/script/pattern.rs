@@ -118,7 +118,6 @@ impl<'a> Matcher<'a> {
                         return Err("missing '[' after '%f' in pattern".into());
                     }
                     let ep = self.class_end(p)?;
-                    self.step(ep - p)?;
                     let previous = if s == 0 { 0 } else { self.src[s - 1] };
                     let current = self.src.get(s).copied().unwrap_or(0);
                     if !self.bracket_class(previous, p, ep - 1)
@@ -169,7 +168,9 @@ impl<'a> Matcher<'a> {
     }
 
     /// Where the single-character class at `p` ends.
-    fn class_end(&self, mut p: usize) -> Res<usize> {
+    /// Every byte of a set is charged as it is scanned, so a long set, or
+    /// one never closed, cannot outlast the limits either.
+    fn class_end(&mut self, mut p: usize) -> Res<usize> {
         let pat = self.pat;
         let c = pat[p];
         p += 1;
@@ -186,6 +187,7 @@ impl<'a> Matcher<'a> {
                 }
                 // The first character is part of the set even if it is ']'.
                 loop {
+                    self.step(1)?;
                     if p == pat.len() {
                         return Err("malformed pattern (missing ']')".into());
                     }
@@ -1005,6 +1007,11 @@ return table.concat(log, '\n')
             "for _ in string.gmatch(string.rep('a', 200000), string.rep('a*', 30) .. 'b') do end",
             "string.find(string.rep('a', 1000000), '[' .. string.rep('b', 100000) .. ']+$')",
             "string.find(string.rep('(', 1000000), '%b()')",
+            // A long set: scanned again at every position of the subject.
+            "string.find(string.rep('a', 1000000), '[' .. string.rep('b', 1000000) .. ']$')",
+            // A set never closed: scanned once per call, so call it often.
+            "local p = '[' .. string.rep('b', 10000000) \
+             while true do pcall(string.find, 'a', p) end",
         ] {
             let (e, took) = timed(code, Duration::from_millis(300));
             assert_eq!(e, TIMED_OUT, "{code}");
