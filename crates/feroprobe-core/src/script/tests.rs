@@ -212,6 +212,9 @@ fn installed_scripts_and_their_index() {
     // The same file by index and by path is loaded once.
     let path = dir.join("mine.lua").display().to_string();
     assert_eq!(ids(&format!("safe,{path}")), ["alpha", "mine"]);
+    // ...and a + on the path still forces it.
+    let chosen = choose_in(&format!("safe,+{path}"), built(), Some(&dir)).unwrap();
+    assert!(chosen.iter().any(|s| s.id == "mine" && s.forced));
     // A script the index lists but that is gone names the fix.
     std::fs::remove_file(dir.join("mine.lua")).unwrap();
     let e = choose_in("safe", built(), Some(&dir)).unwrap_err();

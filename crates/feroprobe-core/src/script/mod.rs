@@ -408,7 +408,10 @@ fn choose_in(
                     && c.path.as_ref().and_then(|p| p.canonicalize().ok())
                         == s.path.as_ref().and_then(|p| p.canonicalize().ok())
             };
-            if chosen.iter().any(same_file) {
+            // Chosen already (by the index, or another rule): loaded once,
+            // and still forced if this rule forces it.
+            if let Some(c) = chosen.iter_mut().find(|c| same_file(c)) {
+                c.forced |= rule.forced;
                 continue;
             }
             chosen.push(Script {

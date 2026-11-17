@@ -186,13 +186,17 @@ impl<S: AsyncRead + Unpin> AsyncRead for Traced<S> {
     ) -> Poll<std::io::Result<()>> {
         let before = buf.filled().len();
         let r = Pin::new(&mut self.inner).poll_read(cx, buf);
-        if let Poll::Ready(Ok(())) = &r {
-            let got = &buf.filled()[before..];
-            if got.is_empty() {
-                self.ends.event(Dir::In, "EOF");
-            } else {
-                self.ends.data(Dir::In, got);
+        match &r {
+            Poll::Ready(Ok(())) => {
+                let got = &buf.filled()[before..];
+                if got.is_empty() {
+                    self.ends.event(Dir::In, "EOF");
+                } else {
+                    self.ends.data(Dir::In, got);
+                }
             }
+            Poll::Ready(Err(e)) => self.ends.event(Dir::In, &e.to_string()),
+            Poll::Pending => {}
         }
         r
     }
@@ -205,14 +209,20 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for Traced<S> {
         buf: &[u8],
     ) -> Poll<std::io::Result<usize>> {
         let r = Pin::new(&mut self.inner).poll_write(cx, buf);
-        if let Poll::Ready(Ok(n)) = &r {
-            self.ends.data(Dir::Out, &buf[..*n]);
+        match &r {
+            Poll::Ready(Ok(n)) => self.ends.data(Dir::Out, &buf[..*n]),
+            Poll::Ready(Err(e)) => self.ends.event(Dir::Out, &e.to_string()),
+            Poll::Pending => {}
         }
         r
     }
 
     fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-        Pin::new(&mut self.inner).poll_flush(cx)
+        let r = Pin::new(&mut self.inner).poll_flush(cx);
+        if let Poll::Ready(Err(e)) = &r {
+            self.ends.event(Dir::Out, &e.to_string());
+        }
+        r
     }
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {

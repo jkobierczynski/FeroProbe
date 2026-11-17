@@ -35,10 +35,16 @@ pub fn dir_for(
     appdata: Option<OsString>,
 ) -> Option<PathBuf> {
     let nonempty = |v: Option<OsString>| v.filter(|v| !v.is_empty()).map(PathBuf::from);
-    let base = nonempty(xdg_data_home)
-        .filter(|p| p.is_absolute())
-        .or_else(|| nonempty(home).map(|h| h.join(".local").join("share")))
-        .or_else(|| nonempty(appdata))?;
+    let home = || nonempty(home.clone()).map(|h| h.join(".local").join("share"));
+    let appdata = || nonempty(appdata.clone());
+    let xdg = nonempty(xdg_data_home).filter(|p| p.is_absolute());
+    // Windows' own data directory comes before HOME there (which Git
+    // Bash and MSYS set); elsewhere APPDATA is only a last resort.
+    let base = if cfg!(windows) {
+        xdg.or_else(appdata).or_else(home)
+    } else {
+        xdg.or_else(home).or_else(appdata)
+    }?;
     Some(base.join("feroprobe").join("scripts"))
 }
 
@@ -175,11 +181,23 @@ pub fn update(dir: &Path, built_in: &[&str]) -> Result<Update, ScriptError> {
             dir.display()
         ));
     }
-    let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
-        .map_err(|e| ScriptError(format!("cannot read {}: {e}", dir.display())))?
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.is_file() && p.extension().is_some_and(|x| x == EXTENSION))
-        .collect();
+    // Any error reading the directory stops the update, so an index is
+    // never replaced by one that silently lacks scripts.
+    let cannot_read =
+        |e: std::io::Error| ScriptError(format!("cannot read {}: {e}", dir.display()));
+    let mut files: Vec<PathBuf> = Vec::new();
+    for entry in std::fs::read_dir(dir).map_err(cannot_read)? {
+        let path = entry.map_err(cannot_read)?.path();
+        if path.extension().is_none_or(|x| x != EXTENSION) {
+            continue;
+        }
+        // Follows links, as reading the script does.
+        let meta = std::fs::metadata(&path)
+            .map_err(|e| ScriptError(format!("cannot read {}: {e}", path.display())))?;
+        if meta.is_file() {
+            files.push(path);
+        }
+    }
     files.sort();
     let mut out = Update::default();
     for f in files {
@@ -217,17 +235,35 @@ pub fn update(dir: &Path, built_in: &[&str]) -> Result<Update, ScriptError> {
             categories: script.categories,
         });
     }
-    // Written beside the old index and moved over it, so a reader never
-    // sees half a file.
-    let path = dir.join(DB_FILE);
-    let tmp = dir.join(format!("{DB_FILE}.tmp"));
-    std::fs::write(&tmp, render(&out.entries))
-        .and_then(|()| std::fs::rename(&tmp, &path))
-        .map_err(|e| {
-            let _ = std::fs::remove_file(&tmp);
-            ScriptError(format!("cannot write {}: {e}", path.display()))
-        })?;
+    write_index(dir, &render(&out.entries))?;
     Ok(out)
+}
+
+/// Write the index beside the old one and move it over it, so a reader
+/// never sees half a file. The temporary file is this process's own and
+/// created new (never an existing file or link, which could aim the write
+/// elsewhere), and only it is removed on failure.
+fn write_index(dir: &Path, text: &str) -> Result<(), ScriptError> {
+    use std::io::Write;
+    let path = dir.join(DB_FILE);
+    let failed = |e: std::io::Error| ScriptError(format!("cannot write {}: {e}", path.display()));
+    let tmp = dir.join(format!("{DB_FILE}.{}.tmp", std::process::id()));
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp)
+        .map_err(failed)?;
+    let written = file
+        .write_all(text.as_bytes())
+        .and_then(|()| file.sync_all())
+        .and_then(|()| {
+            drop(file);
+            std::fs::rename(&tmp, &path)
+        });
+    written.map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        failed(e)
+    })
 }
 
 #[cfg(test)]
@@ -259,6 +295,16 @@ mod tests {
             Some(PathBuf::from("/home/u/.local/share/feroprobe/scripts"))
         );
         assert_eq!(d(None, None, None), None);
+        // With both HOME and APPDATA, Windows uses its own data directory.
+        let both = d(None, Some("/home/u"), Some("/appdata"));
+        if cfg!(windows) {
+            assert_eq!(both, Some(PathBuf::from("/appdata/feroprobe/scripts")));
+        } else {
+            assert_eq!(
+                both,
+                Some(PathBuf::from("/home/u/.local/share/feroprobe/scripts"))
+            );
+        }
     }
 
     #[test]

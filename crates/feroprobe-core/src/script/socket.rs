@@ -262,6 +262,22 @@ pub(crate) fn port_arg(v: &Value) -> mlua::Result<(u16, Option<String>)> {
         .map_err(|_| mlua::Error::runtime("bad port number"))
 }
 
+/// Write all of `data`, counting in `done` what was written so far.
+async fn write_counted<W: tokio::io::AsyncWrite + Unpin + ?Sized>(
+    w: &mut W,
+    data: &[u8],
+    done: &mut usize,
+) -> Result<(), String> {
+    while *done < data.len() {
+        match w.write(&data[*done..]).await {
+            Ok(0) => return Err("connection closed while sending".to_string()),
+            Ok(n) => *done += n,
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+    Ok(())
+}
+
 /// What a receive call waits for.
 #[derive(Clone, Copy)]
 enum Want {
@@ -447,18 +463,26 @@ impl UserData for ScriptSocket {
             async move {
                 let data = data.as_bytes().to_vec();
                 let mut st = state.lock().await;
+                let st = &mut *st;
                 let timeout = st.timeout;
+                // How much was written, kept outside the call so that a
+                // timeout still traces what went out before it.
+                let mut done = 0usize;
                 let sent = async {
                     match &mut st.conn {
                         Conn::Closed => Err("socket is not connected".to_string()),
-                        Conn::Tcp(s) => s.write_all(&data).await.map_err(|e| e.to_string()),
-                        Conn::Tls(s) => async {
-                            s.write_all(&data).await?;
-                            s.flush().await
+                        Conn::Tcp(s) => write_counted(s, &data, &mut done).await,
+                        Conn::Tls(s) => {
+                            write_counted(s.as_mut(), &data, &mut done).await?;
+                            s.flush().await.map_err(|e| e.to_string())
                         }
-                        .await
-                        .map_err(|e| e.to_string()),
-                        Conn::Udp(s) => s.send(&data).await.map(|_| ()).map_err(|e| e.to_string()),
+                        Conn::Udp(s) => match s.send(&data).await {
+                            Ok(_) => {
+                                done = data.len();
+                                Ok(())
+                            }
+                            Err(e) => Err(e.to_string()),
+                        },
                     }
                 };
                 let outcome = match tokio::time::timeout(timeout, sent).await {
@@ -466,9 +490,9 @@ impl UserData for ScriptSocket {
                     Ok(r) => r,
                 };
                 if let Some(ends) = &st.ends {
-                    match &outcome {
-                        Ok(()) => ends.data(Dir::Out, &data),
-                        Err(e) => ends.event(Dir::Out, e),
+                    ends.data(Dir::Out, &data[..done]);
+                    if let Err(e) = &outcome {
+                        ends.event(Dir::Out, e);
                     }
                 }
                 match outcome {

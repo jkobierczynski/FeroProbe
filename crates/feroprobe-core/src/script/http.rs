@@ -645,7 +645,12 @@ pub(crate) async fn request(
             let budget = if i + 1 < tries { left / 2 } else { left };
             let bytes = request_bytes(&req, &name, port_n, ssl);
             match tokio::time::timeout(budget, attempt(addr, sni_now, ssl, &req, &bytes)).await {
-                Err(_) => last_err = "TIMEOUT".into(),
+                Err(_) => {
+                    // The attempt was cancelled: its stream traced only
+                    // CLOSE (or nothing, during the connect).
+                    Ends::tcp(None, addr).event(Dir::In, "TIMEOUT");
+                    last_err = "TIMEOUT".into();
+                }
                 Ok(Err(e)) => last_err = e,
                 Ok(Ok(r)) => {
                     got = Some((r, ssl));
