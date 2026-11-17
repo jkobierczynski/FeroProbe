@@ -565,7 +565,7 @@ struct Args {
     #[arg(long = "script-timeout", value_name = "TIME", value_parser = parse_duration)]
     script_timeout: Option<Duration>,
 
-    /// Print everything the scripts' connections send and receive (NSE:
+    /// Print everything the scripts' connections send and receive (LUA:
     /// lines on standard output), like nmap's --script-trace.
     /// --packet-trace turns it on too
     #[arg(long = "script-trace")]

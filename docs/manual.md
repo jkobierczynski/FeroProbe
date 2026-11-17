@@ -1097,10 +1097,10 @@ event (`CONNECT`, `CLOSE`, `EOF`, `TIMEOUT` or the error) or the data
 sent or received.
 
 ```
-NSE: TCP 192.0.2.1:40312 > 192.0.2.10:21 | CONNECT
-NSE: TCP 192.0.2.1:40312 < 192.0.2.10:21 | 220 (vsFTPd 3.0.5)\r\n
-NSE: TCP 192.0.2.1:40312 > 192.0.2.10:21 | USER anonymous\r\n
-NSE: TCP 192.0.2.1:40312 > 192.0.2.10:21 | CLOSE
+LUA: TCP 192.0.2.1:40312 > 192.0.2.10:21 | CONNECT
+LUA: TCP 192.0.2.1:40312 < 192.0.2.10:21 | 220 (vsFTPd 3.0.5)\r\n
+LUA: TCP 192.0.2.1:40312 > 192.0.2.10:21 | USER anonymous\r\n
+LUA: TCP 192.0.2.1:40312 > 192.0.2.10:21 | CLOSE
 ```
 
 Data that is mostly text (at most 5% of its bytes unprintable, as nmap
@@ -1108,8 +1108,9 @@ decides) is shown on one line, with line ends and tabs as `\r`, `\n`,
 `\t`, a backslash as `\\` and other bytes as `\xHH`. Other data is shown
 as a hex dump, sixteen bytes a line with their printable characters.
 Connections that speak TLS show the data inside the TLS, as nmap's do.
-The HTTP library's connections are traced too. The `NSE:` prefix is
-nmap's, kept so that tools reading nmap's trace read FeroProbe's.
+The HTTP library's connections are traced too. The prefix is `LUA:`
+(nmap's is `NSE:`, the name of its engine); the rest of the line is in
+nmap's layout.
 
 [`--packet-trace`](#--packet-trace) turns the script trace on as well, as
 in nmap (and the `p` key while a scan runs turns both on and off).

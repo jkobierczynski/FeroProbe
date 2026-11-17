@@ -3,9 +3,9 @@
 //! nmap's script trace:
 //!
 //! ```text
-//! NSE: TCP 192.0.2.1:40312 > 192.0.2.7:80 | CONNECT
-//! NSE: TCP 192.0.2.1:40312 > 192.0.2.7:80 | GET / HTTP/1.1\r\n...
-//! NSE: TCP 192.0.2.1:40312 < 192.0.2.7:80 | HTTP/1.1 200 OK\r\n...
+//! LUA: TCP 192.0.2.1:40312 > 192.0.2.7:80 | CONNECT
+//! LUA: TCP 192.0.2.1:40312 > 192.0.2.7:80 | GET / HTTP/1.1\r\n...
+//! LUA: TCP 192.0.2.1:40312 < 192.0.2.7:80 | HTTP/1.1 200 OK\r\n...
 //! ```
 //!
 //! `>` is towards the target, `<` from it. Data that is mostly printable
@@ -94,7 +94,7 @@ impl Ends {
             Dir::In => '<',
         };
         format!(
-            "NSE: {} {} {arrow} {} | {what}",
+            "LUA: {} {} {arrow} {} | {what}",
             self.proto,
             addr(local),
             addr(self.remote)
@@ -268,12 +268,12 @@ mod tests {
         );
         assert_eq!(
             e.line(Dir::Out, "CONNECT"),
-            "NSE: TCP 192.0.2.1:40312 > 192.0.2.7:80 | CONNECT"
+            "LUA: TCP 192.0.2.1:40312 > 192.0.2.7:80 | CONNECT"
         );
         let e = Ends::udp(None, "[2001:db8::7]:123".parse().unwrap());
         assert_eq!(
             e.line(Dir::In, "TIMEOUT"),
-            "NSE: UDP :::0 < 2001:db8::7:123 | TIMEOUT"
+            "LUA: UDP :::0 < 2001:db8::7:123 | TIMEOUT"
         );
     }
 }

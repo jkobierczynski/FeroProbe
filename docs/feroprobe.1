@@ -1625,10 +1625,10 @@ data sent or received.
 .IP
 .nf
 \f[C]
-NSE: TCP 192.0.2.1:40312 > 192.0.2.10:21 | CONNECT
-NSE: TCP 192.0.2.1:40312 < 192.0.2.10:21 | 220 (vsFTPd 3.0.5)\[rs]r\[rs]n
-NSE: TCP 192.0.2.1:40312 > 192.0.2.10:21 | USER anonymous\[rs]r\[rs]n
-NSE: TCP 192.0.2.1:40312 > 192.0.2.10:21 | CLOSE
+LUA: TCP 192.0.2.1:40312 > 192.0.2.10:21 | CONNECT
+LUA: TCP 192.0.2.1:40312 < 192.0.2.10:21 | 220 (vsFTPd 3.0.5)\[rs]r\[rs]n
+LUA: TCP 192.0.2.1:40312 > 192.0.2.10:21 | USER anonymous\[rs]r\[rs]n
+LUA: TCP 192.0.2.1:40312 > 192.0.2.10:21 | CLOSE
 \f[R]
 .fi
 .PP
@@ -1641,8 +1641,8 @@ printable characters.
 Connections that speak TLS show the data inside the TLS, as nmap\[aq]s
 do.
 The HTTP library\[aq]s connections are traced too.
-The \f[V]NSE:\f[R] prefix is nmap\[aq]s, kept so that tools reading
-nmap\[aq]s trace read FeroProbe\[aq]s.
+The prefix is \f[V]LUA:\f[R] (nmap\[aq]s is \f[V]NSE:\f[R], the name of
+its engine); the rest of the line is in nmap\[aq]s layout.
 .PP
 \f[V]--packet-trace\f[R] turns the script trace on as well, as in nmap
 (and the \f[V]p\f[R] key while a scan runs turns both on and off).
