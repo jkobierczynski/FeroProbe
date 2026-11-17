@@ -5826,7 +5826,10 @@ mod tests {
                 .unwrap_or_default()
         };
         let defaults = ids(&["-sC"]);
-        assert!(defaults.contains(&"ssh-hostkey".to_string()), "{defaults:?}");
+        assert!(
+            defaults.contains(&"ssh-hostkey".to_string()),
+            "{defaults:?}"
+        );
         assert!(!defaults.contains(&"banner".to_string()), "{defaults:?}");
         // -A includes -sC, as in nmap; --script adds to it.
         assert_eq!(ids(&["-A"]), defaults);

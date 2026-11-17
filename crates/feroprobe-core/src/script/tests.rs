@@ -1238,7 +1238,9 @@ async fn ftp_anon_and_ftp_syst() {
     }
     assert_eq!(
         output_of("ftp-syst", port, "ftp").await.as_deref(),
-        Some("SYST: UNIX Type: L8\nSTAT:\n  FTP server status:\n       Connected to 127.0.0.1\n  End of status")
+        Some(
+            "SYST: UNIX Type: L8\nSTAT:\n  FTP server status:\n       Connected to 127.0.0.1\n  End of status"
+        )
     );
 
     // A refused login, and STAT refused before login: nothing, and SYST
@@ -1284,7 +1286,9 @@ async fn smtp_pop3_and_imap_capabilities() {
     })
     .await;
     assert_eq!(
-        output_of("pop3-capabilities", port, "pop3").await.as_deref(),
+        output_of("pop3-capabilities", port, "pop3")
+            .await
+            .as_deref(),
         Some("TOP UIDL SASL(PLAIN LOGIN) APOP")
     );
 
@@ -1296,7 +1300,9 @@ async fn smtp_pop3_and_imap_capabilities() {
     })
     .await;
     assert_eq!(
-        output_of("imap-capabilities", port, "imap").await.as_deref(),
+        output_of("imap-capabilities", port, "imap")
+            .await
+            .as_deref(),
         Some("IMAP4rev1 IDLE AUTH=PLAIN")
     );
     assert_eq!(seen.lock().unwrap()[0], "fp1 CAPABILITY");
@@ -1337,7 +1343,12 @@ fn ssh_test_keys() -> (Vec<u8>, Vec<u8>) {
     let ed = [ssh_string(b"ssh-ed25519"), ssh_string(&[0x11; 32])].concat();
     let mut n = vec![0u8, 0xc0];
     n.extend(std::iter::repeat_n(0x5a, 255));
-    let rsa = [ssh_string(b"ssh-rsa"), ssh_string(&[1, 0, 1]), ssh_string(&n)].concat();
+    let rsa = [
+        ssh_string(b"ssh-rsa"),
+        ssh_string(&[1, 0, 1]),
+        ssh_string(&n),
+    ]
+    .concat();
     (ed, rsa)
 }
 
@@ -1401,10 +1412,9 @@ async fn ssh_hostkey_reads_each_key_from_the_key_exchange() {
                         } else {
                             rsa.clone()
                         });
-                        keep.lock().unwrap().push(format!(
-                            "kex {}",
-                            text.contains("curve25519-sha256,")
-                        ));
+                        keep.lock()
+                            .unwrap()
+                            .push(format!("kex {}", text.contains("curve25519-sha256,")));
                     }
                     30 => {
                         // curve25519: a 32-byte public value.
@@ -1653,7 +1663,9 @@ async fn http_robots_and_methods() {
     );
     assert_eq!(
         output_of("http-methods", port, "http").await.as_deref(),
-        Some("\n  Supported Methods: GET HEAD POST OPTIONS TRACE PUT\n  Potentially risky methods: TRACE PUT")
+        Some(
+            "\n  Supported Methods: GET HEAD POST OPTIONS TRACE PUT\n  Potentially risky methods: TRACE PUT"
+        )
     );
     assert_eq!(seen.lock().unwrap().len(), 2);
 
