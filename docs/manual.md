@@ -2191,7 +2191,11 @@ This matters most on operational-technology and industrial-control
 (OT/ICS) networks, where an unexpected packet can hang or reset a fragile
 device such as a PLC or RTU. With `--dry-run`, an operator can check
 every target, port, flag and fragment a command would send, and confirm it
-stays within the approved scope, before any scan probe is sent.
+stays within the approved scope, before any scan probe is sent. This does
+not hold for `--script`: a dry run names each script and the ports its
+sockets could reach, but not what it would send, so it cannot alone
+approve script traffic on such a network (ICS protection refuses
+`--script` for this reason).
 Then run the same command without `--dry-run`, ideally with a gentle
 timing template (`-T0` or `-T1`), a low `--max-rate` and a short, explicit
 port list, with FeroProbe: the same command run with nmap sends other
