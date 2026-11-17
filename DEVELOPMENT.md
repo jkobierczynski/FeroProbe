@@ -287,6 +287,7 @@ release.
 | 7.3 | Default scripts | `-sC`, `-A` | Our own scripts in the `default` category, written from protocol documentation; `-A` then adds `-sC`, as in nmap |
 | 7.4 | More scripts | `--script <category>` | Grows script by script, each with a test against a local service |
 | 7.5 | Script tracing and updates | `--script-trace`, `--script-updatedb` | Trace of every script socket call in the `--packet-trace` layout; an index of installed scripts and their categories |
+| 7.6 | NSE compatibility layer | | Requested by the maintainer 2026-11-17. Our own Lua module offering the common NSE calls under nmap's names (`nmap.new_socket`, `stdnse.get_script_args`, `stdnse.debug`, `shortport.port_or_service`, ...) mapped onto `fero.*`, plus `require` of those names only, so simple NSE scripts run with few or no changes. Written from nmap's public API documentation, never from nselib (NPSL); same sandbox and scope rules. Needs 7.2 for the protocol helpers most real scripts use |
 
 ### Script engine design
 
