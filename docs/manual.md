@@ -1523,12 +1523,13 @@ report files (see [Giving up root under sudo](#giving-up-root-under-sudo)),
 so it writes them as the user who ran `sudo`: they belong to that user,
 and a path that user cannot write to fails as it would for them. When it
 does run as root (`--keep-root`, or root without `sudo`), it refuses to
-write a report through a symbolic link unless root owns both the link and
-its directory and no other user can write to that directory (so
-`/dev/stdout` works, but `sudo feroprobe --keep-root -oN /tmp/scan.txt`
-is refused when `/tmp/scan.txt` is a link, whoever made it). The file is
-opened with `O_NOFOLLOW`, so a link swapped in at the last moment is
-refused too, and a file root creates under `sudo --keep-root` is handed to
+follow a symbolic link anywhere in a report's path, for a directory or the
+file itself, unless root owns both the link and the directory holding it
+and no other user can write to that directory (so `/dev/stdout` works, but
+`sudo feroprobe --keep-root -oN /tmp/scan.txt` is refused when
+`/tmp/scan.txt` is a link, whoever made it). The path is opened one
+component at a time with `O_NOFOLLOW`, so a link swapped in at the last
+moment is refused too, and a file root creates under `sudo --keep-root` is handed to
 the invoking user. nmap writes its reports as root through any link.
 
 #### `--append-output`
@@ -1585,7 +1586,11 @@ Leave the `xml-stylesheet` line out of the XML report.
 
 Carry on with a scan that was aborted (with Ctrl-C, a lost connection, a
 reboot), given its normal (`-oN`), XML (`-oX`) or grepable (`-oG`) report;
-for `-oA`, any of the three files. As in nmap, it takes no other options:
+for `-oA`, any of the three files. As in nmap, it takes no other options,
+except `--keep-root`: under `sudo`, root is given up before the report is
+read, so a scan whose report or files only root can reach is resumed with
+`sudo feroprobe --keep-root --resume FILE` (a `--keep-root` recorded in
+the report has no effect on this):
 
 ```
 feroprobe --resume scan.gnmap

@@ -110,6 +110,10 @@ check_true "because it cannot be opened" has "opening $ROOTDIR/r.txt"
 fero --keep-root -n -sn 127.0.0.1 -oN "$ROOTDIR/r.txt"
 check_true "--keep-root writes it (exit $RC)" test "$RC" -eq 0
 check_true "and hands the new file to nobody" test "$(stat -c %u "$ROOTDIR/r.txt" 2>/dev/null)" = "$NOBODY_UID"
+fero --resume "$ROOTDIR/r.txt"
+check_true "--resume of that root-only report fails (exit $RC)" test "$RC" -ne 0
+fero --keep-root --resume "$ROOTDIR/r.txt"
+check_true "--keep-root --resume reads it (exit $RC)" test "$RC" -eq 0
 
 echo "== report links as root =="
 SHARED="$WORK/shared"; mkdir -m 1777 "$SHARED"
@@ -118,6 +122,11 @@ ln -s "$ROOTDIR/victim" "$SHARED/scan.txt"
 fero --keep-root -n -sn 127.0.0.1 -oN "$SHARED/scan.txt"
 check_true "a link in a sticky shared directory is refused (exit $RC)" test "$RC" -ne 0
 check_true "its target is untouched" test "$(cat "$ROOTDIR/victim")" = keep
+ln -s "$ROOTDIR" "$SHARED/dir"
+chown -h "$NOBODY_UID" "$SHARED/dir"
+fero --keep-root -n -sn 127.0.0.1 -oN "$SHARED/dir/planted.txt"
+check_true "another user's directory link in the path is refused (exit $RC)" test "$RC" -ne 0
+check_true "and nothing is created behind it" test ! -e "$ROOTDIR/planted.txt"
 
 echo "== settings files =="
 ln -s /etc/shadow "$USERDIR/.feroproberc"

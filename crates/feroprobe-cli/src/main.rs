@@ -1000,84 +1000,153 @@ impl ReportFiles {
 
 /// Open (creating, not truncating) one report file.
 ///
-/// As root (`--keep-root`, root without sudo, or a failed hand-over), a
-/// report is not written through a symbolic link unless root owns both
-/// the link and its directory and nobody else can write to that directory
-/// (as with `/dev/stdout`): someone else's link, or any link in a shared
-/// directory such as `/tmp`, could aim root's write at a system file. The
-/// final open uses `O_NOFOLLOW`, so a link swapped in after the check is
-/// refused too. A file root creates under `sudo` is handed to the invoking
-/// user (`SUDO_UID`/`SUDO_GID`), so the report is theirs, not root's.
-/// Without root nothing changes: a report goes wherever the path leads.
+/// As root (`--keep-root`, root without sudo, or a failed hand-over), see
+/// [`open_report_as_root`]. Without root nothing changes: a report goes
+/// wherever the path leads.
 fn open_report(path: &str, append: bool) -> Result<std::fs::File> {
-    let mut opts = std::fs::OpenOptions::new();
-    opts.write(true).append(append).truncate(false);
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
-        // SAFETY: geteuid has no preconditions.
-        if unsafe { libc::geteuid() } == 0 {
-            let p = std::path::Path::new(path);
-            let trusted_link = match std::fs::symlink_metadata(p) {
-                Ok(m) if m.file_type().is_symlink() => {
-                    let dir = match p.parent() {
-                        Some(d) if !d.as_os_str().is_empty() => d,
-                        _ => std::path::Path::new("."),
-                    };
-                    let dir_ok =
-                        std::fs::metadata(dir).is_ok_and(|d| d.uid() == 0 && d.mode() & 0o022 == 0);
-                    if m.uid() != 0 || !dir_ok {
-                        bail!(
-                            "{path} is a symbolic link {}; running as root, FeroProbe does not \
-                             write a report through it. Give the real path",
-                            if m.uid() != 0 {
-                                "owned by another user"
-                            } else {
-                                "in a directory other users can write to"
-                            }
-                        );
-                    }
-                    true
-                }
-                _ => false,
-            };
-            if !trusted_link {
-                opts.custom_flags(libc::O_NOFOLLOW);
-            }
-            let refused = |e: std::io::Error| -> anyhow::Error {
-                if e.raw_os_error() == Some(libc::ELOOP) {
-                    anyhow::anyhow!(
-                        "{path} is a symbolic link; running as root, FeroProbe does not write \
-                         a report through it. Give the real path"
-                    )
-                } else {
-                    anyhow::Error::new(e).context(format!("opening {path}"))
-                }
-            };
-            // Create it ourselves if we can, to know whether to hand it over.
-            let created = opts.clone().create_new(true).open(path);
-            return match created {
-                Ok(file) => {
-                    if let Some((uid, gid)) = privdrop::sudo_ids() {
-                        use std::os::fd::AsRawFd;
-                        // SAFETY: a valid open descriptor.
-                        if unsafe { libc::fchown(file.as_raw_fd(), uid, gid) } != 0 {
-                            return Err(std::io::Error::last_os_error())
-                                .with_context(|| format!("handing {path} to SUDO_UID {uid}"));
-                        }
-                    }
-                    Ok(file)
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                    opts.open(path).map_err(refused)
-                }
-                Err(e) => Err(refused(e)),
-            };
-        }
+    // SAFETY: geteuid has no preconditions.
+    if unsafe { libc::geteuid() } == 0 {
+        return open_report_as_root(path, append);
     }
-    opts.create(true)
+    std::fs::OpenOptions::new()
+        .write(true)
+        .append(append)
+        .truncate(false)
+        .create(true)
         .open(path)
         .with_context(|| format!("opening {path}"))
+}
+
+/// [`open_report`] as root. The path is walked one component at a time
+/// with `openat` and `O_NOFOLLOW`, so no symbolic link anywhere in it is
+/// followed, in a directory or as the file itself, unless root owns both
+/// the link and the directory holding it and no one else can write to that
+/// directory (as with `/dev/stdout`). Someone else's link, or any link in a
+/// shared directory such as `/tmp`, could otherwise aim root's write at a
+/// system file; and since each step opens what it checked, a link swapped
+/// in meanwhile is refused too. A file root creates under `sudo` is handed
+/// to the invoking user (`SUDO_UID`/`SUDO_GID`), so the report is theirs.
+#[cfg(unix)]
+fn open_report_as_root(path: &str, append: bool) -> Result<std::fs::File> {
+    use std::ffi::CString;
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::unix::ffi::OsStrExt;
+    use std::path::Component;
+
+    let open_at = |dir: libc::c_int, name: &CString, flags: libc::c_int| {
+        // SAFETY: name is a valid C string; the descriptor is checked.
+        let fd = unsafe { libc::openat(dir, name.as_ptr(), flags | libc::O_CLOEXEC, 0o666) };
+        if fd < 0 {
+            Err(std::io::Error::last_os_error())
+        } else {
+            // SAFETY: a new descriptor that nothing else owns.
+            Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+        }
+    };
+    // lstat of `name` in `dir`.
+    let stat_at = |dir: &OwnedFd, name: &CString| {
+        // SAFETY: stat is plain data that fstatat fills in.
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        // SAFETY: valid descriptor, C string and stat buffer.
+        let rc = unsafe {
+            libc::fstatat(
+                dir.as_raw_fd(),
+                name.as_ptr(),
+                &mut st,
+                libc::AT_SYMLINK_NOFOLLOW,
+            )
+        };
+        (rc == 0).then_some(st)
+    };
+    let is_link = |st: &libc::stat| st.st_mode & libc::S_IFMT == libc::S_IFLNK;
+    // A link may be followed only if root owns it and its directory, and no
+    // one else can write to that directory.
+    let check_link = |dir: &OwnedFd, link: &libc::stat, shown: &str| -> Result<()> {
+        // SAFETY: stat is plain data that fstat fills in.
+        let mut d: libc::stat = unsafe { std::mem::zeroed() };
+        // SAFETY: valid descriptor and stat buffer.
+        let dir_ok = unsafe { libc::fstat(dir.as_raw_fd(), &mut d) } == 0
+            && d.st_uid == 0
+            && d.st_mode & 0o022 == 0;
+        if link.st_uid != 0 || !dir_ok {
+            bail!(
+                "{shown} is a symbolic link {}; running as root, FeroProbe does not write a \
+                 report through it. Give the real path",
+                if link.st_uid != 0 {
+                    "owned by another user"
+                } else {
+                    "in a directory other users can write to"
+                }
+            );
+        }
+        Ok(())
+    };
+    let cstr = |b: &[u8]| CString::new(b).with_context(|| format!("{path} contains a NUL byte"));
+
+    let p = std::path::Path::new(path);
+    let mut parts: Vec<Component> = p.components().collect();
+    let Some(Component::Normal(file_name)) = parts.pop() else {
+        bail!("{path} does not name a file");
+    };
+    let start = cstr(if p.has_root() { b"/" } else { b"." })?;
+    let dir_flags = libc::O_RDONLY | libc::O_DIRECTORY;
+    let mut dir =
+        open_at(libc::AT_FDCWD, &start, dir_flags).with_context(|| format!("opening {path}"))?;
+    let mut walked = std::path::PathBuf::new();
+    for part in parts {
+        walked.push(part.as_os_str());
+        let name = match part {
+            Component::Normal(n) => cstr(n.as_bytes())?,
+            Component::ParentDir => cstr(b"..")?,
+            _ => continue,
+        };
+        dir = match open_at(dir.as_raw_fd(), &name, dir_flags | libc::O_NOFOLLOW) {
+            Ok(fd) => fd,
+            Err(e) => match stat_at(&dir, &name) {
+                Some(st) if is_link(&st) => {
+                    check_link(&dir, &st, &walked.display().to_string())?;
+                    open_at(dir.as_raw_fd(), &name, dir_flags)
+                        .with_context(|| format!("opening {path}"))?
+                }
+                _ => return Err(e).with_context(|| format!("opening {path}")),
+            },
+        };
+    }
+    let name = cstr(file_name.as_bytes())?;
+    let mut flags = libc::O_WRONLY | if append { libc::O_APPEND } else { 0 };
+    match stat_at(&dir, &name) {
+        Some(st) if is_link(&st) => check_link(&dir, &st, path)?,
+        _ => flags |= libc::O_NOFOLLOW,
+    }
+    let refused = |e: std::io::Error| -> anyhow::Error {
+        if e.raw_os_error() == Some(libc::ELOOP) {
+            anyhow::anyhow!(
+                "{path} is a symbolic link; running as root, FeroProbe does not write a report \
+                 through it. Give the real path"
+            )
+        } else {
+            anyhow::Error::new(e).context(format!("opening {path}"))
+        }
+    };
+    // Create it ourselves if we can, to know whether to hand it over.
+    let fd = match open_at(dir.as_raw_fd(), &name, flags | libc::O_CREAT | libc::O_EXCL) {
+        Ok(fd) => {
+            if let Some((uid, gid)) = privdrop::sudo_ids() {
+                // SAFETY: a valid open descriptor.
+                if unsafe { libc::fchown(fd.as_raw_fd(), uid, gid) } != 0 {
+                    return Err(std::io::Error::last_os_error())
+                        .with_context(|| format!("handing {path} to SUDO_UID {uid}"));
+                }
+            }
+            fd
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            open_at(dir.as_raw_fd(), &name, flags).map_err(refused)?
+        }
+        Err(e) => return Err(refused(e)),
+    };
+    Ok(std::fs::File::from(fd))
 }
 
 /// Progress on standard error for -v.
@@ -2944,10 +3013,14 @@ async fn run(
         None => (first, raw, None),
         Some(path) => {
             // Like nmap, --resume takes no other options: the file has them.
-            let alone = raw.len() == 3 || (raw.len() == 2 && raw[1].starts_with("--resume="));
+            // --keep-root is the one exception: it decides, before the
+            // report is read, whether root is given up for the resumed run.
+            let rest: Vec<&String> = raw[1..].iter().filter(|a| *a != "--keep-root").collect();
+            let alone = rest.len() == 2 || (rest.len() == 1 && rest[0].starts_with("--resume="));
             if !alone {
                 bail!(
-                    "--resume cannot be combined with other options. Usage: feroprobe --resume FILE"
+                    "--resume cannot be combined with other options (except --keep-root). \
+                     Usage: feroprobe [--keep-root] --resume FILE"
                 );
             }
             let r = resume::read(path)?;
@@ -4170,6 +4243,21 @@ mod tests {
         let err = open(&link).err().unwrap().to_string();
         assert!(err.contains("other users can write to"), "{err}");
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep");
+        // A directory link in the path is held to the same rule: someone
+        // else's link to a directory is refused, root's own in a private
+        // directory is followed.
+        let real = dir.join("realdir");
+        std::fs::create_dir(&real).unwrap();
+        let sub = shared.join("sub");
+        std::os::unix::fs::symlink(&real, &sub).unwrap();
+        lchown(&sub, 65534);
+        let err = open(&sub.join("r.txt")).err().unwrap().to_string();
+        assert!(err.contains("owned by another user"), "{err}");
+        assert!(!real.join("r.txt").exists());
+        let own = dir.join("ownsub");
+        std::os::unix::fs::symlink(&real, &own).unwrap();
+        assert!(open(&own.join("r.txt")).is_ok());
+        assert!(real.join("r.txt").exists());
         // /dev/stdout is root's link in root's /dev.
         if std::path::Path::new("/dev/stdout").is_symlink() {
             assert!(open(std::path::Path::new("/dev/stdout")).is_ok());

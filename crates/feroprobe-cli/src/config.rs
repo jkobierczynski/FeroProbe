@@ -480,8 +480,14 @@ fn parse_layer(text: &str, path: &Path, quote: bool) -> Result<(Layer, Vec<Strin
                     value.type_str()
                 ),
             },
-            _ => warnings.push(format!(
+            // The key's name is the file's text: quoted only when it is
+            // the invoking user's own file, as with parse errors.
+            _ if quote => warnings.push(format!(
                 "settings file {}: unknown key \"{key}\", ignored",
+                path.display()
+            )),
+            _ => warnings.push(format!(
+                "settings file {}: an unknown key, ignored",
                 path.display()
             )),
         }
@@ -493,8 +499,13 @@ fn parse_layer(text: &str, path: &Path, quote: bool) -> Result<(Layer, Vec<Strin
 mod tests {
     use super::*;
 
-    /// The default build's loading, whatever features this test build has.
+    /// The default build's loading, whatever features this test build has,
+    /// with this test's user as the invoking one (CI also runs the tests
+    /// under `sudo -E`, where SUDO_UID would name someone else).
     fn load_from(files: &[PathBuf]) -> Result<Loaded> {
+        #[cfg(unix)]
+        return load_as(files, false, &owners(false));
+        #[cfg(not(unix))]
         load_with(files, false)
     }
 
@@ -753,9 +764,27 @@ mod tests {
             "{err}"
         );
         // The user's own file: the parser's message too, still no source line.
-        let err = format!("{:#}", load_as(&[rc], false, &owners(false)).unwrap_err());
+        let err = format!(
+            "{:#}",
+            load_as(std::slice::from_ref(&rc), false, &owners(false)).unwrap_err()
+        );
         assert!(err.contains("not valid TOML at line 1"), "{err}");
         assert!(!err.contains("secrethash"), "{err}");
+        // A file that parses: an unknown key is named only in the user's own.
+        let rc = write(&dir, DIR_FILE, "[\"private-project-name\"]\n");
+        let loaded = load_as(std::slice::from_ref(&rc), false, &o).unwrap();
+        assert_eq!(loaded.warnings.len(), 1);
+        assert!(
+            !loaded.warnings[0].contains("private-project-name"),
+            "{:?}",
+            loaded.warnings
+        );
+        let loaded = load_as(&[rc], false, &owners(false)).unwrap();
+        assert!(
+            loaded.warnings[0].contains("private-project-name"),
+            "{:?}",
+            loaded.warnings
+        );
     }
 
     // Absolute paths are spelled the Unix way here.

@@ -2196,14 +2196,15 @@ the report files (see Giving up root under sudo), so it writes them as
 the user who ran \f[V]sudo\f[R]: they belong to that user, and a path
 that user cannot write to fails as it would for them.
 When it does run as root (\f[V]--keep-root\f[R], or root without
-\f[V]sudo\f[R]), it refuses to write a report through a symbolic link
-unless root owns both the link and its directory and no other user can
-write to that directory (so \f[V]/dev/stdout\f[R] works, but
+\f[V]sudo\f[R]), it refuses to follow a symbolic link anywhere in a
+report\[aq]s path, for a directory or the file itself, unless root owns
+both the link and the directory holding it and no other user can write
+to that directory (so \f[V]/dev/stdout\f[R] works, but
 \f[V]sudo feroprobe --keep-root -oN /tmp/scan.txt\f[R] is refused when
 \f[V]/tmp/scan.txt\f[R] is a link, whoever made it).
-The file is opened with \f[V]O_NOFOLLOW\f[R], so a link swapped in at
-the last moment is refused too, and a file root creates under
-\f[V]sudo --keep-root\f[R] is handed to the invoking user.
+The path is opened one component at a time with \f[V]O_NOFOLLOW\f[R], so
+a link swapped in at the last moment is refused too, and a file root
+creates under \f[V]sudo --keep-root\f[R] is handed to the invoking user.
 nmap writes its reports as root through any link.
 .SS \f[V]--append-output\f[R]
 .PP
@@ -2267,7 +2268,11 @@ Carry on with a scan that was aborted (with Ctrl-C, a lost connection, a
 reboot), given its normal (\f[V]-oN\f[R]), XML (\f[V]-oX\f[R]) or
 grepable (\f[V]-oG\f[R]) report; for \f[V]-oA\f[R], any of the three
 files.
-As in nmap, it takes no other options:
+As in nmap, it takes no other options, except \f[V]--keep-root\f[R]:
+under \f[V]sudo\f[R], root is given up before the report is read, so a
+scan whose report or files only root can reach is resumed with
+\f[V]sudo feroprobe --keep-root --resume FILE\f[R] (a
+\f[V]--keep-root\f[R] recorded in the report has no effect on this):
 .IP
 .nf
 \f[C]
