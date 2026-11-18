@@ -41,10 +41,11 @@ local function wire_name(name)
   return table.concat(out) .. "\0"
 end
 
--- A query for `name` CHAOS TXT, with no recursion wanted; with `nsid`,
+-- A query for `name` CHAOS TXT, with recursion desired (RD) set as in
+-- nmap's queries; with `nsid`,
 -- an EDNS(0) OPT record asking for the NSID (an empty option 3).
 local function query(name, nsid)
-  local q = string.pack(">I2I2I2I2I2I2", TRN_ID, 0, 1, 0, 0, nsid and 1 or 0)
+  local q = string.pack(">I2I2I2I2I2I2", TRN_ID, 0x0100, 1, 0, 0, nsid and 1 or 0)
     .. wire_name(name) .. string.pack(">I2I2", TXT, CH)
   if nsid then
     -- Root name, type OPT, UDP payload size 1232, no extended RCODE,

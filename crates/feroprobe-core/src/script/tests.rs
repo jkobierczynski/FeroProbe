@@ -2744,12 +2744,12 @@ async fn dns_nsid_asks_for_the_nsid_and_the_chaos_names() {
         assert_eq!(seen.len(), 2);
         // ID "FP", no flags (no recursion), one question, one OPT record
         // asking for the NSID; then version.bind without EDNS.
-        assert_eq!(&seen[0][..12], b"FP\0\0\0\x01\0\0\0\0\0\x01");
+        assert_eq!(&seen[0][..12], b"FP\x01\0\0\x01\0\0\0\0\0\x01");
         assert_eq!(&seen[0][12..27], b"\x02id\x06server\0\0\x10\0\x03");
         assert_eq!(&seen[0][27..], b"\0\0\x29\x04\xd0\0\0\0\0\0\x04\0\x03\0\0");
         assert_eq!(
             seen[1],
-            b"FP\0\0\0\x01\0\0\0\0\0\0\x07version\x04bind\0\0\x10\0\x03"
+            b"FP\x01\0\0\x01\0\0\0\0\0\0\x07version\x04bind\0\0\x10\0\x03"
         );
     }
 
@@ -2765,7 +2765,7 @@ async fn dns_nsid_asks_for_the_nsid_and_the_chaos_names() {
         assert_eq!(out, [(port, format!("\n  id.server: ns1.lab{version}"))]);
         let seen = seen.lock().unwrap();
         assert_eq!(seen.len(), 3);
-        assert_eq!(&seen[1][..12], b"FP\0\0\0\x01\0\0\0\0\0\0");
+        assert_eq!(&seen[1][..12], b"FP\x01\0\0\x01\0\0\0\0\0\0");
         assert_eq!(&seen[1][12..], b"\x02id\x06server\0\0\x10\0\x03");
     }
 

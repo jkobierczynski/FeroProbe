@@ -2349,9 +2349,10 @@ from an EDNS(0) query for \f[V]id.server\f[R], and the CHAOS TXT records
 \f[V]id.server\f[R] and \f[V]version.bind\f[R] (RFC 4892), shown as
 \f[V]NSID: <id> (<hex>)\f[R], \f[V]id.server:\f[R] and
 \f[V]bind.version:\f[R]; only the ones the server gives.
-At most three small queries to the scanned port, without recursion: a
-server that rejects EDNS (FORMERR or NOTIMP) is asked for
-\f[V]id.server\f[R] again without it.
+At most three small queries to the scanned port, with the
+recursion-desired (RD) flag set as in nmap\[aq]s queries: a server that
+rejects EDNS (FORMERR or NOTIMP) is asked for \f[V]id.server\f[R] again
+without it.
 A reply that carries a question counts only when it is the one asked,
 and only the TXT record for that name is read; an error reply without a
 question (FORMERR or NOTIMP) only triggers the retry without EDNS.
