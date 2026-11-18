@@ -1962,6 +1962,7 @@ fn the_default_category() {
             "http-title",
             "imap-capabilities",
             "mysql-info",
+            "nbstat",
             "ntp-info",
             "pop3-capabilities",
             "rdp-ntlm-info",
@@ -2437,4 +2438,88 @@ async fn ssl_date_stops_a_trickling_server_at_its_timeout() {
         start.elapsed()
     );
     assert!(hosts[0].ports[0].scripts.is_empty());
+}
+
+/// A stand-in NetBIOS name service: answers a NODE STATUS request with a
+/// name table, keeping each request.
+async fn nbns_server(reply_mac: [u8; 6]) -> (u16, std::sync::Arc<std::sync::Mutex<Vec<Vec<u8>>>>) {
+    let server = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let port = server.local_addr().unwrap().port();
+    let seen: std::sync::Arc<std::sync::Mutex<Vec<Vec<u8>>>> = Default::default();
+    let keep = seen.clone();
+    tokio::spawn(async move {
+        let mut buf = [0u8; 512];
+        while let Ok((n, from)) = server.recv_from(&mut buf).await {
+            keep.lock().unwrap().push(buf[..n].to_vec());
+            let names: [(&[u8], u8, u16); 4] = [
+                (b"LAB-PC", 0x00, 0x0400),
+                (b"WORKGROUP", 0x00, 0x8400),
+                (b"LAB-PC", 0x20, 0x0400),
+                (b"ALICE", 0x03, 0x0400),
+            ];
+            // The header (response, authoritative), the question name as a
+            // pointer, type NBSTAT, class IN, TTL 0.
+            let mut r = buf[..2].to_vec();
+            r.extend([0x84, 0x00, 0, 0, 0, 1, 0, 0, 0, 0]);
+            r.extend([0xc0, 0x0c, 0, 0x21, 0, 1, 0, 0, 0, 0]);
+            let mut rdata = vec![names.len() as u8];
+            for (name, suffix, flags) in names {
+                let mut padded = name.to_vec();
+                padded.resize(15, b' ');
+                rdata.extend(padded);
+                rdata.push(suffix);
+                rdata.extend(flags.to_be_bytes());
+            }
+            rdata.extend(reply_mac);
+            rdata.extend([0u8; 40]);
+            r.extend((rdata.len() as u16).to_be_bytes());
+            r.extend(rdata);
+            let _ = server.send_to(&r, from).await;
+        }
+    });
+    (port, seen)
+}
+
+#[tokio::test]
+async fn nbstat_reads_the_name_table() {
+    async fn run(port: u16, args: &str) -> Vec<String> {
+        let scan =
+            ScriptScan::new(vec![built_in("nbstat")], args::parse(args).unwrap(), None).unwrap();
+        let mut host = host_with(&[(port, PortState::OpenFiltered)]);
+        host.ports[0].protocol = Protocol::Udp;
+        let mut hosts = vec![host];
+        scan.scan_hosts(&mut hosts).await;
+        hosts[0].scripts.iter().map(|s| s.output.clone()).collect()
+    }
+    let (port, seen) = nbns_server([0x00, 0x0c, 0x29, 0x01, 0x02, 0x03]).await;
+    let out = run(port, &format!("nbstat.port={port}")).await;
+    assert_eq!(out.len(), 1, "{out:?}");
+    assert!(
+        out[0].starts_with(
+            "NetBIOS name: LAB-PC, NetBIOS user: ALICE, NetBIOS MAC: 00:0c:29:01:02:03 ("
+        ),
+        "{}",
+        out[0]
+    );
+    {
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        let q = &seen[0];
+        // Transaction ID "FP", one question: "*" padded with NULs, NBSTAT, IN.
+        assert_eq!(&q[..12], b"FP\0\0\0\x01\0\0\0\0\0\0");
+        assert_eq!(q[12], 32);
+        assert_eq!(&q[13..45], b"CKAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
+        assert_eq!(&q[45..], &[0, 0, 0x21, 0, 1]);
+    }
+
+    // Samba gives a zero MAC; nothing is sent when the port was not scanned.
+    let (port, _) = nbns_server([0; 6]).await;
+    let out = run(port, &format!("nbstat.port={port}")).await;
+    assert_eq!(
+        out,
+        ["NetBIOS name: LAB-PC, NetBIOS user: ALICE, NetBIOS MAC: <unknown>"]
+    );
+    let (other, seen) = nbns_server([0; 6]).await;
+    assert!(run(port, &format!("nbstat.port={other}")).await.is_empty());
+    assert!(seen.lock().unwrap().is_empty());
 }

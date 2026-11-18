@@ -72,6 +72,7 @@ const BUILT_IN: &[(&str, &str)] = &[
         "mysql-info",
         include_str!("../../lua-scripts/mysql-info.lua"),
     ),
+    ("nbstat", include_str!("../../lua-scripts/nbstat.lua")),
     ("ntp-info", include_str!("../../lua-scripts/ntp-info.lua")),
     (
         "pop3-capabilities",

@@ -2060,6 +2060,13 @@ T}@T{
 \f[V]n\f[R] random bytes from the system (at most 65536)
 T}
 T{
+\f[V]fero.mac_vendor(mac)\f[R]
+T}@T{
+The vendor the OUI list (\f[V]--oui-file\f[R], else the system\[aq]s)
+gives for a MAC address such as \f[V]00:0c:29:01:02:03\f[R], or
+\f[V]nil\f[R]
+T}
+T{
 \f[V]fero.sleep(seconds)\f[R]
 T}@T{
 Waits (fractions allowed, at most 600 per call) without holding up other
@@ -2439,6 +2446,27 @@ Reads the server\[aq]s greeting: protocol, version, thread ID,
 capability flags and names, status, salt and authentication plugin, or
 the error a server that refuses the connection gives.
 Sends nothing
+T}
+T{
+\f[V]nbstat\f[R]
+T}@T{
+default, discovery, safe
+T}@T{
+hosts with UDP 137 scanned and not closed
+T}@T{
+One NetBIOS NODE STATUS request (as \f[V]nbtstat -A\f[R], RFC 1002),
+sent twice at most: the host\[aq]s NetBIOS name, the logged-in user when
+the name table has one, and the MAC address the host reports with its
+vendor from the OUI list (\f[V]<unknown>\f[R] for the all-zero MAC Samba
+gives); with \f[V]-v\f[R] the whole name table and its flags.
+The transaction ID is \f[V]0x4650\f[R] (\[dq]FP\[dq]).
+nmap\[aq]s also runs when only TCP 139 or 445 is open and then sends to
+UDP 137 anyway; FeroProbe\[aq]s runs only when UDP 137 was scanned
+(\f[V]-sU -p U:137\f[R]), as nothing goes to ports outside the scan.
+nmap\[aq]s shows the name table\[aq]s statistics with \f[V]-vv\f[R];
+FeroProbe\[aq]s does not.
+Arguments: \f[V]nbstat.port\f[R] (default 137, must be scanned),
+\f[V]nbstat.timeout\f[R] (ms, default 5000)
 T}
 T{
 \f[V]ntp-info\f[R]

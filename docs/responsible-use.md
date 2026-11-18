@@ -192,6 +192,7 @@ who asked:
 | `smb2-security-mode`, `smb2-time` | The SMB2 NEGOTIATE client GUID `FeroProbeSMBScan` (16 bytes of ASCII); on port 139 the NetBIOS calling name `FEROPROBE` | — |
 | `rdp-ntlm-info` | The RDP routing cookie `Cookie: mstshash=FeroProbe` in the connection request (clear text, before TLS); then an NTLM NEGOTIATE that names no domain or workstation | — |
 | `ssl-date` | `FeroProbeSSLDate` in the TLS ClientHello random, after its four time bytes (clear text, it is the first message of the handshake) | — |
+| `nbstat` | The NetBIOS transaction ID `0x4650` ("FP") of its NODE STATUS request to UDP 137 (a weak mark: 2 bytes, so another tool's request matches by chance once in 65536) | — |
 | `http-title`, `http-methods`, `http-robots.txt` | The `User-Agent` above | `Nmap Scripting Engine` |
 
 As with the `User-Agent`, `--script-args smtp.domain=...` replaces the
@@ -205,7 +206,7 @@ password, and each stays within the ports the scan probed.
 
 The repository ships Suricata and Snort rules that match the probe
 signature, so blue teams can flag FeroProbe scans without writing their
-own. Rules 9100006 to 9100012 match the script markers above in clear
+own. Rules 9100006 to 9100013 match the script markers above in clear
 text. They are in [`rules/`](../rules/): `rules/feroprobe.rules` for
 Suricata and `rules/feroprobe.snort.rules` for Snort, with setup notes in
 `rules/README.md`.

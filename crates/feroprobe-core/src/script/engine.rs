@@ -441,6 +441,25 @@ pub(crate) fn install_library(
             Ok(())
         })?,
     )?;
+    // fero.mac_vendor("00:0c:29:01:02:03"): the vendor the OUI list
+    // (`--oui-file` or the system's) gives for a MAC address, or nil.
+    fero.raw_set(
+        "mac_vendor",
+        lua.create_function(|_, mac: String| {
+            let mut b = [0u8; 6];
+            let mut parts = mac.split([':', '-']);
+            for byte in &mut b {
+                match parts.next().and_then(|p| u8::from_str_radix(p, 16).ok()) {
+                    Some(v) => *byte = v,
+                    None => return Ok(None),
+                }
+            }
+            if parts.next().is_some() {
+                return Ok(None);
+            }
+            Ok(crate::oui::lookup(crate::arp::MacAddr(b)).map(str::to_string))
+        })?,
+    )?;
     fero.raw_set(
         "verbosity",
         lua.create_function(|_, ()| Ok(crate::debug::verbosity()))?,
