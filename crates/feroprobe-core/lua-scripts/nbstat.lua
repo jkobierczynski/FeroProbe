@@ -97,7 +97,7 @@ local function parse(r)
   for i = 1, count do
     local raw, suffix, nflags = string.unpack(">c15BI2", r, pos)
     pos = pos + 18
-    names[i] = { name = text(raw), suffix = suffix, flags = nflags }
+    names[i] = { raw = raw, name = text(raw), suffix = suffix, flags = nflags }
   end
   local mac
   if rdata_end >= pos + 5 then
@@ -148,16 +148,17 @@ action = function(host)
   local machine = unique(names, 0x00)
   local server = unique(names, 0x20) or machine
   -- The machine registers its own names, aliases included, with <03> as
-  -- well as a unique <00> or <20>; a user is a <03> name that has neither.
+  -- well as a unique <00> or <20>; a user is a <03> name that has neither
+  -- (compared byte for byte, not by the escaped text).
   local own = {}
   for _, n in ipairs(names) do
     if (n.suffix == 0x00 or n.suffix == 0x20) and n.flags & 0x8000 == 0 then
-      own[n.name] = true
+      own[n.raw] = true
     end
   end
   local user
   for _, n in ipairs(names) do
-    if n.suffix == 0x03 and n.flags & 0x8000 == 0 and not own[n.name] then
+    if n.suffix == 0x03 and n.flags & 0x8000 == 0 and not own[n.raw] then
       user = n.name
       break
     end

@@ -2441,8 +2441,14 @@ async fn ssl_date_stops_a_trickling_server_at_its_timeout() {
 }
 
 /// A stand-in NetBIOS name service: answers a NODE STATUS request with a
-/// name table, keeping each request.
-async fn nbns_server(reply_mac: [u8; 6]) -> (u16, std::sync::Arc<std::sync::Mutex<Vec<Vec<u8>>>>) {
+/// name table, keeping each request. With `user` the table has ALICE<03>;
+/// with `bad_first` the first answer is a registration response (OPCODE 5)
+/// carrying MAC ff:ff:ff:ff:ff:ff, which must be ignored.
+async fn nbns_server(
+    reply_mac: [u8; 6],
+    user: bool,
+    bad_first: bool,
+) -> (u16, std::sync::Arc<std::sync::Mutex<Vec<Vec<u8>>>>) {
     let server = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let port = server.local_addr().unwrap().port();
     let seen: std::sync::Arc<std::sync::Mutex<Vec<Vec<u8>>>> = Default::default();
@@ -2450,10 +2456,15 @@ async fn nbns_server(reply_mac: [u8; 6]) -> (u16, std::sync::Arc<std::sync::Mute
     tokio::spawn(async move {
         let mut buf = [0u8; 512];
         while let Ok((n, from)) = server.recv_from(&mut buf).await {
-            keep.lock().unwrap().push(buf[..n].to_vec());
+            let first = {
+                let mut seen = keep.lock().unwrap();
+                seen.push(buf[..n].to_vec());
+                seen.len() == 1
+            };
+            let bad = bad_first && first;
             // Machine LAB-PC serves files as FILES and has an alias NAS;
             // their <03> names come first, and none of them is a user.
-            let names: [(&[u8], u8, u16); 8] = [
+            let all: [(&[u8], u8, u16); 8] = [
                 (b"LAB-PC", 0x00, 0x0400),
                 (b"WORKGROUP", 0x00, 0x8400),
                 (b"FILES", 0x20, 0x0400),
@@ -2463,21 +2474,22 @@ async fn nbns_server(reply_mac: [u8; 6]) -> (u16, std::sync::Arc<std::sync::Mute
                 (b"NAS", 0x03, 0x0400),
                 (b"ALICE", 0x03, 0x0400),
             ];
+            let names = if user { &all[..] } else { &all[..7] };
             // The header (response, authoritative), the question's name in
             // full, type NBSTAT, class IN, TTL 0.
             let mut r = buf[..2].to_vec();
-            r.extend([0x84, 0x00, 0, 0, 0, 1, 0, 0, 0, 0]);
+            r.extend([if bad { 0xac } else { 0x84 }, 0x00, 0, 0, 0, 1, 0, 0, 0, 0]);
             r.extend(&buf[12..46]);
             r.extend([0, 0x21, 0, 1, 0, 0, 0, 0]);
             let mut rdata = vec![names.len() as u8];
-            for (name, suffix, flags) in names {
+            for &(name, suffix, flags) in names {
                 let mut padded = name.to_vec();
                 padded.resize(15, b' ');
                 rdata.extend(padded);
                 rdata.push(suffix);
                 rdata.extend(flags.to_be_bytes());
             }
-            rdata.extend(reply_mac);
+            rdata.extend(if bad { [0xff; 6] } else { reply_mac });
             rdata.extend([0u8; 40]);
             r.extend((rdata.len() as u16).to_be_bytes());
             r.extend(rdata);
@@ -2498,7 +2510,7 @@ async fn nbstat_reads_the_name_table() {
         scan.scan_hosts(&mut hosts).await;
         hosts[0].scripts.iter().map(|s| s.output.clone()).collect()
     }
-    let (port, seen) = nbns_server([0x00, 0x0c, 0x29, 0x01, 0x02, 0x03]).await;
+    let (port, seen) = nbns_server([0x00, 0x0c, 0x29, 0x01, 0x02, 0x03], true, false).await;
     let out = run(port, &format!("nbstat.port={port}")).await;
     assert_eq!(out.len(), 1, "{out:?}");
     assert!(
@@ -2520,13 +2532,27 @@ async fn nbstat_reads_the_name_table() {
     }
 
     // Samba gives a zero MAC; nothing is sent when the port was not scanned.
-    let (port, _) = nbns_server([0; 6]).await;
+    let (port, _) = nbns_server([0; 6], true, false).await;
     let out = run(port, &format!("nbstat.port={port}")).await;
     assert_eq!(
         out,
         ["NetBIOS name: FILES, NetBIOS user: ALICE, NetBIOS MAC: <unknown>"]
     );
-    let (other, seen) = nbns_server([0; 6]).await;
+    let (other, seen) = nbns_server([0; 6], true, false).await;
     assert!(run(port, &format!("nbstat.port={other}")).await.is_empty());
     assert!(seen.lock().unwrap().is_empty());
+
+    // Only the machine's own <03> names: no user. A non-query answer is
+    // ignored and the request sent again.
+    let (port, seen) = nbns_server([0x00, 0x0c, 0x29, 0x01, 0x02, 0x03], false, true).await;
+    let out = run(port, &format!("nbstat.port={port}")).await;
+    assert_eq!(out.len(), 1, "{out:?}");
+    assert!(
+        out[0].starts_with(
+            "NetBIOS name: FILES, NetBIOS user: <unknown>, NetBIOS MAC: 00:0c:29:01:02:03 ("
+        ),
+        "{}",
+        out[0]
+    );
+    assert_eq!(seen.lock().unwrap().len(), 2);
 }
