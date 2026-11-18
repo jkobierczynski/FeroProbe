@@ -389,12 +389,10 @@ async fn detect_local(addr: &str) -> Option<OsResult> {
     }
     let listener = std::net::TcpListener::bind(format!("{addr}:0")).ok()?;
     let open = listener.local_addr().unwrap().port();
-    // A port nothing listens on.
-    let closed = {
-        let l = std::net::TcpListener::bind(format!("{addr}:0")).unwrap();
-        l.local_addr().unwrap().port()
-    };
     let ip: IpAddr = addr.trim_matches(|c| c == '[' || c == ']').parse().unwrap();
+    // A port nothing listens on.
+    let closed_port = crate::testutil::closed_tcp_port(ip);
+    let closed = closed_port.port;
     let mut host = HostResult::new(ip, None);
     for (port, state) in [(open, PortState::Open), (closed, PortState::Closed)] {
         host.ports.push(crate::model::PortResult {

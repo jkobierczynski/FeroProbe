@@ -258,17 +258,17 @@ mod tests {
         Target::new("127.0.0.1".parse().unwrap())
     }
 
-    /// Bind a port, then drop the listener so we know it is now closed.
-    async fn closed_port() -> u16 {
-        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        l.local_addr().unwrap().port()
+    /// A port that stays closed while the guard is kept.
+    fn closed_port() -> crate::testutil::ClosedTcpPort {
+        crate::testutil::closed_tcp_port("127.0.0.1".parse().unwrap())
     }
 
     #[tokio::test]
     async fn detects_open_and_closed() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let open = listener.local_addr().unwrap().port();
-        let closed = closed_port().await;
+        let closed_guard = closed_port();
+        let closed = closed_guard.port;
 
         // Windows retries a SYN that was answered with RST for about 2s before
         // reporting "connection refused", so the timeout must be longer than
@@ -293,10 +293,8 @@ mod tests {
     #[tokio::test]
     async fn results_are_sorted() {
         let cfg = ScanConfig::default();
-        let mut ports = Vec::new();
-        for _ in 0..5 {
-            ports.push(closed_port().await);
-        }
+        let guards: Vec<_> = (0..5).map(|_| closed_port()).collect();
+        let mut ports: Vec<u16> = guards.iter().map(|g| g.port).collect();
         ports.sort_unstable_by(|a, b| b.cmp(a));
         let hosts = connect_scan(&[localhost()], &ports, &cfg).await.unwrap();
         let got: Vec<u16> = hosts[0].ports.iter().map(|p| p.port).collect();

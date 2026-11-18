@@ -99,6 +99,35 @@ pub(crate) mod testutil {
     /// but a concurrent scan's have a different one.
     pub(crate) static LOOPBACK_IP_PROTO: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+    /// A TCP port on `ip` that is closed and stays closed for as long as
+    /// this is kept: a socket bound to it that never listens. Binding a
+    /// listener and dropping it would free the port, and a test running
+    /// at the same time could be given it for a server of its own, so the
+    /// "closed" port would answer as open (or stay silent to FIN, NULL and
+    /// Xmas probes, as an open port does on Linux).
+    pub(crate) struct ClosedTcpPort {
+        _socket: socket2::Socket,
+        pub(crate) port: u16,
+    }
+
+    pub(crate) fn closed_tcp_port(ip: std::net::IpAddr) -> ClosedTcpPort {
+        use socket2::{Domain, Socket, Type};
+        let socket = Socket::new(
+            Domain::for_address(std::net::SocketAddr::new(ip, 0)),
+            Type::STREAM,
+            None,
+        )
+        .unwrap();
+        socket
+            .bind(&std::net::SocketAddr::new(ip, 0).into())
+            .unwrap();
+        let port = socket.local_addr().unwrap().as_socket().unwrap().port();
+        ClosedTcpPort {
+            _socket: socket,
+            port,
+        }
+    }
+
     /// Whether this machine has IPv6 on its loopback interface. CI sets
     /// FEROPROBE_REQUIRE_IPV6=1 so the IPv6 tests cannot silently pass there.
     pub(crate) fn ipv6_loopback() -> bool {
