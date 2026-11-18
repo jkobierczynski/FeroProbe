@@ -339,7 +339,9 @@ fn take_reply(
             printable(&data, 120)
         )
     });
-    if let Some(Matched { found, by }) = rules::match_response(&vs.db, &probe.name, &data) {
+    if let Some(Matched { found, by }) =
+        rules::match_response(&vs.db, &probe.name, probe.payload(), &data)
+    {
         let (kind, name, version) = match &found {
             Found::Hard(i) => (
                 "hard",

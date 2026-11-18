@@ -1001,6 +1001,13 @@ Like nmap, UDP ports the scan left \f[V]open|filtered\f[R] are probed
 too, and one that answers becomes \f[V]open\f[R] (reason
 \f[V]udp-response\f[R]).
 .PP
+A reply that is exactly the probe sent is an \f[V]echo\f[R] service (RFC
+862), as nmap reports it.
+nmap recognizes the echo from one probe (\f[V]help\f[R]); FeroProbe from
+whichever probe comes back unchanged, so an echo also never passes for
+the service whose request it reflects (an echoed SNMP GetRequest used to
+be reported as \f[V]snmp\f[R]).
+.PP
 Each probe opens a new connection and waits up to
 \f[V]--version-timeout\f[R] for a reply, so a silent port costs one wait
 per probe tried: at the default intensity about 15 probes.
@@ -1068,9 +1075,9 @@ Service scan hard match (Probe null matched with built-in rules line 332): 10.0.
 \f[R]
 .fi
 .PP
-The rule is named by its line in the rules file (or as a built-in parser
-or the built-in HTTP header reader), which makes the trace the tool for
-writing and debugging rules.
+The rule is named by its line in the rules file (or as a built-in
+parser, the built-in echo check or the built-in HTTP header reader),
+which makes the trace the tool for writing and debugging rules.
 nmap\[aq]s version trace also prints its network library\[aq]s debug
 lines; FeroProbe prints only the lines above.
 .SS \f[V]--service-rules <file>\f[R]

@@ -89,7 +89,7 @@ pub(super) fn parse_ntp(data: &[u8]) -> Option<ServiceInfo> {
 const SYS_DESCR_OID: &[u8] = &[0x06, 0x08, 0x2b, 0x06, 0x01, 0x02, 0x01, 0x01, 0x01, 0x00];
 
 pub(super) fn parse_snmp(data: &[u8]) -> Option<ServiceInfo> {
-    if data.first() != Some(&0x30) {
+    if snmp_pdu_type(data)? != SNMP_GET_RESPONSE {
         return None;
     }
     let mut info = ServiceInfo {
@@ -115,6 +115,45 @@ pub(super) fn parse_snmp(data: &[u8]) -> Option<ServiceInfo> {
         }
     }
     Some(info)
+}
+
+/// The GetResponse PDU tag (RFC 1157): a reply. Our probe is a GetRequest
+/// (0xa0), so an echo of it is not read as an SNMP server.
+const SNMP_GET_RESPONSE: u8 = 0xa2;
+
+/// The PDU tag of an SNMP message: a SEQUENCE holding the version (an
+/// INTEGER) and the community (an OCTET STRING), then the PDU.
+fn snmp_pdu_type(data: &[u8]) -> Option<u8> {
+    let (tag, body) = ber_element(data)?;
+    if tag != 0x30 {
+        return None;
+    }
+    let (version, rest) = ber_split(body)?;
+    let (community, rest) = ber_split(rest)?;
+    (version == 0x02 && community == 0x04).then(|| rest.first().copied())?
+}
+
+/// A BER element's tag and contents (short or one/two-byte long length),
+/// clipped to what arrived.
+fn ber_element(data: &[u8]) -> Option<(u8, &[u8])> {
+    let (tag, len, rest) = ber_header(data)?;
+    Some((tag, rest.get(..len).unwrap_or(rest)))
+}
+
+/// A BER element's tag and what follows the whole element.
+fn ber_split(data: &[u8]) -> Option<(u8, &[u8])> {
+    let (tag, len, rest) = ber_header(data)?;
+    Some((tag, rest.get(len..)?))
+}
+
+fn ber_header(data: &[u8]) -> Option<(u8, usize, &[u8])> {
+    let (len, rest) = match data.get(1..)? {
+        [0x81, l, rest @ ..] => (usize::from(*l), rest),
+        [0x82, a, b, rest @ ..] => (usize::from(u16::from_be_bytes([*a, *b])), rest),
+        [l, rest @ ..] if *l < 0x80 => (usize::from(*l), rest),
+        _ => return None,
+    };
+    Some((data[0], len, rest))
 }
 
 pub(super) fn parse_ssdp(data: &[u8]) -> Option<ServiceInfo> {
@@ -244,12 +283,26 @@ mod tests {
 
     #[test]
     fn snmp_reply() {
-        let mut reply = vec![0x30, 0x40, 0x02, 0x01, 0x00];
-        reply.extend_from_slice(SYS_DESCR_OID);
+        // The probe as sent: a GetRequest (0xa0) for sysDescr.0.
+        let db = super::super::db::ServiceDb::builtin();
+        let request = db.probe("snmp").unwrap().payload().to_vec();
+        assert!(parse_snmp(&request).is_none(), "an echoed request");
+        // The same message as a GetResponse with sysDescr.0 = "Linux".
+        let mut reply = request.clone();
+        reply[13] = 0xa2;
+        reply.truncate(reply.len() - 2);
         reply.extend_from_slice(&[0x04, 0x05]);
         reply.extend_from_slice(b"Linux");
+        // Fix the lengths: message, PDU, varbind list, varbind.
+        for at in [1, 14, 25, 27] {
+            reply[at] += 5;
+        }
         let i = parse_snmp(&reply).unwrap();
         assert_eq!(i.extra_info.as_deref(), Some("community: public; Linux"));
+        // Not SNMP: no version and community before the PDU.
+        let mut bare = vec![0x30, 0x10, 0xa2, 0x0e];
+        bare.extend_from_slice(SYS_DESCR_OID);
+        assert!(parse_snmp(&bare).is_none());
     }
     fn nbstat_reply(mac: [u8; 6]) -> Vec<u8> {
         let mut r = vec![0x46, 0x50, 0x84, 0x00, 0, 0, 0, 1, 0, 0, 0, 0, 0x20];

@@ -28,12 +28,28 @@ pub(super) struct Matched {
     pub by: String,
 }
 
-/// Identify the service that sent `data` in reply to `probe`. Order: the
-/// built-in parser for the probe, the hard rules in file order, the
-/// generic header reader, then the soft rules.
-pub(super) fn match_response(db: &ServiceDb, probe: &str, data: &[u8]) -> Option<Matched> {
+/// Identify the service that sent `data` in reply to `probe`, whose payload
+/// was `sent`. Order: an echo of the payload, the built-in parser for the
+/// probe, the hard rules in file order, the generic header reader, then the
+/// soft rules.
+pub(super) fn match_response(
+    db: &ServiceDb,
+    probe: &str,
+    sent: &[u8],
+    data: &[u8],
+) -> Option<Matched> {
     if data.is_empty() {
         return None;
+    }
+    // An echo service (RFC 862) sends the probe back unchanged. nmap names
+    // it from its echoed help probe; any of our payloads coming back as it
+    // went out tells the same, and keeps a parser from reading our own
+    // request (an echoed SNMP GetRequest) as the service's reply.
+    if data == sent {
+        return Some(Matched {
+            found: Found::Hard(Box::new(ServiceInfo::named("echo"))),
+            by: format!("built-in echo check ({probe} payload sent back)"),
+        });
     }
     if let Some(info) = super::parsers::parse(probe, data) {
         return Some(Matched {
@@ -202,7 +218,9 @@ mod tests {
 
     /// The hard match for a reply to `probe`, with the built-in rules.
     fn mr(probe: &str, data: &[u8]) -> Option<ServiceInfo> {
-        match match_response(&ServiceDb::builtin(), probe, data)?.found {
+        let db = ServiceDb::builtin();
+        let sent = db.probe(probe).map_or(&[][..], |p| p.payload());
+        match match_response(&db, probe, sent, data)?.found {
             Found::Hard(info) => Some(*info),
             Found::Soft(_) => None,
         }
@@ -495,18 +513,41 @@ mod tests {
     }
 
     #[test]
+    fn echoed_probe_is_echo() {
+        let db = ServiceDb::builtin();
+        // A UDP echo sends each probe back: the first one names it, and the
+        // echoed SNMP GetRequest is not read as an SNMP reply.
+        for probe in ["dns-version", "snmp", "ntp"] {
+            let sent = db.probe(probe).unwrap().payload();
+            let i = mr(probe, sent).unwrap_or_else(|| panic!("{probe}"));
+            assert_eq!(i.name, "echo", "{probe}");
+        }
+        let by = match_response(&db, "snmp", b"x", b"x").unwrap().by;
+        assert_eq!(by, "built-in echo check (snmp payload sent back)");
+        // Only the whole payload: a reply that merely starts like it is not.
+        let sent = db.probe("http").unwrap().payload();
+        assert_ne!(
+            mr("http", &sent[..4]).map(|i| i.name).as_deref(),
+            Some("echo")
+        );
+    }
+
+    #[test]
     fn soft_matches() {
         let db = ServiceDb::builtin();
-        let soft =
-            |probe: &str, data: &[u8]| match match_response(&db, probe, data).map(|m| m.found) {
-                Some(Found::Soft(s)) => Some(s),
-                _ => None,
-            };
+        let soft = |probe: &str, data: &[u8]| match match_response(&db, probe, &[], data)
+            .map(|m| m.found)
+        {
+            Some(Found::Soft(s)) => Some(s),
+            _ => None,
+        };
         assert_eq!(soft("null", b"+OK ready\r\n").as_deref(), Some("pop3"));
         assert_eq!(soft("null", b"* OK ready\r\n").as_deref(), Some("imap"));
         // Only for replies to the listen probe.
         assert_eq!(soft("http", b"+OK ready\r\n"), None);
-        let by = match_response(&db, "null", b"+OK ready\r\n").unwrap().by;
+        let by = match_response(&db, "null", &[], b"+OK ready\r\n")
+            .unwrap()
+            .by;
         assert!(by.starts_with("built-in rules line "), "{by}");
     }
 

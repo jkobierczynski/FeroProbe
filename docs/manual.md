@@ -649,6 +649,12 @@ tell more about that service, as in nmap (with every probe at intensity
 TLS steps. Like nmap, UDP ports the scan left `open|filtered` are probed
 too, and one that answers becomes `open` (reason `udp-response`).
 
+A reply that is exactly the probe sent is an `echo` service (RFC 862), as
+nmap reports it. nmap recognizes the echo from one probe (`help`); FeroProbe
+from whichever probe comes back unchanged, so an echo also never passes for
+the service whose request it reflects (an echoed SNMP GetRequest used to be
+reported as `snmp`).
+
 Each probe opens a new connection and waits up to `--version-timeout` for
 a reply, so a silent port costs one wait per probe tried: at the default
 intensity about 15 probes. `--version-light` makes such ports much quicker.
@@ -710,8 +716,8 @@ Service scan got 32 bytes in reply to probe null from 10.0.0.5:22 (tcp): "SSH-2.
 Service scan hard match (Probe null matched with built-in rules line 332): 10.0.0.5:22 is ssh.  Version: |OpenSSH|9.6p1|Debian-4; protocol 2.0|
 ```
 
-The rule is named by its line in the rules file (or as a built-in parser
-or the built-in HTTP header reader), which makes the trace the tool for
+The rule is named by its line in the rules file (or as a built-in parser,
+the built-in echo check or the built-in HTTP header reader), which makes the trace the tool for
 writing and debugging rules. nmap's version trace also prints its network
 library's debug lines; FeroProbe prints only the lines above.
 
