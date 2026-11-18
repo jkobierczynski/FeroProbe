@@ -70,8 +70,8 @@ TARGETS = {
 TCP_OPEN = [22, 80, 8080]
 TCP_CLOSED = [443, 3389]
 TCP_FILTERED = [8443]
-UDP_OPEN = [53]
-UDP_CLOSED = [123, 137]
+UDP_OPEN = [53, 137]
+UDP_CLOSED = [123]
 UDP_FILTERED = [161]
 TCP_PORTS = sorted(TCP_OPEN + TCP_CLOSED + TCP_FILTERED)
 UDP_PORTS = sorted(UDP_OPEN + UDP_CLOSED + UDP_FILTERED)
@@ -780,6 +780,13 @@ def parse_xml_ports(path):
             if svc is not None and svc.get("name"):
                 s += " " + svc.get("name")
             res[key] = s
+            # Which scripts gave output, not the output itself: the two
+            # tools word and lay out their script output differently.
+            for script in port.iter("script"):
+                res[f"{key} script {script.get('id')}"] = "output"
+        for hs in host.iter("hostscript"):
+            for script in hs.iter("script"):
+                res[f"host script {script.get('id')}"] = "output"
         for extra in host.iter("extraports"):
             res[f"other {extra.get('state')}"] = extra.get("count")
     return res, host_state

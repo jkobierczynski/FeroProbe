@@ -12,6 +12,7 @@ import tempfile
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import listeners  # noqa: E402
 import nmap_diff as nd  # noqa: E402
 
 SCAN_MAC = bytes.fromhex("020000000001")
@@ -204,6 +205,64 @@ class Compare(unittest.TestCase):
         known = [("*", __import__("re").compile(r"^tcp/\d+ \[[A-Z]+\] win: .* vs FeroProbe \[65109"), "sig")]
         nd.annotate(found, known)
         self.assertEqual([x["severity"] for x in found if x.get("known")], ["shape"])
+
+
+class Xml(unittest.TestCase):
+    def test_scripts_with_output_are_listed(self):
+        xml = ('<nmaprun><host><status state="up"/><ports>'
+               '<port protocol="udp" portid="53"><state state="open"/><service name="domain"/>'
+               '<script id="dns-nsid" output="x"/></port></ports>'
+               '<hostscript><script id="nbstat" output="y"/></hostscript></host></nmaprun>')
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "a.xml")
+            with open(path, "w") as f:
+                f.write(xml)
+            ports, state = nd.parse_xml_ports(path)
+        self.assertEqual(state, "up")
+        self.assertEqual(ports, {"udp/53": "open domain", "udp/53 script dns-nsid": "output",
+                                 "host script nbstat": "output"})
+
+
+def dns_query(name, opt=b"", qclass=3, flags=0):
+    q = struct.pack(">HHHHHH", 0x4650, flags, 1, 0, 0, 1 if opt else 0)
+    q += b"".join(bytes([len(x)]) + x for x in name.encode().split(b".")) + b"\0"
+    return q + struct.pack(">HH", 16, qclass) + opt
+
+
+class Listeners(unittest.TestCase):
+    NSID_OPT = b"\0" + struct.pack(">HHIHHH", 41, 1232, 0, 4, 3, 0)
+
+    def test_dns_chaos_txt_and_nsid(self):
+        r = listeners.dns_reply(dns_query("id.server", self.NSID_OPT))
+        qid, flags, qd, an, ns, ar = struct.unpack(">HHHHHH", r[:12])
+        self.assertEqual((qid, flags & 0x800F, qd, an, ns, ar), (0x4650, 0x8000, 1, 1, 0, 1))
+        self.assertIn(b"\x09lab-dns-1", r)
+        self.assertTrue(r.endswith(struct.pack(">HH", 3, 9) + b"lab-dns-1"))
+        plain = listeners.dns_reply(dns_query("version.bind"))
+        self.assertTrue(plain.endswith(b"\x0b9.18.24-lab"))
+        self.assertEqual(struct.unpack(">H", plain[10:12])[0], 0)
+
+    def test_dns_other_queries(self):
+        # IN class: REFUSED; status request (opcode 2): NOTIMP; a reply: ignored
+        self.assertEqual(listeners.dns_reply(dns_query("id.server", qclass=1))[3] & 0xF, 5)
+        self.assertEqual(listeners.dns_reply(dns_query("id.server", flags=0x1000))[3] & 0xF, 4)
+        self.assertIsNone(listeners.dns_reply(dns_query("id.server", flags=0x8000)))
+        self.assertIsNone(listeners.dns_reply(b"hello"))
+
+    def test_nbstat(self):
+        name = b"\x20" + b"CK" + b"A" * 30 + b"\0"
+        q = struct.pack(">HHHHHH", 0x4650, 0, 1, 0, 0, 0) + name + struct.pack(">HH", 0x21, 1)
+        r = listeners.nbstat_reply(q)
+        self.assertEqual(struct.unpack(">HHHH", r[:8]), (0x4650, 0x8400, 0, 1))
+        self.assertEqual(r[12:46], name)
+        rdlen = struct.unpack(">H", r[54:56])[0]
+        self.assertEqual(len(r), 56 + rdlen)
+        self.assertEqual(r[56], 3)
+        self.assertEqual(r[57:72], b"FPDLAB         ")
+        self.assertEqual(r[56 + 1 + 3 * 18:56 + 1 + 3 * 18 + 6], listeners.NB_MAC)
+        # a name query (type NB) and garbage get no answer
+        self.assertIsNone(listeners.nbstat_reply(q[:-4] + struct.pack(">HH", 0x20, 1)))
+        self.assertIsNone(listeners.nbstat_reply(b"hello" * 20))
 
 
 if __name__ == "__main__":

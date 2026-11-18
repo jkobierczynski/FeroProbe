@@ -10,7 +10,7 @@ captures everything the scanner sends, and reports the differences:
 | out-of-scope | A packet to a port nobody asked for (like nmap `-sV` sending UDP/1434 when only TCP ports were requested). Reported for either tool |
 | only-nmap, only-feroprobe | A destination (protocol and port, ICMP type, ARP) only one tool sent to |
 | shape | Same destination, different probe contents: TCP flags, window, options, payload, DF bit, fragmentation |
-| result | The tools report a different port state or service name (from `-oX`) |
+| result | The tools report a different port state or service name, or a script gave output in only one of them (from `-oX`; the script output itself is not compared) |
 | count | Same probes, different number of them (retries, retransmissions) |
 | side-effect | ICMP errors the scanner host's own kernel sent, usually because a raw-socket scan did not consume a reply |
 
@@ -73,9 +73,12 @@ Lab ports (the same on the target and on 127.0.0.1):
 | | open | closed | filtered (dropped) |
 | --- | --- | --- | --- |
 | TCP | 22 (SSH banner), 80 (HTTP), 8080 (silent) | 443, 3389 | 8443 |
-| UDP | 53 (echo) | 123, 137 | 161 |
+| UDP | 53 (echo), 137 (NetBIOS NODE STATUS) | 123 | 161 |
 
-In `matrix.txt`, `@TCP` and `@UDP` expand to these lists. ICMP rate limits
+In `matrix.txt`, `@TCP` and `@UDP` expand to these lists. TCP 53 also has a
+small DNS server for the script cases (CHAOS TXT `id.server`,
+`hostname.bind`, `version.bind` and the EDNS NSID option); it is not in
+`@TCP`, so only a case that names port 53 reaches it. ICMP rate limits
 are off in every namespace, and the neighbour caches are flushed before each
 run, so both tools start from the same state.
 
