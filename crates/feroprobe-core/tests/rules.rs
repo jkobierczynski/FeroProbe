@@ -53,7 +53,7 @@ fn snort_rule_files_match() {
         // Top-level options are split by `;`; a modifier must not be one.
         let body = &line[line.find('(').unwrap() + 1..line.rfind(')').unwrap()];
         for opt in body.split(';') {
-            let name = opt.split(':').next().unwrap().trim();
+            let name = opt.trim().split([':', ' ', '\t']).next().unwrap();
             assert!(
                 !["depth", "offset", "distance", "within", "nocase"].contains(&name),
                 "sid {sid}: Snort 3 wants `, {name}` after its content"
