@@ -42,6 +42,7 @@ pub use socket::Scope;
 /// The scripts built into FeroProbe, written for it: (id, source).
 const BUILT_IN: &[(&str, &str)] = &[
     ("banner", include_str!("../../lua-scripts/banner.lua")),
+    ("dns-nsid", include_str!("../../lua-scripts/dns-nsid.lua")),
     ("ftp-anon", include_str!("../../lua-scripts/ftp-anon.lua")),
     ("ftp-syst", include_str!("../../lua-scripts/ftp-syst.lua")),
     (

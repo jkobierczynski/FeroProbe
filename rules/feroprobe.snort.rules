@@ -54,3 +54,9 @@ alert tcp any any -> $HOME_NET any (msg:"FeroProbe script TLS ClientHello (ssl-d
 # NetBIOS NODE STATUS request for "*" with transaction ID "FP": sent by the
 # nbstat script and by the UDP scan (-sU) and -sV to port 137.
 alert udp any any -> $HOME_NET 137 (msg:"FeroProbe NetBIOS NODE STATUS (nbstat script, -sU or -sV probe)"; content:"FP|00 00 00 01 00 00 00 00 00 00 20|CKAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA|00 00 21 00 01|"; depth:50; classtype:attempted-recon; sid:9100013; rev:2;)
+# DNS CHAOS TXT queries (id.server, version.bind) with transaction ID "FP",
+# no flags and one question: sent by the dns-nsid script, over UDP and TCP
+# (where a two-byte length comes first). The question's type TXT and class
+# CH follow its name.
+alert udp any any -> $HOME_NET any (msg:"FeroProbe DNS CHAOS TXT query (dns-nsid script)"; content:"FP|00 00 00 01 00 00 00 00 00|"; depth:11; content:"|00 10 00 03|"; distance:1; within:20; classtype:attempted-recon; sid:9100014; rev:1;)
+alert tcp any any -> $HOME_NET any (msg:"FeroProbe DNS CHAOS TXT query over TCP (dns-nsid script)"; flow:established,to_server; content:"FP|00 00 00 01 00 00 00 00 00|"; offset:2; depth:11; content:"|00 10 00 03|"; distance:1; within:20; classtype:attempted-recon; sid:9100015; rev:1;)

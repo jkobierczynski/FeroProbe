@@ -2338,6 +2338,26 @@ Arguments: \f[V]banner.timeout\f[R] (ms, default 5000),
 \f[V]banner.length\f[R] (characters, default 200)
 T}
 T{
+\f[V]dns-nsid\f[R]
+T}@T{
+default, discovery, safe
+T}@T{
+53, \f[V]domain\f[R] (TCP or UDP)
+T}@T{
+Asks a DNS server who it is: the name server identifier (NSID, RFC 5001)
+from an EDNS(0) query for \f[V]id.server\f[R], and the CHAOS TXT records
+\f[V]id.server\f[R] and \f[V]version.bind\f[R] (RFC 4892), shown as
+\f[V]NSID: <id> (<hex>)\f[R], \f[V]id.server:\f[R] and
+\f[V]bind.version:\f[R]; only the ones the server gives.
+At most three small queries to the scanned port, without recursion: a
+server that rejects EDNS (FORMERR or NOTIMP) is asked for
+\f[V]id.server\f[R] again without it.
+Over UDP each query is sent twice at most; over TCP with the two-byte
+length in front.
+The transaction ID is \f[V]0x4650\f[R] (\[dq]FP\[dq]).
+Argument: \f[V]dns-nsid.timeout\f[R] (ms, default 5000)
+T}
+T{
 \f[V]ftp-anon\f[R]
 T}@T{
 default, auth, safe

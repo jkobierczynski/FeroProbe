@@ -195,6 +195,7 @@ who asked:
 | `rdp-ntlm-info` | The RDP routing cookie `Cookie: mstshash=FeroProbe` in the connection request (clear text, before TLS); then an NTLM NEGOTIATE that names no domain or workstation | — |
 | `ssl-date` | `FeroProbeSSLDate` in the TLS ClientHello random, after its four time bytes (clear text, it is the first message of the handshake) | — |
 | `nbstat` | The NetBIOS transaction ID `0x4650` ("FP") of its NODE STATUS request to UDP 137 (a weak mark of 2 bytes: rule 9100013 also needs the rest of the request to match, and a tool that picks its IDs at random still matches about once in 65,536 such requests) | — |
+| `dns-nsid` | The DNS transaction ID `0x4650` ("FP") of its CHAOS TXT queries for `id.server` and `version.bind` (the first one asking for the NSID too). A weak mark of 2 bytes: rules 9100014 (UDP) and 9100015 (TCP) also need no flags, one question and the CHAOS TXT question, which few other clients send; a tool that picks its IDs at random still matches about once in 65,536 such queries | — |
 | `http-title`, `http-methods`, `http-robots.txt` | The `User-Agent` above | `Nmap Scripting Engine` |
 
 As with the `User-Agent`, `--script-args smtp.domain=...` replaces the
@@ -208,7 +209,7 @@ password, and each stays within the ports the scan probed.
 
 The repository ships Suricata and Snort rules that match the probe
 signature, so blue teams can flag FeroProbe scans without writing their
-own. Rules 9100006 to 9100013 match the script markers above in clear
+own. Rules 9100006 to 9100015 match the script markers above in clear
 text. They are in [`rules/`](../rules/): `rules/feroprobe.rules` for
 Suricata and `rules/feroprobe.snort.rules` for Snort 2.9 and
 `rules/feroprobe.snort3.rules` for Snort 3, with setup notes in
