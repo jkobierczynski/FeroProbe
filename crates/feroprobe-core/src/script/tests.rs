@@ -1970,6 +1970,7 @@ fn the_default_category() {
             "smb2-time",
             "smtp-commands",
             "ssh-hostkey",
+            "ssl-date",
             "ssl-cert",
             "sshv1",
             "vnc-info",
@@ -2276,4 +2277,164 @@ action = function()
 end"#;
     let scan = ScriptScan::new(vec![script("oem", src)], ArgTable::default(), None).unwrap();
     assert_eq!(scan.pre_scan().await[0].output, "LAB");
+}
+
+/// A stand-in TLS server that answers each ClientHello with a bare
+/// ServerHello record whose gmt_unix_time is `time()`, keeping each hello.
+async fn hello_server(
+    time: fn() -> u32,
+    split: bool,
+) -> (u16, std::sync::Arc<std::sync::Mutex<Vec<Vec<u8>>>>) {
+    let seen: std::sync::Arc<std::sync::Mutex<Vec<Vec<u8>>>> = Default::default();
+    let keep = seen.clone();
+    let port = tcp_server(move |mut s| {
+        let keep = keep.clone();
+        async move {
+            let mut head = [0u8; 5];
+            if s.read_exact(&mut head).await.is_err() {
+                return;
+            }
+            let mut body = vec![0u8; u16::from_be_bytes([head[3], head[4]]) as usize];
+            if s.read_exact(&mut body).await.is_err() {
+                return;
+            }
+            let mut hello = head.to_vec();
+            hello.extend(body);
+            keep.lock().unwrap().push(hello);
+            let mut hs = vec![3, 3];
+            hs.extend(time().to_be_bytes());
+            hs.extend([7u8; 28]);
+            hs.extend([0, 0xc0, 0x2f, 0]);
+            let mut rec = vec![2, 0, 0, hs.len() as u8];
+            rec.extend(hs);
+            // The handshake message whole in one record, or with its first
+            // 10 bytes in a record each (RFC 5246 6.2.1 allows it).
+            let parts: Vec<&[u8]> = if split {
+                let mut p: Vec<&[u8]> = rec[..10].chunks(1).collect();
+                p.push(&rec[10..]);
+                p
+            } else {
+                vec![&rec[..]]
+            };
+            let mut out = Vec::new();
+            for part in parts {
+                out.extend([22, 3, 3]);
+                out.extend((part.len() as u16).to_be_bytes());
+                out.extend(part);
+            }
+            let _ = s.write_all(&out).await;
+            let mut rest = [0u8; 64];
+            let _ = s.read(&mut rest).await;
+        }
+    })
+    .await;
+    (port, seen)
+}
+
+#[tokio::test]
+async fn ssl_date_reads_the_server_hello_time() {
+    fn ahead() -> u32 {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        (now + 5) as u32
+    }
+    let (port, seen) = hello_server(ahead, false).await;
+    let out = output_of("ssl-date", port, "https").await.unwrap();
+    let (date, rest) = out.split_once("; ").unwrap();
+    assert!(date.ends_with("+00:00") && date.len() == 25, "{out}");
+    assert!(
+        ["+4s", "+5s", "+6s"]
+            .map(|d| format!("{d} from scanner time."))
+            .contains(&rest.to_string()),
+        "{out}"
+    );
+    {
+        // Two hellos, or three when the first two came within one second.
+        let seen = seen.lock().unwrap();
+        assert!(matches!(seen.len(), 2 | 3), "{}", seen.len());
+        for hello in seen.iter() {
+            // A TLS 1.2 ClientHello whose random carries the mark, with the
+            // target's name as SNI.
+            assert_eq!(&hello[..3], &[22, 3, 1]);
+            assert_eq!(hello[5], 1);
+            assert_eq!(&hello[9..11], &[3, 3]);
+            assert_eq!(&hello[15..31], b"FeroProbeSSLDate");
+            assert!(hello.windows(9).any(|w| w == b"localhost"));
+        }
+    }
+
+    // Random bytes where the time should be.
+    fn random() -> u32 {
+        static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x1234_5678);
+        N.fetch_add(0x0bad_cafe, std::sync::atomic::Ordering::Relaxed)
+    }
+    let (port, seen) = hello_server(random, false).await;
+    assert_eq!(
+        output_of("ssl-date", port, "https").await.as_deref(),
+        Some("TLS randomness does not represent time")
+    );
+    assert_eq!(seen.lock().unwrap().len(), 2);
+
+    // A field that never changes: a third hello once our clock has moved
+    // two seconds tells it from a real clock asked twice within a second.
+    fn fixed() -> u32 {
+        0x5f00_0000
+    }
+    let (port, seen) = hello_server(fixed, false).await;
+    assert_eq!(
+        output_of("ssl-date", port, "https").await.as_deref(),
+        Some("TLS randomness does not represent time")
+    );
+    assert_eq!(seen.lock().unwrap().len(), 3);
+
+    // A ServerHello split across eleven records.
+    let (port, _) = hello_server(ahead, true).await;
+    let out = output_of("ssl-date", port, "https").await.unwrap();
+    assert!(out.ends_with(" from scanner time."), "{out}");
+}
+
+#[tokio::test]
+async fn ssl_date_stops_a_trickling_server_at_its_timeout() {
+    // Answers each ClientHello with a ServerHello one byte every 400 ms:
+    // every receive stays under the 1 s timeout, but the bytes it needs would take
+    // 12 s in all.
+    let port = tcp_server(|mut s| async move {
+        let mut head = [0u8; 5];
+        if s.read_exact(&mut head).await.is_err() {
+            return;
+        }
+        let mut body = vec![0u8; u16::from_be_bytes([head[3], head[4]]) as usize];
+        if s.read_exact(&mut body).await.is_err() {
+            return;
+        }
+        let mut out = vec![22, 3, 3, 0, 42, 2, 0, 0, 38, 3, 3];
+        out.extend([0x5f, 0, 0, 0]);
+        out.extend([7u8; 28]);
+        for b in out {
+            if s.write_all(&[b]).await.is_err() {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        }
+    })
+    .await;
+    let scan = ScriptScan::new(
+        vec![built_in("ssl-date")],
+        args::parse("ssl-date.timeout=1000").unwrap(),
+        None,
+    )
+    .unwrap();
+    let mut hosts = vec![host_with_services(&[(port, "https")])];
+    let start = std::time::Instant::now();
+    scan.scan_hosts(&mut hosts).await;
+    // One connection gives up within the 1 s budget (2 s with whole-second
+    // rounding), and the script ends there.
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(4),
+        "{:?}",
+        start.elapsed()
+    );
+    assert!(hosts[0].ports[0].scripts.is_empty());
 }

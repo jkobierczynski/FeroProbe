@@ -2058,6 +2058,12 @@ T}@T{
 \f[V]n\f[R] random bytes from the system (at most 65536)
 T}
 T{
+\f[V]fero.sleep(seconds)\f[R]
+T}@T{
+Waits (fractions allowed, at most 600 per call) without holding up other
+scripts; nmap\[aq]s \f[V]stdnse.sleep\f[R]
+T}
+T{
 \f[V]fero.hex(s [, sep])\f[R]
 T}@T{
 \f[V]s\f[R] in lower-case hex, with \f[V]sep\f[R] between bytes if given
@@ -2558,6 +2564,31 @@ key type and size, signature algorithm, validity dates, SHA-1 and
 SHA-256 fingerprints, and with \f[V]-v\f[R] the PEM.
 Direct TLS only for now (no STARTTLS); nmap\[aq]s also shows MD5,
 FeroProbe\[aq]s SHA-256 instead
+T}
+T{
+\f[V]ssl-date\f[R]
+T}@T{
+default, discovery, safe
+T}@T{
+TLS ports
+T}@T{
+Sends a TLS 1.2 ClientHello and reads the time the server puts in the
+first four bytes of its ServerHello random, as
+\f[V]2026-11-18T10:00:00+00:00; +5s from scanner time.\f[R] No handshake
+is finished.
+A second hello checks that the value moves with the clock (and when both
+answers came within one second, a third one two seconds later, so that a
+field that never changes is not taken for a clock); most current servers
+fill it with random bytes, and then the script says
+\f[V]TLS randomness does not represent time\f[R].
+A ServerHello split across several records is read; only its first 10
+bytes are read, within one timeout.
+The hello\[aq]s random carries \f[V]FeroProbeSSLDate\f[R] after the time
+field.
+Direct TLS only (no STARTTLS, which nmap\[aq]s also tries); nmap\[aq]s
+also adds a \f[V]clock-skew\f[R] line to the host\[aq]s script results,
+FeroProbe\[aq]s does not yet.
+Argument: \f[V]ssl-date.timeout\f[R] (ms, default 8000)
 T}
 T{
 \f[V]sshv1\f[R]

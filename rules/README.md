@@ -21,6 +21,7 @@ teams can flag FeroProbe scans without writing their own.
 | `ftp-anon` (default script) | `PASS feroprobe@` |
 | `smb2-security-mode`, `smb2-time` (default scripts) | SMB2 NEGOTIATE client GUID `FeroProbeSMBScan`; on port 139 the NetBIOS calling name `FEROPROBE` |
 | `rdp-ntlm-info` (default script) | RDP connection request cookie `Cookie: mstshash=FeroProbe` |
+| `ssl-date` (default script) | TLS ClientHello random `FeroProbeSSLDate` (bytes 15-30 of the record) |
 
 The TCP window of a scan probe is otherwise meaningless, because the scan
 never completes a handshake, so the fixed window does not change how the
