@@ -2352,8 +2352,13 @@ from an EDNS(0) query for \f[V]id.server\f[R], and the CHAOS TXT records
 At most three small queries to the scanned port, without recursion: a
 server that rejects EDNS (FORMERR or NOTIMP) is asked for
 \f[V]id.server\f[R] again without it.
+A reply counts only when its question is the one asked, and only the TXT
+record for that name is read.
 Over UDP each query is sent twice at most; over TCP with the two-byte
-length in front.
+length in front, read in two reads at most within the timeout each.
+Each value comes from its own query (and, over TCP, its own connection),
+so behind a load balancer or anycast address they can come from
+different servers.
 The transaction ID is \f[V]0x4650\f[R] (\[dq]FP\[dq]).
 Argument: \f[V]dns-nsid.timeout\f[R] (ms, default 5000)
 T}
