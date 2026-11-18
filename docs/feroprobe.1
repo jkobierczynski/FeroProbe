@@ -2018,6 +2018,23 @@ Logs in to nothing; \f[V]fero.smb.dialect_name(d)\f[R] writes a dialect
 as nmap does (\f[V]3:1:1\f[R])
 T}
 T{
+\f[V]fero.ntlm.negotiate_message()\f[R]
+T}@T{
+An NTLM NEGOTIATE message (no domain or workstation named), for a script
+to wrap in its protocol
+T}
+T{
+\f[V]fero.ntlm.parse_challenge(data)\f[R]
+T}@T{
+Finds the NTLM CHALLENGE in \f[V]data\f[R] (it may be wrapped, as in
+CredSSP or SPNEGO) and reads it: \f[V]target_name\f[R],
+\f[V]netbios_computer\f[R], \f[V]netbios_domain\f[R],
+\f[V]dns_computer\f[R], \f[V]dns_domain\f[R], \f[V]dns_tree\f[R],
+\f[V]timestamp\f[R] (Unix seconds), \f[V]version\f[R]
+(\f[V]\[dq]10.0.14393\[dq]\f[R]) and \f[V]flags\f[R], each when the
+server gives it; or \f[V]nil\f[R] and a message
+T}
+T{
 \f[V]fero.reader(sock)\f[R]
 T}@T{
 A buffered reader over a connected socket: \f[V]r:line()\f[R] (one line,
@@ -2438,6 +2455,26 @@ Sends CAPA and lists the capabilities, with their arguments in
 parentheses, plus APOP when the greeting offers it; logs in to nothing
 T}
 T{
+\f[V]rdp-ntlm-info\f[R]
+T}@T{
+default, discovery, safe
+T}@T{
+3389, \f[V]ms-wbt-server\f[R]
+T}@T{
+Asks for TLS and CredSSP (Network Level Authentication) in the
+connection request, sends an NTLM NEGOTIATE inside a CredSSP message
+over TLS and shows what the server\[aq]s NTLM CHALLENGE says: target
+name, NetBIOS and DNS domain and computer names, DNS tree name, product
+version and system time (UTC).
+No credentials are sent.
+A server that does not offer CredSSP gives no output.
+The connection request carries the routing cookie
+\f[V]Cookie: mstshash=FeroProbe\f[R].
+TLS 1.2 and 1.3 only, as for all FeroProbe TLS, so old servers with TLS
+1.0 only give no output.
+Argument: \f[V]rdp-ntlm-info.timeout\f[R] (ms, default 8000)
+T}
+T{
 \f[V]rpcinfo\f[R]
 T}@T{
 default, discovery, safe
@@ -2564,7 +2601,7 @@ A script whose rule needs a service name sees the one \f[V]-sV\f[R]
 found, or without \f[V]-sV\f[R] the name of the port number, as in nmap.
 .PP
 nmap\[aq]s \f[V]default\f[R] category has more scripts (other SMB ones,
-RDP, DNS and others); FeroProbe\[aq]s grows release by release.
+DNS and others); FeroProbe\[aq]s grows release by release.
 Scripts of nmap\[aq]s that would reach beyond the scanned host, such as
 \f[V]http-open-proxy\f[R] or \f[V]socks-open-proxy\f[R], which ask the
 target to fetch an outside site, are not planned for the default set.

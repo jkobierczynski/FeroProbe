@@ -62,6 +62,9 @@ impl Kept {
 /// `fero.smb`: the SMB2 NEGOTIATE exchange.
 const SMB_LIBRARY: &str = include_str!("smb.lua");
 
+/// `fero.ntlm`: the NTLM NEGOTIATE and CHALLENGE messages.
+const NTLM_LIBRARY: &str = include_str!("ntlm.lua");
+
 /// The library every script gets, written for FeroProbe, on top of the
 /// `fero` table the engine fills in.
 const LIBRARY: &str = r##"
@@ -469,6 +472,9 @@ pub(crate) fn install_library(
         .call::<()>((fero.clone(), args_to_lua(lua, args)?))?;
     lua.load(SMB_LIBRARY)
         .set_name("=fero.smb")
+        .call::<()>(fero.clone())?;
+    lua.load(NTLM_LIBRARY)
+        .set_name("=fero.ntlm")
         .call::<()>(fero)?;
     Ok(())
 }

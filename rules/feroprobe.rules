@@ -52,3 +52,6 @@ alert tcp any any -> $HOME_NET any (msg:"FeroProbe script FTP anonymous login"; 
 # smb2-security-mode / smb2-time: the client GUID of the SMB2 NEGOTIATE
 # (TCP 445, or 139 after the NetBIOS session request).
 alert tcp any any -> $HOME_NET any (msg:"FeroProbe script SMB2 NEGOTIATE (client GUID)"; flow:established,to_server; content:"|FE|SMB"; offset:4; depth:4; content:"FeroProbeSMBScan"; distance:72; within:16; classtype:attempted-recon; metadata:tool FeroProbe; sid:9100010; rev:1;)
+# rdp-ntlm-info: the routing cookie of the RDP connection request (in clear
+# text, before TLS starts).
+alert tcp any any -> $HOME_NET any (msg:"FeroProbe script RDP connection request (cookie)"; flow:established,to_server; content:"|03 00|"; depth:2; content:"Cookie|3A| mstshash=FeroProbe|0D 0A|"; distance:9; within:28; classtype:attempted-recon; metadata:tool FeroProbe; sid:9100011; rev:1;)
