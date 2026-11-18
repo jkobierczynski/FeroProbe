@@ -2185,11 +2185,17 @@ async fn rdp_server(protocol: u32, now: i64) -> (u16, Seen) {
                     // No CredSSP: the client must close without starting
                     // TLS. Keep what it sends, if anything, until it closes.
                     let mut got = Vec::new();
-                    let _ =
-                        tokio::time::timeout(Duration::from_secs(5), s.read_to_end(&mut got)).await;
+                    let how =
+                        match tokio::time::timeout(Duration::from_secs(5), s.read_to_end(&mut got))
+                            .await
+                        {
+                            Ok(Ok(_)) => "closed",
+                            Ok(Err(_)) => "error",
+                            Err(_) => "timeout",
+                        };
                     keep.lock()
                         .unwrap()
-                        .push(format!("after: {}", String::from_utf8_lossy(&got)));
+                        .push(format!("after: {how}: {}", String::from_utf8_lossy(&got)));
                     return;
                 }
                 let Ok(mut tls) = acceptor.accept(s).await else {
@@ -2257,7 +2263,7 @@ async fn rdp_ntlm_info_reads_the_challenge() {
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    assert_eq!(seen.lock().unwrap()[1], "after: ");
+    assert_eq!(seen.lock().unwrap()[1], "after: closed: ");
 
     // An OEM (not Unicode) target name is read as bytes, not UTF-16.
     let src = r#"
