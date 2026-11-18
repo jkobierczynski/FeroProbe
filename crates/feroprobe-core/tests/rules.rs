@@ -61,27 +61,28 @@ fn snort_rule_files_match() {
         }
         // Without the modifiers folded in, each rule reads the same. SID
         // 9100006 reads the parsed User-Agent in Snort 3 (http_inspect keeps
-        // HTTP headers out of the default buffer), so its buffer and content
-        // differ; the header and every other option must still match.
-        let http_ua = *sid == 9100006;
-        if http_ua {
-            assert!(line.contains(
-                "http_header:field user-agent; content:\"FeroProbe Scripting Engine\", nocase;"
-            ));
-        }
+        // HTTP headers out of the default buffer), so exactly its expected
+        // User-Agent match is taken out of each version; the header and
+        // every other option, including any further content, must match.
+        let (s3, s2) = if *sid == 9100006 {
+            let ua3 = " http_header:field user-agent; \
+                       content:\"FeroProbe Scripting Engine\", nocase;";
+            let ua2 = " content:\"User-Agent|3A| Mozilla/5.0 (compatible|3B| \
+                       FeroProbe Scripting Engine\"; nocase;";
+            let two = &snort2[sid].1;
+            assert_eq!(line.matches(ua3).count(), 1, "sid {sid}: Snort 3 UA match");
+            assert_eq!(two.matches(ua2).count(), 1, "sid {sid}: Snort 2 UA match");
+            (line.replacen(ua3, "", 1), two.replacen(ua2, "", 1))
+        } else {
+            (line.clone(), snort2[sid].1.clone())
+        };
         let strip = |l: &str| -> String {
             l.split([';', ','])
                 .map(|p| p.trim().replacen(':', " ", 1))
                 .filter(|p| !p.is_empty())
-                .filter(|p| {
-                    !(http_ua
-                        && (p.starts_with("content ")
-                            || p.starts_with("http_header ")
-                            || p == "nocase"))
-                })
                 .collect::<Vec<_>>()
                 .join("|")
         };
-        assert_eq!(strip(line), strip(&snort2[sid].1), "sid {sid}");
+        assert_eq!(strip(&s3), strip(&s2), "sid {sid}");
     }
 }
