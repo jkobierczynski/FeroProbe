@@ -2392,3 +2392,47 @@ async fn ssl_date_reads_the_server_hello_time() {
     let out = output_of("ssl-date", port, "https").await.unwrap();
     assert!(out.ends_with(" from scanner time."), "{out}");
 }
+
+#[tokio::test]
+async fn ssl_date_stops_a_trickling_server_at_its_timeout() {
+    // Answers each ClientHello with a ServerHello one byte every 400 ms:
+    // every receive stays under the 1 s timeout, but the 30 bytes would take
+    // 12 s in all.
+    let port = tcp_server(|mut s| async move {
+        let mut head = [0u8; 5];
+        if s.read_exact(&mut head).await.is_err() {
+            return;
+        }
+        let mut body = vec![0u8; u16::from_be_bytes([head[3], head[4]]) as usize];
+        if s.read_exact(&mut body).await.is_err() {
+            return;
+        }
+        let mut out = vec![22, 3, 3, 0, 42, 2, 0, 0, 38, 3, 3];
+        out.extend([0x5f, 0, 0, 0]);
+        out.extend([7u8; 28]);
+        for b in out {
+            if s.write_all(&[b]).await.is_err() {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        }
+    })
+    .await;
+    let scan = ScriptScan::new(
+        vec![built_in("ssl-date")],
+        args::parse("ssl-date.timeout=1000").unwrap(),
+        None,
+    )
+    .unwrap();
+    let mut hosts = vec![host_with_services(&[(port, "https")])];
+    let start = std::time::Instant::now();
+    scan.scan_hosts(&mut hosts).await;
+    // One connection gives up within the 1 s budget (2 s with whole-second
+    // rounding), and the script ends there.
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(4),
+        "{:?}",
+        start.elapsed()
+    );
+    assert!(hosts[0].ports[0].scripts.is_empty());
+}
