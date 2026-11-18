@@ -2560,11 +2560,12 @@ async fn nbstat_reads_the_name_table() {
 
 /// A stand-in DNS server's answer to `q`: CHAOS TXT for id.server
 /// ("ns1.lab") and version.bind ("9.18" and ".24", two strings), and the
-/// NSID "ns1" when the query asks for it. Without `edns` a query with an
-/// OPT record gets FORMERR. With `odd`, a version.bind answer starts with
-/// two unrelated CHAOS TXT records (hostname.bind, and the single label
-/// "version.bind"), which must be skipped.
-fn dns_answer(q: &[u8], edns: bool, odd: bool) -> Vec<u8> {
+/// NSID "ns1" when the query asks for it. Without EDNS support a query
+/// with an OPT record gets FORMERR (see [`Edns`]). With `odd`, a
+/// version.bind answer starts with two unrelated CHAOS TXT records
+/// (hostname.bind, and the single label "version.bind"), which must be
+/// skipped.
+fn dns_answer(q: &[u8], edns: Edns, odd: bool) -> Vec<u8> {
     let ar = u16::from_be_bytes([q[10], q[11]]);
     let mut end = 12;
     while q[end] != 0 {
@@ -2572,10 +2573,38 @@ fn dns_answer(q: &[u8], edns: bool, odd: bool) -> Vec<u8> {
     }
     let question = &q[12..end + 5];
     let mut r = q[..2].to_vec();
-    if ar > 0 && !edns {
-        r.extend([0x80, 0x01, 0, 1, 0, 0, 0, 0, 0, 0]);
-        r.extend(question);
-        return r;
+    match edns {
+        Edns::Yes => {}
+        Edns::FormErr if ar > 0 => {
+            r.extend([0x80, 0x01, 0, 1, 0, 0, 0, 0, 0, 0]);
+            r.extend(question);
+            return r;
+        }
+        Edns::EmptyFormErr if ar > 0 => {
+            // The header alone: every count zero, nothing after it.
+            r.extend([0x80, 0x01, 0, 0, 0, 0, 0, 0, 0, 0]);
+            return r;
+        }
+        Edns::BareFormErr if ar > 0 || question.starts_with(b"\x07version") => {
+            // No question, and an answer that must not be taken: FORMERR
+            // for EDNS, REFUSED for version.bind.
+            r.extend([
+                0x80,
+                if ar > 0 { 0x01 } else { 0x05 },
+                0,
+                0,
+                0,
+                1,
+                0,
+                0,
+                0,
+                0,
+            ]);
+            r.extend(&q[12..end + 5]);
+            r.extend(b"\0\0\0\0\0\x06\x05wrong");
+            return r;
+        }
+        _ => {}
     }
     let id_server = question.starts_with(b"\x02id\x06server\0");
     let extra = odd && !id_server;
@@ -2617,12 +2646,26 @@ fn dns_answer(q: &[u8], edns: bool, odd: bool) -> Vec<u8> {
     r
 }
 
+/// How a stand-in DNS server treats a query with an OPT record.
+#[derive(Clone, Copy)]
+enum Edns {
+    /// Answers it, with the NSID.
+    Yes,
+    /// FORMERR, with the question.
+    FormErr,
+    /// FORMERR as a 12-byte header with every count zero.
+    EmptyFormErr,
+    /// FORMERR with only the header and an answer record, and the same
+    /// (REFUSED) for version.bind: no value may come from either.
+    BareFormErr,
+}
+
 type Queries = std::sync::Arc<std::sync::Mutex<Vec<Vec<u8>>>>;
 
 /// With `odd`, the first answer to version.bind carries the id.server
 /// question instead (a reply to another query, to be ignored), and the
 /// answers start with an unrelated record (see [`dns_answer`]).
-async fn dns_udp_server(edns: bool, odd: bool) -> (u16, Queries) {
+async fn dns_udp_server(edns: Edns, odd: bool) -> (u16, Queries) {
     let server = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
     let port = server.local_addr().unwrap().port();
     let seen: Queries = Default::default();
@@ -2667,7 +2710,7 @@ async fn dns_tcp_server() -> (u16, Queries) {
                     return;
                 }
                 keep.lock().unwrap().push(q.clone());
-                let a = dns_answer(&q, true, false);
+                let a = dns_answer(&q, Edns::Yes, false);
                 let mut out = (a.len() as u16).to_be_bytes().to_vec();
                 out.extend(a);
                 // In two writes, so the reply arrives in pieces.
@@ -2693,7 +2736,7 @@ async fn dns_nsid_asks_for_the_nsid_and_the_chaos_names() {
         });
         host
     }
-    let (port, seen) = dns_udp_server(true, false).await;
+    let (port, seen) = dns_udp_server(Edns::Yes, false).await;
     let out = run_built_in("dns-nsid", dns_host(port, Protocol::Udp)).await;
     assert_eq!(out, [(port, FULL.to_string())]);
     {
@@ -2701,30 +2744,34 @@ async fn dns_nsid_asks_for_the_nsid_and_the_chaos_names() {
         assert_eq!(seen.len(), 2);
         // ID "FP", no flags (no recursion), one question, one OPT record
         // asking for the NSID; then version.bind without EDNS.
-        assert_eq!(&seen[0][..12], b"FP\0\0\0\x01\0\0\0\0\0\x01");
+        assert_eq!(&seen[0][..12], b"FP\x01\0\0\x01\0\0\0\0\0\x01");
         assert_eq!(&seen[0][12..27], b"\x02id\x06server\0\0\x10\0\x03");
         assert_eq!(&seen[0][27..], b"\0\0\x29\x04\xd0\0\0\0\0\0\x04\0\x03\0\0");
         assert_eq!(
             seen[1],
-            b"FP\0\0\0\x01\0\0\0\0\0\0\x07version\x04bind\0\0\x10\0\x03"
+            b"FP\x01\0\0\x01\0\0\0\0\0\0\x07version\x04bind\0\0\x10\0\x03"
         );
     }
 
-    // A server without EDNS: id.server is asked again plainly.
-    let (port, seen) = dns_udp_server(false, false).await;
-    let out = run_built_in("dns-nsid", dns_host(port, Protocol::Udp)).await;
-    assert_eq!(
-        out,
-        [(
-            port,
-            "\n  id.server: ns1.lab\n  bind.version: 9.18.24".to_string()
-        )]
-    );
-    assert_eq!(seen.lock().unwrap().len(), 3);
+    // A server without EDNS: id.server is asked again plainly, also when
+    // its FORMERR has no question (whose answer records are not taken).
+    for (edns, version) in [
+        (Edns::FormErr, "\n  bind.version: 9.18.24"),
+        (Edns::EmptyFormErr, "\n  bind.version: 9.18.24"),
+        (Edns::BareFormErr, ""),
+    ] {
+        let (port, seen) = dns_udp_server(edns, false).await;
+        let out = run_built_in("dns-nsid", dns_host(port, Protocol::Udp)).await;
+        assert_eq!(out, [(port, format!("\n  id.server: ns1.lab{version}"))]);
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 3);
+        assert_eq!(&seen[1][..12], b"FP\x01\0\0\x01\0\0\0\0\0\0");
+        assert_eq!(&seen[1][12..], b"\x02id\x06server\0\0\x10\0\x03");
+    }
 
     // A reply to another question is ignored and the query sent again; a
     // CHAOS TXT record for another name is skipped.
-    let (port, seen) = dns_udp_server(true, true).await;
+    let (port, seen) = dns_udp_server(Edns::Yes, true).await;
     let out = run_built_in("dns-nsid", dns_host(port, Protocol::Udp)).await;
     assert_eq!(out, [(port, FULL.to_string())]);
     assert_eq!(seen.lock().unwrap().len(), 3);

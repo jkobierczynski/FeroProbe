@@ -70,8 +70,8 @@ TARGETS = {
 TCP_OPEN = [22, 80, 8080]
 TCP_CLOSED = [443, 3389]
 TCP_FILTERED = [8443]
-UDP_OPEN = [53]
-UDP_CLOSED = [123, 137]
+UDP_OPEN = [53, 137]
+UDP_CLOSED = [123]
 UDP_FILTERED = [161]
 TCP_PORTS = sorted(TCP_OPEN + TCP_CLOSED + TCP_FILTERED)
 UDP_PORTS = sorted(UDP_OPEN + UDP_CLOSED + UDP_FILTERED)
@@ -144,7 +144,8 @@ class Lab:
                             rule[3:3] = ["-i", iface]
                         nsx(ns, rule, check=tool == "iptables")
         listener = os.path.join(HERE, "listeners.py")
-        self._spawn(NS_TGT, [sys.executable, "-I", listener, "0.0.0.0"] + (["::"] if self.ipv6 else []))
+        # Only the target's own lab addresses, not every interface.
+        self._spawn(NS_TGT, [sys.executable, "-I", listener, LAN_TGT, C_TGT] + ([LAN6_TGT] if self.ipv6 else []))
         self._spawn(NS_SCAN, [sys.executable, "-I", listener, "127.0.0.1"])
         time.sleep(0.5)
 
@@ -759,6 +760,12 @@ def write_private(path, text):
         f.write(text)
 
 
+def script_has_output(script):
+    """A <script> element with text or structured output (an empty string
+    with no table or elem under it is no output)."""
+    return bool((script.get("output") or "").strip()) or len(script) > 0
+
+
 def parse_xml_ports(path):
     """{'tcp/22': 'open ssh', ...} plus host state, from nmap-style XML."""
     import xml.etree.ElementTree as ET
@@ -780,6 +787,15 @@ def parse_xml_ports(path):
             if svc is not None and svc.get("name"):
                 s += " " + svc.get("name")
             res[key] = s
+            # Which scripts gave output, not the output itself: the two
+            # tools word and lay out their script output differently.
+            for script in port.iter("script"):
+                if script_has_output(script):
+                    res[f"{key} script {script.get('id')}"] = "output"
+        for hs in host.iter("hostscript"):
+            for script in hs.iter("script"):
+                if script_has_output(script):
+                    res[f"host script {script.get('id')}"] = "output"
         for extra in host.iter("extraports"):
             res[f"other {extra.get('state')}"] = extra.get("count")
     return res, host_state
