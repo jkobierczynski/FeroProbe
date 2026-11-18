@@ -113,6 +113,7 @@ The rules use the local SID range `9100000+` and the `attempted-recon`
 class. Adjust the SIDs and `$HOME_NET` to fit your deployment.
 
 If you enable SIDs one by one, enable SID 9100013 together with SID 9100003.
-The `-sU` and `-sV` probes to UDP 137 used to carry the generic
-`FeroProbeScan/1` payload (SID 9100003); they now send the NetBIOS NODE
-STATUS request, which only SID 9100013 matches.
+The `-sU` probe to UDP 137 used to carry the generic `FeroProbeScan/1`
+payload (SID 9100003); it now sends the NetBIOS NODE STATUS request, which
+only SID 9100013 matches. The `-sV` NetBIOS probe already sent that
+request.

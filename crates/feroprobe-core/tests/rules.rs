@@ -23,7 +23,11 @@ fn sids(text: &str) -> BTreeMap<u32, (u32, String)> {
         digits.parse().unwrap()
     };
     let mut out = BTreeMap::new();
-    for line in text.lines().filter(|l| l.starts_with("alert ")) {
+    for line in text
+        .lines()
+        .map(str::trim_start)
+        .filter(|l| l.starts_with("alert "))
+    {
         let sid = num(line, "sid:");
         assert!(
             out.insert(sid, (num(line, "rev:"), line.to_string()))
