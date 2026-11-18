@@ -65,7 +65,10 @@ end
 local function parse(r)
   if #r < 12 then return nil end
   local id, flags, _, ancount = string.unpack(">I2I2I2I2", r)
-  if id ~= TRN_ID or flags & 0x8000 == 0 or ancount < 1 then return nil end
+  -- A response (R bit) with RCODE 0, and an answer.
+  if id ~= TRN_ID or flags & 0x8000 == 0 or flags & 0xf ~= 0 or ancount < 1 then
+    return nil
+  end
   -- The answer's name: the encoded name in full, or a pointer to it.
   local pos = 13
   local first = r:byte(pos)
@@ -82,8 +85,11 @@ local function parse(r)
   end
   if #r < pos + 10 then return nil end
   local rtype, _, _, rdlen, count = string.unpack(">I2I2I4I2B", r, pos)
+  -- RDATA: the name count, the names, then the statistics, whose first
+  -- six bytes are the MAC; all of it inside the datagram.
+  local rdata_end = pos + 10 + rdlen - 1
   pos = pos + 11
-  if rtype ~= 0x21 or rdlen < 1 + count * 18 or #r < pos - 1 + count * 18 then
+  if rtype ~= 0x21 or rdlen < 1 + count * 18 or rdata_end > #r then
     return nil
   end
   local names = {}
@@ -93,17 +99,17 @@ local function parse(r)
     names[i] = { name = text(raw), suffix = suffix, flags = nflags }
   end
   local mac
-  if #r >= pos + 5 then
+  if rdata_end >= pos + 5 then
     local b = { r:byte(pos, pos + 5) }
     mac = string.format("%02x:%02x:%02x:%02x:%02x:%02x", table.unpack(b))
   end
   return names, mac
 end
 
--- The first unique name with `suffix`, other than `except`.
-local function unique(names, suffix, except)
+-- The first unique name with `suffix`.
+local function unique(names, suffix)
   for _, n in ipairs(names) do
-    if n.suffix == suffix and n.flags & 0x8000 == 0 and n.name ~= except then
+    if n.suffix == suffix and n.flags & 0x8000 == 0 then
       return n.name
     end
   end
@@ -121,6 +127,7 @@ end
 
 action = function(host)
   local port = target(host)
+  if not port then return nil end
   local timeout = tonumber(fero.args.get(SCRIPT_NAME .. ".timeout")) or 5000
   local sock = fero.socket.new()
   sock:set_timeout(timeout)
@@ -137,10 +144,22 @@ action = function(host)
   sock:close()
   if not names then return nil end
 
-  local server = unique(names, 0x20) or unique(names, 0x00)
-  local user = unique(names, 0x03, server)
+  local machine = unique(names, 0x00)
+  local server = unique(names, 0x20) or machine
+  -- The machine registers its own name with <03> too (the messenger
+  -- service); a user is a <03> name that is neither.
+  local user
+  for _, n in ipairs(names) do
+    if n.suffix == 0x03 and n.flags & 0x8000 == 0 and n.name ~= server
+      and n.name ~= machine then
+      user = n.name
+      break
+    end
+  end
+  -- Samba reports an all-zero MAC: no MAC.
+  if mac == "00:00:00:00:00:00" then mac = nil end
   local mac_text = "<unknown>"
-  if mac and mac ~= "00:00:00:00:00:00" then
+  if mac then
     mac_text = string.format("%s (%s)", mac, fero.mac_vendor(mac) or "unknown")
   end
   local line = string.format("NetBIOS name: %s, NetBIOS user: %s, NetBIOS MAC: %s",

@@ -2452,17 +2452,21 @@ T{
 T}@T{
 default, discovery, safe
 T}@T{
-hosts with UDP 137 scanned and not closed
+hosts where UDP 137 (or the \f[V]nbstat.port\f[R] port) was scanned and
+is open, open|filtered or unfiltered
 T}@T{
 One NetBIOS NODE STATUS request (as \f[V]nbtstat -A\f[R], RFC 1002),
 sent twice at most: the host\[aq]s NetBIOS name, the logged-in user when
 the name table has one, and the MAC address the host reports with its
-vendor from the OUI list (\f[V]<unknown>\f[R] for the all-zero MAC Samba
-gives); with \f[V]-v\f[R] the whole name table and its flags.
+vendor from the OUI list (\f[V]<unknown>\f[R], and no \f[V]mac\f[R] in
+XML/JSON, for the all-zero MAC Samba gives); a \f[V]<03>\f[R] name that
+is the machine\[aq]s own is not taken for a user; with \f[V]-v\f[R] the
+whole name table and its flags.
 The transaction ID is \f[V]0x4650\f[R] (\[dq]FP\[dq]).
 nmap\[aq]s also runs when only TCP 139 or 445 is open and then sends to
-UDP 137 anyway; FeroProbe\[aq]s runs only when UDP 137 was scanned
-(\f[V]-sU -p U:137\f[R]), as nothing goes to ports outside the scan.
+UDP 137 anyway; FeroProbe\[aq]s runs only when its port (UDP 137, or
+\f[V]nbstat.port\f[R]) was scanned (\f[V]-sU -p U:137\f[R]), as nothing
+goes to ports outside the scan.
 nmap\[aq]s shows the name table\[aq]s statistics with \f[V]-vv\f[R];
 FeroProbe\[aq]s does not.
 Arguments: \f[V]nbstat.port\f[R] (default 137, must be scanned),

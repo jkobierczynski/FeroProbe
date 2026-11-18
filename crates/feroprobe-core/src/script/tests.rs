@@ -2451,17 +2451,20 @@ async fn nbns_server(reply_mac: [u8; 6]) -> (u16, std::sync::Arc<std::sync::Mute
         let mut buf = [0u8; 512];
         while let Ok((n, from)) = server.recv_from(&mut buf).await {
             keep.lock().unwrap().push(buf[..n].to_vec());
-            let names: [(&[u8], u8, u16); 4] = [
+            // The machine's own <03> name comes first: it is not a user.
+            let names: [(&[u8], u8, u16); 5] = [
                 (b"LAB-PC", 0x00, 0x0400),
                 (b"WORKGROUP", 0x00, 0x8400),
                 (b"LAB-PC", 0x20, 0x0400),
+                (b"LAB-PC", 0x03, 0x0400),
                 (b"ALICE", 0x03, 0x0400),
             ];
-            // The header (response, authoritative), the question name as a
-            // pointer, type NBSTAT, class IN, TTL 0.
+            // The header (response, authoritative), the question's name in
+            // full, type NBSTAT, class IN, TTL 0.
             let mut r = buf[..2].to_vec();
             r.extend([0x84, 0x00, 0, 0, 0, 1, 0, 0, 0, 0]);
-            r.extend([0xc0, 0x0c, 0, 0x21, 0, 1, 0, 0, 0, 0]);
+            r.extend(&buf[12..46]);
+            r.extend([0, 0x21, 0, 1, 0, 0, 0, 0]);
             let mut rdata = vec![names.len() as u8];
             for (name, suffix, flags) in names {
                 let mut padded = name.to_vec();
