@@ -49,3 +49,6 @@ alert tcp any any -> $HOME_NET any (msg:"FeroProbe script SSH client (version st
 alert tcp any any -> $HOME_NET any (msg:"FeroProbe script SMTP EHLO"; flow:established,to_server; content:"EHLO feroprobe.invalid"; depth:22; nocase; classtype:attempted-recon; metadata:tool FeroProbe; sid:9100008; rev:1;)
 # ftp-anon's anonymous password.
 alert tcp any any -> $HOME_NET any (msg:"FeroProbe script FTP anonymous login"; flow:established,to_server; content:"PASS feroprobe@"; depth:15; classtype:attempted-recon; metadata:tool FeroProbe; sid:9100009; rev:1;)
+# smb2-security-mode / smb2-time: the client GUID of the SMB2 NEGOTIATE
+# (TCP 445, or 139 after the NetBIOS session request).
+alert tcp any any -> $HOME_NET any (msg:"FeroProbe script SMB2 NEGOTIATE (client GUID)"; flow:established,to_server; content:"|FE|SMB"; offset:4; depth:4; content:"FeroProbeSMBScan"; distance:72; within:16; classtype:attempted-recon; metadata:tool FeroProbe; sid:9100010; rev:1;)

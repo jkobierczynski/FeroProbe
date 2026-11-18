@@ -19,6 +19,7 @@ teams can flag FeroProbe scans without writing their own.
 | `ssh-hostkey` (default script) | SSH client version `SSH-2.0-FeroProbe_Scripting_Engine` |
 | `smtp-commands` (default script) | `EHLO feroprobe.invalid` |
 | `ftp-anon` (default script) | `PASS feroprobe@` |
+| `smb2-security-mode`, `smb2-time` (default scripts) | SMB2 NEGOTIATE client GUID `FeroProbeSMBScan`; on port 139 the NetBIOS calling name `FEROPROBE` |
 
 The TCP window of a scan probe is otherwise meaningless, because the scan
 never completes a handshake, so the fixed window does not change how the

@@ -1989,6 +1989,33 @@ T}@T{
 Base64 (decode gives \f[V]nil\f[R] for text that is not base64)
 T}
 T{
+\f[V]fero.get_port_state(host, port)\f[R]
+T}@T{
+The port table of a scanned port that may be open (\f[V]port\f[R] gives
+\f[V]number\f[R], and \f[V]protocol\f[R], default
+\f[V]\[dq]tcp\[dq]\f[R]), else \f[V]nil\f[R]; for a hostrule script to
+find its service.
+Closed and filtered ports are \f[V]nil\f[R]
+T}
+T{
+\f[V]fero.smb.port(host)\f[R]
+T}@T{
+The port to reach SMB on: \f[V]--script-args smbport=N\f[R] if that port
+may be open, else 445, else 139; \f[V]nil\f[R] when none is open
+T}
+T{
+\f[V]fero.smb.negotiate(host, port [, timeout])\f[R]
+T}@T{
+One SMB2 NEGOTIATE exchange (dialects 2.0.2 to 3.1.1; on 139 or a
+\f[V]netbios-ssn\f[R] port after a NetBIOS session request): a table
+with \f[V]dialect\f[R] (\f[V]0x0311\f[R]...), \f[V]security_mode\f[R],
+\f[V]capabilities\f[R], \f[V]server_guid\f[R], \f[V]time\f[R] and
+\f[V]start_time\f[R] (Unix seconds, \f[V]start_time\f[R] \f[V]nil\f[R]
+when not given), or \f[V]nil\f[R] and a message.
+Logs in to nothing; \f[V]fero.smb.dialect_name(d)\f[R] writes a dialect
+as nmap does (\f[V]3:1:1\f[R])
+T}
+T{
 \f[V]fero.reader(sock)\f[R]
 T}@T{
 A buffered reader over a connected socket: \f[V]r:line()\f[R] (one line,
@@ -2421,6 +2448,32 @@ and service name.
 The ports it lists are not contacted
 T}
 T{
+\f[V]smb2-security-mode\f[R]
+T}@T{
+default, discovery, safe
+T}@T{
+hosts with 445 or 139 open
+T}@T{
+One SMB2 NEGOTIATE (see \f[V]fero.smb.negotiate\f[R]) and whether the
+server signs messages: enabled and required, enabled but not required,
+or disabled, under the dialect it chose (\f[V]3:1:1\f[R]).
+Arguments: \f[V]smbport\f[R], \f[V]smb2-security-mode.timeout\f[R] (ms,
+default 8000)
+T}
+T{
+\f[V]smb2-time\f[R]
+T}@T{
+default, discovery, safe
+T}@T{
+hosts with 445 or 139 open
+T}@T{
+The server\[aq]s clock and start time from its NEGOTIATE answer
+(\f[V]N/A\f[R] when it gives none, as current Windows does), in UTC.
+nmap\[aq]s also adds a \f[V]clock-skew\f[R] line to the host\[aq]s
+script results; FeroProbe\[aq]s does not yet.
+Arguments: \f[V]smbport\f[R], \f[V]smb2-time.timeout\f[R]
+T}
+T{
 \f[V]smtp-commands\f[R]
 T}@T{
 default, discovery, safe
@@ -2508,8 +2561,8 @@ T}
 A script whose rule needs a service name sees the one \f[V]-sV\f[R]
 found, or without \f[V]-sV\f[R] the name of the port number, as in nmap.
 .PP
-nmap\[aq]s \f[V]default\f[R] category has more scripts (SMB, RDP, DNS
-and others); FeroProbe\[aq]s grows release by release.
+nmap\[aq]s \f[V]default\f[R] category has more scripts (other SMB ones,
+RDP, DNS and others); FeroProbe\[aq]s grows release by release.
 Scripts of nmap\[aq]s that would reach beyond the scanned host, such as
 \f[V]http-open-proxy\f[R] or \f[V]socks-open-proxy\f[R], which ask the
 target to fetch an outside site, are not planned for the default set.
