@@ -124,7 +124,9 @@ can tell FeroProbe traffic apart from other traffic. The marks are:
 - **UDP scans** to ports with no service-specific probe carry the ASCII
   payload `FeroProbeScan/1` instead of an empty datagram. Service probes
   (DNS, NTP, SNMP, SSDP and so on) keep their own payloads, which are
-  already identifiable as the standard probe for that service.
+  already identifiable as the standard probe for that service. The
+  NetBIOS probe to UDP 137 carries transaction ID `0x4650` ("FP"), the
+  same request as the `nbstat` script, so rule 9100013 matches both.
 - **ICMP and ICMPv6 echo requests** sent for host discovery carry the
   9-byte ASCII payload `feroprobe` (nmap's echo requests are empty). Echo
   replies copy the payload back, so the marker shows in both directions.
@@ -208,7 +210,8 @@ The repository ships Suricata and Snort rules that match the probe
 signature, so blue teams can flag FeroProbe scans without writing their
 own. Rules 9100006 to 9100013 match the script markers above in clear
 text. They are in [`rules/`](../rules/): `rules/feroprobe.rules` for
-Suricata and `rules/feroprobe.snort.rules` for Snort, with setup notes in
+Suricata and `rules/feroprobe.snort.rules` for Snort 2.9 and
+`rules/feroprobe.snort3.rules` for Snort 3, with setup notes in
 `rules/README.md`.
 
 ## Checking a scan before running it

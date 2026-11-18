@@ -458,8 +458,9 @@ Sends a datagram to each port. A UDP reply means `open`, an ICMP port
 unreachable `closed`, another ICMP unreachable error `filtered`, and no
 answer `open|filtered`. Works without privileges.
 
-Well-known ports get a payload their service answers: DNS (53, 5353), NTP
-(123), SNMP (161) and SSDP (1900). Every other port gets the payload
+Well-known ports get a payload their service answers: DNS (53, 5353),
+NetBIOS name service (137, a NODE STATUS request with transaction ID
+`0x4650` "FP"), NTP (123), SNMP (161) and SSDP (1900). Every other port gets the payload
 `FeroProbeScan/1\n` (see [Probe signature](#probe-signature)).
 
 Hosts rate-limit their ICMP errors, so many closed UDP ports only answer
@@ -2698,7 +2699,7 @@ safeguard calls for a difference. The deliberate differences are:
 | Privileges under `sudo` | Stays root for the whole run | Becomes the user who ran `sudo` once the settings files are read, keeping only the network capabilities on Linux, so reports, `-iL` and other files are read and written as that user; `--keep-root` stays root (see [Giving up root under sudo](#giving-up-root-under-sudo)) |
 | Report files as root | Written through any symbolic link | With `--keep-root` or without `sudo`: a link is refused unless root owns it and its directory and no other user can write there (`/dev/stdout` works); a new file under `sudo` belongs to the invoking user (see `-oA` under Output options) |
 | Service and OS signatures | nmap's databases | FeroProbe's own (nmap's cannot be redistributed); the OS database is much smaller than nmap's, so fewer hosts get a perfect match |
-| UDP service payloads (`-sU`) | nmap's payload database: several probes per port (two DNS queries to 53, two NTP versions to 123, SNMPv1 and v3 to 161, three NetBIOS queries to 137), up to dozens with `-sV` | FeroProbe's own, one per port: DNS (53, 5353), NTP (123), SNMP (161) and SSDP (1900); every other port gets `FeroProbeScan/1\n`. nmap's payloads cannot be redistributed; one payload per service is enough to make it answer |
+| UDP service payloads (`-sU`) | nmap's payload database: several probes per port (two DNS queries to 53, two NTP versions to 123, SNMPv1 and v3 to 161, three NetBIOS queries to 137), up to dozens with `-sV` | FeroProbe's own, one per port: DNS (53, 5353), NetBIOS NODE STATUS (137, transaction ID `0x4650` "FP", the request `nbstat` sends), NTP (123), SNMP (161) and SSDP (1900); every other port gets `FeroProbeScan/1\n`. nmap's payloads cannot be redistributed; one payload per service is enough to make it answer |
 | OS detection probes (`-O`) | About 16 probes per try (6 SYNs with varied options, ECN, T2-T7 to open and closed ports, 2 ICMP echoes, a UDP probe to a closed port), with closed ports picked at random outside the scan when none was found, and hosts without an open port probed too | At most 9 probes per try (4 SYNs, ECN and an ACK to the open port; a SYN and an ACK to a closed port the scan found; an ICMP echo only if discovery sends echo requests). No UDP probe, no T3/T5-T7-style odd flag combinations, no random ports, and hosts without an open TCP port are not probed. The price: fewer tests, so some systems nmap tells apart look alike |
 | OS uptime and TCP sequence lines (`-O -v`) | `Uptime guess` from the TCP timestamps, `TCP Sequence Prediction` difficulty | Not printed. Most current systems give each connection its own random timestamp offset, so the uptime nmap prints for them is wrong; sequence predictability is left out with it |
 | Port names | nmap-services | The same names for the common ports, from the IANA registry, and `unknown` for the rest. nmap-services cannot be redistributed |

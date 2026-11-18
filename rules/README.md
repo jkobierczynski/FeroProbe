@@ -6,7 +6,10 @@ ships ready-made intrusion-detection rules that match that signature, so blue
 teams can flag FeroProbe scans without writing their own.
 
 - `feroprobe.rules` — Suricata format.
-- `feroprobe.snort.rules` — Snort format (2.9.x and 3.x).
+- `feroprobe.snort.rules` — Snort 2.9.x format.
+- `feroprobe.snort3.rules` — Snort 3.x format: the same rules, with content
+  modifiers (`depth`, `offset`, `distance`, `within`, `nocase`) written after
+  their `content` with a comma, as Snort 3 requires.
 
 ## The signature
 
@@ -21,7 +24,7 @@ teams can flag FeroProbe scans without writing their own.
 | `ftp-anon` (default script) | `PASS feroprobe@` |
 | `smb2-security-mode`, `smb2-time` (default scripts) | SMB2 NEGOTIATE client GUID `FeroProbeSMBScan`; on port 139 the NetBIOS calling name `FEROPROBE` |
 | `rdp-ntlm-info` (default script) | RDP connection request cookie `Cookie: mstshash=FeroProbe` |
-| `nbstat` (default script) | NetBIOS NODE STATUS request to UDP 137 with transaction ID `0x4650` ("FP") |
+| `nbstat` (default script), and the `-sU`/`-sV` probe to UDP 137 | NetBIOS NODE STATUS request to UDP 137 with transaction ID `0x4650` ("FP") |
 | `ssl-date` (default script) | TLS ClientHello random `FeroProbeSSLDate` (bytes 15-30 of the record) |
 
 The TCP window of a scan probe is otherwise meaningless, because the scan
@@ -66,18 +69,20 @@ rule-files:
 
 Then reload: `suricatasc -c reload-rules`, or restart Suricata.
 
-First copy `feroprobe.snort.rules` to a directory Snort already searches —
-usually the one that holds your other rule files — or note its absolute
-path, so the include below can find it.
+First copy the file for your Snort version (`feroprobe.snort.rules` for
+2.9.x, `feroprobe.snort3.rules` for 3.x) to a directory Snort already
+searches — usually the one that holds your other rule files — or note its
+absolute path, so the include below can find it.
 
-For **Snort 2.9.x**, add it to `snort.conf`, where `$RULE_PATH` is the
-rules directory your config already defines:
+For **Snort 2.9.x**, add `feroprobe.snort.rules` to `snort.conf`, where
+`$RULE_PATH` is the rules directory your config already defines:
 
 ```
 include $RULE_PATH/feroprobe.snort.rules
 ```
 
-For **Snort 3.x**, add an `include` entry to the `ips` table in
+For **Snort 3.x**, use `feroprobe.snort3.rules`: Snort 3 refuses the 2.9
+form of the content modifiers. Add an `include` entry to the `ips` table in
 `snort.lua` (the `include` directive above is not valid Lua). Add the entry
 **inside your existing `ips` table** — do not paste this as a new `ips = {
 ... }` assignment, which would replace the table and drop its other
@@ -90,7 +95,7 @@ ips =
 
     -- a path Snort can find: a bare name only if the file is on the
     -- include search path, otherwise an absolute path.
-    include = '/etc/snort/rules/feroprobe.snort.rules',
+    include = '/etc/snort/rules/feroprobe.snort3.rules',
 }
 ```
 
