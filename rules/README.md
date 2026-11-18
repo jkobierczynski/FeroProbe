@@ -99,9 +99,20 @@ ips =
 }
 ```
 
-`ips.include` takes a single file. If your `ips` table already sets it,
-load these rules inline through `ips.rules` instead, following your
-existing configuration.
+`ips.include` takes a single file. If your `ips` table already includes
+`feroprobe.snort.rules` (the earlier instructions used it for Snort 3 too),
+change that entry to `feroprobe.snort3.rules`. If it includes an unrelated
+rules file, load these rules inline through `ips.rules` instead, following
+your existing configuration.
+
+In Snort 3, SID 9100006 reads the parsed `User-Agent` header through
+`http_inspect`, so the HTTP inspector must be enabled (it is in the default
+configuration).
 
 The rules use the local SID range `9100000+` and the `attempted-recon`
 class. Adjust the SIDs and `$HOME_NET` to fit your deployment.
+
+If you enable SIDs one by one, enable SID 9100013 together with SID 9100003.
+The `-sU` and `-sV` probes to UDP 137 used to carry the generic
+`FeroProbeScan/1` payload (SID 9100003); they now send the NetBIOS NODE
+STATUS request, which only SID 9100013 matches.

@@ -2,7 +2,8 @@
 #
 # The rules of rules/feroprobe.snort.rules (Snort 2.9.x) in Snort 3 syntax:
 # content modifiers (depth, offset, distance, within, nocase) follow their
-# content after a comma. Keep the two files in step.
+# content after a comma; SID 9100006 reads the parsed User-Agent header.
+# Keep the two files in step (crates/feroprobe-core/tests/rules.rs checks).
 #
 # Same signature as rules/feroprobe.rules (Suricata); see that file and
 # docs/responsible-use.md for the full description. FeroProbe marks its own
@@ -32,8 +33,9 @@ alert icmp any any -> $HOME_NET any (msg:"FeroProbe ping probe (echo payload mar
 alert icmp any any -> $HOME_NET any (msg:"FeroProbe IPv6 ping probe (echo payload marker)"; itype:128; dsize:9; content:"feroprobe", depth 9; classtype:attempted-recon; sid:9100005; rev:1;)
 
 # HTTP request from a FeroProbe script, by its User-Agent (plain HTTP only).
-# Matched in the raw payload, not the HTTP buffers.
-alert tcp any any -> $HOME_NET any (msg:"FeroProbe script HTTP request (User-Agent)"; flow:established,to_server; content:"User-Agent|3A| Mozilla/5.0 (compatible|3B| FeroProbe Scripting Engine", nocase; classtype:attempted-recon; sid:9100006; rev:1;)
+# Snort 3's http_inspect keeps parsed HTTP headers out of the default
+# buffer, so this rule (unlike the 2.9 one) reads the User-Agent field.
+alert tcp any any -> $HOME_NET any (msg:"FeroProbe script HTTP request (User-Agent)"; flow:established,to_server; http_header:field user-agent; content:"FeroProbe Scripting Engine", nocase; classtype:attempted-recon; sid:9100006; rev:1;)
 
 # Default scripts (-sC): the client names it sends in clear text.
 # ssh-hostkey's SSH version line (sent before encryption starts).
