@@ -267,6 +267,14 @@ class Listeners(unittest.TestCase):
         self.assertEqual(r[3] & 0xF, 0)
         self.assertTrue(r.endswith(b"lab-dns-1") and struct.unpack(">H", r[10:12])[0] == 1)
 
+    def test_dns_compressed_owner_before_opt(self):
+        a_rec = b"\xc0\x0c" + struct.pack(">HHIH", 1, 1, 0, 4) + bytes(4)
+        q = dns_query("id.server") + a_rec + self.NSID_OPT
+        q = q[:10] + struct.pack(">H", 2) + q[12:]
+        r = listeners.dns_reply(q)
+        self.assertEqual(r[3] & 0xF, 0)
+        self.assertTrue(r.endswith(b"lab-dns-1"))
+
     def test_dns_malformed_opt_is_formerr(self):
         # an NSID option claiming 8 bytes with none left
         bad = b"\0" + struct.pack(">HHIHHH", 41, 1232, 0, 4, 3, 8)

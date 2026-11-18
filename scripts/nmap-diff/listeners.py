@@ -77,7 +77,11 @@ def dns_additional(query, pos, count):
     malformed (a record or an EDNS option longer than what is left)."""
     nsid = False
     for _ in range(count):
-        owner, pos = dns_name(query, pos)
+        if pos + 2 <= len(query) and query[pos] >= 0xC0:
+            # a compressed owner (RFC 1035 4.1.4): a pointer, never the root
+            owner, pos = ("(compressed)",), pos + 2
+        else:
+            owner, pos = dns_name(query, pos)
         if owner is None or pos + 10 > len(query):
             return None
         rtype, _cls, _ttl, rdlen = struct.unpack(">HHIH", query[pos:pos + 10])
