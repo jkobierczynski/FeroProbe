@@ -2519,8 +2519,10 @@ fn os_option_warnings(args: &Args, os: bool) -> Vec<String> {
     .collect()
 }
 
-/// nmap's script timeout under `-T5`: ten minutes.
-const INSANE_SCRIPT_TIMEOUT: Duration = Duration::from_secs(600);
+/// The script timeout when `--script-timeout` is not given: ten minutes, as
+/// nmap's under `-T5`. nmap has none otherwise; FeroProbe always has one, so
+/// a server that answers a byte at a time cannot hold a script for hours.
+const DEFAULT_SCRIPT_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// Whether the default scripts run: `-sC`, or `-A`, which includes it as
 /// in nmap.
@@ -2601,10 +2603,11 @@ fn script_scan(args: &Args) -> Result<Option<feroprobe_core::script::ScriptScan>
                 .join(",")
         )
     });
-    // As in nmap: 0 is no limit, and -T5 limits scripts to ten minutes.
+    // As in nmap, 0 is no limit. Without the option, ten minutes: nmap's
+    // limit under -T5, which FeroProbe applies at every timing.
     let timeout = match args.script_timeout {
         Some(d) => Some(d).filter(|d| !d.is_zero()),
-        None => matches!(args.timing, Some(Timing::Insane)).then_some(INSANE_SCRIPT_TIMEOUT),
+        None => Some(DEFAULT_SCRIPT_TIMEOUT),
     };
     let engine = script::ScriptScan::new(chosen, table, timeout)
         .map_err(|e| anyhow::anyhow!("--script: {e}"))?;
@@ -5840,7 +5843,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(engine.scripts()[0].id, "banner");
-        assert_eq!(engine.timeout, None);
+        assert_eq!(engine.timeout, Some(DEFAULT_SCRIPT_TIMEOUT));
         let t = |extra: &[&str]| {
             let mut a = vec!["--script", "banner"];
             a.extend_from_slice(extra);
@@ -5852,13 +5855,14 @@ mod tests {
             Some(Duration::from_secs(30))
         );
         assert_eq!(t(&["--script-timeout", "0"]), None);
-        // -T5 sets ten minutes, as in nmap; --script-timeout still wins.
-        assert_eq!(t(&["-T5"]), Some(INSANE_SCRIPT_TIMEOUT));
+        // Ten minutes by default at every timing (nmap: only with -T5);
+        // --script-timeout still wins.
+        assert_eq!(t(&["-T5"]), Some(DEFAULT_SCRIPT_TIMEOUT));
+        assert_eq!(t(&["-T4"]), Some(DEFAULT_SCRIPT_TIMEOUT));
         assert_eq!(
             t(&["-T5", "--script-timeout", "1m"]),
             Some(Duration::from_secs(60))
         );
-        assert_eq!(t(&["-T4"]), None);
 
         let e = script_scan(&argv(&["--script", "nosuch", "10.0.0.1"])).unwrap_err();
         assert!(e.to_string().contains("'nosuch' did not match"), "{e}");

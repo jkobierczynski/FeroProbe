@@ -1704,8 +1704,10 @@ its start.
 A script that runs longer is stopped, and gives no output, as in nmap;
 \f[V]-d\f[R] names it.
 \f[V]0\f[R] means no limit.
-By default there is none, except that \f[V]-T5\f[R] sets ten minutes, as
-in nmap; \f[V]--script-timeout\f[R] overrides that.
+By default the limit is ten minutes at every timing.
+nmap has none by default and sets ten minutes only with \f[V]-T5\f[R];
+FeroProbe always sets one, so a server that answers very slowly (a byte
+at a time, say) cannot hold a script for hours.
 .SS Script sandbox and scope
 .PP
 Every script runs in its own Lua state with:
@@ -3021,7 +3023,7 @@ It is not traced.
 .PP
 The host timeout does not yet cover scripts (\f[V]--script\f[R]): a host
 that finished its scans in time runs its scripts with their own limit,
-\f[V]--script-timeout\f[R], per script.
+\f[V]--script-timeout\f[R] (ten minutes by default), per script.
 Use that option to bound the script phase.
 .SS \f[V]--min-hostgroup <size>\f[R], \f[V]--max-hostgroup <size>\f[R]
 .PP

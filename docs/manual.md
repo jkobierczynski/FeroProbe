@@ -1161,8 +1161,10 @@ nmap uses the `~/.nmap` of whoever it runs as.
 
 The longest one script may run against one host or port, counted from its
 start. A script that runs longer is stopped, and gives no output, as in
-nmap; `-d` names it. `0` means no limit. By default there is none, except
-that `-T5` sets ten minutes, as in nmap; `--script-timeout` overrides that.
+nmap; `-d` names it. `0` means no limit. By default the limit is ten
+minutes at every timing. nmap has none by default and sets ten minutes only
+with `-T5`; FeroProbe always sets one, so a server that answers very slowly
+(a byte at a time, say) cannot hold a script for hours.
 
 ### Script sandbox and scope
 
@@ -1708,7 +1710,7 @@ in XML. It is not traced. `0` means no limit, as in nmap.
 
 The host timeout does not yet cover scripts (`--script`): a host that
 finished its scans in time runs its scripts with their own limit,
-`--script-timeout`, per script. Use that option to bound the script
+`--script-timeout` (ten minutes by default), per script. Use that option to bound the script
 phase.
 
 #### `--min-hostgroup <size>`, `--max-hostgroup <size>`
