@@ -501,6 +501,7 @@ async fn attempt(
     ssl: bool,
     req: &Request,
     bytes: &[u8],
+    local: &std::sync::Mutex<Option<std::net::SocketAddr>>,
 ) -> Result<Response, String> {
     let tcp = match crate::netif::connect_tcp(addr).await {
         Ok(t) => t,
@@ -510,6 +511,10 @@ async fn attempt(
         }
     };
     let ends = Ends::tcp(tcp.local_addr().ok(), addr);
+    // Kept outside this future, for the trace when a timeout cancels it.
+    if let Ok(mut l) = local.lock() {
+        *l = ends.local;
+    }
     ends.event(Dir::Out, "CONNECT");
     let head_only = req.method == "HEAD";
     if ssl {
@@ -644,11 +649,14 @@ pub(crate) async fn request(
             // A first try that hangs leaves half the time to the other.
             let budget = if i + 1 < tries { left / 2 } else { left };
             let bytes = request_bytes(&req, &name, port_n, ssl);
-            match tokio::time::timeout(budget, attempt(addr, sni_now, ssl, &req, &bytes)).await {
+            let local = std::sync::Mutex::new(None);
+            let tried = attempt(addr, sni_now, ssl, &req, &bytes, &local);
+            match tokio::time::timeout(budget, tried).await {
                 Err(_) => {
                     // The attempt was cancelled: its stream traced only
                     // CLOSE (or nothing, during the connect).
-                    Ends::tcp(None, addr).event(Dir::In, "TIMEOUT");
+                    let local = local.lock().ok().and_then(|l| *l);
+                    Ends::tcp(local, addr).event(Dir::In, "TIMEOUT");
                     last_err = "TIMEOUT".into();
                 }
                 Ok(Err(e)) => last_err = e,

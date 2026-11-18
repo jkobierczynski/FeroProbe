@@ -272,6 +272,7 @@ async fn write_counted<W: tokio::io::AsyncWrite + Unpin + ?Sized>(
         match w.write(&data[*done..]).await {
             Ok(0) => return Err("connection closed while sending".to_string()),
             Ok(n) => *done += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(e) => return Err(e.to_string()),
         }
     }
