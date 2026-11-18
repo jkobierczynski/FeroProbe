@@ -106,8 +106,9 @@ rules file, load these rules inline through `ips.rules` instead, following
 your existing configuration.
 
 In Snort 3, SID 9100006 reads the parsed `User-Agent` header through
-`http_inspect`, so the HTTP inspector must be enabled (it is in the default
-configuration).
+`http_inspect`, so the HTTP inspector must be enabled and the binder must send
+HTTP flows to it. Both hold in the default configuration; with custom
+`binder` settings, check that HTTP traffic is still bound to `http_inspect`.
 
 The rules use the local SID range `9100000+` and the `attempted-recon`
 class. Adjust the SIDs and `$HOME_NET` to fit your deployment.

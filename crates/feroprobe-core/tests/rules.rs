@@ -59,18 +59,26 @@ fn snort_rule_files_match() {
                 "sid {sid}: Snort 3 wants `, {name}` after its content"
             );
         }
-        // SID 9100006 reads the parsed User-Agent in Snort 3 (http_inspect
-        // keeps HTTP headers out of the default buffer), so its text differs.
-        if *sid == 9100006 {
-            assert!(line.contains("http_header:field user-agent;"));
-            assert!(line.contains("content:\"FeroProbe Scripting Engine\""));
-            continue;
+        // Without the modifiers folded in, each rule reads the same. SID
+        // 9100006 reads the parsed User-Agent in Snort 3 (http_inspect keeps
+        // HTTP headers out of the default buffer), so its buffer and content
+        // differ; the header and every other option must still match.
+        let http_ua = *sid == 9100006;
+        if http_ua {
+            assert!(line.contains(
+                "http_header:field user-agent; content:\"FeroProbe Scripting Engine\", nocase;"
+            ));
         }
-        // Without the modifiers folded in, each rule reads the same.
         let strip = |l: &str| -> String {
             l.split([';', ','])
                 .map(|p| p.trim().replacen(':', " ", 1))
                 .filter(|p| !p.is_empty())
+                .filter(|p| {
+                    !(http_ua
+                        && (p.starts_with("content ")
+                            || p.starts_with("http_header ")
+                            || p == "nocase"))
+                })
                 .collect::<Vec<_>>()
                 .join("|")
         };
