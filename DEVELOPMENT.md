@@ -82,7 +82,7 @@ the SCTP, IP protocol, IPv6 OS detection and probe-signature work).
 
 | Feature | Options | Notes |
 | --- | --- | --- |
-| Version detection | `-sV`, `--version-timeout` | Our own probes and rules, not nmap's licensed database. TLS first on TLS ports (rustls), shows the certificate name |
+| Version detection | `-sV`, `--version-timeout` | Our own probes and rules, not nmap's licensed database. TLS first on TLS ports (rustls), shows the certificate name. A reply identical to the probe is an `echo` service (nmap names it from its echoed help probe); the SNMP parser needs a GetResponse PDU, so an echoed GetRequest is not SNMP |
 | Rules file | `--service-rules` | `crates/feroprobe-core/data/service-rules.txt`, built into the binary, in our own format (probes with ports, rarity 0-9 and payloads; match and soft-match rules with product, version, info, host, OS, device and CPE templates). Parsed by `service/db.rs`; refuses nmap's `nmap-service-probes` with a clear message |
 | Intensity | `--version-intensity`, `--version-light`, `--version-all` | nmap's rules: probes for the port always, others up to the intensity by rarity; after a soft match only probes that can name more (all at 9); fingerprints printed only at 7 or more; last of the three options wins |
 | Version trace | `--version-trace` | Each probe, reply and match with the rule's line, in nmap's layout (no nsock lines) |
