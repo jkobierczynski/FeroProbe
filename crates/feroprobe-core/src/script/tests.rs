@@ -1970,6 +1970,7 @@ fn the_default_category() {
             "smb2-time",
             "smtp-commands",
             "ssh-hostkey",
+            "ssl-date",
             "ssl-cert",
             "sshv1",
             "vnc-info",
@@ -2276,4 +2277,84 @@ action = function()
 end"#;
     let scan = ScriptScan::new(vec![script("oem", src)], ArgTable::default(), None).unwrap();
     assert_eq!(scan.pre_scan().await[0].output, "LAB");
+}
+
+/// A stand-in TLS server that answers each ClientHello with a bare
+/// ServerHello record whose gmt_unix_time is `time()`, keeping each hello.
+async fn hello_server(time: fn() -> u32) -> (u16, std::sync::Arc<std::sync::Mutex<Vec<Vec<u8>>>>) {
+    let seen: std::sync::Arc<std::sync::Mutex<Vec<Vec<u8>>>> = Default::default();
+    let keep = seen.clone();
+    let port = tcp_server(move |mut s| {
+        let keep = keep.clone();
+        async move {
+            let mut head = [0u8; 5];
+            if s.read_exact(&mut head).await.is_err() {
+                return;
+            }
+            let mut body = vec![0u8; u16::from_be_bytes([head[3], head[4]]) as usize];
+            if s.read_exact(&mut body).await.is_err() {
+                return;
+            }
+            let mut hello = head.to_vec();
+            hello.extend(body);
+            keep.lock().unwrap().push(hello);
+            let mut hs = vec![3, 3];
+            hs.extend(time().to_be_bytes());
+            hs.extend([7u8; 28]);
+            hs.extend([0, 0xc0, 0x2f, 0]);
+            let mut rec = vec![2, 0, 0, hs.len() as u8];
+            rec.extend(hs);
+            let mut out = vec![22, 3, 3];
+            out.extend((rec.len() as u16).to_be_bytes());
+            out.extend(rec);
+            let _ = s.write_all(&out).await;
+            let mut rest = [0u8; 64];
+            let _ = s.read(&mut rest).await;
+        }
+    })
+    .await;
+    (port, seen)
+}
+
+#[tokio::test]
+async fn ssl_date_reads_the_server_hello_time() {
+    fn ahead() -> u32 {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        (now + 5) as u32
+    }
+    let (port, seen) = hello_server(ahead).await;
+    let out = output_of("ssl-date", port, "https").await.unwrap();
+    let (date, rest) = out.split_once("; ").unwrap();
+    assert!(date.ends_with("+00:00") && date.len() == 25, "{out}");
+    assert!(
+        rest == "+5s from scanner time." || rest == "+6s from scanner time.",
+        "{out}"
+    );
+    {
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        for hello in seen.iter() {
+            // A TLS 1.2 ClientHello whose random carries the mark, with the
+            // target's name as SNI.
+            assert_eq!(&hello[..3], &[22, 3, 1]);
+            assert_eq!(hello[5], 1);
+            assert_eq!(&hello[9..11], &[3, 3]);
+            assert_eq!(&hello[15..31], b"FeroProbeSSLDate");
+            assert!(hello.windows(9).any(|w| w == b"localhost"));
+        }
+    }
+
+    // Random bytes where the time should be.
+    fn random() -> u32 {
+        static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x1234_5678);
+        N.fetch_add(0x0bad_cafe, std::sync::atomic::Ordering::Relaxed)
+    }
+    let (port, _) = hello_server(random).await;
+    assert_eq!(
+        output_of("ssl-date", port, "https").await.as_deref(),
+        Some("TLS randomness does not represent time")
+    );
 }

@@ -95,6 +95,7 @@ const BUILT_IN: &[(&str, &str)] = &[
         "ssh-hostkey",
         include_str!("../../lua-scripts/ssh-hostkey.lua"),
     ),
+    ("ssl-date", include_str!("../../lua-scripts/ssl-date.lua")),
     ("ssl-cert", include_str!("../../lua-scripts/ssl-cert.lua")),
     ("sshv1", include_str!("../../lua-scripts/sshv1.lua")),
     ("vnc-info", include_str!("../../lua-scripts/vnc-info.lua")),
