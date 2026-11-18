@@ -2281,7 +2281,10 @@ end"#;
 
 /// A stand-in TLS server that answers each ClientHello with a bare
 /// ServerHello record whose gmt_unix_time is `time()`, keeping each hello.
-async fn hello_server(time: fn() -> u32) -> (u16, std::sync::Arc<std::sync::Mutex<Vec<Vec<u8>>>>) {
+async fn hello_server(
+    time: fn() -> u32,
+    split: bool,
+) -> (u16, std::sync::Arc<std::sync::Mutex<Vec<Vec<u8>>>>) {
     let seen: std::sync::Arc<std::sync::Mutex<Vec<Vec<u8>>>> = Default::default();
     let keep = seen.clone();
     let port = tcp_server(move |mut s| {
@@ -2304,9 +2307,19 @@ async fn hello_server(time: fn() -> u32) -> (u16, std::sync::Arc<std::sync::Mute
             hs.extend([0, 0xc0, 0x2f, 0]);
             let mut rec = vec![2, 0, 0, hs.len() as u8];
             rec.extend(hs);
-            let mut out = vec![22, 3, 3];
-            out.extend((rec.len() as u16).to_be_bytes());
-            out.extend(rec);
+            // The handshake message whole in one record, or split after
+            // six bytes across two (RFC 5246 6.2.1 allows it).
+            let parts: Vec<&[u8]> = if split {
+                vec![&rec[..6], &rec[6..]]
+            } else {
+                vec![&rec[..]]
+            };
+            let mut out = Vec::new();
+            for part in parts {
+                out.extend([22, 3, 3]);
+                out.extend((part.len() as u16).to_be_bytes());
+                out.extend(part);
+            }
             let _ = s.write_all(&out).await;
             let mut rest = [0u8; 64];
             let _ = s.read(&mut rest).await;
@@ -2325,17 +2338,20 @@ async fn ssl_date_reads_the_server_hello_time() {
             .as_secs();
         (now + 5) as u32
     }
-    let (port, seen) = hello_server(ahead).await;
+    let (port, seen) = hello_server(ahead, false).await;
     let out = output_of("ssl-date", port, "https").await.unwrap();
     let (date, rest) = out.split_once("; ").unwrap();
     assert!(date.ends_with("+00:00") && date.len() == 25, "{out}");
     assert!(
-        rest == "+5s from scanner time." || rest == "+6s from scanner time.",
+        ["+4s", "+5s", "+6s"]
+            .map(|d| format!("{d} from scanner time."))
+            .contains(&rest.to_string()),
         "{out}"
     );
     {
+        // Two hellos, or three when the first two came within one second.
         let seen = seen.lock().unwrap();
-        assert_eq!(seen.len(), 2);
+        assert!(matches!(seen.len(), 2 | 3), "{}", seen.len());
         for hello in seen.iter() {
             // A TLS 1.2 ClientHello whose random carries the mark, with the
             // target's name as SNI.
@@ -2352,9 +2368,27 @@ async fn ssl_date_reads_the_server_hello_time() {
         static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x1234_5678);
         N.fetch_add(0x0bad_cafe, std::sync::atomic::Ordering::Relaxed)
     }
-    let (port, _) = hello_server(random).await;
+    let (port, seen) = hello_server(random, false).await;
     assert_eq!(
         output_of("ssl-date", port, "https").await.as_deref(),
         Some("TLS randomness does not represent time")
     );
+    assert_eq!(seen.lock().unwrap().len(), 2);
+
+    // A field that never changes: a third hello once our clock has moved
+    // two seconds tells it from a real clock asked twice within a second.
+    fn fixed() -> u32 {
+        0x5f00_0000
+    }
+    let (port, seen) = hello_server(fixed, false).await;
+    assert_eq!(
+        output_of("ssl-date", port, "https").await.as_deref(),
+        Some("TLS randomness does not represent time")
+    );
+    assert_eq!(seen.lock().unwrap().len(), 3);
+
+    // A ServerHello split across two records.
+    let (port, _) = hello_server(ahead, true).await;
+    let out = output_of("ssl-date", port, "https").await.unwrap();
+    assert!(out.ends_with(" from scanner time."), "{out}");
 }

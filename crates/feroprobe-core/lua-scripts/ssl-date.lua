@@ -7,10 +7,11 @@ description = [[
 Shows a TLS server's clock, from the time many TLS 1.2 and older servers
 put in the first four bytes of their ServerHello random, and how far it
 is from the scanner's clock. Sends a TLS 1.2 ClientHello and reads the
-ServerHello; no handshake is finished. Two hellos are sent a moment
-apart: when the server's two values do not move with the scanner's
-clock, the server fills the field with random bytes (as most current
-servers do) and the script says so.
+ServerHello; no handshake is finished. Two hellos are sent, and when
+both answers came within one second a third one two seconds later: when
+the server's values do not move with the scanner's clock, the server
+fills the field with random bytes (as most current servers do) or never
+changes it, and the script says so.
 
 The ClientHello random carries "FeroProbeSSLDate" after its time field,
 so the target's logs and IDS can tell the hello apart.
@@ -66,25 +67,42 @@ local function client_hello(name)
   return "\22\3\1" .. string.pack(">s2", hs)
 end
 
--- The gmt_unix_time of the server's ServerHello, or nil.
+-- The gmt_unix_time of the server's ServerHello and the scanner's clock
+-- when it came, or nil.
 local function server_time(host, port, timeout)
   local sock = fero.socket.new()
   sock:set_timeout(timeout)
   if not sock:connect(host, port) then return nil end
-  local function done(v)
+  local function done(t, now)
     sock:close()
-    return v
+    return t, now
   end
   if not sock:send(client_hello(host.targetname)) then return done(nil) end
   local r = fero.reader(sock)
-  -- The ServerHello opens the server's first handshake record.
-  local head = r:bytes(5)
-  if not head then return done(nil) end
-  local kind, major, len = string.unpack(">BBxI2", head)
-  if kind ~= 22 or major ~= 3 or len < 38 or len > 18432 then return done(nil) end
-  local rec = r:bytes(len)
-  if not rec or rec:byte(1) ~= 2 then return done(nil) end
-  return done((string.unpack(">I4", rec, 7)))
+  -- The ServerHello opens the server's handshake records; it may be split
+  -- across several. Only its first 10 bytes are read (handshake type and
+  -- length, version, gmt_unix_time), within one `timeout` in all.
+  local deadline = os.time() + math.max(1, timeout // 1000)
+  local hs = ""
+  for _ = 1, 4 do
+    local left = deadline - os.time()
+    if left <= 0 then return done(nil) end
+    sock:set_timeout(left * 1000)
+    local head = r:bytes(5)
+    if not head then return done(nil) end
+    local kind, major, len = string.unpack(">BBxI2", head)
+    if kind ~= 22 or major ~= 3 or len == 0 or len > 18432 then return done(nil) end
+    local chunk = r:bytes(math.min(len, 10 - #hs))
+    if not chunk then return done(nil) end
+    hs = hs .. chunk
+    if #hs >= 10 then
+      local now = os.time()
+      local typ, hlen = string.unpack(">BI3", hs)
+      if typ ~= 2 or hlen < 38 then return done(nil) end
+      return done(string.unpack(">I4", hs, 7), now)
+    end
+  end
+  return done(nil)
 end
 
 -- A time difference as nmap writes it: "0s", "+5s", "-1m05s", "+2h03m04s".
@@ -101,14 +119,21 @@ end
 
 action = function(host, port)
   local timeout = tonumber(fero.args.get(SCRIPT_NAME .. ".timeout")) or 8000
-  local n1 = os.time()
-  local t1 = server_time(host, port, timeout)
+  local t1, n1 = server_time(host, port, timeout)
   if not t1 then return nil end
-  local n2 = os.time()
-  local t2 = server_time(host, port, timeout)
+  local t2, n2 = server_time(host, port, timeout)
   if not t2 then return nil end
-  -- A real clock moves with ours between the two hellos (allowing a
-  -- second either way for rounding and the trip).
+  if t2 == t1 then
+    -- Both hellos may have come within one second, or the field never
+    -- changes: ask again once our clock has moved two seconds, so that a
+    -- real clock must have moved too.
+    fero.sleep(2)
+    t2, n2 = server_time(host, port, timeout)
+    if not t2 then return nil end
+    if t2 == t1 then return "TLS randomness does not represent time" end
+  end
+  -- A real clock moves with ours between the hellos (allowing a second
+  -- either way for rounding and the trip).
   if math.abs((t2 - t1) - (n2 - n1)) > 2 then
     return "TLS randomness does not represent time"
   end

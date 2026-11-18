@@ -430,6 +430,17 @@ pub(crate) fn install_library(
         })?,
     )?;
     fero.raw_set("crypto", crypto)?;
+    // fero.sleep(seconds): wait without blocking other scripts, as nmap's
+    // stdnse.sleep; at most ten minutes per call.
+    fero.raw_set(
+        "sleep",
+        lua.create_async_function(|_, secs: f64| async move {
+            if secs.is_finite() && secs > 0.0 {
+                tokio::time::sleep(std::time::Duration::from_secs_f64(secs.min(600.0))).await;
+            }
+            Ok(())
+        })?,
+    )?;
     fero.raw_set(
         "verbosity",
         lua.create_function(|_, ()| Ok(crate::debug::verbosity()))?,
