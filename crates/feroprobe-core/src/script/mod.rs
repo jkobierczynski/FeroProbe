@@ -45,12 +45,20 @@ const BUILT_IN: &[(&str, &str)] = &[
     ("ftp-anon", include_str!("../../lua-scripts/ftp-anon.lua")),
     ("ftp-syst", include_str!("../../lua-scripts/ftp-syst.lua")),
     (
+        "http-headers",
+        include_str!("../../lua-scripts/http-headers.lua"),
+    ),
+    (
         "http-methods",
         include_str!("../../lua-scripts/http-methods.lua"),
     ),
     (
         "http-robots.txt",
         include_str!("../../lua-scripts/http-robots.txt.lua"),
+    ),
+    (
+        "http-server-header",
+        include_str!("../../lua-scripts/http-server-header.lua"),
     ),
     (
         "http-title",
