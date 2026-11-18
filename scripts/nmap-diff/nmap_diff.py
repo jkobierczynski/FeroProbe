@@ -144,7 +144,8 @@ class Lab:
                             rule[3:3] = ["-i", iface]
                         nsx(ns, rule, check=tool == "iptables")
         listener = os.path.join(HERE, "listeners.py")
-        self._spawn(NS_TGT, [sys.executable, "-I", listener, "0.0.0.0"] + (["::"] if self.ipv6 else []))
+        # Only the target's own lab addresses, not every interface.
+        self._spawn(NS_TGT, [sys.executable, "-I", listener, LAN_TGT, C_TGT] + ([LAN6_TGT] if self.ipv6 else []))
         self._spawn(NS_SCAN, [sys.executable, "-I", listener, "127.0.0.1"])
         time.sleep(0.5)
 

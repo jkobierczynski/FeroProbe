@@ -17,7 +17,8 @@ against a real host:
             name table and MAC address, and ignores anything else
 
 Closed and filtered ports are not opened here; nmap-diff.py drops the
-filtered ones with iptables. Usage: listeners.py ADDR [ADDR ...]
+filtered ones with iptables. Usage: listeners.py ADDR [ADDR ...] (default
+127.0.0.1); nmap-diff.py passes the lab target's own addresses.
 """
 
 import socket
@@ -253,7 +254,7 @@ def echo(data):
 
 
 def main():
-    addrs = sys.argv[1:] or ["0.0.0.0"]
+    addrs = sys.argv[1:] or ["127.0.0.1"]
     tcp = ((22, ssh), (53, dns_tcp), (80, http), (8080, silent))
     udp = ((53, echo), (137, nbstat_reply))
     # Bind every socket before saying "ready", so the harness never scans a
