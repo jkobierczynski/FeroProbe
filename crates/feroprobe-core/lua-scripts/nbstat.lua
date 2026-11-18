@@ -65,8 +65,9 @@ end
 local function parse(r)
   if #r < 12 then return nil end
   local id, flags, _, ancount = string.unpack(">I2I2I2I2", r)
-  -- A response (R bit) with RCODE 0, and an answer.
-  if id ~= TRN_ID or flags & 0x8000 == 0 or flags & 0xf ~= 0 or ancount < 1 then
+  -- A response (R bit) to a query (OPCODE 0) with RCODE 0, and an answer.
+  if id ~= TRN_ID or flags & 0x8000 == 0 or flags & 0x7800 ~= 0
+    or flags & 0xf ~= 0 or ancount < 1 then
     return nil
   end
   -- The answer's name: the encoded name in full, or a pointer to it.
@@ -146,12 +147,17 @@ action = function(host)
 
   local machine = unique(names, 0x00)
   local server = unique(names, 0x20) or machine
-  -- The machine registers its own name with <03> too (the messenger
-  -- service); a user is a <03> name that is neither.
+  -- The machine registers its own names, aliases included, with <03> as
+  -- well as a unique <00> or <20>; a user is a <03> name that has neither.
+  local own = {}
+  for _, n in ipairs(names) do
+    if (n.suffix == 0x00 or n.suffix == 0x20) and n.flags & 0x8000 == 0 then
+      own[n.name] = true
+    end
+  end
   local user
   for _, n in ipairs(names) do
-    if n.suffix == 0x03 and n.flags & 0x8000 == 0 and n.name ~= server
-      and n.name ~= machine then
+    if n.suffix == 0x03 and n.flags & 0x8000 == 0 and not own[n.name] then
       user = n.name
       break
     end

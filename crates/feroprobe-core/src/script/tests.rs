@@ -2451,12 +2451,16 @@ async fn nbns_server(reply_mac: [u8; 6]) -> (u16, std::sync::Arc<std::sync::Mute
         let mut buf = [0u8; 512];
         while let Ok((n, from)) = server.recv_from(&mut buf).await {
             keep.lock().unwrap().push(buf[..n].to_vec());
-            // The machine's own <03> name comes first: it is not a user.
-            let names: [(&[u8], u8, u16); 5] = [
+            // Machine LAB-PC serves files as FILES and has an alias NAS;
+            // their <03> names come first, and none of them is a user.
+            let names: [(&[u8], u8, u16); 8] = [
                 (b"LAB-PC", 0x00, 0x0400),
                 (b"WORKGROUP", 0x00, 0x8400),
-                (b"LAB-PC", 0x20, 0x0400),
+                (b"FILES", 0x20, 0x0400),
+                (b"NAS", 0x20, 0x0400),
                 (b"LAB-PC", 0x03, 0x0400),
+                (b"FILES", 0x03, 0x0400),
+                (b"NAS", 0x03, 0x0400),
                 (b"ALICE", 0x03, 0x0400),
             ];
             // The header (response, authoritative), the question's name in
@@ -2499,7 +2503,7 @@ async fn nbstat_reads_the_name_table() {
     assert_eq!(out.len(), 1, "{out:?}");
     assert!(
         out[0].starts_with(
-            "NetBIOS name: LAB-PC, NetBIOS user: ALICE, NetBIOS MAC: 00:0c:29:01:02:03 ("
+            "NetBIOS name: FILES, NetBIOS user: ALICE, NetBIOS MAC: 00:0c:29:01:02:03 ("
         ),
         "{}",
         out[0]
@@ -2520,7 +2524,7 @@ async fn nbstat_reads_the_name_table() {
     let out = run(port, &format!("nbstat.port={port}")).await;
     assert_eq!(
         out,
-        ["NetBIOS name: LAB-PC, NetBIOS user: ALICE, NetBIOS MAC: <unknown>"]
+        ["NetBIOS name: FILES, NetBIOS user: ALICE, NetBIOS MAC: <unknown>"]
     );
     let (other, seen) = nbns_server([0; 6]).await;
     assert!(run(port, &format!("nbstat.port={other}")).await.is_empty());

@@ -2459,9 +2459,10 @@ One NetBIOS NODE STATUS request (as \f[V]nbtstat -A\f[R], RFC 1002),
 sent twice at most: the host\[aq]s NetBIOS name, the logged-in user when
 the name table has one, and the MAC address the host reports with its
 vendor from the OUI list (\f[V]<unknown>\f[R], and no \f[V]mac\f[R] in
-XML/JSON, for the all-zero MAC Samba gives); a \f[V]<03>\f[R] name that
-is the machine\[aq]s own is not taken for a user; with \f[V]-v\f[R] the
-whole name table and its flags.
+XML/JSON, for the all-zero MAC Samba gives); a \f[V]<03>\f[R] name the
+machine also holds as a unique \f[V]<00>\f[R] or \f[V]<20>\f[R] name
+(its own name or an alias) is not taken for a user; with \f[V]-v\f[R]
+the whole name table and its flags.
 The transaction ID is \f[V]0x4650\f[R] (\[dq]FP\[dq]).
 nmap\[aq]s also runs when only TCP 139 or 445 is open and then sends to
 UDP 137 anyway; FeroProbe\[aq]s runs only when its port (UDP 137, or
