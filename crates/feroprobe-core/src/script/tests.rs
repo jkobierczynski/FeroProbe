@@ -2086,6 +2086,13 @@ async fn smb2_security_mode_and_time() {
             .await
             .is_empty()
     );
+    // A server that gives no clock: N/A, as for the start time.
+    let (port, _) = smb_server(1, -11_644_473_600, false).await;
+    let arg = format!("smbport={port}");
+    assert_eq!(
+        host_output_of("smb2-time", port, "microsoft-ds", &arg).await,
+        ["\n  date: N/A\n  start_date: N/A"]
+    );
     // A server that does not speak SMB2: no output.
     let port = tcp_server(|mut s| async move {
         let _ = s.write_all(b"\0\0\0\x08\xffSMBjunk").await;

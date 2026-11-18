@@ -2000,8 +2000,10 @@ T}
 T{
 \f[V]fero.smb.port(host)\f[R]
 T}@T{
-The port to reach SMB on: \f[V]--script-args smbport=N\f[R] if that port
-may be open, else 445, else 139; \f[V]nil\f[R] when none is open
+The port to reach SMB on.
+With \f[V]--script-args smbport=N\f[R], that port only (\f[V]nil\f[R]
+when it is not open; 445 and 139 are not tried).
+Without it, 445 if open, else 139, else \f[V]nil\f[R]
 T}
 T{
 \f[V]fero.smb.negotiate(host, port [, timeout])\f[R]

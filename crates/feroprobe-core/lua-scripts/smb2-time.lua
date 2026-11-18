@@ -32,6 +32,6 @@ action = function(host)
   if not port then return nil end
   local timeout = tonumber(fero.args.get(SCRIPT_NAME .. ".timeout")) or 8000
   local n = fero.smb.negotiate(host, port, timeout)
-  if not n or not n.time then return nil end
+  if not n then return nil end
   return { date = when(n.time), start_date = when(n.start_time) }
 end
