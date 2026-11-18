@@ -46,10 +46,13 @@ fn snort_rule_files_match() {
     assert_eq!(revs(&snort2), revs(&snort3));
     assert_eq!(revs(&snort2), revs(&suricata));
     for (sid, (_, line)) in &snort3 {
-        for m in ["depth", "offset", "distance", "within", "nocase"] {
+        // Top-level options are split by `;`; a modifier must not be one.
+        let body = &line[line.find('(').unwrap() + 1..line.rfind(')').unwrap()];
+        for opt in body.split(';') {
+            let name = opt.split(':').next().unwrap().trim();
             assert!(
-                !line.contains(&format!("; {m}")),
-                "sid {sid}: Snort 3 wants `, {m}` after its content"
+                !["depth", "offset", "distance", "within", "nocase"].contains(&name),
+                "sid {sid}: Snort 3 wants `, {name}` after its content"
             );
         }
         // Without the modifiers folded in, each rule reads the same.
