@@ -1980,7 +1980,7 @@ theirs.
 The default report on standard output is nmap's "normal" layout:
 
 ```
-Starting FeroProbe 0.5.0
+Starting FeroProbe 0.6.0
 
 Scan report for example.org (203.0.113.5)
 Host is up, syn-ack (0.85 ms latency).
@@ -2021,7 +2021,7 @@ the default), `xml`, `grepable` or `json`.
 
 Also write the normal report to a file. As in nmap, the file starts with a
 comment line naming the version, the start time and the command line
-(`# FeroProbe 0.5.0 scan initiated ... as: feroprobe -oN scan.nmap ...`),
+(`# FeroProbe 0.6.0 scan initiated ... as: feroprobe -oN scan.nmap ...`),
 which `--resume` reads, and ends with `# FeroProbe done at ...` instead of
 the screen's summary line.
 

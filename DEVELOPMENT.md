@@ -300,6 +300,20 @@ release.
 
 ### Phase 7: script engine (v0.6.0)
 
+Released as v0.6.0 (2026-11-18) with the script engine: `--script` with
+Lua 5.4 and our own `fero` library (7.1), the first script libraries (TLS
+sockets, the HTTP client with its `User-Agent` signature, 7.2 part 1), `-sC`
+and `-A` running it (7.3; 25 scripts in all, 22 of them in `default`), `--script-trace` and
+`--script-updatedb` (7.5), a 10-minute default script time limit, and more
+scripts (7.4): `http-headers`, `http-server-header`, `smb2-security-mode`,
+`smb2-time`, `rdp-ntlm-info`, `ssl-date`, `nbstat` and `dns-nsid`, each with
+its own signature and detection rules (Snort 3 rules in their own file). Also
+the `--resume` fix for untrusted reports, the security review's medium fixes
+(dropping root under sudo), the nmap-diff `script-*` cases and the `-sV`
+echo fix. Moved to v0.7.0: the rest of 7.2 (ordered output tables,
+`fero.registry`, `receive_buf`, a STARTTLS helper, raw packets), more scripts
+(7.4) and the NSE compatibility layer (7.6).
+
 | Step | Feature | nmap options | Plan |
 | --- | --- | --- | --- |
 | 7.1 | Engine and script format | `--script`, `--script-args`, `--script-args-file`, `--script-help`, `--script-timeout` | **Done** (see [Script scanning](#script-scanning)). Embedded Lua, see [Script engine design](#script-engine-design). The engine, the sandbox, script selection, output in every format, and the scope-checked TCP and UDP sockets (moved here from 7.2, since the scope rule lives in them), with one script, `banner`. Not done: `--host-timeout` does not yet cover the script phase (scripts are bounded by `--script-timeout`) |
