@@ -189,6 +189,7 @@ who asked:
 | `ssh-hostkey` | The client version line `SSH-2.0-FeroProbe_Scripting_Engine` (in clear text, before encryption starts) | `SSH-2.0-Nmap-SSH2-Hostkey` |
 | `smtp-commands` | `EHLO feroprobe.invalid` (`.invalid` is a reserved name, RFC 2606) | the target's name, or `nmap.scanme.org` |
 | `ftp-anon` | `USER anonymous`, `PASS feroprobe@` | `PASS IEUser@` |
+| `smb2-security-mode`, `smb2-time` | The SMB2 NEGOTIATE client GUID `FeroProbeSMBScan` (16 bytes of ASCII); on port 139 the NetBIOS calling name `FEROPROBE` | — |
 | `http-title`, `http-methods`, `http-robots.txt` | The `User-Agent` above | `Nmap Scripting Engine` |
 
 As with the `User-Agent`, `--script-args smtp.domain=...` replaces the
@@ -202,7 +203,7 @@ password, and each stays within the ports the scan probed.
 
 The repository ships Suricata and Snort rules that match the probe
 signature, so blue teams can flag FeroProbe scans without writing their
-own. Rules 9100006 to 9100009 match the script markers above in clear
+own. Rules 9100006 to 9100010 match the script markers above in clear
 text. They are in [`rules/`](../rules/): `rules/feroprobe.rules` for
 Suricata and `rules/feroprobe.snort.rules` for Snort, with setup notes in
 `rules/README.md`.

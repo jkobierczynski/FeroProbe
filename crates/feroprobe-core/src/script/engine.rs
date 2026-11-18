@@ -59,6 +59,9 @@ impl Kept {
     }
 }
 
+/// `fero.smb`: the SMB2 NEGOTIATE exchange.
+const SMB_LIBRARY: &str = include_str!("smb.lua");
+
 /// The library every script gets, written for FeroProbe, on top of the
 /// `fero` table the engine fills in.
 const LIBRARY: &str = r##"
@@ -463,7 +466,10 @@ pub(crate) fn install_library(
     g.raw_set("fero", fero.clone())?;
     lua.load(LIBRARY)
         .set_name("=fero")
-        .call::<()>((fero, args_to_lua(lua, args)?))?;
+        .call::<()>((fero.clone(), args_to_lua(lua, args)?))?;
+    lua.load(SMB_LIBRARY)
+        .set_name("=fero.smb")
+        .call::<()>(fero)?;
     Ok(())
 }
 
@@ -531,6 +537,30 @@ fn port_table(lua: &Lua, p: &PortResult) -> mlua::Result<Table> {
     }
     t.raw_set("version", v)?;
     Ok(t)
+}
+
+/// `fero.get_port_state(host, port)`: the port table of the scanned port
+/// `port` names (`number`, and `protocol`, `"tcp"` when left out) when it
+/// may be open, else `nil`. Hostrule scripts use it to find the service
+/// they need, as nmap's `nmap.get_port_state`; only the ports a portrule
+/// would be asked about are known, so a closed or filtered port is `nil`.
+fn install_port_state(lua: &Lua, h: &HostResult) -> mlua::Result<()> {
+    let ports: Vec<PortResult> = h.ports.iter().filter(|p| rule_port(p)).cloned().collect();
+    let f = lua.create_function(move |lua, (_host, port): (Value, Table)| {
+        let number: i64 = port.get("number")?;
+        let proto: Option<String> = port.get("protocol")?;
+        let proto = proto.as_deref().unwrap_or("tcp");
+        match ports
+            .iter()
+            .find(|p| i64::from(p.port) == number && p.protocol.to_string() == proto)
+        {
+            Some(p) => Ok(Value::Table(port_table(lua, p)?)),
+            None => Ok(Value::Nil),
+        }
+    })?;
+    lua.globals()
+        .get::<Table>("fero")?
+        .raw_set("get_port_state", f)
 }
 
 /// The ports a portrule is asked about, as in nmap: those that may be open.
@@ -757,6 +787,9 @@ impl ScriptScan {
         let scope = Arc::new(scope_of(&script.id, on.host()));
         install_library(&lua, &script.id, on.kind(), &self.args, &scope)
             .map_err(|e| e.to_string())?;
+        if let Some(h) = on.host() {
+            install_port_state(&lua, h).map_err(|e| e.to_string())?;
+        }
         let name = script.path.as_ref().map_or_else(
             || format!("{}.{}", script.id, super::EXTENSION),
             |p| p.display().to_string(),

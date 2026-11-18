@@ -860,10 +860,8 @@ mod imp {
             }
             use std::sync::Arc;
             use std::sync::atomic::AtomicBool;
-            let closed = {
-                let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-                l.local_addr().unwrap().port()
-            };
+            let closed_port = crate::testutil::closed_tcp_port("127.0.0.1".parse().unwrap());
+            let closed = closed_port.port;
             let cfg = ScanConfig {
                 rtt: crate::rtt::RttTimeouts::fixed(Duration::from_secs(5)),
                 ..Default::default()
@@ -968,10 +966,8 @@ mod imp {
             }
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             let open = listener.local_addr().unwrap().port();
-            let closed = {
-                let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-                l.local_addr().unwrap().port()
-            };
+            let closed_port = crate::testutil::closed_tcp_port("127.0.0.1".parse().unwrap());
+            let closed = closed_port.port;
             let cfg = ScanConfig {
                 rtt: crate::rtt::RttTimeouts::fixed(Duration::from_millis(500)),
                 ..Default::default()
@@ -1020,10 +1016,8 @@ mod imp {
             }
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             let open = listener.local_addr().unwrap().port();
-            let closed = {
-                let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-                l.local_addr().unwrap().port()
-            };
+            let closed_port = crate::testutil::closed_tcp_port("127.0.0.1".parse().unwrap());
+            let closed = closed_port.port;
             let cfg = ScanConfig {
                 rtt: crate::rtt::RttTimeouts::fixed(Duration::from_millis(300)),
                 retries: 0,

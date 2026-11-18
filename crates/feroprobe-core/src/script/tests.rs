@@ -1965,6 +1965,8 @@ fn the_default_category() {
             "ntp-info",
             "pop3-capabilities",
             "rpcinfo",
+            "smb2-security-mode",
+            "smb2-time",
             "smtp-commands",
             "ssh-hostkey",
             "ssl-cert",
@@ -1977,4 +1979,129 @@ fn the_default_category() {
     for s in choose("default").unwrap() {
         assert!(s.categories.iter().any(|c| c == "safe"), "{}", s.id);
     }
+}
+
+/// A stand-in SMB2 server: answers a NEGOTIATE with signing `mode`, the
+/// dialect 3.1.1 and the clock `now` (Unix seconds), keeping each request.
+/// With `netbios`, a NetBIOS session request comes first.
+async fn smb_server(mode: u16, now: i64, netbios: bool) -> (u16, Seen) {
+    let seen: Seen = Default::default();
+    let keep = seen.clone();
+    let port = tcp_server(move |mut s| {
+        let keep = keep.clone();
+        async move {
+            let mut head = [0u8; 4];
+            if netbios {
+                if s.read_exact(&mut head).await.is_err() || head[0] != 0x81 {
+                    return;
+                }
+                let mut names = vec![0u8; u16::from_be_bytes([head[2], head[3]]) as usize];
+                if s.read_exact(&mut names).await.is_err() {
+                    return;
+                }
+                keep.lock()
+                    .unwrap()
+                    .push(format!("session {}", String::from_utf8_lossy(&names)));
+                let _ = s.write_all(&[0x82, 0, 0, 0]).await;
+            }
+            if s.read_exact(&mut head).await.is_err() {
+                return;
+            }
+            let len = u32::from_be_bytes(head) as usize;
+            let mut req = vec![0u8; len];
+            if s.read_exact(&mut req).await.is_err() {
+                return;
+            }
+            keep.lock()
+                .unwrap()
+                .push(String::from_utf8_lossy(&req).into_owned());
+            let filetime = |t: i64| ((t + 11_644_473_600) * 10_000_000).to_le_bytes();
+            let mut m = b"\xfeSMB".to_vec();
+            m.extend(64u16.to_le_bytes());
+            m.extend([0u8; 58]);
+            m.extend(65u16.to_le_bytes());
+            m.extend(mode.to_le_bytes());
+            m.extend(0x0311u16.to_le_bytes());
+            m.extend(0u16.to_le_bytes());
+            m.extend(*b"server-guid-0123");
+            m.extend([0u8; 16]);
+            m.extend(filetime(now));
+            m.extend([0u8; 8]); // no start time
+            m.extend([0u8; 9]);
+            let mut out = (m.len() as u32).to_be_bytes().to_vec();
+            out.extend(m);
+            let _ = s.write_all(&out).await;
+        }
+    })
+    .await;
+    (port, seen)
+}
+
+/// The host-script outputs of built-in `id` on a host whose only port is
+/// `port`, known as `service`, with `args`.
+async fn host_output_of(id: &str, port: u16, service: &str, args: &str) -> Vec<String> {
+    let scan = ScriptScan::new(vec![built_in(id)], args::parse(args).unwrap(), None).unwrap();
+    let mut hosts = vec![host_with_services(&[(port, service)])];
+    scan.scan_hosts(&mut hosts).await;
+    hosts[0].scripts.iter().map(|s| s.output.clone()).collect()
+}
+
+#[tokio::test]
+async fn smb2_security_mode_and_time() {
+    // 2026-01-02T03:04:05Z
+    let now = 1_767_323_045;
+    let (port, seen) = smb_server(1, now, false).await;
+    let arg = format!("smbport={port}");
+    assert_eq!(
+        host_output_of("smb2-security-mode", port, "microsoft-ds", &arg).await,
+        ["\n  3:1:1: \n    Message signing enabled but not required"]
+    );
+    assert_eq!(
+        host_output_of("smb2-time", port, "microsoft-ds", &arg).await,
+        ["\n  date: 2026-01-02T03:04:05\n  start_date: N/A"]
+    );
+    {
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        // The FeroProbe client GUID marks each NEGOTIATE.
+        assert!(
+            seen.iter()
+                .all(|r| r.starts_with("\u{fffd}SMB") && r.contains("FeroProbeSMBScan"))
+        );
+    }
+
+    // Signing required, over a NetBIOS session (port 139's service).
+    let (port, seen) = smb_server(3, now, true).await;
+    let arg = format!("smbport={port}");
+    assert_eq!(
+        host_output_of("smb2-security-mode", port, "netbios-ssn", &arg).await,
+        ["\n  3:1:1: \n    Message signing enabled and required"]
+    );
+    assert!(seen.lock().unwrap()[0].starts_with("session  CKFDENECFDEFFCFGEFFCCACACACACACA"));
+
+    // No SMB port open (smbport names one the scan did not find open):
+    // the hostrule says no, and nothing is sent.
+    assert!(
+        host_output_of("smb2-time", port, "netbios-ssn", "smbport=1")
+            .await
+            .is_empty()
+    );
+    // A server that gives no clock: N/A, as for the start time.
+    let (port, _) = smb_server(1, -11_644_473_600, false).await;
+    let arg = format!("smbport={port}");
+    assert_eq!(
+        host_output_of("smb2-time", port, "microsoft-ds", &arg).await,
+        ["\n  date: N/A\n  start_date: N/A"]
+    );
+    // A server that does not speak SMB2: no output.
+    let port = tcp_server(|mut s| async move {
+        let _ = s.write_all(b"\0\0\0\x08\xffSMBjunk").await;
+    })
+    .await;
+    let arg = format!("smbport={port}");
+    assert!(
+        host_output_of("smb2-time", port, "microsoft-ds", &arg)
+            .await
+            .is_empty()
+    );
 }

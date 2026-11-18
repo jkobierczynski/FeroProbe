@@ -79,6 +79,11 @@ const BUILT_IN: &[(&str, &str)] = &[
     ),
     ("rpcinfo", include_str!("../../lua-scripts/rpcinfo.lua")),
     (
+        "smb2-security-mode",
+        include_str!("../../lua-scripts/smb2-security-mode.lua"),
+    ),
+    ("smb2-time", include_str!("../../lua-scripts/smb2-time.lua")),
+    (
         "smtp-commands",
         include_str!("../../lua-scripts/smtp-commands.lua"),
     ),
