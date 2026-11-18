@@ -104,12 +104,16 @@ pub(crate) mod testutil {
     /// listener and dropping it would free the port, and a test running
     /// at the same time could be given it for a server of its own, so the
     /// "closed" port would answer as open (or stay silent to FIN, NULL and
-    /// Xmas probes, as an open port does on Linux).
+    /// Xmas probes, as an open port does on Linux). Linux only: there a
+    /// SYN to a bound socket that does not listen gets a reset, but macOS
+    /// leaves it unanswered.
+    #[cfg(target_os = "linux")]
     pub(crate) struct ClosedTcpPort {
         _socket: socket2::Socket,
         pub(crate) port: u16,
     }
 
+    #[cfg(target_os = "linux")]
     pub(crate) fn closed_tcp_port(ip: std::net::IpAddr) -> ClosedTcpPort {
         use socket2::{Domain, Socket, Type};
         let socket = Socket::new(
