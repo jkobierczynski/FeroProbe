@@ -26,6 +26,7 @@ teams can flag FeroProbe scans without writing their own.
 | `rdp-ntlm-info` (default script) | RDP connection request cookie `Cookie: mstshash=FeroProbe` |
 | `nbstat` (default script), and the `-sU`/`-sV` probe to UDP 137 | NetBIOS NODE STATUS request to UDP 137 with transaction ID `0x4650` ("FP") |
 | `ssl-date` (default script) | TLS ClientHello random `FeroProbeSSLDate` (bytes 15-30 of the record) |
+| `dns-nsid` (default script) | DNS CHAOS TXT queries (`id.server`, `version.bind`) with transaction ID `0x4650` ("FP") and no flags, over UDP (SID 9100014) or TCP (SID 9100015) |
 
 The TCP window of a scan probe is otherwise meaningless, because the scan
 never completes a handshake, so the fixed window does not change how the
