@@ -712,7 +712,8 @@ no answer \f[V]open|filtered\f[R].
 Works without privileges.
 .PP
 Well-known ports get a payload their service answers: DNS (53, 5353),
-NTP (123), SNMP (161) and SSDP (1900).
+NetBIOS name service (137, a NODE STATUS request with transaction ID
+\f[V]0x4650\f[R] \[dq]FP\[dq]), NTP (123), SNMP (161) and SSDP (1900).
 Every other port gets the payload \f[V]FeroProbeScan/1\[rs]n\f[R] (see
 Probe signature).
 .PP
@@ -4463,8 +4464,10 @@ nmap\[aq]s payload database: several probes per port (two DNS queries to
 53, two NTP versions to 123, SNMPv1 and v3 to 161, three NetBIOS queries
 to 137), up to dozens with \f[V]-sV\f[R]
 T}@T{
-FeroProbe\[aq]s own, one per port: DNS (53, 5353), NTP (123), SNMP (161)
-and SSDP (1900); every other port gets \f[V]FeroProbeScan/1\[rs]n\f[R].
+FeroProbe\[aq]s own, one per port: DNS (53, 5353), NetBIOS NODE STATUS
+(137, transaction ID \f[V]0x4650\f[R] \[dq]FP\[dq], the request
+\f[V]nbstat\f[R] sends), NTP (123), SNMP (161) and SSDP (1900); every
+other port gets \f[V]FeroProbeScan/1\[rs]n\f[R].
 nmap\[aq]s payloads cannot be redistributed; one payload per service is
 enough to make it answer
 T}

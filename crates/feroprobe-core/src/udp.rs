@@ -48,6 +48,9 @@ pub fn payload_for(port: u16) -> &'static [u8] {
             0x19, 0x02, 0x01, 0x01, 0x02, 0x01, 0x00, 0x02, 0x01, 0x00, 0x30, 0x0e, 0x30, 0x0c,
             0x06, 0x08, 0x2b, 0x06, 0x01, 0x02, 0x01, 0x01, 0x01, 0x00, 0x05, 0x00,
         ],
+        // NetBIOS name service: NODE STATUS request for "*" (RFC 1002
+        // 4.2.17), transaction ID "FP", the same request `nbstat` sends.
+        137 => &NBSTAT_REQUEST,
         // SSDP (UPnP) discovery.
         1900 => b"M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nMAN: \"ssdp:discover\"\r\nMX: 1\r\nST: ssdp:all\r\n\r\n",
         // Ports with no service-specific probe carry FeroProbe's
@@ -56,6 +59,28 @@ pub fn payload_for(port: u16) -> &'static [u8] {
         _ => crate::packet::UDP_MARKER,
     }
 }
+
+/// NetBIOS NODE STATUS request: header (ID "FP", one question), the name
+/// "*" padded with NULs, first-level encoded ("CK" then "AA" x 15), type
+/// NBSTAT (0x21), class IN.
+const NBSTAT_REQUEST: [u8; 50] = {
+    let mut p = [0u8; 50];
+    p[0] = b'F';
+    p[1] = b'P';
+    p[5] = 1; // QDCOUNT
+    p[12] = 32;
+    p[13] = b'C';
+    p[14] = b'K';
+    let mut i = 15;
+    while i < 45 {
+        p[i] = b'A';
+        i += 1;
+    }
+    // p[45] = 0: end of name.
+    p[47] = 0x21;
+    p[49] = 1;
+    p
+};
 
 const NTP_REQUEST: [u8; 48] = {
     let mut p = [0u8; 48];
@@ -459,6 +484,11 @@ mod tests {
     fn payloads() {
         assert_eq!(payload_for(123).len(), 48);
         assert!(payload_for(53).len() > 12);
+        // NetBIOS NODE STATUS for "*", ID "FP": what rule 9100013 matches.
+        let mut nbstat = b"FP\0\0\0\x01\0\0\0\0\0\0\x20CK".to_vec();
+        nbstat.extend([b'A'; 30]);
+        nbstat.extend([0, 0, 0x21, 0, 1]);
+        assert_eq!(payload_for(137), &nbstat[..]);
         // Ports with no service-specific probe carry the FeroProbe marker.
         assert_eq!(payload_for(9999), crate::packet::UDP_MARKER);
     }

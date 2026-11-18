@@ -58,5 +58,6 @@ alert tcp any any -> $HOME_NET any (msg:"FeroProbe script RDP connection request
 # ssl-date: the mark in the ClientHello random (after the 5-byte record
 # header, 4-byte handshake header, 2-byte version and 4 time bytes).
 alert tcp any any -> $HOME_NET any (msg:"FeroProbe script TLS ClientHello (ssl-date)"; flow:established,to_server; content:"|16 03 01|"; depth:3; content:"FeroProbeSSLDate"; distance:12; within:16; classtype:attempted-recon; metadata:tool FeroProbe; sid:9100012; rev:1;)
-# nbstat: the NODE STATUS request for "*" with transaction ID "FP".
-alert udp any any -> $HOME_NET 137 (msg:"FeroProbe script NetBIOS NODE STATUS (nbstat)"; content:"FP|00 00 00 01 00 00 00 00 00 00 20|CKAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA|00 00 21 00 01|"; depth:50; classtype:attempted-recon; metadata:tool FeroProbe; sid:9100013; rev:1;)
+# NetBIOS NODE STATUS request for "*" with transaction ID "FP": sent by the
+# nbstat script and by the UDP scan (-sU) and -sV to port 137.
+alert udp any any -> $HOME_NET 137 (msg:"FeroProbe NetBIOS NODE STATUS (nbstat script, -sU or -sV probe)"; content:"FP|00 00 00 01 00 00 00 00 00 00 20|CKAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA|00 00 21 00 01|"; depth:50; classtype:attempted-recon; metadata:tool FeroProbe; sid:9100013; rev:2;)

@@ -1,0 +1,58 @@
+# FeroProbe scan detection rules — Snort 3.x
+#
+# The rules of rules/feroprobe.snort.rules (Snort 2.9.x) in Snort 3 syntax:
+# content modifiers (depth, offset, distance, within, nocase) follow their
+# content after a comma; SID 9100006 reads the parsed User-Agent header.
+# Keep the two files in step (crates/feroprobe-core/tests/rules.rs checks).
+#
+# Same signature as rules/feroprobe.rules (Suricata); see that file and
+# docs/responsible-use.md for the full description. FeroProbe marks its own
+# scan traffic so the owner of a scanned network can recognize it:
+#   * Raw-socket TCP scan probes carry TCP window 65109 (0xFE55).
+#   * UDP probes without a service-specific payload carry "FeroProbeScan/1".
+#   * ICMP/ICMPv6 echo requests carry the 9-byte payload "feroprobe".
+#   * Script HTTP requests (--script) carry a User-Agent naming
+#     "FeroProbe Scripting Engine" (plain HTTP only; HTTPS hides it).
+#
+# The TCP connect scan (-sT) and OS-detection probes (-O) are the documented
+# exceptions and carry no marker.
+#
+# SIDs use the local 9100000+ range. Adjust to fit your own numbering.
+
+# SYN scan probe: lone SYN, no payload, marker window.
+alert tcp any any -> $HOME_NET any (msg:"FeroProbe SYN scan probe (window marker 0xFE55)"; flags:S; dsize:0; window:65109; classtype:attempted-recon; sid:9100001; rev:1;)
+
+# Other raw-socket TCP scan probes: FIN, NULL, Xmas, ACK, Window, Maimon.
+alert tcp any any -> $HOME_NET any (msg:"FeroProbe stateless TCP scan probe (window marker 0xFE55)"; flags:!S; window:65109; classtype:attempted-recon; sid:9100002; rev:1;)
+
+# UDP scan probe carrying FeroProbe's payload marker.
+alert udp any any -> $HOME_NET any (msg:"FeroProbe UDP scan probe (payload marker)"; content:"FeroProbeScan/1", depth 16; classtype:attempted-recon; sid:9100003; rev:1;)
+
+# ICMP echo request (host discovery, -PO included) carrying FeroProbe's 9-byte payload.
+alert icmp any any -> $HOME_NET any (msg:"FeroProbe ping probe (echo payload marker)"; itype:8; dsize:9; content:"feroprobe", depth 9; classtype:attempted-recon; sid:9100004; rev:1;)
+alert icmp any any -> $HOME_NET any (msg:"FeroProbe IPv6 ping probe (echo payload marker)"; itype:128; dsize:9; content:"feroprobe", depth 9; classtype:attempted-recon; sid:9100005; rev:1;)
+
+# HTTP request from a FeroProbe script, by its User-Agent (plain HTTP only).
+# Snort 3's http_inspect keeps parsed HTTP headers out of the default
+# buffer, so this rule (unlike the 2.9 one) reads the User-Agent field.
+alert tcp any any -> $HOME_NET any (msg:"FeroProbe script HTTP request (User-Agent)"; flow:established,to_server; http_header:field user-agent; content:"FeroProbe Scripting Engine", nocase; classtype:attempted-recon; sid:9100006; rev:1;)
+
+# Default scripts (-sC): the client names it sends in clear text.
+# ssh-hostkey's SSH version line (sent before encryption starts).
+alert tcp any any -> $HOME_NET any (msg:"FeroProbe script SSH client (version string)"; flow:established,to_server; content:"SSH-2.0-FeroProbe_Scripting_Engine", depth 34; classtype:attempted-recon; sid:9100007; rev:1;)
+# smtp-commands' EHLO name (plain SMTP only; replaced by --script-args smtp.domain).
+alert tcp any any -> $HOME_NET any (msg:"FeroProbe script SMTP EHLO"; flow:established,to_server; content:"EHLO feroprobe.invalid", depth 22, nocase; classtype:attempted-recon; sid:9100008; rev:1;)
+# ftp-anon's anonymous password.
+alert tcp any any -> $HOME_NET any (msg:"FeroProbe script FTP anonymous login"; flow:established,to_server; content:"PASS feroprobe@", depth 15; classtype:attempted-recon; sid:9100009; rev:1;)
+# smb2-security-mode / smb2-time: the client GUID of the SMB2 NEGOTIATE
+# (TCP 445, or 139 after the NetBIOS session request).
+alert tcp any any -> $HOME_NET any (msg:"FeroProbe script SMB2 NEGOTIATE (client GUID)"; flow:established,to_server; content:"|FE|SMB", offset 4, depth 4; content:"FeroProbeSMBScan", distance 72, within 16; classtype:attempted-recon; sid:9100010; rev:1;)
+# rdp-ntlm-info: the routing cookie of the RDP connection request (in clear
+# text, before TLS starts).
+alert tcp any any -> $HOME_NET any (msg:"FeroProbe script RDP connection request (cookie)"; flow:established,to_server; content:"|03 00|", depth 2; content:"Cookie|3A| mstshash=FeroProbe|0D 0A|", distance 9, within 28; classtype:attempted-recon; sid:9100011; rev:1;)
+# ssl-date: the mark in the ClientHello random (after the 5-byte record
+# header, 4-byte handshake header, 2-byte version and 4 time bytes).
+alert tcp any any -> $HOME_NET any (msg:"FeroProbe script TLS ClientHello (ssl-date)"; flow:established,to_server; content:"|16 03 01|", depth 3; content:"FeroProbeSSLDate", distance 12, within 16; classtype:attempted-recon; sid:9100012; rev:1;)
+# NetBIOS NODE STATUS request for "*" with transaction ID "FP": sent by the
+# nbstat script and by the UDP scan (-sU) and -sV to port 137.
+alert udp any any -> $HOME_NET 137 (msg:"FeroProbe NetBIOS NODE STATUS (nbstat script, -sU or -sV probe)"; content:"FP|00 00 00 01 00 00 00 00 00 00 20|CKAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA|00 00 21 00 01|", depth 50; classtype:attempted-recon; sid:9100013; rev:2;)

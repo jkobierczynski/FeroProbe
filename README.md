@@ -12,7 +12,7 @@ no external binaries.
 | TCP connect scan, `-sT` (no root needed) | ✅ |
 | TCP SYN scan, `-sS`, IPv4 and IPv6 (raw sockets, Linux, root or `CAP_NET_RAW`) | ✅ |
 | FIN, NULL, Xmas, ACK, Window and Maimon scans (`-sF`, `-sN`, `-sX`, `-sA`, `-sW`, `-sM`) and custom flags with `--scanflags`, IPv4 and IPv6 (raw sockets, Linux, root) | ✅ |
-| UDP scan, `-sU`, with DNS, NTP, SNMP and SSDP payloads | ✅ |
+| UDP scan, `-sU`, with DNS, NetBIOS, NTP, SNMP and SSDP payloads | ✅ |
 | SCTP scans `-sY` (INIT) and `-sZ` (COOKIE ECHO), IPv4 and IPv6 (raw sockets, Linux, root) | ✅ |
 | IP protocol scan `-sO` (which protocols a host runs), IPv4 and IPv6 (raw sockets, Linux, root) | ✅ |
 | Host discovery with nmap's default probes (raw ICMP echo/timestamp, SYN 443, ACK 80 as root; connects otherwise), localhost skipped as root, `-sn`, `-Pn` | ✅ |

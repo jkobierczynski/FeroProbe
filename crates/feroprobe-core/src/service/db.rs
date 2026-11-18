@@ -601,9 +601,10 @@ mod tests {
 
     #[test]
     fn udp_payloads_match_the_scan() {
-        // The UDP scan and -sV send the same NTP, SNMP and SSDP queries.
+        // The UDP scan and -sV send the same NetBIOS, NTP, SNMP and SSDP
+        // queries.
         let db = ServiceDb::builtin();
-        for (probe, port) in [("ntp", 123), ("snmp", 161), ("ssdp", 1900)] {
+        for (probe, port) in [("nbstat", 137), ("ntp", 123), ("snmp", 161), ("ssdp", 1900)] {
             assert_eq!(
                 db.probe(probe).unwrap().payload(),
                 crate::udp::payload_for(port),
