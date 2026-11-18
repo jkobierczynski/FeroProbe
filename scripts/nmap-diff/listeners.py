@@ -39,9 +39,9 @@ HTTP_REPLY = (
 # DNS (RFC 1035, RFC 6891 EDNS(0), RFC 5001 NSID)
 DNS_TXT, DNS_OPT, DNS_CH, DNS_NSID = 16, 41, 3, 3
 DNS_CHAOS = {
-    "id.server": b"lab-dns-1",
-    "hostname.bind": b"lab-dns-1",
-    "version.bind": b"9.18.24-lab",
+    (b"id", b"server"): b"lab-dns-1",
+    (b"hostname", b"bind"): b"lab-dns-1",
+    (b"version", b"bind"): b"9.18.24-lab",
 }
 DNS_NSID_VALUE = b"lab-dns-1"
 
@@ -55,19 +55,48 @@ NB_MAC = bytes.fromhex("02000000a10b")
 
 
 def dns_name(msg, pos):
-    """The name at pos (no compression in a question we answer) and the
-    position after it; None when it runs out or is compressed."""
+    """The labels at pos, lower-cased, as a tuple (so "a.b" as one label
+    stays apart from "a" and "b"), and the position after them; None when
+    the name runs out or is compressed (no question we answer is)."""
     labels = []
     while True:
         if pos >= len(msg):
             return None, pos
         n = msg[pos]
         if n == 0:
-            return b".".join(labels).decode("ascii", "replace").lower(), pos + 1
+            return tuple(labels), pos + 1
         if n > 63 or pos + 1 + n > len(msg):
             return None, pos
-        labels.append(msg[pos + 1:pos + 1 + n])
+        labels.append(msg[pos + 1:pos + 1 + n].lower())
         pos += 1 + n
+
+
+def dns_additional(query, pos, count):
+    """Whether the additional section asks for the NSID; None when it is
+    malformed (a record or an EDNS option longer than what is left)."""
+    nsid = False
+    for _ in range(count):
+        owner, pos = dns_name(query, pos)
+        if owner is None or pos + 10 > len(query):
+            return None
+        rtype, _cls, _ttl, rdlen = struct.unpack(">HHIH", query[pos:pos + 10])
+        pos += 10
+        if pos + rdlen > len(query):
+            return None
+        if rtype == DNS_OPT:
+            if owner != ():
+                return None
+            rdata, p = query[pos:pos + rdlen], 0
+            while p < len(rdata):
+                if p + 4 > len(rdata):
+                    return None
+                code, olen = struct.unpack(">HH", rdata[p:p + 4])
+                if p + 4 + olen > len(rdata):
+                    return None
+                nsid |= code == DNS_NSID
+                p += 4 + olen
+        pos += rdlen
+    return nsid
 
 
 def dns_reply(query):
@@ -76,7 +105,7 @@ def dns_reply(query):
     A standard query for a CHAOS TXT name in DNS_CHAOS gets that TXT
     record; one carrying an OPT record with the NSID option also gets
     DNS_NSID_VALUE back in an OPT record. Other standard queries get
-    REFUSED, other opcodes NOTIMP.
+    REFUSED, other opcodes NOTIMP, a malformed additional section FORMERR.
     """
     if len(query) < 12:
         return None
@@ -88,24 +117,12 @@ def dns_reply(query):
         return None
     qtype, qclass = struct.unpack(">HH", query[pos:pos + 4])
     question = query[12:pos + 4]
-    pos += 4
-    nsid = False
-    for _ in range(ar):
-        # the OPT record: root name, type, payload size, ttl, rdlength
-        if pos + 11 > len(query) or query[pos] != 0:
-            break
-        rtype, _size, _ttl, rdlen = struct.unpack(">HHIH", query[pos + 1:pos + 11])
-        rdata = query[pos + 11:pos + 11 + rdlen]
-        if rtype == DNS_OPT:
-            p = 0
-            while p + 4 <= len(rdata):
-                code, olen = struct.unpack(">HH", rdata[p:p + 4])
-                nsid |= code == DNS_NSID
-                p += 4 + olen
-        pos += 11 + rdlen
+    nsid = dns_additional(query, pos + 4, ar)
     opcode = (flags >> 11) & 0xF
     rcode, answer = 0, b""
-    if opcode != 0:
+    if nsid is None:
+        rcode, nsid = 1, False
+    elif opcode != 0:
         rcode = 4
     elif qclass == DNS_CH and qtype == DNS_TXT and name in DNS_CHAOS:
         txt = DNS_CHAOS[name]
@@ -132,7 +149,10 @@ def nbstat_reply(query):
         return None
     name = query[12:12 + 34]
     qtype, qclass = struct.unpack(">HH", query[46:50])
-    if name[-1] != 0 or qtype != 0x21 or qclass != 1:
+    # first-level encoding (RFC 1001 14.1): 32 letters A to P
+    if name[-1] != 0 or any(not 0x41 <= c <= 0x50 for c in name[1:33]):
+        return None
+    if qtype != 0x21 or qclass != 1:
         return None
     table = bytes([len(NB_NAMES)])
     for nb, suffix, nflags in NB_NAMES:
@@ -146,13 +166,23 @@ def family(addr):
     return socket.AF_INET6 if ":" in addr else socket.AF_INET
 
 
-def serve_tcp(addr, port, handler):
-    s = socket.socket(family(addr), socket.SOCK_STREAM)
-    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    if family(addr) == socket.AF_INET6:
-        s.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
-    s.bind((addr, port))
-    s.listen(64)
+def bind(addr, port, kind):
+    s = socket.socket(family(addr), kind)
+    try:
+        if kind == socket.SOCK_STREAM:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        if family(addr) == socket.AF_INET6:
+            s.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+        s.bind((addr, port))
+        if kind == socket.SOCK_STREAM:
+            s.listen(64)
+    except OSError:
+        s.close()
+        raise
+    return s
+
+
+def serve_tcp(s, handler):
     while True:
         conn, _ = s.accept()
         threading.Thread(target=handler, args=(conn,), daemon=True).start()
@@ -210,11 +240,7 @@ def dns_tcp(conn):
             pass
 
 
-def serve_udp(addr, port, handler):
-    s = socket.socket(family(addr), socket.SOCK_DGRAM)
-    if family(addr) == socket.AF_INET6:
-        s.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
-    s.bind((addr, port))
+def serve_udp(s, handler):
     while True:
         data, peer = s.recvfrom(65535)
         reply = handler(data)
@@ -222,24 +248,29 @@ def serve_udp(addr, port, handler):
             s.sendto(reply, peer)
 
 
-def serve_udp_echo(addr, port):
-    s = socket.socket(family(addr), socket.SOCK_DGRAM)
-    if family(addr) == socket.AF_INET6:
-        s.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
-    s.bind((addr, port))
-    while True:
-        data, peer = s.recvfrom(65535)
-        s.sendto(data or b"\x00", peer)
+def echo(data):
+    return data or b"\x00"
 
 
 def main():
     addrs = sys.argv[1:] or ["0.0.0.0"]
-    threads = []
-    for addr in addrs:
-        for port, handler in ((22, ssh), (53, dns_tcp), (80, http), (8080, silent)):
-            threads.append(threading.Thread(target=serve_tcp, args=(addr, port, handler), daemon=True))
-        threads.append(threading.Thread(target=serve_udp_echo, args=(addr, 53), daemon=True))
-        threads.append(threading.Thread(target=serve_udp, args=(addr, 137, nbstat_reply), daemon=True))
+    tcp = ((22, ssh), (53, dns_tcp), (80, http), (8080, silent))
+    udp = ((53, echo), (137, nbstat_reply))
+    # Bind every socket before saying "ready", so the harness never scans a
+    # lab with a service missing; on a failure close them all and exit.
+    served = []
+    try:
+        for addr in addrs:
+            for port, handler in tcp:
+                served.append((serve_tcp, bind(addr, port, socket.SOCK_STREAM), handler))
+            for port, handler in udp:
+                served.append((serve_udp, bind(addr, port, socket.SOCK_DGRAM), handler))
+    except OSError as e:
+        for _, s, _ in served:
+            s.close()
+        print(f"listener setup failed: {e}", flush=True)
+        sys.exit(1)
+    threads = [threading.Thread(target=f, args=(s, h), daemon=True) for f, s, h in served]
     for t in threads:
         t.start()
     print("ready", flush=True)

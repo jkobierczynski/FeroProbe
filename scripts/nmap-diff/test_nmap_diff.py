@@ -222,6 +222,19 @@ class Xml(unittest.TestCase):
         self.assertEqual(ports, {"udp/53": "open domain", "udp/53 script dns-nsid": "output",
                                  "host script nbstat": "output"})
 
+    def test_empty_script_record_is_no_output(self):
+        xml = ('<nmaprun><host><status state="up"/><ports>'
+               '<port protocol="tcp" portid="80"><state state="open"/>'
+               '<script id="empty" output=""/>'
+               '<script id="table" output=""><elem key="k"></elem></script></port></ports></host></nmaprun>')
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "a.xml")
+            with open(path, "w") as f:
+                f.write(xml)
+            ports, _ = nd.parse_xml_ports(path)
+        self.assertNotIn("tcp/80 script empty", ports)
+        self.assertEqual(ports["tcp/80 script table"], "output")
+
 
 def dns_query(name, opt=b"", qclass=3, flags=0):
     q = struct.pack(">HHHHHH", 0x4650, flags, 1, 0, 0, 1 if opt else 0)
@@ -242,6 +255,24 @@ class Listeners(unittest.TestCase):
         self.assertTrue(plain.endswith(b"\x0b9.18.24-lab"))
         self.assertEqual(struct.unpack(">H", plain[10:12])[0], 0)
 
+    def test_dns_label_boundaries_and_opt_position(self):
+        # one label "id.server" is not the name id.server
+        q = struct.pack(">HHHHHH", 1, 0, 1, 0, 0, 0) + b"\x09id.server\0" + struct.pack(">HH", 16, 3)
+        self.assertEqual(listeners.dns_reply(q)[3] & 0xF, 5)
+        # an A record before the OPT record: the NSID is still found
+        a_rec = b"\x01x\0" + struct.pack(">HHIH", 1, 1, 0, 4) + bytes(4)
+        q = dns_query("ID.Server") + a_rec + self.NSID_OPT
+        q = q[:10] + struct.pack(">H", 2) + q[12:]
+        r = listeners.dns_reply(q)
+        self.assertEqual(r[3] & 0xF, 0)
+        self.assertTrue(r.endswith(b"lab-dns-1") and struct.unpack(">H", r[10:12])[0] == 1)
+
+    def test_dns_malformed_opt_is_formerr(self):
+        # an NSID option claiming 8 bytes with none left
+        bad = b"\0" + struct.pack(">HHIHHH", 41, 1232, 0, 4, 3, 8)
+        r = listeners.dns_reply(dns_query("id.server", bad))
+        self.assertEqual((r[3] & 0xF, struct.unpack(">H", r[6:8])[0], struct.unpack(">H", r[10:12])[0]), (1, 0, 0))
+
     def test_dns_other_queries(self):
         # IN class: REFUSED; status request (opcode 2): NOTIMP; a reply: ignored
         self.assertEqual(listeners.dns_reply(dns_query("id.server", qclass=1))[3] & 0xF, 5)
@@ -260,7 +291,9 @@ class Listeners(unittest.TestCase):
         self.assertEqual(r[56], 3)
         self.assertEqual(r[57:72], b"FPDLAB         ")
         self.assertEqual(r[56 + 1 + 3 * 18:56 + 1 + 3 * 18 + 6], listeners.NB_MAC)
-        # a name query (type NB) and garbage get no answer
+        # a name outside the first-level alphabet A to P, a name query (type
+        # NB) and garbage get no answer
+        self.assertIsNone(listeners.nbstat_reply(q[:13] + b"Z" + q[14:]))
         self.assertIsNone(listeners.nbstat_reply(q[:-4] + struct.pack(">HH", 0x20, 1)))
         self.assertIsNone(listeners.nbstat_reply(b"hello" * 20))
 

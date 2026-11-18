@@ -2580,6 +2580,11 @@ fn dns_answer(q: &[u8], edns: Edns, odd: bool) -> Vec<u8> {
             r.extend(question);
             return r;
         }
+        Edns::EmptyFormErr if ar > 0 => {
+            // The header alone: every count zero, nothing after it.
+            r.extend([0x80, 0x01, 0, 0, 0, 0, 0, 0, 0, 0]);
+            return r;
+        }
         Edns::BareFormErr if ar > 0 || question.starts_with(b"\x07version") => {
             // No question, and an answer that must not be taken: FORMERR
             // for EDNS, REFUSED for version.bind.
@@ -2648,6 +2653,8 @@ enum Edns {
     Yes,
     /// FORMERR, with the question.
     FormErr,
+    /// FORMERR as a 12-byte header with every count zero.
+    EmptyFormErr,
     /// FORMERR with only the header and an answer record, and the same
     /// (REFUSED) for version.bind: no value may come from either.
     BareFormErr,
@@ -2750,6 +2757,7 @@ async fn dns_nsid_asks_for_the_nsid_and_the_chaos_names() {
     // its FORMERR has no question (whose answer records are not taken).
     for (edns, version) in [
         (Edns::FormErr, "\n  bind.version: 9.18.24"),
+        (Edns::EmptyFormErr, "\n  bind.version: 9.18.24"),
         (Edns::BareFormErr, ""),
     ] {
         let (port, seen) = dns_udp_server(edns, false).await;

@@ -759,6 +759,12 @@ def write_private(path, text):
         f.write(text)
 
 
+def script_has_output(script):
+    """A <script> element with text or structured output (an empty string
+    with no table or elem under it is no output)."""
+    return bool((script.get("output") or "").strip()) or len(script) > 0
+
+
 def parse_xml_ports(path):
     """{'tcp/22': 'open ssh', ...} plus host state, from nmap-style XML."""
     import xml.etree.ElementTree as ET
@@ -783,10 +789,12 @@ def parse_xml_ports(path):
             # Which scripts gave output, not the output itself: the two
             # tools word and lay out their script output differently.
             for script in port.iter("script"):
-                res[f"{key} script {script.get('id')}"] = "output"
+                if script_has_output(script):
+                    res[f"{key} script {script.get('id')}"] = "output"
         for hs in host.iter("hostscript"):
             for script in hs.iter("script"):
-                res[f"host script {script.get('id')}"] = "output"
+                if script_has_output(script):
+                    res[f"host script {script.get('id')}"] = "output"
         for extra in host.iter("extraports"):
             res[f"other {extra.get('state')}"] = extra.get("count")
     return res, host_state

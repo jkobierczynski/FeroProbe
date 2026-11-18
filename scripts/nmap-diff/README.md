@@ -77,8 +77,9 @@ Lab ports (the same on the target and on 127.0.0.1):
 
 In `matrix.txt`, `@TCP` and `@UDP` expand to these lists. TCP 53 also has a
 small DNS server for the script cases (CHAOS TXT `id.server`,
-`hostname.bind`, `version.bind` and the EDNS NSID option); it is not in
-`@TCP`, so only a case that names port 53 reaches it. ICMP rate limits
+`hostname.bind`, `version.bind` and the EDNS NSID option). It is not in
+`@TCP`, so a case reaches it only by naming port 53 or through a port list
+that holds 53 (`fast`, with `-F`, finds it open). ICMP rate limits
 are off in every namespace, and the neighbour caches are flushed before each
 run, so both tools start from the same state.
 
