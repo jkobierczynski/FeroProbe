@@ -71,7 +71,17 @@ function ntlm.parse_challenge(data)
   end
   local out = { flags = string.unpack("<I4", m, 21) }
   local name = field(m, 13)
-  if name then out.target_name = utf16(name) end
+  if name then
+    -- Unicode when NTLMSSP_NEGOTIATE_UNICODE is set, else the OEM code
+    -- page, shown as ASCII with other bytes escaped.
+    if out.flags & 1 ~= 0 then
+      out.target_name = utf16(name)
+    else
+      out.target_name = name:gsub("[^\32-\126]", function(c)
+        return string.format("\\x%02x", c:byte())
+      end)
+    end
+  end
   local info = field(m, 41)
   if info then
     local pos = 1

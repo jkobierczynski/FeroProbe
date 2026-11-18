@@ -2178,7 +2178,18 @@ async fn rdp_server(protocol: u32, now: i64) -> (u16, Seen) {
                 cc.extend(protocol.to_le_bytes());
                 let mut out = vec![3, 0, 0, (cc.len() + 4) as u8];
                 out.extend(cc);
-                if s.write_all(&out).await.is_err() || protocol & 0x0a == 0 {
+                if s.write_all(&out).await.is_err() {
+                    return;
+                }
+                if protocol & 0x0a == 0 {
+                    // No CredSSP: the client must close without starting
+                    // TLS. Keep what it sends, if anything, until it closes.
+                    let mut got = Vec::new();
+                    let _ =
+                        tokio::time::timeout(Duration::from_secs(5), s.read_to_end(&mut got)).await;
+                    keep.lock()
+                        .unwrap()
+                        .push(format!("after: {}", String::from_utf8_lossy(&got)));
                     return;
                 }
                 let Ok(mut tls) = acceptor.accept(s).await else {
@@ -2240,5 +2251,23 @@ async fn rdp_ntlm_info_reads_the_challenge() {
         output_of("rdp-ntlm-info", port, "ms-wbt-server").await,
         None
     );
-    assert_eq!(seen.lock().unwrap().len(), 1);
+    for _ in 0..100 {
+        if seen.lock().unwrap().len() == 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(seen.lock().unwrap()[1], "after: ");
+
+    // An OEM (not Unicode) target name is read as bytes, not UTF-16.
+    let src = r#"
+categories = {"safe"}
+prerule = function() return true end
+action = function()
+  local m = "NTLMSSP\0" .. string.pack("<I4I2I2I4I4", 2, 3, 3, 48, 2)
+    .. string.rep("\0", 24) .. "LAB"
+  return fero.ntlm.parse_challenge(m).target_name
+end"#;
+    let scan = ScriptScan::new(vec![script("oem", src)], ArgTable::default(), None).unwrap();
+    assert_eq!(scan.pre_scan().await[0].output, "LAB");
 }
