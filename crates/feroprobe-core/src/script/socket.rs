@@ -23,6 +23,7 @@ use tokio::sync::Mutex;
 use tokio::net::TcpStream;
 use tokio_rustls::client::TlsStream;
 
+use super::trace::{Dir, Ends};
 use crate::model::Protocol;
 
 /// Where a script's sockets may go.
@@ -100,6 +101,8 @@ struct State {
     slot: Option<Slot>,
     /// The name to send as TLS SNI, from the last `connect`.
     sni: Option<String>,
+    /// The connection's ends, for `--script-trace`.
+    ends: Option<Ends>,
 }
 
 /// One open socket counted against a run's limit.
@@ -140,6 +143,7 @@ impl ScriptSocket {
                 timeout: DEFAULT_TIMEOUT,
                 slot: None,
                 sni: None,
+                ends: None,
             })),
         }
     }
@@ -258,6 +262,23 @@ pub(crate) fn port_arg(v: &Value) -> mlua::Result<(u16, Option<String>)> {
         .map_err(|_| mlua::Error::runtime("bad port number"))
 }
 
+/// Write all of `data`, counting in `done` what was written so far.
+async fn write_counted<W: tokio::io::AsyncWrite + Unpin + ?Sized>(
+    w: &mut W,
+    data: &[u8],
+    done: &mut usize,
+) -> Result<(), String> {
+    while *done < data.len() {
+        match w.write(&data[*done..]).await {
+            Ok(0) => return Err("connection closed while sending".to_string()),
+            Ok(n) => *done += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+    Ok(())
+}
+
 /// What a receive call waits for.
 #[derive(Clone, Copy)]
 enum Want {
@@ -296,6 +317,9 @@ async fn receive(lua: Lua, state: Arc<Mutex<State>>, want: Want) -> mlua::Result
             if n == 0 && matches!(st.conn, Conn::Tcp(_) | Conn::Tls(_)) {
                 return Err("EOF".to_string());
             }
+            if let Some(e) = &st.ends {
+                e.data(Dir::In, &chunk[..n]);
+            }
             st.buf.extend_from_slice(&chunk[..n]);
             if st.buf.len() > MAX_RECEIVE {
                 return Err("too much data".to_string());
@@ -309,6 +333,9 @@ async fn receive(lua: Lua, state: Arc<Mutex<State>>, want: Want) -> mlua::Result
         Ok(r) => r,
         Err(_) => Err("TIMEOUT".to_string()),
     };
+    if let (Err(e), Some(ends)) = (&outcome, &st.ends) {
+        ends.event(Dir::In, e);
+    }
     match outcome {
         Ok(()) => {
             let data = std::mem::take(&mut st.buf);
@@ -326,6 +353,7 @@ async fn receive(lua: Lua, state: Arc<Mutex<State>>, want: Want) -> mlua::Result
             st.conn = Conn::Closed;
             st.buf = Vec::new();
             st.slot = None;
+            st.ends = None;
             fail(&lua, e)
         }
         Err(e) => fail(&lua, e),
@@ -367,25 +395,38 @@ impl UserData for ScriptSocket {
                     st.conn = Conn::Closed;
                     st.buf.clear();
                     st.slot = None;
+                    st.ends = None;
                     let slot = match Slot::take(&open) {
                         Ok(s) => s,
                         Err(e) => return fail(&lua, e),
                     };
                     let timeout = st.timeout;
-                    let conn = match proto {
+                    // A failed connect is traced with the reason.
+                    let failed = |ends: Ends, why: String| {
+                        ends.event(Dir::Out, &why);
+                        fail(&lua, why)
+                    };
+                    let (conn, ends) = match proto {
                         Protocol::Tcp => {
+                            let unknown = Ends::tcp(None, addr);
                             match tokio::time::timeout(timeout, crate::netif::connect_tcp(addr))
                                 .await
                             {
-                                Err(_) => return fail(&lua, "TIMEOUT"),
-                                Ok(Err(e)) => return fail(&lua, e.to_string()),
-                                Ok(Ok(s)) if ssl => {
-                                    match tls_handshake(s, sni.as_deref(), timeout, false).await {
-                                        Ok(t) => Conn::Tls(Box::new(t)),
-                                        Err(e) => return fail(&lua, e),
+                                Err(_) => return failed(unknown, "TIMEOUT".into()),
+                                Ok(Err(e)) => return failed(unknown, e.to_string()),
+                                Ok(Ok(s)) => {
+                                    let ends = Ends::tcp(s.local_addr().ok(), addr);
+                                    ends.event(Dir::Out, "CONNECT");
+                                    if ssl {
+                                        match tls_handshake(s, sni.as_deref(), timeout, false).await
+                                        {
+                                            Ok(t) => (Conn::Tls(Box::new(t)), ends),
+                                            Err(e) => return failed(ends, e),
+                                        }
+                                    } else {
+                                        (Conn::Tcp(s), ends)
                                     }
                                 }
-                                Ok(Ok(s)) => Conn::Tcp(s),
                             }
                         }
                         _ => {
@@ -396,18 +437,24 @@ impl UserData for ScriptSocket {
                                 let s = tokio::net::UdpSocket::from_std(std)?;
                                 Ok::<_, std::io::Error>(s)
                             })();
+                            let unknown = Ends::udp(None, addr);
                             match udp {
                                 Ok(s) => match s.connect(addr).await {
-                                    Ok(()) => Conn::Udp(s),
-                                    Err(e) => return fail(&lua, e.to_string()),
+                                    Ok(()) => {
+                                        let ends = Ends::udp(s.local_addr().ok(), addr);
+                                        ends.event(Dir::Out, "CONNECT");
+                                        (Conn::Udp(s), ends)
+                                    }
+                                    Err(e) => return failed(unknown, e.to_string()),
                                 },
-                                Err(e) => return fail(&lua, e.to_string()),
+                                Err(e) => return failed(unknown, e.to_string()),
                             }
                         }
                     };
                     st.conn = conn;
                     st.slot = Some(slot);
                     st.sni = sni;
+                    st.ends = Some(ends);
                     ok(&lua)
                 }
             },
@@ -417,24 +464,41 @@ impl UserData for ScriptSocket {
             async move {
                 let data = data.as_bytes().to_vec();
                 let mut st = state.lock().await;
+                let st = &mut *st;
                 let timeout = st.timeout;
+                // How much was written, kept outside the call so that a
+                // timeout still traces what went out before it.
+                let mut done = 0usize;
                 let sent = async {
                     match &mut st.conn {
                         Conn::Closed => Err("socket is not connected".to_string()),
-                        Conn::Tcp(s) => s.write_all(&data).await.map_err(|e| e.to_string()),
-                        Conn::Tls(s) => async {
-                            s.write_all(&data).await?;
-                            s.flush().await
+                        Conn::Tcp(s) => write_counted(s, &data, &mut done).await,
+                        Conn::Tls(s) => {
+                            write_counted(s.as_mut(), &data, &mut done).await?;
+                            s.flush().await.map_err(|e| e.to_string())
                         }
-                        .await
-                        .map_err(|e| e.to_string()),
-                        Conn::Udp(s) => s.send(&data).await.map(|_| ()).map_err(|e| e.to_string()),
+                        Conn::Udp(s) => match s.send(&data).await {
+                            Ok(_) => {
+                                done = data.len();
+                                Ok(())
+                            }
+                            Err(e) => Err(e.to_string()),
+                        },
                     }
                 };
-                match tokio::time::timeout(timeout, sent).await {
-                    Err(_) => fail(&lua, "TIMEOUT"),
-                    Ok(Err(e)) => fail(&lua, e),
-                    Ok(Ok(())) => ok(&lua),
+                let outcome = match tokio::time::timeout(timeout, sent).await {
+                    Err(_) => Err("TIMEOUT".to_string()),
+                    Ok(r) => r,
+                };
+                if let Some(ends) = &st.ends {
+                    ends.data(Dir::Out, &data[..done]);
+                    if let Err(e) = &outcome {
+                        ends.event(Dir::Out, e);
+                    }
+                }
+                match outcome {
+                    Err(e) => fail(&lua, e),
+                    Ok(()) => ok(&lua),
                 }
             }
         });
@@ -479,6 +543,9 @@ impl UserData for ScriptSocket {
                         ok(&lua)
                     }
                     Err(e) => {
+                        if let Some(ends) = st.ends.take() {
+                            ends.event(Dir::Out, &e);
+                        }
                         st.slot = None;
                         fail(&lua, e)
                     }
@@ -539,6 +606,11 @@ impl UserData for ScriptSocket {
             let state = this.state.clone();
             async move {
                 let mut st = state.lock().await;
+                if !matches!(st.conn, Conn::Closed)
+                    && let Some(ends) = st.ends.take()
+                {
+                    ends.event(Dir::Out, "CLOSE");
+                }
                 st.conn = Conn::Closed;
                 st.buf.clear();
                 st.slot = None;

@@ -71,6 +71,8 @@ SCRIPT SCAN:
   --script-args <n1=v1,[n2=v2,...]>: Provide arguments to scripts
   --script-args-file <filename>: Provide script arguments in a file
   --script-help <Lua scripts>: Show help about scripts
+  --script-trace: Show all data sent and received by scripts
+  --script-updatedb: Index your scripts directory's scripts by category
   --script-timeout <time>: Stop a script that runs longer on one host or port
 OS DETECTION:
   -O: Enable OS detection

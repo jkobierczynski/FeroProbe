@@ -1032,9 +1032,12 @@ Choose the scripts to run: a comma-separated list where each item is
   directory named like a category is never picked by mistake.
 
 Names, categories and expressions choose among the scripts built into
-FeroProbe. An item that matches none of them is tried as a file, then as a
-directory; one that matches nothing at all stops the run before anything is
-sent, as does a script that fails to load, or two scripts with the same
+FeroProbe and the scripts installed in your
+[scripts directory](#--script-updatedb) that its index lists. An item that
+matches none of them is tried as a file, then as a directory, then as the
+name of a script in the scripts directory (`--script my-check` finds
+`my-check.lua` there even before it is indexed, as nmap does); one that
+matches nothing at all stops the run before anything is sent, as does a script that fails to load, or two scripts with the same
 name. A `+` before an item runs its scripts on every host and port whatever
 their rules say (scripts with a `portrule` still only see the ports that
 may be open). `--script` may be given more than once; the lists add up.
@@ -1084,6 +1087,75 @@ Built into FeroProbe
   Shows the first line of text a TCP service sends when a connection
   opens, ...
 ```
+
+#### `--script-trace`
+
+Print everything the scripts' connections do on standard output, one line
+each, in nmap's script-trace layout: the protocol, the local and remote
+ends, `>` towards the target or `<` from it, and after the `|` either an
+event (`CONNECT`, `CLOSE`, `EOF`, `TIMEOUT` or the error) or the data
+sent or received.
+
+```
+LUA: TCP 192.0.2.1:40312 > 192.0.2.10:21 | CONNECT
+LUA: TCP 192.0.2.1:40312 < 192.0.2.10:21 | 220 (vsFTPd 3.0.5)\r\n
+LUA: TCP 192.0.2.1:40312 > 192.0.2.10:21 | USER anonymous\r\n
+LUA: TCP 192.0.2.1:40312 > 192.0.2.10:21 | CLOSE
+```
+
+Data that is mostly text (at most 5% of its bytes unprintable, as nmap
+decides) is shown on one line, with line ends and tabs as `\r`, `\n`,
+`\t`, a backslash as `\\` and other bytes as `\xHH`. Other data is shown
+as a hex dump, sixteen bytes a line with their printable characters.
+Connections that speak TLS show the data inside the TLS, as nmap's do.
+The HTTP library's connections are traced too. The prefix is `LUA:`
+(nmap's is `NSE:`, the name of its engine); the rest of the line is in
+nmap's layout.
+
+[`--packet-trace`](#--packet-trace) turns the script trace on as well, as
+in nmap (and the `p` key while a scan runs turns both on and off).
+Without `--script` or `-sC` the option does nothing, and a warning says
+so.
+
+#### `--script-updatedb`
+
+Index the scripts in your scripts directory by category, then stop. It
+needs no target and sends nothing.
+
+The scripts directory is `$XDG_DATA_HOME/feroprobe/scripts`, which is
+`~/.local/share/feroprobe/scripts` when `XDG_DATA_HOME` is not set (on
+Windows, `%APPDATA%\feroprobe\scripts`). Put your own `.lua` scripts
+there, then run:
+
+```
+$ feroprobe --script-updatedb
+Updating the script database in /home/me/.local/share/feroprobe/scripts.
+Script database updated: 2 scripts.
+```
+
+Each script is loaded in the sandbox (as when it runs, with no network)
+to read its categories, and the result is written to `script.db` in that
+directory, one line per script, in nmap's layout:
+
+```
+Entry { filename = "my-check.lua", categories = { "discovery", "safe", } }
+```
+
+From then on `--script` and `-sC` choose those scripts by category and
+expression as well as by name: a script of yours in `default` runs with
+`-sC`, as in nmap. A script added or whose categories changed is chosen by
+category only after the next `--script-updatedb`; by name it is found at
+once. A script that does not load, or that has a built-in script's name,
+is left out of the index with a warning (give its path to `--script` to
+run it anyway). A `script.db` that FeroProbe cannot read stops the run
+with a message naming the fix, and one that lists a script that has gone
+does too. FeroProbe reads the index as data and never runs it.
+
+Under `sudo`, FeroProbe gives up root for the user who ran `sudo` (see
+[Privileges and platforms](#privileges-and-platforms)), and uses that user's scripts directory, so
+`sudo feroprobe --script-updatedb` and `sudo feroprobe -sC ...` see your
+own scripts. With `--keep-root`, or as root without `sudo`, it is root's.
+nmap uses the `~/.nmap` of whoever it runs as.
 
 #### `--script-timeout <time>`
 
@@ -2292,6 +2364,8 @@ RCVD (0.0545s) TCP 10.0.0.5:22 > 10.0.0.2:48100 SA seq=1290442 win=64240 ttl=64
 
 With `-f`/`--mtu` every fragment gets its own line (see
 [Firewall/IDS evasion and spoofing](#firewallids-evasion-and-spoofing)).
+As in nmap, `--packet-trace` also turns on the
+[script trace](#--script-trace).
 
 #### `--dry-run`
 
@@ -2646,7 +2720,6 @@ These nmap options are refused as unknown:
 
 - Scans and discovery: `-sI` (idle scan, not planned), `-iR`,
   `--resolve-all`.
-- Scripting: `--script-trace` and `--script-updatedb` (planned).
 - Output and misc: `--port-ratio`.
 
 [DEVELOPMENT.md](../DEVELOPMENT.md) tracks which of these are planned.

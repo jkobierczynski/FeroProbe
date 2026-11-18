@@ -178,6 +178,13 @@ fn sudo_user_home() -> Result<Option<PathBuf>> {
     }
 }
 
+/// The home directory of the user who ran `sudo`, while still root (see
+/// [`sudo_user_home`]): where their scripts directory is once root is
+/// given up.
+pub fn invoking_user_home() -> Result<Option<PathBuf>> {
+    sudo_user_home()
+}
+
 #[cfg(not(unix))]
 fn sudo_user_home() -> Result<Option<PathBuf>> {
     Ok(None)
