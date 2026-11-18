@@ -81,8 +81,8 @@ local function server_time(host, port, timeout)
   local r = fero.reader(sock)
   -- The ServerHello opens the server's handshake records; it may be split
   -- across several. Only its first 10 bytes are read (handshake type and
-  -- length, version, gmt_unix_time), at most 30 bytes with the record
-  -- headers. They are read one at a time, each receive waiting only for
+  -- length, version, gmt_unix_time), from at most 10 records (each
+  -- non-empty), 60 bytes with their headers. They are read one at a time, each receive waiting only for
   -- what is left of one `timeout` (counted in whole seconds, as os.time
   -- is), so a server that trickles bytes cannot stretch the wait.
   local deadline = os.time() + math.max(1, timeout // 1000)
@@ -98,7 +98,7 @@ local function server_time(host, port, timeout)
     return table.concat(out)
   end
   local hs = ""
-  for _ = 1, 4 do
+  for _ = 1, 10 do
     local head = take(5)
     if not head then return done(nil) end
     local kind, major, len = string.unpack(">BBxI2", head)

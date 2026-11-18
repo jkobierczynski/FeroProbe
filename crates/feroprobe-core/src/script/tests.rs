@@ -2307,10 +2307,12 @@ async fn hello_server(
             hs.extend([0, 0xc0, 0x2f, 0]);
             let mut rec = vec![2, 0, 0, hs.len() as u8];
             rec.extend(hs);
-            // The handshake message whole in one record, or split after
-            // six bytes across two (RFC 5246 6.2.1 allows it).
+            // The handshake message whole in one record, or with its first
+            // 10 bytes in a record each (RFC 5246 6.2.1 allows it).
             let parts: Vec<&[u8]> = if split {
-                vec![&rec[..6], &rec[6..]]
+                let mut p: Vec<&[u8]> = rec[..10].chunks(1).collect();
+                p.push(&rec[10..]);
+                p
             } else {
                 vec![&rec[..]]
             };
@@ -2387,7 +2389,7 @@ async fn ssl_date_reads_the_server_hello_time() {
     );
     assert_eq!(seen.lock().unwrap().len(), 3);
 
-    // A ServerHello split across two records.
+    // A ServerHello split across eleven records.
     let (port, _) = hello_server(ahead, true).await;
     let out = output_of("ssl-date", port, "https").await.unwrap();
     assert!(out.ends_with(" from scanner time."), "{out}");
@@ -2396,7 +2398,7 @@ async fn ssl_date_reads_the_server_hello_time() {
 #[tokio::test]
 async fn ssl_date_stops_a_trickling_server_at_its_timeout() {
     // Answers each ClientHello with a ServerHello one byte every 400 ms:
-    // every receive stays under the 1 s timeout, but the 30 bytes would take
+    // every receive stays under the 1 s timeout, but the bytes it needs would take
     // 12 s in all.
     let port = tcp_server(|mut s| async move {
         let mut head = [0u8; 5];
