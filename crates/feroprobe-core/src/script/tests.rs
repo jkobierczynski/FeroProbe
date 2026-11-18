@@ -1964,6 +1964,7 @@ fn the_default_category() {
             "mysql-info",
             "ntp-info",
             "pop3-capabilities",
+            "rdp-ntlm-info",
             "rpcinfo",
             "smb2-security-mode",
             "smb2-time",
@@ -2104,4 +2105,175 @@ async fn smb2_security_mode_and_time() {
             .await
             .is_empty()
     );
+}
+
+/// An NTLM CHALLENGE message as a Windows server sends it: target name
+/// "LAB", the usual AV pairs, version 10.0.14393 and the clock `now`.
+fn ntlm_challenge(now: i64) -> Vec<u8> {
+    let u16le = |s: &str| -> Vec<u8> { s.encode_utf16().flat_map(u16::to_le_bytes).collect() };
+    let name = u16le("LAB");
+    let mut info = Vec::new();
+    for (id, v) in [
+        (2u16, "LAB"),
+        (1, "SRV01"),
+        (4, "lab.local"),
+        (3, "srv01.lab.local"),
+        (5, "lab.local"),
+    ] {
+        let v = u16le(v);
+        info.extend(id.to_le_bytes());
+        info.extend((v.len() as u16).to_le_bytes());
+        info.extend(v);
+    }
+    info.extend(7u16.to_le_bytes());
+    info.extend(8u16.to_le_bytes());
+    info.extend(((now + 11_644_473_600) * 10_000_000).to_le_bytes());
+    info.extend([0u8; 4]);
+    let mut m = b"NTLMSSP\0".to_vec();
+    m.extend(2u32.to_le_bytes());
+    m.extend((name.len() as u16).to_le_bytes());
+    m.extend((name.len() as u16).to_le_bytes());
+    m.extend(56u32.to_le_bytes());
+    m.extend(0xe28a_8215u32.to_le_bytes());
+    m.extend(*b"chalenge");
+    m.extend([0u8; 8]);
+    m.extend((info.len() as u16).to_le_bytes());
+    m.extend((info.len() as u16).to_le_bytes());
+    m.extend((56 + name.len() as u32).to_le_bytes());
+    m.extend([10, 0]);
+    m.extend(14393u16.to_le_bytes());
+    m.extend([0, 0, 0, 15]);
+    m.extend(name);
+    m.extend(info);
+    m
+}
+
+/// A stand-in RDP server: confirms the connection selecting `protocol`,
+/// then (for CredSSP) speaks TLS and answers the TSRequest with an NTLM
+/// challenge. Keeps the connection request and the TSRequest.
+async fn rdp_server(protocol: u32, now: i64) -> (u16, Seen) {
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = l.local_addr().unwrap().port();
+    let acceptor = tls_acceptor();
+    let seen: Seen = Default::default();
+    let keep = seen.clone();
+    tokio::spawn(async move {
+        while let Ok((mut s, _)) = l.accept().await {
+            let acceptor = acceptor.clone();
+            let keep = keep.clone();
+            tokio::spawn(async move {
+                let mut head = [0u8; 4];
+                if s.read_exact(&mut head).await.is_err() {
+                    return;
+                }
+                let mut req = vec![0u8; u16::from_be_bytes([head[2], head[3]]) as usize - 4];
+                if s.read_exact(&mut req).await.is_err() {
+                    return;
+                }
+                keep.lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&req).into_owned());
+                let mut cc = vec![0x0e, 0xd0, 0, 0, 0x12, 0x34, 0];
+                cc.extend([2, 0x1f, 8, 0]);
+                cc.extend(protocol.to_le_bytes());
+                let mut out = vec![3, 0, 0, (cc.len() + 4) as u8];
+                out.extend(cc);
+                if s.write_all(&out).await.is_err() {
+                    return;
+                }
+                if protocol & 0x0a == 0 {
+                    // No CredSSP: the client must close without starting
+                    // TLS. Keep what it sends, if anything, until it closes.
+                    let mut got = Vec::new();
+                    let how =
+                        match tokio::time::timeout(Duration::from_secs(5), s.read_to_end(&mut got))
+                            .await
+                        {
+                            Ok(Ok(_)) => "closed",
+                            Ok(Err(_)) => "error",
+                            Err(_) => "timeout",
+                        };
+                    keep.lock()
+                        .unwrap()
+                        .push(format!("after: {how}: {}", String::from_utf8_lossy(&got)));
+                    return;
+                }
+                let Ok(mut tls) = acceptor.accept(s).await else {
+                    return;
+                };
+                let mut buf = [0u8; 512];
+                let n = tls.read(&mut buf).await.unwrap_or(0);
+                keep.lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&buf[..n]).into_owned());
+                let token = ntlm_challenge(now);
+                let mut body = vec![0xa0, 3, 2, 1, 6, 0xa1, 0x82];
+                body.extend(((token.len() + 8) as u16).to_be_bytes());
+                body.extend([0x30, 0x82]);
+                body.extend(((token.len() + 4) as u16).to_be_bytes());
+                body.extend([0x04, 0x82]);
+                body.extend((token.len() as u16).to_be_bytes());
+                body.extend(token);
+                let mut reply = vec![0x30, 0x82];
+                reply.extend((body.len() as u16).to_be_bytes());
+                reply.extend(body);
+                let _ = tls.write_all(&reply).await;
+                let _ = tls.shutdown().await;
+            });
+        }
+    });
+    (port, seen)
+}
+
+#[tokio::test]
+async fn rdp_ntlm_info_reads_the_challenge() {
+    // 2026-01-02T03:04:05Z
+    let (port, seen) = rdp_server(2, 1_767_323_045).await;
+    assert_eq!(
+        output_of("rdp-ntlm-info", port, "ms-wbt-server")
+            .await
+            .as_deref(),
+        Some(
+            "\n  Target_Name: LAB\n  NetBIOS_Domain_Name: LAB\n  \
+             NetBIOS_Computer_Name: SRV01\n  DNS_Domain_Name: lab.local\n  \
+             DNS_Computer_Name: srv01.lab.local\n  DNS_Tree_Name: lab.local\n  \
+             Product_Version: 10.0.14393\n  System_Time: 2026-01-02T03:04:05+00:00"
+        )
+    );
+    {
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 2, "{seen:?}");
+        // The cookie names FeroProbe; the CredSSP message carries only an
+        // NTLM NEGOTIATE.
+        assert!(
+            seen[0].contains("Cookie: mstshash=FeroProbe\r\n"),
+            "{seen:?}"
+        );
+        assert!(seen[1].contains("NTLMSSP\0\u{1}\0\0\0"), "{seen:?}");
+    }
+    // A server that offers only TLS (no CredSSP): no output, no TLS.
+    let (port, seen) = rdp_server(1, 0).await;
+    assert_eq!(
+        output_of("rdp-ntlm-info", port, "ms-wbt-server").await,
+        None
+    );
+    for _ in 0..100 {
+        if seen.lock().unwrap().len() == 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(seen.lock().unwrap()[1], "after: closed: ");
+
+    // An OEM (not Unicode) target name is read as bytes, not UTF-16.
+    let src = r#"
+categories = {"safe"}
+prerule = function() return true end
+action = function()
+  local m = "NTLMSSP\0" .. string.pack("<I4I2I2I4I4", 2, 3, 3, 48, 2)
+    .. string.rep("\0", 24) .. "LAB"
+  return fero.ntlm.parse_challenge(m).target_name
+end"#;
+    let scan = ScriptScan::new(vec![script("oem", src)], ArgTable::default(), None).unwrap();
+    assert_eq!(scan.pre_scan().await[0].output, "LAB");
 }

@@ -1269,6 +1269,8 @@ far as `-sV` found them.
 | `fero.get_port_state(host, port)` | The port table of a scanned port that may be open (`port` gives `number`, and `protocol`, default `"tcp"`), else `nil`; for a hostrule script to find its service. Closed and filtered ports are `nil` |
 | `fero.smb.port(host)` | The port to reach SMB on. With `--script-args smbport=N`, that port only (`nil` when it is not open; 445 and 139 are not tried). Without it, 445 if open, else 139, else `nil` |
 | `fero.smb.negotiate(host, port [, timeout])` | One SMB2 NEGOTIATE exchange (dialects 2.0.2 to 3.1.1; on 139 or a `netbios-ssn` port after a NetBIOS session request): a table with `dialect` (`0x0311`...), `security_mode`, `capabilities`, `server_guid`, `time` and `start_time` (Unix seconds, `start_time` `nil` when not given), or `nil` and a message. Logs in to nothing; `fero.smb.dialect_name(d)` writes a dialect as nmap does (`3:1:1`) |
+| `fero.ntlm.negotiate_message()` | An NTLM NEGOTIATE message (no domain or workstation named), for a script to wrap in its protocol |
+| `fero.ntlm.parse_challenge(data)` | Finds the NTLM CHALLENGE in `data` (it may be wrapped, as in CredSSP or SPNEGO) and reads it: `target_name`, `netbios_computer`, `netbios_domain`, `dns_computer`, `dns_domain`, `dns_tree`, `timestamp` (Unix seconds), `version` (`"10.0.14393"`) and `flags`, each when the server gives it; or `nil` and a message |
 | `fero.reader(sock)` | A buffered reader over a connected socket: `r:line()` (one line, without its CR LF), `r:bytes(n)` (exactly `n` bytes) and `r:reply()` (an FTP or SMTP style reply: its code as a number and its lines, following `250-` continuation lines up to `250 `). Each returns `nil` and a message on a timeout, the end of the connection or a line over 64 KiB |
 | `fero.crypto.digest(name, data)` | The digest of `data` as raw bytes: `md5`, `sha1`, `sha256`, `sha384` or `sha512` (MD5 and SHA-1 only for fingerprints, as tools still print them) |
 | `fero.crypto.random_bytes(n)` | `n` random bytes from the system (at most 65536) |
@@ -1429,6 +1431,7 @@ compare, with the differences named below.
 | `mysql-info` | default, discovery, safe | 3306, `mysql` | Reads the server's greeting: protocol, version, thread ID, capability flags and names, status, salt and authentication plugin, or the error a server that refuses the connection gives. Sends nothing |
 | `ntp-info` | default, discovery, safe | 123/udp, `ntp` | One NTP client request (the server's receive time) and one control-message READVAR request (version, system, stratum, reference ID and the other system variables, which many servers refuse). Not the `monlist` request used for amplification |
 | `pop3-capabilities` | default, discovery, safe | 110, 995, `pop3`, `pop3s` | Sends CAPA and lists the capabilities, with their arguments in parentheses, plus APOP when the greeting offers it; logs in to nothing |
+| `rdp-ntlm-info` | default, discovery, safe | 3389, `ms-wbt-server` | Asks for TLS and CredSSP (Network Level Authentication) in the connection request, sends an NTLM NEGOTIATE inside a CredSSP message over TLS and shows what the server's NTLM CHALLENGE says: target name, NetBIOS and DNS domain and computer names, DNS tree name, product version and system time (UTC). No credentials are sent. A server that does not offer CredSSP gives no output. The connection request carries the routing cookie `Cookie: mstshash=FeroProbe`. TLS 1.2 and 1.3 only, as for all FeroProbe TLS, so old servers with TLS 1.0 only give no output. Argument: `rdp-ntlm-info.timeout` (ms, default 8000) |
 | `rpcinfo` | default, discovery, safe | 111/tcp and udp, `rpcbind` | Asks the portmapper for its registered RPC programs (DUMP, as `rpcinfo -p`) and lists program, versions, port and protocol, and service name. The ports it lists are not contacted |
 | `smb2-security-mode` | default, discovery, safe | hosts with 445 or 139 open | One SMB2 NEGOTIATE (see `fero.smb.negotiate`) and whether the server signs messages: enabled and required, enabled but not required, or disabled, under the dialect it chose (`3:1:1`). Arguments: `smbport`, `smb2-security-mode.timeout` (ms, default 8000) |
 | `smb2-time` | default, discovery, safe | hosts with 445 or 139 open | The server's clock and start time from its NEGOTIATE answer (`N/A` when it gives none, as current Windows does), in UTC. nmap's also adds a `clock-skew` line to the host's script results; FeroProbe's does not yet. Arguments: `smbport`, `smb2-time.timeout` |
@@ -1445,7 +1448,7 @@ ports" are ports where `-sV` found TLS, or whose number or service is a
 TLS one. A script whose rule needs a service name sees the one `-sV`
 found, or without `-sV` the name of the port number, as in nmap.
 
-nmap's `default` category has more scripts (other SMB ones, RDP, DNS and others);
+nmap's `default` category has more scripts (other SMB ones, DNS and others);
 FeroProbe's grows release by release. Scripts of nmap's that would reach
 beyond the scanned host, such as `http-open-proxy` or `socks-open-proxy`,
 which ask the target to fetch an outside site, are not planned for the
