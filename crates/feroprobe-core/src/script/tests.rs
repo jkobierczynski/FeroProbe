@@ -2562,8 +2562,8 @@ async fn nbstat_reads_the_name_table() {
 /// ("ns1.lab") and version.bind ("9.18" and ".24", two strings), and the
 /// NSID "ns1" when the query asks for it. Without `edns` a query with an
 /// OPT record gets FORMERR. With `odd`, a version.bind answer starts with
-/// an unrelated CHAOS TXT record (hostname.bind "wrong"), which must be
-/// skipped.
+/// two unrelated CHAOS TXT records (hostname.bind, and the single label
+/// "version.bind"), which must be skipped.
 fn dns_answer(q: &[u8], edns: bool, odd: bool) -> Vec<u8> {
     let ar = u16::from_be_bytes([q[10], q[11]]);
     let mut end = 12;
@@ -2585,7 +2585,7 @@ fn dns_answer(q: &[u8], edns: bool, odd: bool) -> Vec<u8> {
         0,
         1,
         0,
-        1 + extra as u8,
+        1 + 2 * extra as u8,
         0,
         0,
         0,
@@ -2594,6 +2594,8 @@ fn dns_answer(q: &[u8], edns: bool, odd: bool) -> Vec<u8> {
     r.extend(question);
     if extra {
         r.extend(b"\x08hostname\x04bind\0\0\x10\0\x03\0\0\0\0\0\x06\x05wrong");
+        // One label "version.bind", not the name version.bind.
+        r.extend(b"\x0cversion.bind\0\0\x10\0\x03\0\0\0\0\0\x06\x05wrong");
     }
     let txt: &[&[u8]] = if id_server {
         &[b"ns1.lab"]

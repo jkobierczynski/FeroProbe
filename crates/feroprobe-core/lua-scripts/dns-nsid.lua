@@ -55,7 +55,8 @@ local function query(name, nsid)
   return q
 end
 
--- The name at `pos`, lower-cased and dotted, following compression
+-- The name at `pos`, lower-cased and dotted (a dot or backslash inside a
+-- label escaped, so label boundaries are kept), following compression
 -- pointers (RFC 1035 4.1.4), and the position after it in the message;
 -- nil when it is malformed or runs out.
 local function read_name(m, pos)
@@ -76,7 +77,7 @@ local function read_name(m, pos)
       return table.concat(labels, "."):lower(), after or pos + 1
     else
       if pos + len > #m then return nil end
-      labels[#labels + 1] = m:sub(pos + 1, pos + len)
+      labels[#labels + 1] = m:sub(pos + 1, pos + len):gsub("[\\.]", "\\%0")
       if #labels > 127 then return nil end
       pos = pos + 1 + len
     end
@@ -109,7 +110,11 @@ local function parse(m, qname)
     local qtype, qclass = string.unpack(">I2I2", m, pos)
     if qtype ~= TXT or qclass ~= CH then return nil end
     pos = pos + 4
-  elseif qd ~= 0 or flags & 0xf == 0 then
+  elseif qd == 0 and flags & 0xf ~= 0 then
+    -- An error reply without the question: its RCODE only (for the EDNS
+    -- fallback), never values.
+    return flags & 0xf
+  else
     return nil
   end
   local txt, nsid
