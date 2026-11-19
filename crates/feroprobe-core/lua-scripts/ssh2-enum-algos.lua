@@ -7,8 +7,9 @@ Lists the algorithms an SSH-2 server offers in its key exchange
 initialisation (KEXINIT): key exchange methods, host key types,
 ciphers, MACs and compression. Without -v only the number of each is
 shown; with -v each algorithm is listed, in the server's order of
-preference. When the server offers the same list in both directions
-(client to server and server to client), it is shown once.
+preference (nmap 7.95 lists them without -v too). When the server
+offers the same list in both directions (client to server and server
+to client), it is shown once.
 
 The script reads the server's version line, sends its own
 ("SSH-2.0-FeroProbe_Scripting_Engine") and a KEXINIT, reads the
