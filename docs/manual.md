@@ -1263,6 +1263,7 @@ far as `-sV` found them.
 | `sock:send(data)` | Send. Returns `true`, or `false` and a message |
 | `sock:receive()` | Whatever arrives next. Returns `true` and the data, or `false` and `"TIMEOUT"`, `"EOF"` or another message |
 | `sock:receive_bytes(n)`, `sock:receive_lines(n)` | Wait for at least `n` bytes or `n` lines; returns all data read. What arrived before a timeout or the end of the connection is returned too |
+| `sock:receive_buf(delimiter, keep)` | The data up to the first match of `delimiter`, a Lua pattern (such as `"\r?\n"`) or a function that is given the buffered data and returns where its delimiter starts and ends, as `string.find` does; with the delimiter when `keep` is true. What follows stays buffered for the next receive call. Without a match before a timeout, the end of the connection or 16 MiB, returns `false` and the message, and keeps what arrived for the next call |
 | `sock:set_timeout(ms)` | How long each call waits (default 30 seconds) |
 | `sock:close()` | Close the socket (also done when the script ends) |
 | `fero.args.get(name, ...)` | The `--script-args` values of the given names, one per name; an item may be a list of names, the first found wins. A name given as a bare flag returns `true`; `"script.arg"` falls back to `"arg"`, as in nmap |
@@ -1280,6 +1281,11 @@ far as `-sV` found them.
 | `fero.smb.negotiate(host, port [, timeout])` | One SMB2 NEGOTIATE exchange (dialects 2.0.2 to 3.1.1; on 139 or a `netbios-ssn` port after a NetBIOS session request): a table with `dialect` (`0x0311`...), `security_mode`, `capabilities`, `server_guid`, `time` and `start_time` (Unix seconds, `start_time` `nil` when not given), or `nil` and a message. Logs in to nothing; `fero.smb.dialect_name(d)` writes a dialect as nmap does (`3:1:1`) |
 | `fero.ntlm.negotiate_message()` | An NTLM NEGOTIATE message (no domain or workstation named), for a script to wrap in its protocol |
 | `fero.ntlm.parse_challenge(data)` | Finds the NTLM CHALLENGE in `data` (it may be wrapped, as in CredSSP or SPNEGO) and reads it: `target_name`, `netbios_computer`, `netbios_domain`, `dns_computer`, `dns_domain`, `dns_tree`, `timestamp` (Unix seconds), `version` (`"10.0.14393"`) and `flags`, each when the server gives it; or `nil` and a message |
+| `fero.output_table()` | A table for output that keeps its names in the order they are first set (one removed and set again goes last), as nmap's `stdnse.output_table`; see Output below |
+| `fero.registry.get(name)`, `.set(name, value)`, `.append(name, value)` | Values shared by every script of the run, as nmap's `nmap.registry`; see [The registry](#the-registry) |
+| `fero.host_registry.get(name)`, `.set(...)`, `.append(...)` | The same for the host the script runs against, as nmap's `host.registry`; `nil` in prerule and postrule scripts |
+| `fero.record_skew(remote [, scanner])` | Notes how far a service's clock (`remote`, Unix seconds) is from the scanner's (`scanner`, default `os.time()`) for `clock-skew`, as nmap's `datetime.record_skew` |
+| `fero.format_time(seconds)` | A time span as nmap writes one: `0s`, `5s`, `-1m05s`, `2h03m04s`, `1d02h03m04s` |
 | `fero.reader(sock)` | A buffered reader over a connected socket: `r:line()` (one line, without its CR LF), `r:bytes(n)` (exactly `n` bytes) and `r:reply()` (an FTP or SMTP style reply: its code as a number and its lines, following `250-` continuation lines up to `250 `). Each returns `nil` and a message on a timeout, the end of the connection or a line over 64 KiB |
 | `fero.crypto.digest(name, data)` | The digest of `data` as raw bytes: `md5`, `sha1`, `sha256`, `sha384` or `sha512` (MD5 and SHA-1 only for fingerprints, as tools still print them) |
 | `fero.crypto.random_bytes(n)` | `n` random bytes from the system (at most 65536) |
@@ -1291,8 +1297,9 @@ far as `-sV` found them.
 
 **Output.** `action` returns a string, which is the output as it is; a
 table, which the report lays out as indented lines (its numbered entries
-first, as their value alone, then its named entries in name order, as
-`name: value`) and which XML and JSON keep as structured data; or a table
+first, as their value alone, then its named entries as `name: value`, in
+name order, or for a table from `fero.output_table()` in the order they
+were set) and which XML and JSON keep as structured data; or a table
 and a string, the string being the text shown. Returning nothing gives no
 output. An error in a rule or action gives no output either; `-d` shows it.
 
@@ -1313,6 +1320,30 @@ action = function(host, port)
   return { greets = tostring(ok), bytes = ok and #data or 0 }
 end
 ```
+
+### The registry
+
+Each script run has a Lua state of its own, so scripts leave values for
+each other in the registry, which lives outside them all: `set(name,
+value)` stores a copy (`nil` removes it), `get(name)` returns a copy (or
+`nil`), and `append(name, value)` adds a copy to the end of the list under
+`name`, starting the list when there is none, in one step, so scripts that
+run at the same time never lose each other's entries. Changing a table
+after `set` or `get` changes only the script's own copy; store it again to
+share the change. Only plain data is kept: `nil`, booleans, numbers,
+strings, and tables of them (keys: numbers, strings or booleans) up to 32
+levels deep. A function, a socket or another userdata is refused with an
+error, so nothing in the registry can run in another script. All values
+together may take 16 MiB.
+
+`fero.registry` is the run's, shared by every script, the prerule and
+postrule ones included; `fero.host_registry` is the host's, shared by the
+scripts that run against that host. A script that reads what another one
+leaves names it in `dependencies`, so that it runs after it when both are
+chosen. In nmap the registry is a plain table that scripts change in
+place; FeroProbe's is called through these functions, as values are
+copied between states. The NSE compatibility layer (planned) can offer
+nmap's form on top.
 
 ### Script TLS and HTTP
 
@@ -1431,9 +1462,11 @@ compare, with the differences named below.
 | Script | Categories | Runs on | What it does |
 | --- | --- | --- | --- |
 | `banner` | discovery, safe | open TCP ports | Shows the first line the service sends, without sending anything. Arguments: `banner.timeout` (ms, default 5000), `banner.length` (characters, default 200) |
+| `clock-skew` | default, safe | hosts where another script noted a clock | Sums up how far the host's clocks are from the scanner's, from what `http-date`, `ntp-info`, `rdp-ntlm-info`, `smb2-time` and `ssl-date` saw (it runs after them and sends nothing): the one value when there is one (`5s`), else `mean: ..., deviation: ..., median: ...` (the population standard deviation); XML and JSON have `mean`, `stddev`, `median` and `count` in seconds. After the scan, when two or more hosts had a value, it lists the hosts grouped by their median (`Post-scan script results`). The differences include the time an answer took and the rounding to whole seconds, so `-1s` or `1s` usually means the clocks agree. nmap's also counts services FeroProbe has no scripts for yet (SMB1, the other NTLM-info scripts) |
 | `dns-nsid` | default, discovery, safe | 53, `domain` (TCP or UDP) | Asks a DNS server who it is: the name server identifier (NSID, RFC 5001) from an EDNS(0) query for `id.server`, and the CHAOS TXT records `id.server` and `version.bind` (RFC 4892), shown as `NSID: <id> (<hex>)`, `id.server:` and `bind.version:`; only the ones the server gives. At most three small queries to the scanned port, with the recursion-desired (RD) flag set as in nmap's queries: a server that rejects EDNS (FORMERR or NOTIMP) is asked for `id.server` again without it. A reply that carries a question counts only when it is the one asked, and only the TXT record for that name is read; an error reply without a question (FORMERR or NOTIMP) only triggers the retry without EDNS. Over UDP each query is sent twice at most; over TCP with the two-byte length in front, read in two reads at most within the timeout each. The NSID and `id.server` come from the same reply (unless the retry without EDNS was needed); `version.bind` comes from its own query (and, over TCP, its own connection), so behind a load balancer or anycast address it can come from a different server. The transaction ID is `0x4650` ("FP"). Argument: `dns-nsid.timeout` (ms, default 5000) |
 | `ftp-anon` | default, auth, safe | 21, `ftp` | Logs in as `anonymous` with the password `feroprobe@` and says whether that is allowed, then quits. Lists no files (nmap's does): a listing needs a data connection to a port the server picks, outside the scan's scope. Argument: `ftp-anon.timeout` (ms, default 8000) |
 | `ftp-syst` | default, discovery, safe | 21, `ftp` | Sends SYST and STAT without logging in and shows the answers (many servers answer STAT only after a login; then only SYST is shown). Argument: `ftp-syst.timeout` |
+| `http-date` | discovery, safe | web ports | One GET of the front page; shows its `Date` header and how far it is from the scanner's clock, as `Wed, 19 Nov 2026 03:00:05 GMT; +5s from local time.` (XML and JSON: `date` in ISO form and `delta` in seconds), and notes the difference for `clock-skew`. Reads all three HTTP-date forms. Follows no redirect. Not in `default`, as in nmap |
 | `http-headers` | discovery, safe | web ports | Lists the headers of the front page's answer as they came, then the request used: HEAD, or GET when HEAD gets an error status or no answer. Follows no redirect. Not in `default`, as in nmap. Arguments: `http-headers.path` (default `/`), `http-headers.useget` (GET straight away) |
 | `http-methods` | default, safe | web ports | Sends one OPTIONS request and lists the methods in the `Allow` header, repeating those beyond GET, HEAD, POST and OPTIONS as potentially risky. Tries no method. Argument: `http-methods.url-path` (default `/`) |
 | `http-robots.txt` | default, discovery, safe | web ports | Fetches `/robots.txt` and lists its `Disallow` paths (at most 100) |
@@ -1442,16 +1475,16 @@ compare, with the differences named below.
 | `imap-capabilities` | default, safe | 143, 993, `imap`, `imaps` | Sends CAPABILITY and lists the answer; logs in to nothing. Over TLS on 993 and when `-sV` found TLS |
 | `mysql-info` | default, discovery, safe | 3306, `mysql` | Reads the server's greeting: protocol, version, thread ID, capability flags and names, status, salt and authentication plugin, or the error a server that refuses the connection gives. Sends nothing |
 | `nbstat` | default, discovery, safe | hosts where UDP 137 (or the `nbstat.port` port) was scanned and is open, open\|filtered or unfiltered | One NetBIOS NODE STATUS request (as `nbtstat -A`, RFC 1002), sent twice at most: the host's NetBIOS name, the logged-in user when the name table has one, and the MAC address the host reports with its vendor from the OUI list (`<unknown>`, and no `mac` in XML/JSON, for the all-zero MAC Samba gives); a `<03>` name the machine also holds as a unique `<00>` or `<20>` name (its own name or an alias) is not taken for a user; with `-v` the whole name table and its flags. The transaction ID is `0x4650` ("FP"). nmap's also runs when only TCP 139 or 445 is open and then sends to UDP 137 anyway; FeroProbe's runs only when its port (UDP 137, or `nbstat.port`) was scanned (`-sU -p U:137`), as nothing goes to ports outside the scan. nmap's shows the name table's statistics with `-vv`; FeroProbe's does not. Arguments: `nbstat.port` (default 137, must be scanned), `nbstat.timeout` (ms, default 5000) |
-| `ntp-info` | default, discovery, safe | 123/udp, `ntp` | One NTP client request (the server's receive time) and one control-message READVAR request (version, system, stratum, reference ID and the other system variables, which many servers refuse). Not the `monlist` request used for amplification |
+| `ntp-info` | default, discovery, safe | 123/udp, `ntp` | One NTP client request (the server's receive time) and one control-message READVAR request (version, system, stratum, reference ID and the other system variables, which many servers refuse). The receive time is noted for `clock-skew`. Not the `monlist` request used for amplification |
 | `pop3-capabilities` | default, discovery, safe | 110, 995, `pop3`, `pop3s` | Sends CAPA and lists the capabilities, with their arguments in parentheses, plus APOP when the greeting offers it; logs in to nothing |
-| `rdp-ntlm-info` | default, discovery, safe | 3389, `ms-wbt-server` | Asks for TLS and CredSSP (Network Level Authentication) in the connection request, sends an NTLM NEGOTIATE inside a CredSSP message over TLS and shows what the server's NTLM CHALLENGE says: target name, NetBIOS and DNS domain and computer names, DNS tree name, product version and system time (UTC). No credentials are sent. A server that does not offer CredSSP gives no output. The connection request carries the routing cookie `Cookie: mstshash=FeroProbe`. TLS 1.2 and 1.3 only, as for all FeroProbe TLS, so old servers with TLS 1.0 only give no output. Argument: `rdp-ntlm-info.timeout` (ms, default 8000) |
+| `rdp-ntlm-info` | default, discovery, safe | 3389, `ms-wbt-server` | Asks for TLS and CredSSP (Network Level Authentication) in the connection request, sends an NTLM NEGOTIATE inside a CredSSP message over TLS and shows what the server's NTLM CHALLENGE says: target name, NetBIOS and DNS domain and computer names, DNS tree name, product version and system time (UTC), in that order, as nmap's; the system time is noted for `clock-skew`. No credentials are sent. A server that does not offer CredSSP gives no output. The connection request carries the routing cookie `Cookie: mstshash=FeroProbe`. TLS 1.2 and 1.3 only, as for all FeroProbe TLS, so old servers with TLS 1.0 only give no output. Argument: `rdp-ntlm-info.timeout` (ms, default 8000) |
 | `rpcinfo` | default, discovery, safe | 111/tcp and udp, `rpcbind` | Asks the portmapper for its registered RPC programs (DUMP, as `rpcinfo -p`) and lists program, versions, port and protocol, and service name. The ports it lists are not contacted |
 | `smb2-security-mode` | default, discovery, safe | hosts with 445 or 139 open | One SMB2 NEGOTIATE (see `fero.smb.negotiate`) and whether the server signs messages: enabled and required, enabled but not required, or disabled, under the dialect it chose (`3:1:1`). Arguments: `smbport`, `smb2-security-mode.timeout` (ms, default 8000) |
-| `smb2-time` | default, discovery, safe | hosts with 445 or 139 open | The server's clock and start time from its NEGOTIATE answer (`N/A` when it gives none, as current Windows does), in UTC. nmap's also adds a `clock-skew` line to the host's script results; FeroProbe's does not yet. Arguments: `smbport`, `smb2-time.timeout` |
+| `smb2-time` | default, discovery, safe | hosts with 445 or 139 open | The server's clock and start time from its NEGOTIATE answer (`N/A` when it gives none, as current Windows does), in UTC; the clock is noted for `clock-skew`. Arguments: `smbport`, `smb2-time.timeout` |
 | `smtp-commands` | default, discovery, safe | 25, 465, 587, `smtp`, `submission` | Sends `EHLO feroprobe.invalid` and lists the server's name and extensions; QUIT. Over TLS on 465. `smtp.domain` (nmap's name) sends another name instead. nmap's also sends HELP, and by default the target's own name; FeroProbe's sends no HELP |
 | `ssh-hostkey` | default, discovery, safe | 22, `ssh` | Shows each host key's size, MD5 fingerprint and type, as nmap's does, and with `-vv` the key. `ssh-hostkey.format` (or nmap's `ssh_hostkey`) picks `md5`, `sha256` (as `ssh-keygen -l` prints it), `full` or `all`; nmap's `visual` and `bubble` forms are not offered. One connection per key type the server offers; each stops at the server's key exchange reply, before any login. The client announces itself as `SSH-2.0-FeroProbe_Scripting_Engine`. Key exchange: curve25519 or the Diffie-Hellman groups 14, 16, 18 and 1. Argument: `ssh-hostkey.timeout` (ms, default 10000) |
 | `ssl-cert` | default, discovery, safe | TLS ports | Shows the certificate of a TLS port: subject, alternative names, issuer, key type and size, signature algorithm, validity dates, SHA-1 and SHA-256 fingerprints, and with `-v` the PEM. Direct TLS only for now (no STARTTLS); nmap's also shows MD5, FeroProbe's SHA-256 instead |
-| `ssl-date` | default, discovery, safe | TLS ports | Sends a TLS 1.2 ClientHello and reads the time the server puts in the first four bytes of its ServerHello random, as `2026-11-18T10:00:00+00:00; +5s from scanner time.` No handshake is finished. A second hello checks that the value moves with the clock (and when both answers came within one second, a third one two seconds later, so that a field that never changes is not taken for a clock); most current servers fill it with random bytes, and then the script says `TLS randomness does not represent time`. A ServerHello split across several records is read; only its first 10 bytes are read, within one timeout. The hello's random carries `FeroProbeSSLDate` after the time field. Direct TLS only (no STARTTLS, which nmap's also tries); nmap's also adds a `clock-skew` line to the host's script results, FeroProbe's does not yet. Argument: `ssl-date.timeout` (ms, default 8000) |
+| `ssl-date` | default, discovery, safe | TLS ports | Sends a TLS 1.2 ClientHello and reads the time the server puts in the first four bytes of its ServerHello random, as `2026-11-18T10:00:00+00:00; +5s from scanner time.` No handshake is finished. A second hello checks that the value moves with the clock (and when both answers came within one second, a third one two seconds later, so that a field that never changes is not taken for a clock); most current servers fill it with random bytes, and then the script says `TLS randomness does not represent time`. A ServerHello split across several records is read; only its first 10 bytes are read, within one timeout. The hello's random carries `FeroProbeSSLDate` after the time field. The server's clock is noted for `clock-skew`. Direct TLS only (no STARTTLS, which nmap's also tries). Argument: `ssl-date.timeout` (ms, default 8000) |
 | `sshv1` | default, safe | 22, `ssh` | Says whether the server still accepts the obsolete SSH protocol 1, from the version in its greeting; sends nothing. nmap's also reads the version 1 keys and ciphers |
 | `vnc-info` | default, discovery, safe | 5900-5910, `vnc` | Answers the RFB version handshake and lists the security types offered, with a warning when "None" (no authentication) is one; chooses none, so nothing logs in |
 | `x11-access` | default, auth, safe | 6000-6009, `X11` | Sends an X11 connection setup without credentials and says whether the server lets anyone connect; closes at once |

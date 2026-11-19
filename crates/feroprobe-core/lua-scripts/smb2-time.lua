@@ -5,7 +5,8 @@
 description = [[
 Shows an SMB2/SMB3 server's clock, and when it started if it says, from
 its answer to one NEGOTIATE exchange on TCP 445 (or 139, after a NetBIOS
-session request). Times are in UTC. Logs in to nothing.
+session request). Times are in UTC. Logs in to nothing. How far the
+server's clock is from the scanner's is noted for clock-skew.
 
 Script arguments:
   smbport          The port to use instead of 445 and 139.
@@ -33,5 +34,6 @@ action = function(host)
   local timeout = tonumber(fero.args.get(SCRIPT_NAME .. ".timeout")) or 8000
   local n = fero.smb.negotiate(host, port, timeout)
   if not n then return nil end
+  if n.time then fero.record_skew(n.time) end
   return { date = when(n.time), start_date = when(n.start_time) }
 end

@@ -1955,6 +1955,7 @@ fn the_default_category() {
     assert_eq!(
         defaults,
         [
+            "clock-skew",
             "dns-nsid",
             "ftp-anon",
             "ftp-syst",
@@ -2781,4 +2782,284 @@ async fn dns_nsid_asks_for_the_nsid_and_the_chaos_names() {
     let out = run_built_in("dns-nsid", dns_host(port, Protocol::Tcp)).await;
     assert_eq!(out, [(port, FULL.to_string())]);
     assert_eq!(seen.lock().unwrap().len(), 2);
+}
+
+// ---- Script libraries, part 2: ordered output, registry, receive_buf ----
+
+#[tokio::test]
+async fn output_tables_keep_their_order() {
+    let src = r#"
+categories = {"safe"}
+prerule = function() return true end
+action = function()
+  local t = fero.output_table()
+  t.zeta = "1"
+  t.alpha = "2"
+  t[1] = "first"
+  t.mid = fero.output_table()
+  t.mid.y = "a"
+  t.mid.x = "b"
+  t.gone = "x"
+  t.gone = nil
+  t.again = "3"
+  t.alpha = "changed"
+  rawset(t, "raw", "4")
+  t.gone = "back"
+  return t
+end"#;
+    let scan = ScriptScan::new(vec![script("ordered", src)], ArgTable::default(), None).unwrap();
+    let r = scan.pre_scan().await;
+    assert_eq!(
+        r[0].output,
+        "\n  first\n  zeta: 1\n  alpha: changed\n  mid: \n    y: a\n    x: b\n  again: 3\n  gone: back\n  raw: 4"
+    );
+    let json = serde_json::to_string(r[0].data.as_ref().unwrap()).unwrap();
+    assert_eq!(
+        json,
+        r#"{"1":"first","zeta":"1","alpha":"changed","mid":{"y":"a","x":"b"},"again":"3","gone":"back","raw":"4"}"#
+    );
+    // A plain table is still sorted.
+    let src = r#"
+categories = {"safe"}
+prerule = function() return true end
+action = function() return { zeta = "1", alpha = "2" } end"#;
+    let scan = ScriptScan::new(vec![script("plain", src)], ArgTable::default(), None).unwrap();
+    assert_eq!(scan.pre_scan().await[0].output, "\n  alpha: 2\n  zeta: 1");
+}
+
+#[tokio::test]
+async fn the_registry_carries_values_between_scripts() {
+    let writer = r#"
+categories = {"safe"}
+prerule = function() return true end
+hostrule = function() return true end
+action = function(host)
+  if SCRIPT_TYPE == "prerule" then
+    fero.registry.set("seen", { "pre" })
+    return nil
+  end
+  fero.host_registry.set("note", { ip = host.ip })
+  fero.registry.append("hosts", host.ip)
+end"#;
+    let reader = r#"
+categories = {"safe"}
+dependencies = {"writer"}
+hostrule = function() return fero.host_registry.get("note") ~= nil end
+postrule = function() return true end
+action = function(host)
+  if SCRIPT_TYPE == "postrule" then
+    local h = fero.registry.get("hosts")
+    table.sort(h)
+    return fero.registry.get("seen")[1] .. " " .. table.concat(h, ",")
+  end
+  return "note " .. fero.host_registry.get("note").ip
+end"#;
+    let scan = ScriptScan::new(
+        vec![script("reader", reader), script("writer", writer)],
+        ArgTable::default(),
+        None,
+    )
+    .unwrap();
+    assert!(scan.pre_scan().await.is_empty());
+    let mut other = host_with(&[]);
+    other.addr = "127.0.0.2".parse().unwrap();
+    let mut hosts = vec![host_with(&[]), other];
+    scan.scan_hosts(&mut hosts).await;
+    assert_eq!(hosts[0].scripts[0].output, "note 127.0.0.1");
+    assert_eq!(hosts[1].scripts[0].output, "note 127.0.0.2");
+    let post = scan.post_scan().await;
+    assert_eq!(post[0].output, "pre 127.0.0.1,127.0.0.2");
+}
+
+#[tokio::test]
+async fn receive_buf_splits_at_the_delimiter() {
+    let port = greeter(b"one\r\ntwo\nthree;four").await;
+    let src = r#"
+categories = {"safe"}
+portrule = function() return true end
+action = function(host, port)
+  local s = fero.socket.new()
+  s:set_timeout(1000)
+  assert(s:connect(host, port))
+  local out = {}
+  local function add(...) out[#out + 1] = table.concat({ tostring(select(1, ...)), tostring(select(2, ...)) }, "=") end
+  add(s:receive_buf("\r?\n", false))
+  add(s:receive_buf("\n", true))
+  add(s:receive_buf(function(buf) return buf:find(";", 1, true) end, false))
+  s:set_timeout(300)
+  add(s:receive_buf("never", false))
+  add(s:receive())
+  local ok, err = pcall(s.receive_buf, s, 5, false)
+  add(ok, err ~= nil)
+  return table.concat(out, "|")
+end"#;
+    let scan = ScriptScan::new(vec![script("rb", src)], ArgTable::default(), None).unwrap();
+    let mut hosts = vec![host_with(&[(port, PortState::Open)])];
+    scan.scan_hosts(&mut hosts).await;
+    assert_eq!(
+        hosts[0].ports[0].scripts[0].output,
+        "true=one|true=two\n|true=three|false=TIMEOUT|true=four|false=true"
+    );
+}
+
+/// `t` (Unix seconds) as an IMF-fixdate.
+fn http_date(t: i64) -> String {
+    let days = t.div_euclid(86400);
+    let secs = t.rem_euclid(86400);
+    // Civil date from days since 1970-01-01.
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    let wd = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"][days.rem_euclid(7) as usize];
+    let mon = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ][(m - 1) as usize];
+    format!(
+        "{wd}, {d:02} {mon} {y} {:02}:{:02}:{:02} GMT",
+        secs / 3600,
+        secs / 60 % 60,
+        secs % 60
+    )
+}
+
+/// An HTTP server whose Date header is `date(now)`, keeping each request.
+async fn date_web(date: fn(i64) -> String) -> (u16, Seen) {
+    let seen: Seen = Default::default();
+    let keep = seen.clone();
+    let port = tcp_server(move |mut s| {
+        let keep = keep.clone();
+        async move {
+            let req = read_http(&mut s).await;
+            keep.lock().unwrap().push(req);
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64;
+            let reply = format!(
+                "HTTP/1.1 200 OK\r\nDate: {}\r\nContent-Length: 2\r\n\r\nok",
+                date(now)
+            );
+            let _ = s.write_all(reply.as_bytes()).await;
+            let _ = s.shutdown().await;
+        }
+    })
+    .await;
+    (port, seen)
+}
+
+#[test]
+fn http_dates_format() {
+    assert_eq!(http_date(784_111_777), "Sun, 06 Nov 1994 08:49:37 GMT");
+    assert_eq!(http_date(0), "Thu, 01 Jan 1970 00:00:00 GMT");
+}
+
+#[tokio::test]
+async fn http_date_reads_the_date_header() {
+    // Each of the three HTTP-date forms.
+    for (date, iso) in [
+        ("Sun, 06 Nov 1994 08:49:37 GMT", "1994-11-06T08:49:37+00:00"),
+        (
+            "Sunday, 06-Nov-94 08:49:37 GMT",
+            "1994-11-06T08:49:37+00:00",
+        ),
+        ("Sun Nov  6 08:49:37 1994", "1994-11-06T08:49:37+00:00"),
+    ] {
+        let reply: &'static str = Box::leak(
+            format!("HTTP/1.1 200 OK\r\nDate: {date}\r\nContent-Length: 0\r\n\r\n")
+                .into_boxed_str(),
+        );
+        let port = tcp_server(move |mut s| async move {
+            let _ = read_http(&mut s).await;
+            let _ = s.write_all(reply.as_bytes()).await;
+        })
+        .await;
+        let scan = ScriptScan::new(vec![built_in("http-date")], ArgTable::default(), None).unwrap();
+        let mut hosts = vec![host_with_services(&[(port, "http")])];
+        scan.scan_hosts(&mut hosts).await;
+        let r = &hosts[0].ports[0].scripts[0];
+        assert!(
+            r.output.starts_with(&format!("{date}; -")) && r.output.ends_with(" from local time."),
+            "{}",
+            r.output
+        );
+        assert_eq!(text(named(r.data.as_ref().unwrap(), "date")), iso);
+    }
+    // An hour ahead, carrying the User-Agent signature.
+    let (port, seen) = date_web(|now| http_date(now + 3600)).await;
+    let out = output_of("http-date", port, "http").await.unwrap();
+    assert!(
+        ["+59m59s", "+1h00m00s", "+1h00m01s"]
+            .iter()
+            .any(|d| out.ends_with(&format!("; {d} from local time."))),
+        "{out}"
+    );
+    assert!(seen.lock().unwrap()[0].contains(USER_AGENT));
+    // No Date header, or one that does not parse: nothing.
+    let (port, _) = web(|_| b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n".to_vec()).await;
+    assert_eq!(output_of("http-date", port, "http").await, None);
+    let (port, _) =
+        web(|_| b"HTTP/1.1 200 OK\r\nDate: yesterday\r\nContent-Length: 0\r\n\r\n".to_vec()).await;
+    assert_eq!(output_of("http-date", port, "http").await, None);
+}
+
+#[tokio::test]
+async fn clock_skew_sums_up_what_the_date_scripts_saw() {
+    // A stand-in for ssl-date (so clock-skew runs after it) that notes a
+    // fixed skew per host: 127.0.0.1 one of 5 s, 127.0.0.2 three of 3600,
+    // 3600 and 3610 s, 127.0.0.3 none.
+    let recorder = r#"
+categories = {"safe"}
+hostrule = function() return true end
+action = function(host)
+  local now = os.time()
+  if host.ip == "127.0.0.1" then
+    fero.record_skew(now + 5, now)
+  elseif host.ip == "127.0.0.2" then
+    fero.record_skew(now + 3600, now)
+    fero.record_skew(now + 3600, now)
+    fero.record_skew(now + 3610, now)
+  end
+end"#;
+    let scan = ScriptScan::new(
+        vec![built_in("clock-skew"), script("ssl-date", recorder)],
+        ArgTable::default(),
+        None,
+    )
+    .unwrap();
+    let mut hosts: Vec<HostResult> = ["127.0.0.1", "127.0.0.2", "127.0.0.3"]
+        .iter()
+        .map(|ip| {
+            let mut h = host_with(&[]);
+            h.addr = ip.parse().unwrap();
+            h.hostname = None;
+            h
+        })
+        .collect();
+    scan.scan_hosts(&mut hosts).await;
+    let out =
+        |h: &HostResult| -> Vec<String> { h.scripts.iter().map(|s| s.output.clone()).collect() };
+    assert_eq!(out(&hosts[0]), ["5s"]);
+    assert_eq!(
+        out(&hosts[1]),
+        ["mean: 1h00m03s, deviation: 5s, median: 1h00m00s"]
+    );
+    assert!(out(&hosts[2]).is_empty());
+    let json = serde_json::to_string(hosts[1].scripts[0].data.as_ref().unwrap()).unwrap();
+    assert_eq!(
+        json,
+        r#"{"mean":"3603","stddev":"5","median":"3600","count":"3"}"#
+    );
+    // After the scan: the hosts grouped by their median.
+    let post = scan.post_scan().await;
+    assert_eq!(post.len(), 1);
+    assert_eq!(
+        post[0].output,
+        "\n  5s: \n    127.0.0.1\n  1h00m00s: \n    127.0.0.2"
+    );
 }

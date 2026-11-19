@@ -196,13 +196,14 @@ who asked:
 | `ssl-date` | `FeroProbeSSLDate` in the TLS ClientHello random, after its four time bytes (clear text, it is the first message of the handshake) | — |
 | `nbstat` | The NetBIOS transaction ID `0x4650` ("FP") of its NODE STATUS request to UDP 137 (a weak mark of 2 bytes: rule 9100013 also needs the rest of the request to match, and a tool that picks its IDs at random still matches about once in 65,536 such requests) | — |
 | `dns-nsid` | The DNS transaction ID `0x4650` ("FP") of its CHAOS TXT queries for `id.server` and `version.bind` (the first one asking for the NSID too). A weak mark of 2 bytes: rules 9100014 (UDP) and 9100015 (TCP) also need only the RD flag (as in nmap's queries), one question and that question (`id.server` or `version.bind`, CHAOS TXT), which few other clients send; a tool that picks its IDs at random still matches about once in 65,536 such queries | — |
-| `http-title`, `http-methods`, `http-robots.txt` | The `User-Agent` above | `Nmap Scripting Engine` |
+| `http-title`, `http-methods`, `http-robots.txt` (and `http-date` when chosen) | The `User-Agent` above | `Nmap Scripting Engine` |
 
 As with the `User-Agent`, `--script-args smtp.domain=...` replaces the
 EHLO name with one chosen on purpose. The other default scripts read a
 greeting or ask a protocol's standard question (CAPA, CAPABILITY, SYST,
 an RPC portmapper dump, an NTP time request, an RFB or X11 handshake),
-which has no field for a client name. None of them logs in with a
+which has no field for a client name. `clock-skew` sends nothing: it only
+sums up what the other scripts saw. None of them logs in with a
 password, and each stays within the ports the scan probed.
 
 ### Detection rules for defenders

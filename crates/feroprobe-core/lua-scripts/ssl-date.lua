@@ -6,8 +6,8 @@
 description = [[
 Shows a TLS server's clock, from the time many TLS 1.2 and older servers
 put in the first four bytes of their ServerHello random, and how far it
-is from the scanner's clock. Sends a TLS 1.2 ClientHello and reads the
-ServerHello; no handshake is finished. Two hellos are sent, and when
+is from the scanner's clock (also noted for clock-skew). Sends a TLS 1.2
+ClientHello and reads the ServerHello; no handshake is finished. Two hellos are sent, and when
 both answers came within one second a third one two seconds later: when
 the server's values do not move with the scanner's clock, the server
 fills the field with random bytes (as most current servers do) or never
@@ -116,18 +116,6 @@ local function server_time(host, port, timeout)
   return done(nil)
 end
 
--- A time difference as nmap writes it: "0s", "+5s", "-1m05s", "+2h03m04s".
-local function delta(d)
-  if d == 0 then return "0s" end
-  local sign = d < 0 and "-" or "+"
-  d = math.abs(d)
-  local days, h, m, s = d // 86400, d // 3600 % 24, d // 60 % 60, d % 60
-  if days > 0 then return string.format("%s%dd%02dh%02dm%02ds", sign, days, h, m, s) end
-  if h > 0 then return string.format("%s%dh%02dm%02ds", sign, h, m, s) end
-  if m > 0 then return string.format("%s%dm%02ds", sign, m, s) end
-  return string.format("%s%ds", sign, s)
-end
-
 action = function(host, port)
   local timeout = tonumber(fero.args.get(SCRIPT_NAME .. ".timeout")) or 8000
   local t1, n1 = server_time(host, port, timeout)
@@ -149,7 +137,8 @@ action = function(host, port)
     return "TLS randomness does not represent time"
   end
   local d = t2 - n2
+  fero.record_skew(t2, n2)
   local date = os.date("!%Y-%m-%dT%H:%M:%S+00:00", t2)
   return { date = date, delta = tostring(d) },
-    date .. "; " .. delta(d) .. " from scanner time."
+    date .. "; " .. (d > 0 and "+" or "") .. fero.format_time(d) .. " from scanner time."
 end
