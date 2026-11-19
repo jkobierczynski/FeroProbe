@@ -1694,36 +1694,41 @@ const SSH_LAB_LISTS: [&[u8]; 10] = [
     b"",
 ];
 
-#[tokio::test]
-async fn ssh2_enum_algos_lists_the_server_algorithms() {
-    let (port, seen) = ssh_kexinit_lab(SSH_LAB_LISTS).await;
-    let scan =
-        ScriptScan::new(vec![built_in("ssh2-enum-algos")], ArgTable::default(), None).unwrap();
+/// `ssh2-enum-algos` with `fero.verbosity()` fixed at `level`: the global
+/// verbosity is shared with tests running at the same time.
+async fn ssh2_enum_algos_at(level: u8, port: u16) -> ScriptResult {
+    let src = Script::built_in()
+        .unwrap()
+        .into_iter()
+        .find(|s| s.id == "ssh2-enum-algos")
+        .unwrap()
+        .source
+        .replace("fero.verbosity()", &level.to_string());
+    let scan = ScriptScan::new(
+        vec![script("ssh2-enum-algos", &src)],
+        ArgTable::default(),
+        None,
+    )
+    .unwrap();
     let mut hosts = vec![host_with_services(&[(port, "ssh")])];
     scan.scan_hosts(&mut hosts).await;
-    let r = hosts[0].ports[0].scripts[0].clone();
-    // Each algorithm is listed whatever the verbosity, as nmap 7.95 does.
+    assert_eq!(hosts[0].ports[0].scripts.len(), 1);
+    hosts[0].ports[0].scripts[0].clone()
+}
+
+#[tokio::test]
+async fn ssh2_enum_algos_counts_the_server_algorithms() {
+    let (port, seen) = ssh_kexinit_lab(SSH_LAB_LISTS).await;
+    let r = ssh2_enum_algos_at(0, port).await;
     assert_eq!(
         r.output,
-        "\n  kex_algorithms: (3)\
-         \n      curve25519-sha256\
-         \n      diffie-hellman-group14-sha256\
-         \n      kex-strict-s-v00@openssh.com\
-         \n  server_host_key_algorithms: (2)\
-         \n      rsa-sha2-512\
-         \n      ssh-ed25519\
-         \n  encryption_algorithms: (2)\
-         \n      chacha20-poly1305@openssh.com\
-         \n      aes256-ctr\
-         \n  mac_algorithms: (1)\
-         \n      hmac-sha2-256-etm@openssh.com\
+        "\n  kex_algorithms: (3)\n  server_host_key_algorithms: (2)\
+         \n  encryption_algorithms: (2)\n  mac_algorithms: (1)\
          \n  compression_algorithms_client_to_server: (2)\
-         \n      none\
-         \n      zlib@openssh.com\
-         \n  compression_algorithms_server_to_client: (1)\
-         \n      none"
+         \n  compression_algorithms_server_to_client: (1)"
     );
-    // The structured output holds the same lists, in the order the server sent them and the groups in nmap's order.
+    // The full lists are in the structured output whatever the verbosity,
+    // in the order the server sent them and the groups in nmap's order.
     let data = r.data.as_ref().unwrap();
     let ScriptValue::Table(t) = data else {
         panic!("{data:?}")
@@ -1764,6 +1769,32 @@ async fn ssh2_enum_algos_lists_the_server_algorithms() {
         *seen,
         ["SSH-2.0-FeroProbe_Scripting_Engine", "packet 20"],
         "{seen:?}"
+    );
+}
+
+#[tokio::test]
+async fn ssh2_enum_algos_lists_each_algorithm_with_v() {
+    let (port, _) = ssh_kexinit_lab(SSH_LAB_LISTS).await;
+    let r = ssh2_enum_algos_at(1, port).await;
+    assert_eq!(
+        r.output,
+        "\n  kex_algorithms: (3)\
+         \n      curve25519-sha256\
+         \n      diffie-hellman-group14-sha256\
+         \n      kex-strict-s-v00@openssh.com\
+         \n  server_host_key_algorithms: (2)\
+         \n      rsa-sha2-512\
+         \n      ssh-ed25519\
+         \n  encryption_algorithms: (2)\
+         \n      chacha20-poly1305@openssh.com\
+         \n      aes256-ctr\
+         \n  mac_algorithms: (1)\
+         \n      hmac-sha2-256-etm@openssh.com\
+         \n  compression_algorithms_client_to_server: (2)\
+         \n      none\
+         \n      zlib@openssh.com\
+         \n  compression_algorithms_server_to_client: (1)\
+         \n      none"
     );
 }
 

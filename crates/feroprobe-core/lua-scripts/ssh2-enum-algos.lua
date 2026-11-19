@@ -5,9 +5,9 @@
 description = [[
 Lists the algorithms an SSH-2 server offers in its key exchange
 initialisation (KEXINIT): key exchange methods, host key types,
-ciphers, MACs and compression: the number of each, then each
-algorithm in the server's order of preference, as nmap 7.95 shows them
-(at any verbosity). When the server offers the same list in both directions
+ciphers, MACs and compression. Without -v only the number of each is
+shown; with -v each algorithm is listed, in the server's order of
+preference. When the server offers the same list in both directions
 (client to server and server to client), it is shown once.
 
 The script reads the server's version line, sends its own
@@ -77,10 +77,13 @@ action = function(host, port)
 
   local out = fero.output_table()
   local lines = {}
+  local verbose = fero.verbosity() >= 1
   local function add(name, list)
     out[name] = list
     lines[#lines + 1] = string.format("%s: (%d)", name, #list)
-    for _, alg in ipairs(list) do lines[#lines + 1] = "    " .. alg end
+    if verbose then
+      for _, alg in ipairs(list) do lines[#lines + 1] = "    " .. alg end
+    end
   end
   for _, name in ipairs(SHOWN) do
     local whole = theirs[name]
