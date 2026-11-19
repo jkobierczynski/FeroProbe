@@ -110,11 +110,20 @@ local function propfind(host, port, path)
   -- default namespace), so any prefix is taken inside this document.
   -- A prefix is always followed by ":", so names that merely end in
   -- "response" or "href" do not count.
+  -- Each form's next match is kept and searched again only once `pos`
+  -- has passed it, so the body is scanned once per form, not once per
+  -- response.
+  local pats = { "<[%w%-%._]+:response[%s>]", "<response[%s>]" }
+  local starts, ends = { 0, 0 }, { 0, 0 }
   local pos = 1
   while #listing < MAX_LISTED do
-    local _, e = body:find("<[%w%-%._]+:response[%s>]", pos)
-    local _, e2 = body:find("<response[%s>]", pos)
-    if e2 and (not e or e2 < e) then e = e2 end
+    local e
+    for i, pat in ipairs(pats) do
+      if starts[i] and starts[i] < pos then
+        starts[i], ends[i] = body:find(pat, pos)
+      end
+      if starts[i] and (not e or ends[i] < e) then e = ends[i] end
+    end
     if not e then break end
     local gt = body:find(">", e, true)
     if not gt then break end
