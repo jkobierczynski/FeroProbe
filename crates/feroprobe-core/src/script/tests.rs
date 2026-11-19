@@ -1960,22 +1960,29 @@ fn the_default_category() {
             "ftp-anon",
             "ftp-syst",
             "http-methods",
+            "http-ntlm-info",
             "http-robots.txt",
             "http-title",
             "imap-capabilities",
+            "imap-ntlm-info",
+            "ms-sql-ntlm-info",
             "mysql-info",
             "nbstat",
+            "nntp-ntlm-info",
             "ntp-info",
             "pop3-capabilities",
+            "pop3-ntlm-info",
             "rdp-ntlm-info",
             "rpcinfo",
             "smb2-security-mode",
             "smb2-time",
             "smtp-commands",
+            "smtp-ntlm-info",
             "ssh-hostkey",
             "ssl-date",
             "ssl-cert",
             "sshv1",
+            "telnet-ntlm-info",
             "vnc-info",
             "x11-access",
         ]
@@ -3061,5 +3068,478 @@ end"#;
     assert_eq!(
         post[0].output,
         "\n  5s: \n    127.0.0.1\n  1h00m00s: \n    127.0.0.2"
+    );
+}
+
+// ---- NTLM-info scripts and the STARTTLS helper (v0.7.0 step 2) ----
+
+/// The NTLM NEGOTIATE every script sends, as IDS rules 9100016 (base64)
+/// and 9100017 (raw) match it.
+const NEGOTIATE_B64: &str = "TlRMTVNTUAABAAAAB6IIogAAAAAAAAAACQAJACgAAAAAAAAAAAAAD0ZFUk9QUk9CRQ==";
+
+/// What every *-ntlm-info script (but rdp's) shows for [`ntlm_challenge`].
+const NTLM_INFO: &str = "\n  Target_Name: LAB\n  NetBIOS_Domain_Name: LAB\n  \
+    NetBIOS_Computer_Name: SRV01\n  DNS_Domain_Name: lab.local\n  \
+    DNS_Computer_Name: srv01.lab.local\n  DNS_Tree_Name: lab.local\n  \
+    Product_Version: 10.0.14393";
+
+/// What `seen` holds once it has `n` entries (or after 5 s): a server
+/// may still be reading the client's last words when the script is done.
+async fn seen_once(seen: &Seen, n: usize) -> Vec<String> {
+    for _ in 0..100 {
+        if seen.lock().unwrap().len() >= n {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    seen.lock().unwrap().clone()
+}
+
+fn challenge_b64() -> String {
+    super::base64::encode(&ntlm_challenge(1_767_323_045))
+}
+
+#[tokio::test]
+async fn the_ntlm_negotiate_names_feroprobe() {
+    let src = r#"
+categories = {"safe"}
+prerule = function() return true end
+action = function()
+  return fero.ntlm.negotiate_base64() .. " " .. fero.hex(fero.ntlm.negotiate_message())
+end"#;
+    let scan = ScriptScan::new(vec![script("n", src)], ArgTable::default(), None).unwrap();
+    let out = scan.pre_scan().await[0].output.clone();
+    let (b64, hex) = out.split_once(' ').unwrap();
+    assert_eq!(b64, NEGOTIATE_B64);
+    assert_eq!(
+        hex,
+        "4e544c4d535350000100000007a208a2000000000000000009000900280000000000000000\
+         00000f4645524f50524f4245"
+    );
+    assert_eq!(super::base64::decode(b64.as_bytes()).unwrap().len(), 49);
+}
+
+#[tokio::test]
+async fn http_ntlm_info_reads_the_www_authenticate_challenge() {
+    let (port, seen) = web(|req| {
+        if req.contains("Authorization: NTLM ") {
+            format!(
+                "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Negotiate\r\n\
+                 WWW-Authenticate: NTLM {}\r\nContent-Length: 0\r\n\r\n",
+                challenge_b64()
+            )
+            .into_bytes()
+        } else {
+            b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n".to_vec()
+        }
+    })
+    .await;
+    assert_eq!(
+        output_of("http-ntlm-info", port, "http").await.as_deref(),
+        Some(NTLM_INFO)
+    );
+    {
+        let seen = seen.lock().unwrap();
+        assert!(seen[0].starts_with("GET / "), "{seen:?}");
+        assert!(
+            seen[0].contains(&format!("Authorization: NTLM {NEGOTIATE_B64}\r\n")),
+            "{seen:?}"
+        );
+        assert!(seen[0].contains("FeroProbe Scripting Engine"), "{seen:?}");
+    }
+    // No NTLM offered: nothing.
+    let (port, _) =
+        web(|_| b"HTTP/1.1 401 No\r\nWWW-Authenticate: Basic realm=x\r\n\r\n".to_vec()).await;
+    assert_eq!(output_of("http-ntlm-info", port, "http").await, None);
+}
+
+/// The plain-text side of a line-protocol AUTH exchange shared by the
+/// SMTP, POP3, IMAP and NNTP stand-ins: the server's answer to `line`.
+fn mail_answer(line: &str) -> Option<String> {
+    let chal = challenge_b64();
+    Some(match line {
+        l if l.starts_with("EHLO ") => "250-mail.lab\r\n250 AUTH NTLM LOGIN\r\n".into(),
+        "STARTTLS" => "502 not here\r\n".into(),
+        "STLS" => "-ERR not here\r\n".into(),
+        "AUTH NTLM" => "334 \r\n".into(),
+        "AUTHINFO GENERIC NTLM" => "381 go on\r\n".into(),
+        "fp1 AUTHENTICATE NTLM" => "+\r\n".into(),
+        l if l == NEGOTIATE_B64 => format!("334 {chal}\r\n"),
+        l if l == format!("AUTHINFO GENERIC {NEGOTIATE_B64}") => format!("381 {chal}\r\n"),
+        "*" => "501 cancelled\r\n".into(),
+        "QUIT" => "221 bye\r\n".into(),
+        _ => return None,
+    })
+}
+
+#[tokio::test]
+async fn smtp_ntlm_info_falls_back_to_plain_text() {
+    let (port, seen) = line_server("220 mail.lab ESMTP\r\n", mail_answer).await;
+    assert_eq!(
+        output_of("smtp-ntlm-info", port, "smtp").await.as_deref(),
+        Some(NTLM_INFO)
+    );
+    assert_eq!(
+        seen_once(&seen, 8).await,
+        [
+            "EHLO feroprobe.invalid",
+            "STARTTLS",
+            "QUIT",
+            "EHLO feroprobe.invalid",
+            "AUTH NTLM",
+            NEGOTIATE_B64,
+            "*",
+            "QUIT",
+        ]
+    );
+}
+
+#[tokio::test]
+async fn pop3_and_nntp_ntlm_info() {
+    let (port, seen) = line_server("+OK ready\r\n", |line| match line {
+        "AUTH NTLM" => Some("+ \r\n".into()),
+        l if l == NEGOTIATE_B64 => Some(format!("+ {}\r\n", challenge_b64())),
+        "*" => Some("-ERR cancelled\r\n".into()),
+        _ => mail_answer(line),
+    })
+    .await;
+    assert_eq!(
+        output_of("pop3-ntlm-info", port, "pop3").await.as_deref(),
+        Some(NTLM_INFO)
+    );
+    assert_eq!(
+        seen_once(&seen, 6).await,
+        ["STLS", "QUIT", "AUTH NTLM", NEGOTIATE_B64, "*", "QUIT"]
+    );
+
+    let (port, seen) = line_server("200 news.lab ready\r\n", mail_answer).await;
+    assert_eq!(
+        output_of("nntp-ntlm-info", port, "nntp").await.as_deref(),
+        Some(NTLM_INFO)
+    );
+    assert_eq!(
+        seen_once(&seen, 5).await,
+        [
+            "STARTTLS".to_string(),
+            "QUIT".into(),
+            "AUTHINFO GENERIC NTLM".into(),
+            format!("AUTHINFO GENERIC {NEGOTIATE_B64}"),
+            "QUIT".into(),
+        ]
+    );
+}
+
+/// A server that speaks plain text until it switches to TLS: it sends
+/// each step's reply once what it read contains the step's expected bytes
+/// (at once for an empty one), then takes a TLS handshake and answers the
+/// lines it reads inside TLS with `tls_answer` (closing on `None`). Keeps
+/// the plain bytes it read, then each line read inside TLS as "tls: ...".
+async fn starttls_server(
+    steps: &'static [(&'static [u8], &'static [u8])],
+    tls_answer: fn(&str) -> Option<String>,
+) -> (u16, Seen) {
+    use tokio::io::AsyncBufReadExt;
+    let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = l.local_addr().unwrap().port();
+    let acceptor = tls_acceptor();
+    let seen: Seen = Default::default();
+    let keep = seen.clone();
+    tokio::spawn(async move {
+        while let Ok((mut s, _)) = l.accept().await {
+            let acceptor = acceptor.clone();
+            let keep = keep.clone();
+            tokio::spawn(async move {
+                let mut buf = Vec::new();
+                for (expect, reply) in steps {
+                    while !expect.is_empty() && !buf.windows(expect.len()).any(|w| w == *expect) {
+                        let mut chunk = [0u8; 1024];
+                        match s.read(&mut chunk).await {
+                            Ok(0) | Err(_) => {
+                                keep.lock()
+                                    .unwrap()
+                                    .push(String::from_utf8_lossy(&buf).into());
+                                return;
+                            }
+                            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                        }
+                    }
+                    if s.write_all(reply).await.is_err() {
+                        return;
+                    }
+                }
+                keep.lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&buf).into());
+                let Ok(tls) = acceptor.accept(s).await else {
+                    return;
+                };
+                let (rd, mut wr) = tokio::io::split(tls);
+                let mut rd = tokio::io::BufReader::new(rd);
+                let mut line = String::new();
+                while rd.read_line(&mut line).await.unwrap_or(0) > 0 {
+                    let got = line.trim_end().to_string();
+                    keep.lock().unwrap().push(format!("tls: {got}"));
+                    line.clear();
+                    match tls_answer(&got) {
+                        Some(reply) if wr.write_all(reply.as_bytes()).await.is_ok() => {}
+                        _ => break,
+                    }
+                }
+                let _ = wr.shutdown().await;
+            });
+        }
+    });
+    (port, seen)
+}
+
+const SMTP_STARTTLS: &[(&[u8], &[u8])] = &[
+    (b"", b"220 mail.lab ESMTP\r\n"),
+    (
+        b"EHLO feroprobe.invalid\r\n",
+        b"250-mail.lab\r\n250 STARTTLS\r\n",
+    ),
+    (b"STARTTLS\r\n", b"220 go ahead\r\n"),
+];
+
+#[tokio::test]
+async fn smtp_ntlm_info_and_ssl_cert_over_starttls() {
+    let (port, seen) = starttls_server(SMTP_STARTTLS, mail_answer).await;
+    assert_eq!(
+        output_of("smtp-ntlm-info", port, "smtp").await.as_deref(),
+        Some(NTLM_INFO)
+    );
+    assert_eq!(
+        seen_once(&seen, 6).await,
+        [
+            "EHLO feroprobe.invalid\r\nSTARTTLS\r\n".to_string(),
+            "tls: EHLO feroprobe.invalid".into(),
+            "tls: AUTH NTLM".into(),
+            format!("tls: {NEGOTIATE_B64}"),
+            "tls: *".into(),
+            "tls: QUIT".into(),
+        ]
+    );
+    // ssl-cert reads the certificate after STARTTLS on an SMTP port.
+    let (port, _) = starttls_server(SMTP_STARTTLS, |_| None).await;
+    let out = output_of("ssl-cert", port, "smtp").await.unwrap();
+    assert!(
+        out.starts_with("Subject: commonName=localhost/organizationName=FeroProbe Lab"),
+        "{out}"
+    );
+}
+
+#[tokio::test]
+async fn imap_ntlm_info_switches_to_tls_when_offered() {
+    const STEPS: &[(&[u8], &[u8])] = &[
+        (b"", b"* OK IMAP4rev1 ready\r\n"),
+        (
+            b"fp1 CAPABILITY\r\n",
+            b"* CAPABILITY IMAP4rev1 STARTTLS LOGINDISABLED\r\nfp1 OK done\r\n",
+        ),
+        (b"fp2 STARTTLS\r\n", b"fp2 OK begin TLS\r\n"),
+    ];
+    let (port, seen) = starttls_server(STEPS, |line| match line {
+        "fp1 AUTHENTICATE NTLM" => Some("+ \r\n".into()),
+        l if l == NEGOTIATE_B64 => Some(format!("+ {}\r\n", challenge_b64())),
+        "*" => Some("fp1 BAD cancelled\r\n".into()),
+        _ => Some("* BYE\r\nfp2 OK\r\n".into()),
+    })
+    .await;
+    assert_eq!(
+        output_of("imap-ntlm-info", port, "imap").await.as_deref(),
+        Some(NTLM_INFO)
+    );
+    assert_eq!(
+        seen_once(&seen, 5).await,
+        [
+            "fp1 CAPABILITY\r\nfp2 STARTTLS\r\n".to_string(),
+            "tls: fp1 AUTHENTICATE NTLM".into(),
+            format!("tls: {NEGOTIATE_B64}"),
+            "tls: *".into(),
+            "tls: fp2 LOGOUT".into(),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn starttls_switches_each_protocol_to_tls() {
+    const FTP: &[(&[u8], &[u8])] = &[
+        (b"", b"220-Lab FTP\r\n220 ready\r\n"),
+        (b"AUTH TLS\r\n", b"234 go\r\n"),
+    ];
+    const POP3: &[(&[u8], &[u8])] = &[(b"", b"+OK ready\r\n"), (b"STLS\r\n", b"+OK go\r\n")];
+    const NNTP: &[(&[u8], &[u8])] = &[(b"", b"201 ready\r\n"), (b"STARTTLS\r\n", b"382 go\r\n")];
+    const LMTP: &[(&[u8], &[u8])] = &[
+        (b"", b"220 lmtp ready\r\n"),
+        (b"LHLO feroprobe.invalid\r\n", b"250 STARTTLS\r\n"),
+        (b"STARTTLS\r\n", b"220 go\r\n"),
+    ];
+    const LDAP: &[(&[u8], &[u8])] = &[(
+        b"\x30\x1d\x02\x01\x01\x77\x18\x80\x161.3.6.1.4.1.1466.20037",
+        b"\x30\x0c\x02\x01\x01\x78\x07\x0a\x01\x00\x04\x00\x04\x00",
+    )];
+    const POSTGRES: &[(&[u8], &[u8])] = &[(b"\x00\x00\x00\x08\x04\xd2\x16\x2f", b"S")];
+    const XMPP: &[(&[u8], &[u8])] = &[
+        (
+            b"to='localhost' version='1.0'>",
+            b"<?xml version='1.0'?><stream:stream from='lab' version='1.0'><stream:features>\
+              <starttls xmlns='urn:ietf:params:xml:ns:xmpp-tls'><required/></starttls>\
+              </stream:features>",
+        ),
+        (
+            b"<starttls xmlns='urn:ietf:params:xml:ns:xmpp-tls'/>",
+            b"<proceed xmlns='urn:ietf:params:xml:ns:xmpp-tls'/>",
+        ),
+    ];
+    let src = r#"
+categories = {"safe"}
+portrule = function() return true end
+action = function(host, port)
+  local sock, err = fero.starttls.connect(host, port, { protocol = fero.args.get("p") })
+  if not sock then return "failed: " .. tostring(err) end
+  local cert = sock:get_ssl_certificate()
+  sock:close()
+  return cert and cert.subject.commonName
+end"#;
+    for (proto, steps) in [
+        ("ftp", FTP),
+        ("pop3", POP3),
+        ("nntp", NNTP),
+        ("lmtp", LMTP),
+        ("ldap", LDAP),
+        ("postgresql", POSTGRES),
+        ("xmpp", XMPP),
+    ] {
+        let (port, _) = starttls_server(steps, |_| None).await;
+        let scan = ScriptScan::new(
+            vec![script("s", src)],
+            args::parse(&format!("p={proto}")).unwrap(),
+            None,
+        )
+        .unwrap();
+        let mut hosts = vec![host_with_services(&[(port, "unknown")])];
+        scan.scan_hosts(&mut hosts).await;
+        assert_eq!(hosts[0].ports[0].scripts[0].output, "localhost", "{proto}");
+    }
+    // A refusal is reported, and nothing is switched.
+    let (port, _) = line_server("+OK ready\r\n", mail_answer).await;
+    let scan =
+        ScriptScan::new(vec![script("s", src)], args::parse("p=pop3").unwrap(), None).unwrap();
+    let mut hosts = vec![host_with_services(&[(port, "pop3")])];
+    scan.scan_hosts(&mut hosts).await;
+    assert_eq!(hosts[0].ports[0].scripts[0].output, "failed: STLS refused");
+}
+
+#[tokio::test]
+async fn telnet_ntlm_info_reads_the_auth_reply() {
+    let seen: Seen = Default::default();
+    let keep = seen.clone();
+    let port = tcp_server(move |mut s| {
+        let keep = keep.clone();
+        async move {
+            // The server's own negotiation first: DO AUTHENTICATION.
+            let _ = s.write_all(b"\xff\xfd\x25").await;
+            let mut buf = vec![0u8; 256];
+            let n = s.read(&mut buf).await.unwrap_or(0);
+            keep.lock().unwrap().push(fero_hex(&buf[..n]));
+            // A challenge whose nonce holds 0xff bytes, doubled on the wire.
+            let mut chal = ntlm_challenge(1_767_323_045);
+            chal[24..32].copy_from_slice(&[0xff; 8]);
+            let mut data = vec![0x0f, 0x00, 0x01];
+            data.extend((chal.len() as u32).to_le_bytes());
+            data.extend(2u32.to_le_bytes());
+            data.extend(chal);
+            let mut out = b"\xff\xfa\x25\x02".to_vec();
+            for b in data {
+                out.push(b);
+                if b == 0xff {
+                    out.push(0xff);
+                }
+            }
+            out.extend(b"\xff\xf0");
+            // In two pieces, the end of the sub-negotiation last.
+            let (a, b) = out.split_at(out.len() - 5);
+            let _ = s.write_all(a).await;
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let _ = s.write_all(b).await;
+        }
+    })
+    .await;
+    assert_eq!(
+        output_of("telnet-ntlm-info", port, "telnet")
+            .await
+            .as_deref(),
+        Some(NTLM_INFO)
+    );
+    let negotiate = fero_hex(&super::base64::decode(NEGOTIATE_B64.as_bytes()).unwrap());
+    assert_eq!(
+        seen.lock().unwrap()[0],
+        format!(
+            "fffa25000f000031000000020000004e544c4d{}fff0",
+            &negotiate[8..]
+        )
+    );
+}
+
+fn fero_hex(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+#[tokio::test]
+async fn ms_sql_ntlm_info_logs_in_with_integrated_security() {
+    let seen: Seen = Default::default();
+    let keep = seen.clone();
+    let port = tcp_server(move |mut s| {
+        let keep = keep.clone();
+        async move {
+            let mut head = [0u8; 8];
+            if s.read_exact(&mut head).await.is_err() {
+                return;
+            }
+            let mut body = vec![0u8; u16::from_be_bytes([head[2], head[3]]) as usize - 8];
+            if s.read_exact(&mut body).await.is_err() {
+                return;
+            }
+            keep.lock().unwrap().push(fero_hex(&head));
+            keep.lock().unwrap().push(fero_hex(&body));
+            let chal = ntlm_challenge(1_767_323_045);
+            let mut tokens = vec![0xed];
+            tokens.extend((chal.len() as u16).to_le_bytes());
+            tokens.extend(chal);
+            // Two packets: the second one ends the message.
+            let (a, b) = tokens.split_at(20);
+            for (part, status) in [(a, 0u8), (b, 1)] {
+                let mut p = vec![0x04, status];
+                p.extend(((part.len() + 8) as u16).to_be_bytes());
+                p.extend([0, 0, 1, 0]);
+                p.extend(part);
+                let _ = s.write_all(&p).await;
+            }
+        }
+    })
+    .await;
+    let out = output_of("ms-sql-ntlm-info", port, "ms-sql-s")
+        .await
+        .unwrap();
+    assert_eq!(
+        out,
+        format!(
+            "\n  127.0.0.1:{port}: {}",
+            NTLM_INFO.replace("\n  ", "\n    ")
+        )
+    );
+    let seen = seen.lock().unwrap();
+    // A LOGIN7 packet, alone in its message.
+    assert!(seen[0].starts_with("1001"), "{seen:?}");
+    let body = &seen[1];
+    // TDS 7.1, integrated security, and the NEGOTIATE at the end.
+    assert_eq!(&body[8..16], "01000071");
+    assert_eq!(&body[50..52], "83");
+    let negotiate = fero_hex(&super::base64::decode(NEGOTIATE_B64.as_bytes()).unwrap());
+    assert!(body.ends_with(&negotiate), "{body}");
+    // The host name FEROPROBE, in UTF-16.
+    assert!(
+        body.contains("4600450052004f00500052004f0042004500"),
+        "{body}"
     );
 }

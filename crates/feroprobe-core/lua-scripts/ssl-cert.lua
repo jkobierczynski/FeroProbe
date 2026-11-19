@@ -8,23 +8,42 @@ dates and SHA-1 and SHA-256 fingerprints; with -v, the certificate in
 PEM form too. The certificate is read, never checked or trusted.
 
 Runs on ports where -sV found TLS, or whose service or port number is a
-TLS one. Services that switch to TLS on request (STARTTLS) are not
-covered yet. TLS 1.2 and 1.3 only.
+TLS one, and on services that switch to TLS on request (fero.starttls):
+SMTP and submission, LMTP, IMAP, POP3, NNTP, FTP (AUTH TLS), LDAP,
+PostgreSQL and XMPP. These are asked to switch first; when that fails,
+a TLS handshake is tried straight away, as nmap does. TLS 1.2 and 1.3
+only.
 ]]
 
 author = "FeroProbe contributors"
 license = "GPL-3.0-or-later"
 categories = { "default", "discovery", "safe" }
 
-portrule = fero.portrule.ssl
+portrule = function(host, port)
+  if fero.portrule.ssl(host, port) then return true end
+  return (port.state == "open" or port.state == "open|filtered")
+    and fero.starttls.protocol(port) ~= nil
+end
+
+local function tunnelled(port)
+  return type(port.version) == "table" and port.version.service_tunnel == "ssl"
+end
 
 action = function(host, port)
-  local sock = fero.socket.new()
-  sock:set_timeout(10000)
-  local ok, err = sock:connect(host, port, "ssl")
-  if not ok then
-    fero.debug(1, "TLS connection failed: " .. tostring(err))
-    return nil
+  local sock, err
+  if not tunnelled(port) and fero.starttls.protocol(port) then
+    sock, err = fero.starttls.connect(host, port)
+    if not sock then fero.debug(1, "STARTTLS failed: " .. tostring(err)) end
+  end
+  if not sock then
+    sock = fero.socket.new()
+    sock:set_timeout(10000)
+    local ok
+    ok, err = sock:connect(host, port, "ssl")
+    if not ok then
+      fero.debug(1, "TLS connection failed: " .. tostring(err))
+      return nil
+    end
   end
   local cert, why = sock:get_ssl_certificate()
   sock:close()

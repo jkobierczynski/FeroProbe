@@ -24,6 +24,8 @@ teams can flag FeroProbe scans without writing their own.
 | `ftp-anon` (default script) | `PASS feroprobe@` |
 | `smb2-security-mode`, `smb2-time` (default scripts) | SMB2 NEGOTIATE client GUID `FeroProbeSMBScan`; on port 139 the NetBIOS calling name `FEROPROBE` |
 | `rdp-ntlm-info` (default script) | RDP connection request cookie `Cookie: mstshash=FeroProbe` |
+| `http-`, `smtp-`, `imap-`, `pop3-`, `nntp-ntlm-info` (default scripts) | NTLM NEGOTIATE naming the workstation `FEROPROBE`, in base64 (`TlRMTVNTUAABAAAAB6IIogAAAAAAAAAACQAJACgAAAAAAAAAAAAAD0ZFUk9QUk9CRQ==`, SID 9100016) |
+| `telnet-ntlm-info`, `ms-sql-ntlm-info` (default scripts) | The same NEGOTIATE as raw bytes (`NTLMSSP\0` ... `FEROPROBE`, SID 9100017) |
 | `nbstat` (default script), and the `-sU`/`-sV` probe to UDP 137 | NetBIOS NODE STATUS request to UDP 137 with transaction ID `0x4650` ("FP") |
 | `ssl-date` (default script) | TLS ClientHello random `FeroProbeSSLDate` (bytes 15-30 of the record) |
 | `dns-nsid` (default script) | DNS CHAOS TXT queries (`id.server`, `version.bind`) with transaction ID `0x4650` ("FP") and only the RD flag set, over UDP (SID 9100014) or TCP (SID 9100015) |
@@ -44,7 +46,12 @@ encrypted, so the rules can match only plain HTTP. A script, or
 `--script-args http.useragent=...`, can set another `User-Agent`, as in
 nmap; the request then carries only what was asked for. Likewise
 `--script-args smtp.domain=...` replaces the EHLO name. SMTP over TLS
-(port 465, or after STARTTLS) hides the EHLO from the rules; the SSH
+(port 465, or after STARTTLS) hides the EHLO from the rules, and the
+NTLM-info scripts' NEGOTIATE too once they have switched to TLS (they ask
+for STARTTLS where the server offers it). In Snort 3, whose `http_inspect`
+keeps HTTP headers out of the default buffer, SID 9100016 does not see
+`http-ntlm-info`'s `Authorization` header; that request is flagged by its
+`User-Agent` (SID 9100006); the SSH
 version line and the FTP password are always in clear text. Other script
 traffic (TLS handshakes, protocols with no field for a client name)
 carries no marker.
