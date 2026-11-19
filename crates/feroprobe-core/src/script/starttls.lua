@@ -193,15 +193,21 @@ local function xmpp(sock, _, host, port)
   end
   sock:send("<starttls xmlns='urn:ietf:params:xml:ns:xmpp-tls'/>")
   -- The answer is a whole <proceed/> or <failure/> element in the TLS
-  -- namespace, with or without a prefix: one the element itself binds
-  -- (<tls:proceed xmlns:tls='...'/>) or one the stream header bound.
+  -- namespace, with or without a prefix. A binding on the element itself
+  -- (<tls:proceed xmlns:tls='...'/>, or xmlns='...' when unprefixed) wins;
+  -- otherwise a prefix must be one the stream header bound.
   local function answer(b, name)
     local s, e, prefix = b:find("<([%w_%.%-]*:?)" .. name .. "[%s/>]")
     if not s then return false end
     local close = b:find(">", e, true)
     if not close then return false end
-    return prefix == "" or bound[prefix]
-      or b:sub(s, close):find(TLS_NS, 1, true) ~= nil
+    local attr = prefix == "" and "xmlns" or "xmlns:" .. prefix:sub(1, -2)
+    local own
+    for a, uri in b:sub(s, close):gmatch("([%w_%.%-:]+)%s*=%s*['\"]([^'\"]*)['\"]") do
+      if a == attr then own = uri end
+    end
+    if own then return own == TLS_NS end
+    return prefix == "" or bound[prefix] == true
   end
   buf = ""
   while #buf <= 65536 do

@@ -3444,6 +3444,28 @@ end"#;
         scan.scan_hosts(&mut hosts).await;
         assert_eq!(hosts[0].ports[0].scripts[0].output, "localhost", "{proto}");
     }
+    // A binding on the answer element overrides the stream's: this
+    // <tls:proceed/> is in another namespace, so nothing is switched.
+    const XMPP_OVERRIDDEN: &[(&[u8], &[u8])] = &[
+        (
+            b"version='1.0'>",
+            b"<stream:stream xmlns:tls='urn:ietf:params:xml:ns:xmpp-tls' version='1.0'>\
+              <stream:features><tls:starttls/></stream:features>",
+        ),
+        (
+            b"<starttls",
+            b"<tls:proceed xmlns:tls='urn:other'/><tls:failure/>",
+        ),
+    ];
+    let (port, _) = starttls_server(XMPP_OVERRIDDEN, |_| None).await;
+    let scan =
+        ScriptScan::new(vec![script("s", src)], args::parse("p=xmpp").unwrap(), None).unwrap();
+    let mut hosts = vec![host_with_services(&[(port, "unknown")])];
+    scan.scan_hosts(&mut hosts).await;
+    assert_eq!(
+        hosts[0].ports[0].scripts[0].output,
+        "failed: STARTTLS refused"
+    );
     // A refusal is reported, and nothing is switched.
     let (port, _) = line_server("+OK ready\r\n", mail_answer).await;
     let scan =
