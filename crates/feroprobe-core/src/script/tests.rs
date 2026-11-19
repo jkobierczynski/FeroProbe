@@ -3125,7 +3125,7 @@ async fn http_ntlm_info_reads_the_www_authenticate_challenge() {
         if req.contains("Authorization: NTLM ") {
             format!(
                 "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Negotiate\r\n\
-                 WWW-Authenticate: NTLM {}\r\nContent-Length: 0\r\n\r\n",
+                 WWW-Authenticate: ntlm {}\r\nContent-Length: 0\r\n\r\n",
                 challenge_b64()
             )
             .into_bytes()
@@ -3401,6 +3401,18 @@ action = function(host, port)
   sock:close()
   return cert and cert.subject.commonName
 end"#;
+    // A prefixed answer element in the TLS namespace counts too.
+    const XMPP_PREFIXED: &[(&[u8], &[u8])] = &[
+        (
+            b"version='1.0'>",
+            b"<stream:stream version='1.0'><stream:features><starttls \
+              xmlns='urn:ietf:params:xml:ns:xmpp-tls'/></stream:features>",
+        ),
+        (
+            b"<starttls",
+            b"<tls:proceed xmlns:tls='urn:ietf:params:xml:ns:xmpp-tls'/>",
+        ),
+    ];
     for (proto, steps) in [
         ("ftp", FTP),
         ("pop3", POP3),
@@ -3409,6 +3421,7 @@ end"#;
         ("ldap", LDAP),
         ("postgresql", POSTGRES),
         ("xmpp", XMPP),
+        ("xmpp", XMPP_PREFIXED),
     ] {
         let (port, _) = starttls_server(steps, |_| None).await;
         let scan = ScriptScan::new(
@@ -3428,6 +3441,33 @@ end"#;
     let mut hosts = vec![host_with_services(&[(port, "pop3")])];
     scan.scan_hosts(&mut hosts).await;
     assert_eq!(hosts[0].ports[0].scripts[0].output, "failed: STLS refused");
+    // A truncated LDAP answer is a refusal, not a script error.
+    const LDAP_SHORT: &[(&[u8], &[u8])] = &[(b"1.3.6.1.4.1.1466.20037", b"\x30\x01\x02")];
+    let (port, _) = starttls_server(LDAP_SHORT, |_| None).await;
+    let scan =
+        ScriptScan::new(vec![script("s", src)], args::parse("p=ldap").unwrap(), None).unwrap();
+    let mut hosts = vec![host_with_services(&[(port, "ldap")])];
+    scan.scan_hosts(&mut hosts).await;
+    assert_eq!(
+        hosts[0].ports[0].scripts[0].output,
+        "failed: not an LDAP message"
+    );
+}
+
+#[tokio::test]
+async fn clock_skew_waits_for_the_ntlm_scripts() {
+    let (port, _) = line_server("220 mail.lab ESMTP\r\n", mail_answer).await;
+    let scan = ScriptScan::new(
+        vec![built_in("clock-skew"), built_in("smtp-ntlm-info")],
+        ArgTable::default(),
+        None,
+    )
+    .unwrap();
+    let mut hosts = vec![host_with_services(&[(port, "smtp")])];
+    scan.scan_hosts(&mut hosts).await;
+    assert_eq!(hosts[0].ports[0].scripts.len(), 1);
+    let skew: Vec<_> = hosts[0].scripts.iter().map(|s| s.id.as_str()).collect();
+    assert_eq!(skew, ["clock-skew"]);
 }
 
 #[tokio::test]

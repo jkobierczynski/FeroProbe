@@ -32,10 +32,12 @@ action = function(host, port)
     fero.debug(1, "request failed: " .. tostring(err))
     return nil
   end
+  local received = os.time()
   local auth = resp.header["www-authenticate"]
   if not auth then return nil end
-  -- Several challenges may share the header ("Negotiate, NTLM TlRM...").
-  local blob = auth:match("NTLM ([A-Za-z0-9+/=]+)")
+  -- Several challenges may share the header ("Negotiate, NTLM TlRM...");
+  -- the scheme name is case-insensitive (RFC 9110 11.1).
+  local blob = auth:match("%f[%w][Nn][Tt][Ll][Mm] +([A-Za-z0-9+/=]+)")
   if not blob then return nil end
-  return fero.ntlm.info(fero.base64.decode(blob))
+  return fero.ntlm.info(fero.base64.decode(blob), { received = received })
 end

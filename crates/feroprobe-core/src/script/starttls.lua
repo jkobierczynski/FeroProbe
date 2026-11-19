@@ -131,8 +131,11 @@ local function ldap(sock, r)
   if not body then return nil, "short LDAP answer" end
   -- messageID (INTEGER), then [APPLICATION 24] with its result code
   -- (ENUMERATED) first.
-  if body:byte(1) ~= 0x02 then return nil, "not an LDAP message" end
+  if #body < 2 or body:byte(1) ~= 0x02 or body:byte(2) >= 0x80 then
+    return nil, "not an LDAP message"
+  end
   local pos = 3 + body:byte(2)
+  if pos + 1 > #body then return nil, "short LDAP answer" end
   if body:byte(pos) ~= 0x78 then return nil, "not an ExtendedResponse" end
   pos = pos + 1
   local l = body:byte(pos)
@@ -167,6 +170,7 @@ end
 -- XMPP: a stream header to the target's name, the features must offer
 -- <starttls/>, then <starttls/> answered <proceed/>. Port 5269 or an
 -- xmpp-server service is spoken to as a server (jabber:server).
+local TLS_NS = "urn:ietf:params:xml:ns:xmpp-tls"
 local function xmpp(sock, _, host, port)
   local ns = (port.number == 5269 or port.service == "xmpp-server")
     and "jabber:server" or "jabber:client"
@@ -182,13 +186,24 @@ local function xmpp(sock, _, host, port)
     return nil, "STARTTLS not offered"
   end
   sock:send("<starttls xmlns='urn:ietf:params:xml:ns:xmpp-tls'/>")
-  buf = read_until(sock, "", ">")
-  -- The answer may come whole or in pieces; one tag is enough to tell.
-  if buf and not buf:find("<proceed", 1, true) and not buf:find("<failure", 1, true) then
-    buf = read_until(sock, buf, "/>")
+  -- The answer is a whole <proceed/> or <failure/> element in the TLS
+  -- namespace, with or without a prefix (<tls:proceed xmlns:tls='...'/>).
+  local function answer(b, name)
+    local s, e, prefix = b:find("<([%w_%.%-]*:?)" .. name .. "[%s/>]")
+    if not s then return false end
+    local close = b:find(">", e, true)
+    if not close then return false end
+    return prefix == "" or b:sub(s, close):find(TLS_NS, 1, true) ~= nil
   end
-  if not buf or not buf:find("<proceed", 1, true) then return nil, "STARTTLS refused" end
-  return true
+  buf = ""
+  while #buf <= 65536 do
+    if answer(buf, "proceed") then return true end
+    if answer(buf, "failure") then break end
+    local ok, data = sock:receive()
+    if not ok then break end
+    buf = buf .. data
+  end
+  return nil, "STARTTLS refused"
 end
 
 -- Each protocol, by service name and by port number, as nmap's table.

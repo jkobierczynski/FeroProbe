@@ -51,12 +51,13 @@ action = function(host, port)
   end
   sock:send("AUTH NTLM\r\n")
   local line = r:line()
-  local challenge
+  local challenge, received
   if line and line:sub(1, 1) == "+" and line:sub(1, 3) ~= "+OK" then
     sock:send(fero.ntlm.negotiate_base64() .. "\r\n")
     line = r:line()
     if line and line:sub(1, 2) == "+ " then
       challenge = line:sub(3):match("^%s*(%S*)")
+      received = os.time()
       sock:send("*\r\n")
       r:line()
     end
@@ -64,5 +65,5 @@ action = function(host, port)
   sock:send("QUIT\r\n")
   sock:close()
   if not challenge then return nil end
-  return fero.ntlm.info(fero.base64.decode(challenge))
+  return fero.ntlm.info(fero.base64.decode(challenge), { received = received })
 end

@@ -76,6 +76,7 @@ action = function(host, port)
   end
   sock:send(fero.ntlm.negotiate_base64() .. "\r\n")
   local code, lines = r:reply()
+  local received = os.time()
   if code == 334 then
     sock:send("*\r\n")
     r:reply()
@@ -83,5 +84,6 @@ action = function(host, port)
   sock:send("QUIT\r\n")
   sock:close()
   if code ~= 334 then return nil end
-  return fero.ntlm.info(fero.base64.decode(lines[1]:sub(5):match("^%s*(%S*)")))
+  return fero.ntlm.info(fero.base64.decode(lines[1]:sub(5):match("^%s*(%S*)")),
+    { received = received })
 end

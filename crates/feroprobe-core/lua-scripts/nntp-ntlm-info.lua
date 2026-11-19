@@ -51,14 +51,17 @@ action = function(host, port)
     end
   end
   sock:send("AUTHINFO GENERIC NTLM\r\n")
-  local challenge
+  local challenge, received
   if r:reply() == 381 then
     sock:send("AUTHINFO GENERIC " .. fero.ntlm.negotiate_base64() .. "\r\n")
     local code, lines = r:reply()
-    if code == 381 then challenge = lines[1]:sub(5):match("^%s*(%S*)") end
+    if code == 381 then
+      challenge = lines[1]:sub(5):match("^%s*(%S*)")
+      received = os.time()
+    end
   end
   sock:send("QUIT\r\n")
   sock:close()
   if not challenge then return nil end
-  return fero.ntlm.info(fero.base64.decode(challenge))
+  return fero.ntlm.info(fero.base64.decode(challenge), { received = received })
 end

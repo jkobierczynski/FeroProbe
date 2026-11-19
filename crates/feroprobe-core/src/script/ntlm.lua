@@ -135,7 +135,8 @@ local LABELS = {
 -- The output of an *-ntlm-info script: what the CHALLENGE in `data`
 -- (found anywhere in it) says, in an ordered table with nmap's labels;
 -- with `opts.system_time`, the server's clock too (as rdp-ntlm-info).
--- The clock is noted for clock-skew either way. nil when `data` holds no
+-- The clock is noted for clock-skew either way, against `opts.received`
+-- (the scanner's os.time() when the challenge came; default now). nil when `data` holds no
 -- challenge, or one that says nothing.
 function ntlm.info(data, opts)
   if type(data) ~= "string" then return nil end
@@ -149,7 +150,7 @@ function ntlm.info(data, opts)
     end
   end
   if c.timestamp then
-    fero.record_skew(c.timestamp)
+    fero.record_skew(c.timestamp, opts and opts.received)
     if opts and opts.system_time then
       out.System_Time = os.date("!%Y-%m-%dT%H:%M:%S+00:00", c.timestamp)
       any = true
