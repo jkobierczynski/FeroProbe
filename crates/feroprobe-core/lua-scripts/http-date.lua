@@ -59,7 +59,10 @@ local function parse_date(s)
 end
 
 action = function(host, port)
-  local resp, err = fero.http.get(host, port, "/", { truncated_ok = true, redirect_ok = false })
+  -- No body is read (max_body_size 0), so the scanner's time is taken
+  -- when the headers came, not after a slow body.
+  local resp, err = fero.http.get(host, port, "/",
+    { truncated_ok = true, redirect_ok = false, max_body_size = 0 })
   local now = os.time()
   if not resp then
     fero.debug(1, "request failed: " .. tostring(err))

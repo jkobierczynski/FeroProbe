@@ -45,10 +45,34 @@ enum Stored {
     Table(Vec<(Key, Stored)>),
 }
 
-/// One registry: names to values, with the bytes each takes.
+/// One stored value, with the bytes it takes and, for a table, its
+/// highest positive whole-number key (where `append` goes next).
+#[derive(Debug)]
+struct Entry {
+    value: Stored,
+    size: usize,
+    last: i64,
+}
+
+/// The highest positive whole-number key of a table, else 0.
+fn last_index(s: &Stored) -> i64 {
+    match s {
+        Stored::Table(entries) => entries
+            .iter()
+            .filter_map(|(k, _)| match k {
+                Key::Int(i) if *i > 0 => Some(*i),
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0),
+        _ => 0,
+    }
+}
+
+/// One registry: names to values.
 #[derive(Debug, Default)]
 struct Map {
-    values: HashMap<Vec<u8>, (Stored, usize)>,
+    values: HashMap<Vec<u8>, Entry>,
 }
 
 /// The registries of a run.
@@ -182,7 +206,7 @@ impl Registry {
 
     fn get(&self, lua: &Lua, which: Which, name: &[u8]) -> mlua::Result<Value> {
         // Copied out of the lock first, so no Lua code runs under it.
-        let found = self.with(which, |m, _| m.values.get(name).map(|(s, _)| s.clone()));
+        let found = self.with(which, |m, _| m.values.get(name).map(|e| e.value.clone()));
         match found {
             Some(s) => load(lua, &s),
             None => Ok(Value::Nil),
@@ -193,7 +217,7 @@ impl Registry {
         let mut size = name.len();
         let stored = store(v, 0, &mut size)?;
         self.with(which, |m, bytes| {
-            let old = m.values.get(name).map_or(0, |(_, n)| *n);
+            let old = m.values.get(name).map_or(0, |e| e.size);
             match stored {
                 None => {
                     m.values.remove(name);
@@ -205,7 +229,15 @@ impl Registry {
                         return Err("the registry is full".to_string());
                     }
                     *bytes = total;
-                    m.values.insert(name.to_vec(), (s, size));
+                    let last = last_index(&s);
+                    m.values.insert(
+                        name.to_vec(),
+                        Entry {
+                            value: s,
+                            size,
+                            last,
+                        },
+                    );
                 }
             }
             Ok(())
@@ -225,17 +257,16 @@ impl Registry {
                 return Err("the registry is full".to_string());
             }
             match m.values.get_mut(name) {
-                Some((Stored::Table(entries), n)) => {
-                    let next = entries
-                        .iter()
-                        .filter_map(|(k, _)| match k {
-                            Key::Int(i) => Some(*i),
-                            _ => None,
-                        })
-                        .max()
-                        .unwrap_or(0)
-                        + 1;
+                Some(Entry {
+                    value: Stored::Table(entries),
+                    size: n,
+                    last,
+                }) => {
+                    let Some(next) = last.checked_add(1) else {
+                        return Err("the list has no room for another entry".to_string());
+                    };
                     entries.push((Key::Int(next), stored));
+                    *last = next;
                     *n += size;
                     *bytes += size;
                 }
@@ -244,7 +275,11 @@ impl Registry {
                     let n = size + name.len() + ENTRY_COST;
                     m.values.insert(
                         name.to_vec(),
-                        (Stored::Table(vec![(Key::Int(1), stored)]), n),
+                        Entry {
+                            value: Stored::Table(vec![(Key::Int(1), stored)]),
+                            size: n,
+                            last: 1,
+                        },
                     );
                     *bytes += n;
                 }
@@ -346,6 +381,23 @@ mod tests {
             .unwrap();
         assert_eq!((y.as_str(), n, l2.as_str(), b3), ("z", 2, "six", 3.5));
         assert!(other.is_nil());
+        // Appends go after the highest positive whole-number key.
+        let (a3, n1) = a
+            .load(
+                r#"
+                fero.registry.set("p", { 1, 2, [-5] = "neg" })
+                fero.registry.append("p", "three")
+                fero.registry.set("q", { [-5] = "neg" })
+                fero.registry.append("q", "one")
+                return fero.registry.get("p")[3], fero.registry.get("q")[1]
+                "#,
+            )
+            .eval::<(String, String)>()
+            .unwrap();
+        assert_eq!((a3.as_str(), n1.as_str()), ("three", "one"));
+        a.load(r#"fero.registry.set("p", nil) fero.registry.set("q", nil)"#)
+            .exec()
+            .unwrap();
         // Another host has its own registry; nil removes a value.
         let c = Lua::new();
         let fc = c.create_table().unwrap();
@@ -360,7 +412,7 @@ mod tests {
         let gone: Value = b.load(r#"return fero.registry.get("t")"#).eval().unwrap();
         assert!(gone.is_nil());
         let g = reg.inner.lock().unwrap();
-        assert_eq!(g.bytes, g.hosts[&ip].values[&b"l".to_vec()].1);
+        assert_eq!(g.bytes, g.hosts[&ip].values[&b"l".to_vec()].size);
     }
 
     #[test]
@@ -379,6 +431,7 @@ mod tests {
             r#"local t = {} t.t = t fero.registry.set("c", t)"#,
             r#"fero.registry.set("big", string.rep("x", 17 * 1024 * 1024))"#,
             r#"fero.registry.set("s", 1) fero.registry.append("s", 2)"#,
+            r#"fero.registry.set("m", { [math.maxinteger] = true }) fero.registry.append("m", 1)"#,
         ] {
             assert!(a.load(bad).exec().is_err(), "{bad}");
         }

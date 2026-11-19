@@ -429,13 +429,20 @@ async fn receive_buf(
     let read = async {
         let mut chunk = vec![0u8; 65536];
         loop {
+            // Never read past the limit: a delimiter within it is still
+            // found, and what lies beyond stays unread.
+            let room = MAX_RECEIVE.saturating_sub(st.buf.len()).min(chunk.len());
+            if room == 0 {
+                return mlua::Result::Ok(Err("too much data".to_string()));
+            }
+            let chunk = &mut chunk[..room];
             let n = match &mut st.conn {
                 Conn::Closed => {
-                    return mlua::Result::Ok(Err("socket is not connected".to_string()));
+                    return Ok(Err("socket is not connected".to_string()));
                 }
-                Conn::Tcp(s) => s.read(&mut chunk).await.map_err(read_error),
-                Conn::Tls(s) => s.read(&mut chunk).await.map_err(read_error),
-                Conn::Udp(s) => s.recv(&mut chunk).await.map_err(|e| e.to_string()),
+                Conn::Tcp(s) => s.read(chunk).await.map_err(read_error),
+                Conn::Tls(s) => s.read(chunk).await.map_err(read_error),
+                Conn::Udp(s) => s.recv(chunk).await.map_err(|e| e.to_string()),
             };
             let n = match n {
                 Ok(n) => n,
@@ -448,9 +455,6 @@ async fn receive_buf(
                 e.data(Dir::In, &chunk[..n]);
             }
             st.buf.extend_from_slice(&chunk[..n]);
-            if st.buf.len() > MAX_RECEIVE {
-                return Ok(Err("too much data".to_string()));
-            }
             if let Some(at) = find_delimiter(&lua, &find, &delim, &st.buf)? {
                 return Ok(Ok(at));
             }
@@ -466,9 +470,10 @@ async fn receive_buf(
     match outcome {
         Ok(at) => take(st, at),
         Err(e) => {
+            // At the limit the connection is dropped, so nothing more can
+            // pile up, but what came stays for a later receive.
             if e == "too much data" {
                 st.conn = Conn::Closed;
-                st.buf = Vec::new();
                 st.slot = None;
                 st.ends = None;
             }

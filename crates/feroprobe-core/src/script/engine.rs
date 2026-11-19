@@ -250,7 +250,8 @@ end
 fero.record_skew = function(remote, scanner)
   if fero.host_registry == nil or type(remote) ~= "number" then return end
   scanner = scanner or os.time()
-  fero.host_registry.append("clock_skew", {
+  -- A full registry loses the sample, never the calling script's output.
+  pcall(fero.host_registry.append, "clock_skew", {
     script = SCRIPT_NAME, skew = math.floor(remote - scanner + 0.5),
   })
 end
