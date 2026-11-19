@@ -156,7 +156,9 @@ local function check_root(host, port, root)
   -- A site that sends a 200 for a file that does not exist (say "Not
   -- found: <path>") cannot be believed for the free-text files: only a
   -- .git/config, whose [section] lines are checked, counts there.
-  local answers_all = get(host, port, root .. NO_SUCH_FILE, true) ~= nil
+  -- Its status alone decides: an HTML page with a 200 counts too.
+  local probe = fero.http.get(host, port, root .. NO_SUCH_FILE, { truncated_ok = true, redirect_ok = false })
+  local answers_all = probe ~= nil and probe.status == 200
   local bodies, found, ok = {}, fero.output_table(), 0
   for _, name in ipairs(FILES) do
     local body = get(host, port, root .. name)

@@ -4245,8 +4245,7 @@ async fn http_git_skips_fallback_pages_and_hides_passwords() {
     assert_eq!(
         http_output("http-git", port, "").await,
         Some(format!(
-            "\n  127.0.0.1:{port}/.git/\n    Potential Git repository found (found 3/6 expected files)\
-             \n    Repository description: Site \
+            "\n  127.0.0.1:{port}/.git/\n    Potential Git repository found (found 2/6 expected files)\
              \n    Remotes:\n      https://git.example/site.git\n      git@backup.example:site.git\
              \n      https://git.example?owner=dev@example.org"
         ))
@@ -4261,6 +4260,9 @@ async fn http_git_skips_fallback_pages_and_hides_passwords() {
     let (port, _) = web(|req| {
         let body: Vec<u8> = if req.starts_with("GET /.git/HEAD ") {
             b"ref: refs/heads/main\n".to_vec()
+        } else if req.starts_with("GET /.git/feroprobe-no-such-file ") {
+            // The missing file gets an HTML page; its 200 still counts.
+            b"<html><body>No such page</body></html>".to_vec()
         } else {
             let path = req.split(' ').nth(1).unwrap_or("");
             format!("Not found: {path}\n").into_bytes()
