@@ -12,9 +12,11 @@ not count as the file). Shows the repository's description, its last
 commit message (from COMMIT_EDITMSG, which can also hold a message whose
 commit was given up), the URLs of its remotes (with any user name and
 password left out), the kind of project its ignore files suggest, and
-which files mention words such as "passw", "key" or "secret". Plain
-GETs with FeroProbe's User-Agent, six at most per root; no Git object
-is downloaded.
+which files mention words such as "passw", "key" or "secret". A file
+whose text is what the site sends for a path that does not exist
+(.git/feroprobe-no-such-file, asked for once) is not counted, nor a
+.git/config without a [section] line. Plain GETs with FeroProbe's
+User-Agent, seven at most per root; no Git object is downloaded.
 
 Script arguments:
   http-git.root  The path that holds the .git directory (default "/");
@@ -35,6 +37,10 @@ local FILES = {
   ".git/description",
   ".git/info/exclude",
 }
+
+-- A path no repository has, asked for once to learn how the site
+-- answers a missing file.
+local NO_SUCH_FILE = ".git/feroprobe-no-such-file"
 
 -- Words worth a second look when a file contains them.
 local INTERESTING = { "bug", "key", "passw", "pw", "user", "secret", "uid" }
@@ -146,10 +152,20 @@ local function check_root(host, port, root)
   if not head or not is_head(head) then
     return nil
   end
+  -- What the site sends for a file that does not exist: a site that
+  -- answers every path with the same text (say "Not found" with a 200)
+  -- has none of these files when it sends that text.
+  local fallback = get(host, port, root .. NO_SUCH_FILE, true)
   local bodies, found, ok = {}, fero.output_table(), 0
   for _, name in ipairs(FILES) do
-    bodies[name] = get(host, port, root .. name)
-    found[name] = bodies[name] ~= nil
+    local body = get(host, port, root .. name)
+    if body and fallback and body == fallback then body = nil end
+    -- A Git config is made of [section] lines.
+    if body and name == ".git/config" and not body:find("^%s*%[") and not body:find("\n%s*%[") then
+      body = nil
+    end
+    bodies[name] = body
+    found[name] = body ~= nil
     if bodies[name] then ok = ok + 1 end
   end
 

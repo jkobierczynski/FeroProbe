@@ -3959,7 +3959,7 @@ async fn http_git_reads_an_exposed_repository() {
              \n    Project type: Django web application (guessed from .gitignore)"
         ))
     );
-    assert_eq!(seen.lock().unwrap().len(), 6);
+    assert_eq!(seen.lock().unwrap().len(), 7);
     // Another root, and none there: nothing, after one request.
     seen.lock().unwrap().clear();
     assert_eq!(
@@ -4255,6 +4255,32 @@ async fn http_git_skips_fallback_pages_and_hides_passwords() {
     let (port, _) =
         web(|_| b"HTTP/1.1 200 OK\r\nContent-Length: 16\r\n\r\nref: unavailable".to_vec()).await;
     assert_eq!(http_output("http-git", port, "").await, None);
+    // Every other path answered with the same plain text: only HEAD and
+    // the one file whose text differs count.
+    let (port, _) = web(|req| {
+        let body: &[u8] = if req.starts_with("GET /.git/HEAD ") {
+            b"ref: refs/heads/main\n"
+        } else if req.starts_with("GET /.git/description ") {
+            b"Shop\n"
+        } else {
+            b"Not found"
+        };
+        let mut r = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        r.extend_from_slice(body);
+        r
+    })
+    .await;
+    assert_eq!(
+        http_output("http-git", port, "").await,
+        Some(format!(
+            "\n  127.0.0.1:{port}/.git/\n    Potential Git repository found (found 2/6 expected files)\
+             \n    Repository description: Shop "
+        ))
+    );
 }
 
 #[tokio::test]
