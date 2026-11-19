@@ -58,6 +58,7 @@ script-dns-udp   | lan    | root | -sU -p 53 --script dns-nsid
 script-nbstat    | lan    | root | -sU -p 137 --script nbstat
 script-date      | lan    | root | -sS -p 80 --script http-date,clock-skew
 script-ntlm      | lan    | root | -sS -p 23,25,80,110,119,143,1433 --script http-ntlm-info,smtp-ntlm-info,imap-ntlm-info,pop3-ntlm-info,nntp-ntlm-info,telnet-ntlm-info,ms-sql-ntlm-info
+script-ssh       | lan    | root | -sS -p 22 --script ssh2-enum-algos
 
 # --- Loopback (nmap treats localhost specially) ----------------------------
 syn-local        | local  | root | -sS -p @TCP

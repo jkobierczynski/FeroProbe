@@ -72,7 +72,7 @@ Lab ports (the same on the target and on 127.0.0.1):
 
 | | open | closed | filtered (dropped) |
 | --- | --- | --- | --- |
-| TCP | 22 (SSH banner), 80 (HTTP), 8080 (silent) | 443, 3389 | 8443 |
+| TCP | 22 (SSH banner, then a KEXINIT), 80 (HTTP), 8080 (silent) | 443, 3389 | 8443 |
 | UDP | 53 (echo), 137 (NetBIOS NODE STATUS) | 123 | 161 |
 
 In `matrix.txt`, `@TCP` and `@UDP` expand to these lists. TCP 53 also has a

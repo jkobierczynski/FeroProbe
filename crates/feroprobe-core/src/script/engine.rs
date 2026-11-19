@@ -66,6 +66,9 @@ const SMB_LIBRARY: &str = include_str!("smb.lua");
 /// `fero.ntlm`: the NTLM NEGOTIATE and CHALLENGE messages.
 const NTLM_LIBRARY: &str = include_str!("ntlm.lua");
 
+/// `fero.ssh`: the SSH version exchange and KEXINIT.
+const SSH_LIBRARY: &str = include_str!("ssh.lua");
+
 /// `fero.starttls`: switching a plain-text connection to TLS.
 const STARTTLS_LIBRARY: &str = include_str!("starttls.lua");
 
@@ -551,6 +554,9 @@ pub(crate) fn install_library(
         .call::<()>(fero.clone())?;
     lua.load(NTLM_LIBRARY)
         .set_name("=fero.ntlm")
+        .call::<()>(fero.clone())?;
+    lua.load(SSH_LIBRARY)
+        .set_name("=fero.ssh")
         .call::<()>(fero.clone())?;
     lua.load(STARTTLS_LIBRARY)
         .set_name("=fero.starttls")

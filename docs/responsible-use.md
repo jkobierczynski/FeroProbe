@@ -188,7 +188,7 @@ who asked:
 
 | Script | What the target sees | nmap's counterpart |
 | --- | --- | --- |
-| `ssh-hostkey` | The client version line `SSH-2.0-FeroProbe_Scripting_Engine` (in clear text, before encryption starts) | `SSH-2.0-Nmap-SSH2-Hostkey` |
+| `ssh-hostkey` (and `ssh2-enum-algos` when chosen) | The client version line `SSH-2.0-FeroProbe_Scripting_Engine` (in clear text, before encryption starts) | `SSH-2.0-Nmap-SSH2-Hostkey`, `SSH-2.0-Nmap-SSH2-Enum-Algos` |
 | `smtp-commands` | `EHLO feroprobe.invalid` (`.invalid` is a reserved name, RFC 2606) | the target's name, or `nmap.scanme.org` |
 | `ftp-anon` | `USER anonymous`, `PASS feroprobe@` | `PASS IEUser@` |
 | `smb2-security-mode`, `smb2-time` | The SMB2 NEGOTIATE client GUID `FeroProbeSMBScan` (16 bytes of ASCII); on port 139 the NetBIOS calling name `FEROPROBE` | — |

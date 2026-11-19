@@ -6,7 +6,9 @@ namespace for the loopback target). It gives the scanners something real to
 talk to, so service and OS detection follow the same paths as they would
 against a real host:
 
-  TCP 22    sends an SSH banner, then waits for the client
+  TCP 22    sends an SSH banner; answers a client's SSH version line with
+            a KEXINIT (OpenSSH 9.6's lists) for ssh2-enum-algos, and
+            closes at the client's next packet (no key exchange)
   TCP 80    answers any request with a small HTTP/1.0 response; one that
             carries "Authorization: NTLM" gets a 401 with an NTLM challenge
   TCP 8080  accepts and stays silent (the "unknown service" path)
@@ -225,11 +227,57 @@ def serve_tcp(s, handler):
         threading.Thread(target=handler, args=(conn,), daemon=True).start()
 
 
+def ssh_kexinit():
+    """An unencrypted SSH KEXINIT packet (RFC 4253 sections 6 and 7.1)."""
+    lists = (
+        b"sntrup761x25519-sha512@openssh.com,curve25519-sha256,"
+        b"curve25519-sha256@libssh.org,ecdh-sha2-nistp256,"
+        b"diffie-hellman-group14-sha256,ext-info-s,"
+        b"kex-strict-s-v00@openssh.com",
+        b"rsa-sha2-512,rsa-sha2-256,ecdsa-sha2-nistp256,ssh-ed25519",
+        b"chacha20-poly1305@openssh.com,aes128-ctr,aes256-ctr,"
+        b"aes128-gcm@openssh.com,aes256-gcm@openssh.com",
+        b"chacha20-poly1305@openssh.com,aes128-ctr,aes256-ctr,"
+        b"aes128-gcm@openssh.com,aes256-gcm@openssh.com",
+        b"umac-128-etm@openssh.com,hmac-sha2-256-etm@openssh.com,"
+        b"hmac-sha2-512-etm@openssh.com,hmac-sha2-256",
+        b"umac-128-etm@openssh.com,hmac-sha2-256-etm@openssh.com,"
+        b"hmac-sha2-512-etm@openssh.com,hmac-sha2-256",
+        b"none,zlib@openssh.com",
+        b"none,zlib@openssh.com",
+        b"",
+        b"",
+    )
+    payload = b"\x14" + bytes(range(16))
+    payload += b"".join(struct.pack(">I", len(x)) + x for x in lists)
+    payload += b"\0\0\0\0\0"
+    pad = 8 - (5 + len(payload)) % 8
+    if pad < 4:
+        pad += 8
+    return struct.pack(">IB", 1 + len(payload) + pad, pad) + payload + bytes(pad)
+
+
+SSH_KEXINIT = ssh_kexinit()
+
+
 def ssh(conn):
     with conn:
         try:
             conn.sendall(SSH_BANNER)
             conn.settimeout(10)
+            got = b""
+            while b"\n" not in got and len(got) < 4096:
+                data = conn.recv(4096)
+                if not data:
+                    return
+                got += data
+            if not got.startswith(b"SSH-"):
+                return
+            conn.sendall(SSH_KEXINIT)
+            # Wait (2 s at most) for the client's next packet or its close,
+            # then close: a key exchange the client starts is not answered,
+            # so no client waits long for a reply that never comes.
+            conn.settimeout(2)
             conn.recv(4096)
         except OSError:
             pass

@@ -29,8 +29,6 @@ categories = { "default", "discovery", "safe" }
 
 portrule = fero.portrule.match({ 22 }, { "ssh" })
 
-local IDENT = "SSH-2.0-FeroProbe_Scripting_Engine"
-
 local KEX = {
   "curve25519-sha256", "curve25519-sha256@libssh.org",
   "diffie-hellman-group14-sha256", "diffie-hellman-group16-sha512",
@@ -50,38 +48,9 @@ local FAMILIES = {
   { label = "ED25519", algs = { "ssh-ed25519" } },
 }
 
-local MAX_PACKET = 35000
-
-local function str(s) return string.pack(">s4", s) end
-
-local function packet(payload)
-  local pad = 8 - ((5 + #payload) % 8)
-  if pad < 4 then pad = pad + 8 end
-  return string.pack(">I4B", 1 + #payload + pad, pad) .. payload .. string.rep("\0", pad)
-end
-
-local function read_packet(r)
-  local head, err = r:bytes(5)
-  if not head then return nil, err end
-  local len, pad = string.unpack(">I4B", head)
-  if len < 1 + pad or len > MAX_PACKET then return nil, "bad packet length" end
-  local body, err2 = r:bytes(len - 1)
-  if not body then return nil, err2 end
-  return body:sub(1, len - 1 - pad)
-end
-
-local function list_of(s)
-  local t = {}
-  for name in s:gmatch("[^,]+") do t[#t + 1] = name end
-  return t
-end
-
--- The name-lists of a KEXINIT payload: kex, then host key algorithms.
-local function parse_kexinit(p)
-  local ok, kex, hostkeys = pcall(string.unpack, ">s4s4", p, 18)
-  if not ok then return nil end
-  return list_of(kex), list_of(hostkeys)
-end
+local str = fero.ssh.string
+local packet = fero.ssh.packet
+local read_packet = fero.ssh.read_packet
 
 local function first_common(mine, theirs)
   local set = {}
@@ -130,26 +99,16 @@ end
 -- nil and the server's host key algorithms when it has none of this
 -- family's (so later families can be skipped without connecting).
 local function fetch(host, port, family, timeout)
-  local sock = fero.socket.new()
-  sock:set_timeout(timeout)
-  local ok, err = sock:connect(host, port)
-  if not ok then return nil, nil, err end
-  local r = fero.reader(sock)
-  local server_ident
-  for _ = 1, 20 do
-    local line = r:line()
-    if not line then break end
-    if line:sub(1, 4) == "SSH-" then server_ident = line break end
-  end
-  if not server_ident or not server_ident:match("^SSH%-2%.0%-") and not server_ident:match("^SSH%-1%.99%-") then
-    sock:close()
-    return nil, nil, "not an SSH-2 server"
-  end
-  sock:send(IDENT .. "\r\n")
-  local kexinit = string.char(20) .. fero.crypto.random_bytes(16)
-    .. str(table.concat(KEX, ",")) .. str(table.concat(family.algs, ","))
-    .. str(CIPHERS) .. str(CIPHERS) .. str(MACS) .. str(MACS)
-    .. str("none") .. str("none") .. str("") .. str("") .. "\0" .. string.pack(">I4", 0)
+  local sock, r = fero.ssh.connect(host, port, timeout)
+  if not sock then return nil, nil, r end
+  local kexinit = fero.ssh.kexinit({
+    kex_algorithms = KEX, server_host_key_algorithms = family.algs,
+    encryption_algorithms_client_to_server = CIPHERS,
+    encryption_algorithms_server_to_client = CIPHERS,
+    mac_algorithms_client_to_server = MACS, mac_algorithms_server_to_client = MACS,
+    compression_algorithms_client_to_server = "none",
+    compression_algorithms_server_to_client = "none",
+  })
   sock:send(packet(kexinit))
   local kex
   for _ = 1, 50 do
@@ -160,8 +119,9 @@ local function fetch(host, port, family, timeout)
     end
     local msg = p:byte(1)
     if msg == 20 and not kex then
-      local their_kex, their_keys = parse_kexinit(p)
-      if not their_kex then break end
+      local theirs = fero.ssh.parse_kexinit(p)
+      if not theirs then break end
+      local their_kex, their_keys = theirs.kex_algorithms, theirs.server_host_key_algorithms
       if not first_common(family.algs, their_keys) then
         sock:close()
         return nil, their_keys

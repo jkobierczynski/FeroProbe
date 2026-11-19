@@ -19,7 +19,7 @@ teams can flag FeroProbe scans without writing their own.
 | UDP scans to ports with no service-specific probe | payload `FeroProbeScan/1` |
 | ICMP / ICMPv6 echo requests (host discovery, `-PE`, `-PO` and the defaults) | payload `feroprobe` (9 bytes) |
 | HTTP requests from scripts (`--script`, `fero.http`) | `User-Agent: Mozilla/5.0 (compatible; FeroProbe Scripting Engine; https://github.com/jkobierczynski/FeroProbe)` |
-| `ssh-hostkey` (default script) | SSH client version `SSH-2.0-FeroProbe_Scripting_Engine` |
+| `ssh-hostkey` (default script), `ssh2-enum-algos` | SSH client version `SSH-2.0-FeroProbe_Scripting_Engine` |
 | `smtp-commands` (default script) | `EHLO feroprobe.invalid` |
 | `ftp-anon` (default script) | `PASS feroprobe@` |
 | `smb2-security-mode`, `smb2-time` (default scripts) | SMB2 NEGOTIATE client GUID `FeroProbeSMBScan`; on port 139 the NetBIOS calling name `FEROPROBE` |

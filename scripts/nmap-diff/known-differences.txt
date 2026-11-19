@@ -19,6 +19,7 @@ script-default | ^(udp/1434 was not asked for, but nmap only sent to it|only nma
 script-default | ^tcp/\d+ \[(PA|A|FA|RA|R)\]( payload)?: | own scripts, not nmap's NSE scripts (Default scripts)
 script-http | ^tcp/\d+ \[(PA|A|FA|RA|R)\]( payload)?: | own scripts, not nmap's NSE scripts (Default scripts)
 script-ntlm | ^tcp/\d+ \[(PA|A|FA|RA|R)\]( payload)?: | own scripts, NTLM NEGOTIATE naming FEROPROBE (`*-ntlm-info` scripts)
+script-ssh | ^tcp/\d+ \[(PA|A|FA|RA|R)\]( payload)?: | own scripts, SSH version line SSH-2.0-FeroProbe_Scripting_Engine (Default scripts; docs/responsible-use.md)
 os | ^only nmap sent to udp/\d+: .*300B 'C | nmap's OS detection UDP probe to an unscanned port (Probes outside the requested ports)
 *aggressive* | ^only nmap sent to udp/\d+: .*300B 'C | nmap's OS detection UDP probe to an unscanned port (Probes outside the requested ports)
 os | ^udp/\d+ was not asked for, but nmap only sent to it | nmap's OS detection UDP probe to an unscanned port (Probes outside the requested ports)

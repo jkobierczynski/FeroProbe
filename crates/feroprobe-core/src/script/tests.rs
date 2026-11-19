@@ -1638,6 +1638,175 @@ async fn check_ssh_hostkey(kex: &'static [u8]) {
     assert!(idents.iter().all(|i| i != "kex false"), "{idents:?}");
 }
 
+/// A lab SSH server that sends an IGNORE message and then a KEXINIT with
+/// `lists` (the ten name-lists of RFC 4253 section 7.1), and keeps the
+/// client's version line and the type of each packet it gets.
+async fn ssh_kexinit_lab(lists: [&'static [u8]; 10]) -> (u16, Seen) {
+    use tokio::io::AsyncBufReadExt;
+    let seen: Seen = Default::default();
+    let keep = seen.clone();
+    let port = tcp_server(move |s| {
+        let keep = keep.clone();
+        async move {
+            let mut s = tokio::io::BufReader::new(s);
+            if s.write_all(b"Welcome\r\nSSH-2.0-LabSSH_1.0\r\n")
+                .await
+                .is_err()
+            {
+                return;
+            }
+            let mut ident = String::new();
+            if s.read_line(&mut ident).await.is_err() {
+                return;
+            }
+            keep.lock().unwrap().push(ident.trim_end().to_string());
+            let mut out = ssh_packet(&[2, 0, 0, 0, 3, b'h', b'e', b'y']);
+            let mut kexinit = vec![20u8];
+            kexinit.extend([0x42u8; 16]);
+            for list in lists {
+                kexinit.extend(ssh_string(list));
+            }
+            kexinit.extend([0, 0, 0, 0, 0]);
+            out.extend(ssh_packet(&kexinit));
+            if s.write_all(&out).await.is_err() {
+                return;
+            }
+            let mut head = [0u8; 6];
+            if s.read_exact(&mut head).await.is_ok() {
+                keep.lock().unwrap().push(format!("packet {}", head[5]));
+            }
+        }
+    })
+    .await;
+    (port, seen)
+}
+
+const SSH_LAB_LISTS: [&[u8]; 10] = [
+    b"curve25519-sha256,diffie-hellman-group14-sha256,kex-strict-s-v00@openssh.com",
+    b"rsa-sha2-512,ssh-ed25519",
+    b"chacha20-poly1305@openssh.com,aes256-ctr",
+    b"chacha20-poly1305@openssh.com,aes256-ctr",
+    b"hmac-sha2-256-etm@openssh.com",
+    b"hmac-sha2-256-etm@openssh.com",
+    b"none,zlib@openssh.com",
+    b"none",
+    b"",
+    b"",
+];
+
+/// `ssh2-enum-algos` with `fero.verbosity()` fixed at `level`: the global
+/// verbosity is shared with tests running at the same time.
+async fn ssh2_enum_algos_at(level: u8, port: u16) -> ScriptResult {
+    let src = Script::built_in()
+        .unwrap()
+        .into_iter()
+        .find(|s| s.id == "ssh2-enum-algos")
+        .unwrap()
+        .source
+        .replace("fero.verbosity()", &level.to_string());
+    let scan = ScriptScan::new(
+        vec![script("ssh2-enum-algos", &src)],
+        ArgTable::default(),
+        None,
+    )
+    .unwrap();
+    let mut hosts = vec![host_with_services(&[(port, "ssh")])];
+    scan.scan_hosts(&mut hosts).await;
+    assert_eq!(hosts[0].ports[0].scripts.len(), 1);
+    hosts[0].ports[0].scripts[0].clone()
+}
+
+#[tokio::test]
+async fn ssh2_enum_algos_counts_the_server_algorithms() {
+    let (port, seen) = ssh_kexinit_lab(SSH_LAB_LISTS).await;
+    let r = ssh2_enum_algos_at(0, port).await;
+    assert_eq!(
+        r.output,
+        "\n  kex_algorithms: (3)\n  server_host_key_algorithms: (2)\
+         \n  encryption_algorithms: (2)\n  mac_algorithms: (1)\
+         \n  compression_algorithms_client_to_server: (2)\
+         \n  compression_algorithms_server_to_client: (1)"
+    );
+    // The full lists are in the structured output whatever the verbosity,
+    // in the order the server sent them and the groups in nmap's order.
+    let data = r.data.as_ref().unwrap();
+    let ScriptValue::Table(t) = data else {
+        panic!("{data:?}")
+    };
+    let names: Vec<&str> = t.named.iter().map(|(k, _)| k.as_str()).collect();
+    assert_eq!(
+        names,
+        [
+            "kex_algorithms",
+            "server_host_key_algorithms",
+            "encryption_algorithms",
+            "mac_algorithms",
+            "compression_algorithms_client_to_server",
+            "compression_algorithms_server_to_client"
+        ]
+    );
+    let ScriptValue::Table(hk) = named(data, "server_host_key_algorithms") else {
+        panic!()
+    };
+    assert_eq!(
+        hk.list,
+        [
+            ScriptValue::Str("rsa-sha2-512".into()),
+            ScriptValue::Str("ssh-ed25519".into())
+        ]
+    );
+    // FeroProbe's version line, then its KEXINIT (message 20). The lab's
+    // connection task notes the packet after the script may have finished,
+    // so wait for it (2 s at most).
+    for _ in 0..200 {
+        if seen.lock().unwrap().len() >= 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let seen = seen.lock().unwrap();
+    assert_eq!(
+        *seen,
+        ["SSH-2.0-FeroProbe_Scripting_Engine", "packet 20"],
+        "{seen:?}"
+    );
+}
+
+#[tokio::test]
+async fn ssh2_enum_algos_lists_each_algorithm_with_v() {
+    let (port, _) = ssh_kexinit_lab(SSH_LAB_LISTS).await;
+    let r = ssh2_enum_algos_at(1, port).await;
+    assert_eq!(
+        r.output,
+        "\n  kex_algorithms: (3)\
+         \n      curve25519-sha256\
+         \n      diffie-hellman-group14-sha256\
+         \n      kex-strict-s-v00@openssh.com\
+         \n  server_host_key_algorithms: (2)\
+         \n      rsa-sha2-512\
+         \n      ssh-ed25519\
+         \n  encryption_algorithms: (2)\
+         \n      chacha20-poly1305@openssh.com\
+         \n      aes256-ctr\
+         \n  mac_algorithms: (1)\
+         \n      hmac-sha2-256-etm@openssh.com\
+         \n  compression_algorithms_client_to_server: (2)\
+         \n      none\
+         \n      zlib@openssh.com\
+         \n  compression_algorithms_server_to_client: (1)\
+         \n      none"
+    );
+}
+
+#[tokio::test]
+async fn ssh2_enum_algos_needs_an_ssh2_server() {
+    let port = greeter(b"SSH-1.5-OldServer\r\n").await;
+    assert_eq!(output_of("ssh2-enum-algos", port, "ssh").await, None);
+    // A server that closes after its version line gives no output.
+    let port = greeter(b"SSH-2.0-Quiet\r\n").await;
+    assert_eq!(output_of("ssh2-enum-algos", port, "ssh").await, None);
+}
+
 #[tokio::test]
 async fn mysql_info_reads_the_greeting() {
     let port = tcp_server(|mut s| async move {
