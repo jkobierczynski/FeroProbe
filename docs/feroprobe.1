@@ -2041,10 +2041,26 @@ Logs in to nothing; \f[V]fero.smb.dialect_name(d)\f[R] writes a dialect
 as nmap does (\f[V]3:1:1\f[R])
 T}
 T{
-\f[V]fero.ntlm.negotiate_message()\f[R]
+\f[V]fero.ntlm.negotiate_message()\f[R],
+\f[V]fero.ntlm.negotiate_base64()\f[R]
 T}@T{
-An NTLM NEGOTIATE message (no domain or workstation named), for a script
-to wrap in its protocol
+An NTLM NEGOTIATE message, raw or in base64, for a script to wrap in its
+protocol: no domain, the workstation \f[V]FEROPROBE\f[R]
+(FeroProbe\[aq]s mark, IDS rules 9100016 and 9100017), the same 49 bytes
+every time
+T}
+T{
+\f[V]fero.ntlm.info(data [, opts])\f[R]
+T}@T{
+What an NTLM CHALLENGE found in \f[V]data\f[R] says, as the
+\f[V]*-ntlm-info\f[R] scripts show it: an ordered table with
+\f[V]Target_Name\f[R], \f[V]NetBIOS_Domain_Name\f[R],
+\f[V]NetBIOS_Computer_Name\f[R], \f[V]DNS_Domain_Name\f[R],
+\f[V]DNS_Computer_Name\f[R], \f[V]DNS_Tree_Name\f[R] and
+\f[V]Product_Version\f[R] (each when given and not empty), and
+\f[V]System_Time\f[R] with \f[V]opts.system_time\f[R].
+Notes the server\[aq]s clock for \f[V]clock-skew\f[R].
+\f[V]nil\f[R] when there is no challenge
 T}
 T{
 \f[V]fero.ntlm.parse_challenge(data)\f[R]
@@ -2056,6 +2072,31 @@ CredSSP or SPNEGO) and reads it: \f[V]target_name\f[R],
 \f[V]timestamp\f[R] (Unix seconds), \f[V]version\f[R]
 (\f[V]\[dq]10.0.14393\[dq]\f[R]) and \f[V]flags\f[R], each when the
 server gives it; or \f[V]nil\f[R] and a message
+T}
+T{
+\f[V]fero.starttls.protocol(port)\f[R]
+T}@T{
+The protocol a TCP port switches to TLS with: by its service name, else
+its number, as nmap\[aq]s table: \f[V]smtp\f[R] (25,
+\f[V]submission\f[R] 587), \f[V]lmtp\f[R], \f[V]imap\f[R] (143),
+\f[V]pop3\f[R] (110), \f[V]nntp\f[R] (119), \f[V]ftp\f[R] (21, AUTH
+TLS), \f[V]ldap\f[R] (389, the StartTLS extended operation),
+\f[V]postgresql\f[R] (5432, SSLRequest), \f[V]xmpp\f[R] (5222, and
+\f[V]xmpp-server\f[R] 5269); \f[V]nil\f[R] for others
+T}
+T{
+\f[V]fero.starttls.connect(host, port [, opts])\f[R]
+T}@T{
+Connects, asks the server to switch to TLS as its protocol does, and
+returns the socket speaking TLS (an SMTP server then wants EHLO again),
+or \f[V]nil\f[R] and a message (the connection closed).
+SMTP and LMTP say \f[V]EHLO\f[R]/\f[V]LHLO feroprobe.invalid\f[R] first
+(\f[V]opts.domain\f[R], else \f[V]smtp.domain\f[R], replaces the name);
+IMAP asks for CAPABILITY and switches only when STARTTLS is listed; XMPP
+opens a stream to the target\[aq]s name.
+\f[V]opts.timeout\f[R] (ms, default 10000) bounds each wait,
+\f[V]opts.protocol\f[R] names the protocol instead of the port.
+Only the port asked for is contacted
 T}
 T{
 \f[V]fero.output_table()\f[R]
@@ -2427,10 +2468,10 @@ T}@T{
 hosts where another script noted a clock
 T}@T{
 Sums up how far the host\[aq]s clocks are from the scanner\[aq]s, from
-what \f[V]http-date\f[R], \f[V]ntp-info\f[R], \f[V]rdp-ntlm-info\f[R],
-\f[V]smb2-time\f[R] and \f[V]ssl-date\f[R] saw (it runs after them and
-sends nothing): the one value when there is one (\f[V]5s\f[R]), else
-\f[V]mean: ..., deviation: ..., median: ...\f[R] (the population
+what \f[V]http-date\f[R], \f[V]ntp-info\f[R], the \f[V]*-ntlm-info\f[R]
+scripts, \f[V]smb2-time\f[R] and \f[V]ssl-date\f[R] saw (it runs after
+them and sends nothing): the one value when there is one (\f[V]5s\f[R]),
+else \f[V]mean: ..., deviation: ..., median: ...\f[R] (the population
 standard deviation); XML and JSON have \f[V]mean\f[R], \f[V]stddev\f[R],
 \f[V]median\f[R] and \f[V]count\f[R] in seconds.
 After the scan, when two or more hosts had a value, it lists the hosts
@@ -2438,8 +2479,8 @@ grouped by their median (\f[V]Post-scan script results\f[R]).
 The differences include the time an answer took and the rounding to
 whole seconds, so \f[V]-1s\f[R] or \f[V]1s\f[R] usually means the clocks
 agree.
-nmap\[aq]s also counts services FeroProbe has no scripts for yet (SMB1,
-the other NTLM-info scripts)
+nmap\[aq]s also counts services FeroProbe has no scripts for yet (SMB1
+and others)
 T}
 T{
 \f[V]dns-nsid\f[R]
@@ -2537,6 +2578,26 @@ Tries no method.
 Argument: \f[V]http-methods.url-path\f[R] (default \f[V]/\f[R])
 T}
 T{
+\f[V]http-ntlm-info\f[R]
+T}@T{
+default, discovery, safe
+T}@T{
+web ports
+T}@T{
+One GET with \f[V]Authorization: NTLM\f[R] and the NEGOTIATE in base64;
+reads the challenge from the \f[V]WWW-Authenticate\f[R] header of the
+401 answer.
+Shows what the server\[aq]s NTLM CHALLENGE says: target name, NetBIOS
+and DNS domain and computer names, DNS tree name and product version, in
+nmap\[aq]s order and labels (see \f[V]fero.ntlm.info\f[R]); the
+server\[aq]s clock is noted for \f[V]clock-skew\f[R].
+The NTLM NEGOTIATE names no user and the workstation
+\f[V]FEROPROBE\f[R]; nothing logs in.
+A server that offers no NTLM gives no output.
+Argument: \f[V]http-ntlm-info.root\f[R] (default \f[V]/\f[R], a path
+that asks for authentication)
+T}
+T{
 \f[V]http-robots.txt\f[R]
 T}@T{
 default, discovery, safe
@@ -2575,6 +2636,25 @@ redirect it did not follow points.
 Argument: \f[V]http-title.path\f[R] (default \f[V]/\f[R])
 T}
 T{
+\f[V]imap-ntlm-info\f[R]
+T}@T{
+default, discovery, safe
+T}@T{
+143, 993, \f[V]imap\f[R], \f[V]imaps\f[R]
+T}@T{
+Switches to TLS with STARTTLS when the server lists it (else starts
+again in plain text), sends \f[V]AUTHENTICATE NTLM\f[R] and the
+NEGOTIATE, then cancels the exchange (\f[V]*\f[R]) and logs out.
+Shows what the server\[aq]s NTLM CHALLENGE says: target name, NetBIOS
+and DNS domain and computer names, DNS tree name and product version, in
+nmap\[aq]s order and labels (see \f[V]fero.ntlm.info\f[R]); the
+server\[aq]s clock is noted for \f[V]clock-skew\f[R].
+The NTLM NEGOTIATE names no user and the workstation
+\f[V]FEROPROBE\f[R]; nothing logs in.
+Over TLS from the start on 993 and when \f[V]-sV\f[R] found TLS.
+Argument: \f[V]imap-ntlm-info.timeout\f[R] (ms, default 10000)
+T}
+T{
 \f[V]imap-capabilities\f[R]
 T}@T{
 default, safe
@@ -2583,6 +2663,30 @@ T}@T{
 T}@T{
 Sends CAPABILITY and lists the answer; logs in to nothing.
 Over TLS on 993 and when \f[V]-sV\f[R] found TLS
+T}
+T{
+\f[V]ms-sql-ntlm-info\f[R]
+T}@T{
+default, discovery, safe
+T}@T{
+1433, \f[V]ms-sql-s\f[R]
+T}@T{
+Sends one TDS 7.1 LOGIN7 packet asking for Windows (integrated)
+authentication, with the NEGOTIATE as its security data, host name
+\f[V]FEROPROBE\f[R] and application name
+\f[V]FeroProbe Scripting Engine\f[R], and reads the SSPI answer.
+Shows what the server\[aq]s NTLM CHALLENGE says: target name, NetBIOS
+and DNS domain and computer names, DNS tree name and product version, in
+nmap\[aq]s order and labels (see \f[V]fero.ntlm.info\f[R]); the
+server\[aq]s clock is noted for \f[V]clock-skew\f[R].
+The NTLM NEGOTIATE names no user and the workstation
+\f[V]FEROPROBE\f[R]; nothing logs in.
+The output is listed under the instance, \f[V]address:port\f[R], as
+nmap\[aq]s.
+nmap\[aq]s first asks the SQL Server Browser on UDP 1434 for other
+instances, even when 1434 was not scanned; FeroProbe\[aq]s asks only the
+TCP port the scan found.
+Argument: \f[V]ms-sql-ntlm-info.timeout\f[R] (ms, default 10000)
 T}
 T{
 \f[V]mysql-info\f[R]
@@ -2623,6 +2727,25 @@ Arguments: \f[V]nbstat.port\f[R] (default 137, must be scanned),
 \f[V]nbstat.timeout\f[R] (ms, default 5000)
 T}
 T{
+\f[V]nntp-ntlm-info\f[R]
+T}@T{
+default, discovery, safe
+T}@T{
+119, 433, 563, \f[V]nntp\f[R], \f[V]snews\f[R]
+T}@T{
+Switches to TLS with STARTTLS where the server allows it (else starts
+again in plain text), sends \f[V]AUTHINFO GENERIC NTLM\f[R] and then the
+NEGOTIATE, and says QUIT.
+Shows what the server\[aq]s NTLM CHALLENGE says: target name, NetBIOS
+and DNS domain and computer names, DNS tree name and product version, in
+nmap\[aq]s order and labels (see \f[V]fero.ntlm.info\f[R]); the
+server\[aq]s clock is noted for \f[V]clock-skew\f[R].
+The NTLM NEGOTIATE names no user and the workstation
+\f[V]FEROPROBE\f[R]; nothing logs in.
+Over TLS from the start on 563 and when \f[V]-sV\f[R] found TLS.
+Argument: \f[V]nntp-ntlm-info.timeout\f[R] (ms, default 10000)
+T}
+T{
 \f[V]ntp-info\f[R]
 T}@T{
 default, discovery, safe
@@ -2646,6 +2769,25 @@ Sends CAPA and lists the capabilities, with their arguments in
 parentheses, plus APOP when the greeting offers it; logs in to nothing
 T}
 T{
+\f[V]pop3-ntlm-info\f[R]
+T}@T{
+default, discovery, safe
+T}@T{
+110, 995, \f[V]pop3\f[R], \f[V]pop3s\f[R]
+T}@T{
+Switches to TLS with STLS where the server allows it (else starts again
+in plain text), sends \f[V]AUTH NTLM\f[R] and the NEGOTIATE, then
+cancels the exchange (\f[V]*\f[R]) and says QUIT.
+Shows what the server\[aq]s NTLM CHALLENGE says: target name, NetBIOS
+and DNS domain and computer names, DNS tree name and product version, in
+nmap\[aq]s order and labels (see \f[V]fero.ntlm.info\f[R]); the
+server\[aq]s clock is noted for \f[V]clock-skew\f[R].
+The NTLM NEGOTIATE names no user and the workstation
+\f[V]FEROPROBE\f[R]; nothing logs in.
+Over TLS from the start on 995 and when \f[V]-sV\f[R] found TLS.
+Argument: \f[V]pop3-ntlm-info.timeout\f[R] (ms, default 10000)
+T}
+T{
 \f[V]rdp-ntlm-info\f[R]
 T}@T{
 default, discovery, safe
@@ -2653,9 +2795,10 @@ T}@T{
 3389, \f[V]ms-wbt-server\f[R]
 T}@T{
 Asks for TLS and CredSSP (Network Level Authentication) in the
-connection request, sends an NTLM NEGOTIATE inside a CredSSP message
-over TLS and shows what the server\[aq]s NTLM CHALLENGE says: target
-name, NetBIOS and DNS domain and computer names, DNS tree name, product
+connection request, sends an NTLM NEGOTIATE (see
+\f[V]fero.ntlm.negotiate_message\f[R]) inside a CredSSP message over TLS
+and shows what the server\[aq]s NTLM CHALLENGE says: target name,
+NetBIOS and DNS domain and computer names, DNS tree name, product
 version and system time (UTC), in that order, as nmap\[aq]s; the system
 time is noted for \f[V]clock-skew\f[R].
 No credentials are sent.
@@ -2718,6 +2861,28 @@ nmap\[aq]s also sends HELP, and by default the target\[aq]s own name;
 FeroProbe\[aq]s sends no HELP
 T}
 T{
+\f[V]smtp-ntlm-info\f[R]
+T}@T{
+default, discovery, safe
+T}@T{
+25, 465, 587, \f[V]smtp\f[R], \f[V]smtps\f[R], \f[V]submission\f[R]
+T}@T{
+Says \f[V]EHLO feroprobe.invalid\f[R], switches to TLS with STARTTLS
+where the server allows it (some servers take AUTH only then; else it
+starts again in plain text) and says EHLO again, sends
+\f[V]AUTH NTLM\f[R] and the NEGOTIATE, then cancels the exchange
+(\f[V]*\f[R]) and says QUIT.
+Shows what the server\[aq]s NTLM CHALLENGE says: target name, NetBIOS
+and DNS domain and computer names, DNS tree name and product version, in
+nmap\[aq]s order and labels (see \f[V]fero.ntlm.info\f[R]); the
+server\[aq]s clock is noted for \f[V]clock-skew\f[R].
+The NTLM NEGOTIATE names no user and the workstation
+\f[V]FEROPROBE\f[R]; nothing logs in.
+Over TLS from the start on 465 and when \f[V]-sV\f[R] found TLS.
+Arguments: \f[V]smtp-ntlm-info.domain\f[R] or \f[V]smtp.domain\f[R] (the
+EHLO name), \f[V]smtp-ntlm-info.timeout\f[R] (ms, default 10000)
+T}
+T{
 \f[V]ssh-hostkey\f[R]
 T}@T{
 default, discovery, safe
@@ -2742,13 +2907,20 @@ T{
 T}@T{
 default, discovery, safe
 T}@T{
-TLS ports
+TLS ports, and ports that switch to TLS on request (see
+\f[V]fero.starttls.protocol\f[R])
 T}@T{
 Shows the certificate of a TLS port: subject, alternative names, issuer,
 key type and size, signature algorithm, validity dates, SHA-1 and
 SHA-256 fingerprints, and with \f[V]-v\f[R] the PEM.
-Direct TLS only for now (no STARTTLS); nmap\[aq]s also shows MD5,
-FeroProbe\[aq]s SHA-256 instead
+On an SMTP, LMTP, IMAP, POP3, NNTP, FTP, LDAP, PostgreSQL or XMPP port
+that \f[V]-sV\f[R] did not find speaking TLS straight away, it first
+asks for TLS the protocol\[aq]s way (\f[V]fero.starttls.connect\f[R]),
+and when that fails tries a TLS handshake straight away, as nmap\[aq]s
+does.
+nmap\[aq]s also covers MySQL, VNC and MS-SQL (TDS), which
+FeroProbe\[aq]s does not yet; nmap\[aq]s also shows MD5, FeroProbe\[aq]s
+SHA-256 instead
 T}
 T{
 \f[V]ssl-date\f[R]
@@ -2784,6 +2956,25 @@ T}@T{
 Says whether the server still accepts the obsolete SSH protocol 1, from
 the version in its greeting; sends nothing.
 nmap\[aq]s also reads the version 1 keys and ciphers
+T}
+T{
+\f[V]telnet-ntlm-info\f[R]
+T}@T{
+default, discovery, safe
+T}@T{
+23, \f[V]telnet\f[R]
+T}@T{
+Sends one telnet AUTHENTICATION IS NTLM sub-negotiation ([MS-TNAP]) with
+the NEGOTIATE and reads the server\[aq]s REPLY (doubled 0xff bytes
+undone), skipping the server\[aq]s own option negotiation.
+Shows what the server\[aq]s NTLM CHALLENGE says: target name, NetBIOS
+and DNS domain and computer names, DNS tree name and product version, in
+nmap\[aq]s order and labels (see \f[V]fero.ntlm.info\f[R]); the
+server\[aq]s clock is noted for \f[V]clock-skew\f[R].
+The NTLM NEGOTIATE names no user and the workstation
+\f[V]FEROPROBE\f[R]; nothing logs in.
+Answers only Microsoft\[aq]s telnet server.
+Argument: \f[V]telnet-ntlm-info.timeout\f[R] (ms, default 10000)
 T}
 T{
 \f[V]vnc-info\f[R]
@@ -4835,6 +5026,21 @@ T}@T{
 \f[V]SSH-2.0-FeroProbe_Scripting_Engine\f[R],
 \f[V]EHLO feroprobe.invalid\f[R], FTP password \f[V]feroprobe\[at]\f[R]
 (see \f[V]docs/responsible-use.md\f[R])
+T}
+T{
+\f[V]*-ntlm-info\f[R] scripts
+T}@T{
+NTLM NEGOTIATE with no workstation; \f[V]ms-sql-ntlm-info\f[R] first
+asks UDP 1434 for instances; SMTP, IMAP, POP3 and NNTP leave the AUTH
+exchange open when they close; \f[V]telnet-ntlm-info\f[R] reads the
+challenge with any doubled 0xff bytes left in
+T}@T{
+NEGOTIATE naming the workstation \f[V]FEROPROBE\f[R] (rules 9100016,
+9100017); \f[V]ms-sql-ntlm-info\f[R] asks only the scanned TCP port; the
+AUTH exchange is cancelled (\f[V]*\f[R]) before QUIT (NNTP has no
+cancel); doubled 0xff bytes are undone.
+A failed STARTTLS costs POP3 and NNTP a second connection (nmap\[aq]s
+carry on in plain text on the first)
 T}
 T{
 \f[V]--resume\f[R]

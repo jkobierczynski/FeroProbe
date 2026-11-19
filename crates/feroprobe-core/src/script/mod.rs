@@ -60,6 +60,10 @@ const BUILT_IN: &[(&str, &str)] = &[
         include_str!("../../lua-scripts/http-methods.lua"),
     ),
     (
+        "http-ntlm-info",
+        include_str!("../../lua-scripts/http-ntlm-info.lua"),
+    ),
+    (
         "http-robots.txt",
         include_str!("../../lua-scripts/http-robots.txt.lua"),
     ),
@@ -76,14 +80,30 @@ const BUILT_IN: &[(&str, &str)] = &[
         include_str!("../../lua-scripts/imap-capabilities.lua"),
     ),
     (
+        "imap-ntlm-info",
+        include_str!("../../lua-scripts/imap-ntlm-info.lua"),
+    ),
+    (
+        "ms-sql-ntlm-info",
+        include_str!("../../lua-scripts/ms-sql-ntlm-info.lua"),
+    ),
+    (
         "mysql-info",
         include_str!("../../lua-scripts/mysql-info.lua"),
     ),
     ("nbstat", include_str!("../../lua-scripts/nbstat.lua")),
+    (
+        "nntp-ntlm-info",
+        include_str!("../../lua-scripts/nntp-ntlm-info.lua"),
+    ),
     ("ntp-info", include_str!("../../lua-scripts/ntp-info.lua")),
     (
         "pop3-capabilities",
         include_str!("../../lua-scripts/pop3-capabilities.lua"),
+    ),
+    (
+        "pop3-ntlm-info",
+        include_str!("../../lua-scripts/pop3-ntlm-info.lua"),
     ),
     (
         "rdp-ntlm-info",
@@ -100,12 +120,20 @@ const BUILT_IN: &[(&str, &str)] = &[
         include_str!("../../lua-scripts/smtp-commands.lua"),
     ),
     (
+        "smtp-ntlm-info",
+        include_str!("../../lua-scripts/smtp-ntlm-info.lua"),
+    ),
+    (
         "ssh-hostkey",
         include_str!("../../lua-scripts/ssh-hostkey.lua"),
     ),
     ("ssl-date", include_str!("../../lua-scripts/ssl-date.lua")),
     ("ssl-cert", include_str!("../../lua-scripts/ssl-cert.lua")),
     ("sshv1", include_str!("../../lua-scripts/sshv1.lua")),
+    (
+        "telnet-ntlm-info",
+        include_str!("../../lua-scripts/telnet-ntlm-info.lua"),
+    ),
     ("vnc-info", include_str!("../../lua-scripts/vnc-info.lua")),
     (
         "x11-access",

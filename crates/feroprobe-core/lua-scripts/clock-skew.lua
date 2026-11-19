@@ -17,7 +17,11 @@ author = "FeroProbe contributors"
 license = "GPL-3.0-or-later"
 categories = { "default", "safe" }
 
-dependencies = { "http-date", "ntp-info", "rdp-ntlm-info", "smb2-time", "ssl-date" }
+dependencies = {
+  "http-date", "ntp-info", "rdp-ntlm-info", "smb2-time", "ssl-date",
+  "http-ntlm-info", "imap-ntlm-info", "ms-sql-ntlm-info", "nntp-ntlm-info",
+  "pop3-ntlm-info", "smtp-ntlm-info", "telnet-ntlm-info",
+}
 
 local function skews()
   local list = fero.host_registry and fero.host_registry.get("clock_skew")

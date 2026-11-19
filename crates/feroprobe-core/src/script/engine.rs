@@ -66,6 +66,9 @@ const SMB_LIBRARY: &str = include_str!("smb.lua");
 /// `fero.ntlm`: the NTLM NEGOTIATE and CHALLENGE messages.
 const NTLM_LIBRARY: &str = include_str!("ntlm.lua");
 
+/// `fero.starttls`: switching a plain-text connection to TLS.
+const STARTTLS_LIBRARY: &str = include_str!("starttls.lua");
+
 /// The library every script gets, written for FeroProbe, on top of the
 /// `fero` table the engine fills in.
 const LIBRARY: &str = r##"
@@ -548,6 +551,9 @@ pub(crate) fn install_library(
         .call::<()>(fero.clone())?;
     lua.load(NTLM_LIBRARY)
         .set_name("=fero.ntlm")
+        .call::<()>(fero.clone())?;
+    lua.load(STARTTLS_LIBRARY)
+        .set_name("=fero.starttls")
         .call::<()>(fero)?;
     Ok(())
 }

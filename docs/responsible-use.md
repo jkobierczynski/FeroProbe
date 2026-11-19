@@ -192,7 +192,8 @@ who asked:
 | `smtp-commands` | `EHLO feroprobe.invalid` (`.invalid` is a reserved name, RFC 2606) | the target's name, or `nmap.scanme.org` |
 | `ftp-anon` | `USER anonymous`, `PASS feroprobe@` | `PASS IEUser@` |
 | `smb2-security-mode`, `smb2-time` | The SMB2 NEGOTIATE client GUID `FeroProbeSMBScan` (16 bytes of ASCII); on port 139 the NetBIOS calling name `FEROPROBE` | — |
-| `rdp-ntlm-info` | The RDP routing cookie `Cookie: mstshash=FeroProbe` in the connection request (clear text, before TLS); then an NTLM NEGOTIATE that names no domain or workstation | — |
+| `rdp-ntlm-info` | The RDP routing cookie `Cookie: mstshash=FeroProbe` in the connection request (clear text, before TLS); then the NTLM NEGOTIATE below, inside TLS | — |
+| `http-ntlm-info`, `smtp-ntlm-info`, `imap-ntlm-info`, `pop3-ntlm-info`, `nntp-ntlm-info`, `telnet-ntlm-info`, `ms-sql-ntlm-info` | An NTLM NEGOTIATE that names the workstation `FEROPROBE` and no user or domain, the same 49 bytes every time: in base64 over HTTP (`Authorization: NTLM`, beside the `User-Agent` above), SMTP, IMAP, POP3 and NNTP (rule 9100016), as is over telnet and MS-SQL (rule 9100017). `ms-sql-ntlm-info`'s login also gives the host name `FEROPROBE` and the application name `FeroProbe Scripting Engine`; `smtp-ntlm-info` says `EHLO feroprobe.invalid`. These scripts switch to TLS with STARTTLS where the server allows it, and the NEGOTIATE is then encrypted | NEGOTIATE with no workstation |
 | `ssl-date` | `FeroProbeSSLDate` in the TLS ClientHello random, after its four time bytes (clear text, it is the first message of the handshake) | — |
 | `nbstat` | The NetBIOS transaction ID `0x4650` ("FP") of its NODE STATUS request to UDP 137 (a weak mark of 2 bytes: rule 9100013 also needs the rest of the request to match, and a tool that picks its IDs at random still matches about once in 65,536 such requests) | — |
 | `dns-nsid` | The DNS transaction ID `0x4650` ("FP") of its CHAOS TXT queries for `id.server` and `version.bind` (the first one asking for the NSID too). A weak mark of 2 bytes: rules 9100014 (UDP) and 9100015 (TCP) also need only the RD flag (as in nmap's queries), one question and that question (`id.server` or `version.bind`, CHAOS TXT), which few other clients send; a tool that picks its IDs at random still matches about once in 65,536 such queries | — |
@@ -210,7 +211,7 @@ password, and each stays within the ports the scan probed.
 
 The repository ships Suricata and Snort rules that match the probe
 signature, so blue teams can flag FeroProbe scans without writing their
-own. Rules 9100006 to 9100015 match the script markers above in clear
+own. Rules 9100006 to 9100017 match the script markers above in clear
 text. They are in [`rules/`](../rules/): `rules/feroprobe.rules` for
 Suricata and `rules/feroprobe.snort.rules` for Snort 2.9 and
 `rules/feroprobe.snort3.rules` for Snort 3, with setup notes in

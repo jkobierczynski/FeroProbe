@@ -7,17 +7,30 @@ local ntlm = {}
 
 local SIGNATURE = "NTLMSSP\0"
 
--- NEGOTIATE flags: UNICODE, REQUEST_TARGET, NTLM, ALWAYS_SIGN,
--- EXTENDED_SESSIONSECURITY, VERSION, 128, 56.
-local FLAGS = 0x00000001 | 0x00000004 | 0x00000200 | 0x00008000
-  | 0x00080000 | 0x02000000 | 0x20000000 | 0x80000000
+-- NEGOTIATE flags: UNICODE, OEM, REQUEST_TARGET, NTLM, OEM_WORKSTATION_
+-- SUPPLIED, ALWAYS_SIGN, EXTENDED_SESSIONSECURITY, VERSION, 128, 56.
+local FLAGS = 0x00000001 | 0x00000002 | 0x00000004 | 0x00000200
+  | 0x00002000 | 0x00008000 | 0x00080000 | 0x02000000 | 0x20000000
+  | 0x80000000
 
--- The NEGOTIATE message: no domain or workstation named; the version
--- field is empty but for the NTLM revision (15).
+-- The workstation the NEGOTIATE names: FeroProbe's mark, the same in
+-- every NTLM exchange a script starts (IDS rules 9100016 and 9100017).
+local WORKSTATION = "FEROPROBE"
+
+-- The NEGOTIATE message: no domain; the workstation "FEROPROBE" (OEM
+-- text, right after the fixed 40 bytes); the version field empty but
+-- for the NTLM revision (15). The same 49 bytes every time.
 function ntlm.negotiate_message()
   return SIGNATURE .. string.pack("<I4I4", 1, FLAGS)
-    .. string.pack("<I2I2I4", 0, 0, 0) .. string.pack("<I2I2I4", 0, 0, 0)
-    .. string.rep("\0", 7) .. "\x0f"
+    .. string.pack("<I2I2I4", 0, 0, 0)
+    .. string.pack("<I2I2I4", #WORKSTATION, #WORKSTATION, 40)
+    .. string.rep("\0", 7) .. "\x0f" .. WORKSTATION
+end
+
+-- The NEGOTIATE message in base64, as text protocols carry it (HTTP
+-- "Authorization: NTLM ...", SMTP/POP3/IMAP/NNTP AUTH exchanges).
+function ntlm.negotiate_base64()
+  return fero.base64.encode(ntlm.negotiate_message())
 end
 
 -- UTF-16LE as UTF-8; unprintable characters escaped.
@@ -105,6 +118,45 @@ function ntlm.parse_challenge(data)
     local major, minor, build = string.unpack("<BBI2", m, 49)
     if major > 0 then out.version = string.format("%d.%d.%d", major, minor, build) end
   end
+  return out
+end
+
+-- The labels nmap's *-ntlm-info scripts give each field, in their order.
+local LABELS = {
+  { "target_name", "Target_Name" },
+  { "netbios_domain", "NetBIOS_Domain_Name" },
+  { "netbios_computer", "NetBIOS_Computer_Name" },
+  { "dns_domain", "DNS_Domain_Name" },
+  { "dns_computer", "DNS_Computer_Name" },
+  { "dns_tree", "DNS_Tree_Name" },
+  { "version", "Product_Version" },
+}
+
+-- The output of an *-ntlm-info script: what the CHALLENGE in `data`
+-- (found anywhere in it) says, in an ordered table with nmap's labels;
+-- with `opts.system_time`, the server's clock too (as rdp-ntlm-info).
+-- The clock is noted for clock-skew either way, against `opts.received`
+-- (the scanner's os.time() when the challenge came; default now). nil when `data` holds no
+-- challenge, or one that says nothing.
+function ntlm.info(data, opts)
+  if type(data) ~= "string" then return nil end
+  local c = ntlm.parse_challenge(data)
+  if not c then return nil end
+  local out, any = fero.output_table(), false
+  for _, l in ipairs(LABELS) do
+    if c[l[1]] and c[l[1]] ~= "" then
+      out[l[2]] = c[l[1]]
+      any = true
+    end
+  end
+  if c.timestamp then
+    fero.record_skew(c.timestamp, opts and opts.received)
+    if opts and opts.system_time then
+      out.System_Time = os.date("!%Y-%m-%dT%H:%M:%S+00:00", c.timestamp)
+      any = true
+    end
+  end
+  if not any then return nil end
   return out
 end
 

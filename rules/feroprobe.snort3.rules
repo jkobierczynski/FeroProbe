@@ -61,3 +61,10 @@ alert udp any any -> $HOME_NET 137 (msg:"FeroProbe NetBIOS NODE STATUS (nbstat s
 # dns-nsid script, over UDP and TCP (where a two-byte length comes first).
 alert udp any any -> $HOME_NET any (msg:"FeroProbe DNS CHAOS TXT query (dns-nsid script)"; content:"FP|01 00 00 01 00 00 00 00 00|", depth 11; pcre:"/^FP\x01\x00\x00\x01\x00{5}[\x00\x01](?:\x02id\x06server|\x07version\x04bind)\x00\x00\x10\x00\x03/s"; classtype:attempted-recon; sid:9100014; rev:2;)
 alert tcp any any -> $HOME_NET any (msg:"FeroProbe DNS CHAOS TXT query over TCP (dns-nsid script)"; flow:established,to_server; content:"FP|01 00 00 01 00 00 00 00 00|", offset 2, depth 11; pcre:"/^.{2}FP\x01\x00\x00\x01\x00{5}[\x00\x01](?:\x02id\x06server|\x07version\x04bind)\x00\x00\x10\x00\x03/s"; classtype:attempted-recon; sid:9100015; rev:2;)
+# *-ntlm-info scripts: the NTLM NEGOTIATE they send names the workstation
+# FEROPROBE and is the same 49 bytes every time. Text protocols carry it in
+# base64 (HTTP "Authorization: NTLM", SMTP/POP3 AUTH NTLM, IMAP AUTHENTICATE,
+# NNTP AUTHINFO GENERIC; over STARTTLS it is encrypted); telnet and MS-SQL
+# carry it as is.
+alert tcp any any -> $HOME_NET any (msg:"FeroProbe script NTLM NEGOTIATE in base64 (*-ntlm-info)"; flow:established,to_server; content:"TlRMTVNTUAABAAAAB6IIogAAAAAAAAAACQAJACgAAAAAAAAAAAAAD0ZFUk9QUk9CRQ=="; classtype:attempted-recon; sid:9100016; rev:1;)
+alert tcp any any -> $HOME_NET any (msg:"FeroProbe script NTLM NEGOTIATE (*-ntlm-info)"; flow:established,to_server; content:"NTLMSSP|00 01 00 00 00 07 A2 08 A2 00 00 00 00 00 00 00 00 09 00 09 00 28 00 00 00 00 00 00 00 00 00 00 0F|FEROPROBE"; classtype:attempted-recon; sid:9100017; rev:1;)

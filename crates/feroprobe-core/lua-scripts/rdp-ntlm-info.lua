@@ -10,7 +10,8 @@ NetBIOS and DNS computer and domain names, the Windows version and its
 clock (also noted for clock-skew). Asks for TLS and CredSSP in the
 connection request, sends an NTLM NEGOTIATE inside a CredSSP message over
 TLS, reads the server's CHALLENGE and closes; no credentials are sent and
-nothing logs in. A server that does not offer CredSSP gives no output.
+nothing logs in. The NEGOTIATE names the workstation FEROPROBE (inside
+TLS, so only the server sees it). A server that does not offer CredSSP gives no output.
 
 The connection request carries the routing cookie
 "Cookie: mstshash=FeroProbe", so the server's logs name the client.
@@ -78,16 +79,6 @@ local function read_der(r)
   return r:bytes(n)
 end
 
-local LABELS = {
-  { "target_name", "Target_Name" },
-  { "netbios_domain", "NetBIOS_Domain_Name" },
-  { "netbios_computer", "NetBIOS_Computer_Name" },
-  { "dns_domain", "DNS_Domain_Name" },
-  { "dns_computer", "DNS_Computer_Name" },
-  { "dns_tree", "DNS_Tree_Name" },
-  { "version", "Product_Version" },
-}
-
 action = function(host, port)
   local timeout = tonumber(fero.args.get(SCRIPT_NAME .. ".timeout")) or 8000
   local sock = fero.socket.new()
@@ -114,20 +105,5 @@ action = function(host, port)
   local reply = read_der(fero.reader(sock))
   sock:close()
   if not reply then return nil end
-  local c = fero.ntlm.parse_challenge(reply)
-  if not c then return nil end
-  local data, any = fero.output_table(), false
-  for _, l in ipairs(LABELS) do
-    if c[l[1]] then
-      data[l[2]] = c[l[1]]
-      any = true
-    end
-  end
-  if c.timestamp then
-    data.System_Time = os.date("!%Y-%m-%dT%H:%M:%S+00:00", c.timestamp)
-    fero.record_skew(c.timestamp)
-    any = true
-  end
-  if not any then return nil end
-  return data
+  return fero.ntlm.info(reply, { system_time = true })
 end

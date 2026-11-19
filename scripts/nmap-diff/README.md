@@ -79,7 +79,11 @@ In `matrix.txt`, `@TCP` and `@UDP` expand to these lists. TCP 53 also has a
 small DNS server for the script cases (CHAOS TXT `id.server`,
 `hostname.bind`, `version.bind` and the EDNS NSID option). It is not in
 `@TCP`, so a case reaches it only by naming port 53 or through a port list
-that holds 53 (`fast`, with `-F`, finds it open). ICMP rate limits
+that holds 53 (`fast`, with `-F`, finds it open). The same goes for the
+NTLM responders of the `script-ntlm` case: telnet on 23, SMTP on 25, POP3
+on 110, NNTP on 119, IMAP on 143 and MS-SQL (TDS) on 1433 each answer an
+NTLM NEGOTIATE with a fixed CHALLENGE, and port 80 does so for a request
+with `Authorization: NTLM`. ICMP rate limits
 are off in every namespace, and the neighbour caches are flushed before each
 run, so both tools start from the same state.
 

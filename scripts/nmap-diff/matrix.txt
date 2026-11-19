@@ -48,13 +48,16 @@ traceroute       | routed | root | --traceroute -p @TCP
 # --- Scripts, root (v0.6.0) --------------------------------------------------
 # Only which scripts gave output is compared, not the output text. The lab
 # has a DNS server on TCP 53 (not in @TCP) and a NetBIOS responder on UDP
-# 137; UDP 53 stays an echo, so dns-nsid over UDP gets no real answer.
+# 137; UDP 53 stays an echo, so dns-nsid over UDP gets no real answer. The
+# NTLM responders (TCP 23, 25, 110, 119, 143, 1433, and port 80 for an
+# "Authorization: NTLM" request) are not in @TCP either.
 script-default   | lan    | root | -sS -sC -p @TCP
 script-http      | lan    | root | -sS -p 80 --script http-title,http-headers,http-server-header
 script-dns-tcp   | lan    | root | -sS -p 53 --script dns-nsid
 script-dns-udp   | lan    | root | -sU -p 53 --script dns-nsid
 script-nbstat    | lan    | root | -sU -p 137 --script nbstat
 script-date      | lan    | root | -sS -p 80 --script http-date,clock-skew
+script-ntlm      | lan    | root | -sS -p 23,25,80,110,119,143,1433 --script http-ntlm-info,smtp-ntlm-info,imap-ntlm-info,pop3-ntlm-info,nntp-ntlm-info,telnet-ntlm-info,ms-sql-ntlm-info
 
 # --- Loopback (nmap treats localhost specially) ----------------------------
 syn-local        | local  | root | -sS -p @TCP
