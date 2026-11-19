@@ -89,8 +89,9 @@ end
 
 -- A file's body when the server sends it as such: 200 straight away (a
 -- redirect, say to a login page, is not the file) and not an HTML page
--- (a site that answers every path with its own page).
-local function get(host, port, path)
+-- (a site that answers every path with its own page). `any_type`
+-- skips the Content-Type check, for HEAD, whose body is checked whole.
+local function get(host, port, path, any_type)
   local resp, err = fero.http.get(host, port, path, { truncated_ok = true, redirect_ok = false })
   if not resp then
     fero.debug(1, path .. ": " .. tostring(err))
@@ -100,7 +101,7 @@ local function get(host, port, path)
   local body = resp.body
   local ctype = (resp.header["content-type"] or ""):lower()
   local head = body:sub(1, 512):lower()
-  if ctype:find("html", 1, true) or head:find("^%s*<!doctype") or head:find("<html", 1, true) then
+  if (not any_type and ctype:find("html", 1, true)) or head:find("^%s*<!doctype") or head:find("<html", 1, true) then
     fero.debug(1, path .. ": an HTML page, not the file")
     return nil
   end
@@ -124,8 +125,13 @@ local function remotes_of(config)
     if section then
       in_remote = section:find("^%s*remote[%s\"]") ~= nil
     elseif in_remote then
-      local url = line:match("^%s*url%s*=%s*(%S+)")
-      if url then
+      local url = line:match("^%s*url%s*=%s*(.-)%s*$")
+      if url and url ~= "" then
+        -- A double-quoted value (git-config(1)): the quotes and the
+        -- backslash escapes go first, so nothing hides the user info.
+        if url:sub(1, 1) == '"' then
+          url = url:sub(2):gsub('"%s*$', ""):gsub("\\(.)", "%1")
+        end
         list[#list + 1] = (url:gsub("^(%a[%w+.%-]*://)[^/]*@", "%1"))
       end
     end
@@ -136,7 +142,7 @@ end
 -- What one root holds: the structured table and the report's lines; nil
 -- when its .git/HEAD is not a Git reference.
 local function check_root(host, port, root)
-  local head = get(host, port, root .. ".git/HEAD")
+  local head = get(host, port, root .. ".git/HEAD", true)
   if not head or not is_head(head) then
     return nil
   end

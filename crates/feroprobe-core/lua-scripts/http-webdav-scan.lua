@@ -105,13 +105,16 @@ local function propfind(host, port, path)
   -- properties (such as a lock root). The patterns never backtrack far:
   -- the href text runs to the next "<".
   local listing = {}
-  local resp_pat = "<" .. p .. "response[%s>]"
-  local href_pat = "^[^<]*<" .. p .. "href>%s*([^<]*)"
+  -- Children may carry another prefix bound to DAV: (or none, under a
+  -- default namespace), so any prefix is taken inside this document.
+  local resp_pat = "<[%w%-%._]*:?response[%s>]"
+  local href_pat = "^[^<]*<[%w%-%._]*:?href>%s*([^<]*)"
   local pos = 1
   while #listing < MAX_LISTED do
     local _, e = body:find(resp_pat, pos)
     if not e then break end
-    local gt = body:find(">", e, true) or e
+    local gt = body:find(">", e, true)
+    if not gt then break end
     local href = body:match(href_pat, gt + 1)
     if href then
       href = href:gsub("%s+$", ""):gsub("&lt;", "<"):gsub("&gt;", ">")

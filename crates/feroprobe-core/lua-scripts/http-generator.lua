@@ -35,15 +35,33 @@ local function tag_end(body, pos)
   end
 end
 
--- The attributes of one tag's text, names in lower case; a quoted value
--- ends at the quote it started with.
+-- The attributes of one tag's text, names in lower case: read from left
+-- to right, each value (quoted, ending at the quote it started with, or
+-- bare) taken whole before the next name, so text inside a value is
+-- never read as an attribute.
 local function attributes(tag)
-  local attrs = {}
-  for name, _, value in tag:gmatch("([%w%-:]+)%s*=%s*([\"'])(.-)%2") do
-    attrs[name:lower()] = attrs[name:lower()] or value
-  end
-  for name, value in tag:gmatch("([%w%-:]+)%s*=%s*([^%s\"'>]+)") do
-    attrs[name:lower()] = attrs[name:lower()] or value
+  local attrs, pos = {}, 1
+  while true do
+    local s, e, name = tag:find("([%w%-:]+)", pos)
+    if not s then break end
+    name = name:lower()
+    local _, eq = tag:find("^%s*=%s*", e + 1)
+    if not eq then
+      pos = e + 1
+    else
+      local q = tag:sub(eq + 1, eq + 1)
+      local value
+      if q == '"' or q == "'" then
+        local close = tag:find(q, eq + 2, true) or (#tag + 1)
+        value = tag:sub(eq + 2, close - 1)
+        pos = close + 1
+      else
+        local _, ve = tag:find("^[^%s>]*", eq + 1)
+        value = tag:sub(eq + 1, ve)
+        pos = ve + 1
+      end
+      if attrs[name] == nil then attrs[name] = value end
+    end
   end
   return attrs
 end

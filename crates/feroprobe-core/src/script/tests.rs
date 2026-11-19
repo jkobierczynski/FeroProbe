@@ -4159,7 +4159,7 @@ async fn http_cors_lists_the_allowed_methods() {
 async fn http_cookie_flags_checks_a_redirect_and_merges_repeats() {
     let (port, seen) = web(|req| {
         if req.starts_with("GET / ") {
-            b"HTTP/1.1 302 Found\r\nLocation: /home\r\nSet-Cookie: PHPSESSID=1; Secure\r\n\
+            b"HTTP/1.1 302 Found\r\nLocation: /home\r\nSet-Cookie: JSESSIONID=1; Secure\r\n\
               Content-Length: 0\r\n\r\n"
                 .to_vec()
         } else {
@@ -4169,11 +4169,13 @@ async fn http_cookie_flags_checks_a_redirect_and_merges_repeats() {
         }
     })
     .await;
-    // The redirect's own cookie lacks HttpOnly; the page's are merged
-    // under the one name, each issue once.
+    // The redirect's own cookie lacks HttpOnly, and so does one of the
+    // page's two of one name (merged, each issue once).
     assert_eq!(
         http_output("http-cookie-flags", port, "").await.as_deref(),
-        Some("\n  /: \n    PHPSESSID: \n      httponly flag not set")
+        Some(
+            "\n  /: \n    JSESSIONID: \n      httponly flag not set\n    PHPSESSID: \n      httponly flag not set"
+        )
     );
     assert_eq!(seen.lock().unwrap().len(), 3);
 }
@@ -4217,9 +4219,12 @@ async fn http_cors_needs_a_successful_answer() {
 async fn http_git_skips_fallback_pages_and_hides_passwords() {
     let (port, _) = web(|req| {
         let body: &[u8] = if req.starts_with("GET /.git/HEAD ") {
-            b"0123456789abcdef0123456789abcdef01234567\n"
+            // Served as HTML by a careless server: the body decides.
+            return b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 41\r\n\r\n\
+                     0123456789abcdef0123456789abcdef01234567\n"
+                .to_vec();
         } else if req.starts_with("GET /.git/config ") {
-            b"[remote \"origin\"]\n\turl = https://dev:s3cret@git.example/site.git\n\
+            b"[remote \"origin\"]\n\turl = \"https://dev:s3cret@git.example/site.git\"\n\
               [remote \"backup\"]\n\turl = git@backup.example:site.git\n\
               [submodule \"lib\"]\n\turl = https://git.example/lib.git\n"
         } else if req.starts_with("GET /.git/description ") {
@@ -4258,8 +4263,9 @@ async fn http_webdav_scan_reads_any_prefix() {
               Allow: GET, PROPFIND\r\n\r\n"
                 .to_vec()
         } else if req.starts_with("PROPFIND ") {
-            let body = "<?xml version=\"1.0\"?><x.d:multistatus xmlns:x.d=\"DAV:\">\
-                <x.d:response><x.d:href>/a%20b?x=1&amp;y=2</x.d:href><x.d:propstat><x.d:prop>\
+            let body = "<?xml version=\"1.0\"?><x.d:multistatus xmlns:x.d=\"DAV:\" xmlns=\"DAV:\">\
+                <response><href>/a%20b?x=1&amp;y=2</href></response>\
+                <x.d:response><x.d:href>/second</x.d:href><x.d:propstat><x.d:prop>\
                 <x.d:lockdiscovery><x.d:activelock><x.d:lockroot><x.d:href>/</x.d:href></x.d:lockroot>\
                 </x.d:activelock></x.d:lockdiscovery></x.d:prop>\
                 <x.d:status>HTTP/1.1 403 Forbidden</x.d:status></x.d:propstat></x.d:response>\
@@ -4277,7 +4283,7 @@ async fn http_webdav_scan_reads_any_prefix() {
     assert_eq!(
         http_output("http-webdav-scan", port, "").await.as_deref(),
         Some(
-            "\n  Allowed Methods: GET, PROPFIND\n  WebDAV type: Apache DAV\n  Directory Listing: \n    /a%20b?x=1&y=2"
+            "\n  Allowed Methods: GET, PROPFIND\n  WebDAV type: Apache DAV\n  Directory Listing: \n    /a%20b?x=1&y=2\n    /second"
         )
     );
     // "DAV: 11" is not class 1, and a 207 outside the DAV: namespace is
@@ -4298,7 +4304,10 @@ async fn http_webdav_scan_reads_any_prefix() {
 async fn http_favicon_and_generator_read_quoted_values() {
     let (port, _) = web(|req| {
         let body: &[u8] = if req.starts_with("GET / ") {
-            b"<link rel=\"icon\" title=\"a > b\" href=\"/site's.ico\"><meta name=generator content=\"CMS > 2\">"
+            b"<link title=\"rel=icon href=/wrong.ico\" rel=stylesheet href=/style.css>\
+              <link rel=\"icon\" title=\"a > b\" href=\"/site's.ico\">\
+              <meta title=\"> name=generator content=Fake\" name=viewport content=width=device-width>\
+              <meta name=generator content=\"CMS > 2\">"
         } else if req.starts_with("GET /site's.ico ") {
             b"ICON"
         } else {
