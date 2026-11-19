@@ -7,11 +7,14 @@ Checks whether a web site serves a Git repository's .git directory
 from its document root, which can expose the site's source code. Asks
 for .git/HEAD; when that holds a Git reference, reads a few small,
 uncompressed files: .gitignore, .git/COMMIT_EDITMSG, .git/config,
-.git/description and .git/info/exclude. Shows the repository's
-description, its last commit message, its remotes, the kind of project
-its ignore files suggest, and which files mention words such as "passw",
-"key" or "secret". Plain GETs with FeroProbe's User-Agent, six at most
-per root; no Git object is downloaded.
+.git/description and .git/info/exclude (a redirect or an HTML page does
+not count as the file). Shows the repository's description, its last
+commit message (from COMMIT_EDITMSG, which can also hold a message whose
+commit was given up), the URLs of its remotes (with any user name and
+password left out), the kind of project its ignore files suggest, and
+which files mention words such as "passw", "key" or "secret". Plain
+GETs with FeroProbe's User-Agent, six at most per root; no Git object
+is downloaded.
 
 Script arguments:
   http-git.root  The path that holds the .git directory (default "/");
@@ -84,21 +87,57 @@ local function roots()
   return list
 end
 
+-- A file's body when the server sends it as such: 200 straight away (a
+-- redirect, say to a login page, is not the file) and not an HTML page
+-- (a site that answers every path with its own page).
 local function get(host, port, path)
-  local resp, err = fero.http.get(host, port, path, { truncated_ok = true })
+  local resp, err = fero.http.get(host, port, path, { truncated_ok = true, redirect_ok = false })
   if not resp then
     fero.debug(1, path .. ": " .. tostring(err))
     return nil
   end
   if resp.status ~= 200 then return nil end
-  return resp.body
+  local body = resp.body
+  local ctype = (resp.header["content-type"] or ""):lower()
+  local head = body:sub(1, 512):lower()
+  if ctype:find("html", 1, true) or head:find("^%s*<!doctype") or head:find("<html", 1, true) then
+    fero.debug(1, path .. ": an HTML page, not the file")
+    return nil
+  end
+  return body
+end
+
+-- Whether `head` is a whole HEAD file: "ref: refs/..." or an object name
+-- (SHA-1 or SHA-256), one line.
+local function is_head(head)
+  return head:find("^ref: refs/[^%s]+\r?\n?$") ~= nil
+    or head:find("^" .. ("%x"):rep(40) .. "\r?\n?$") ~= nil
+    or head:find("^" .. ("%x"):rep(64) .. "\r?\n?$") ~= nil
+end
+
+-- The url of each [remote "..."] section of a Git config, with any user
+-- name and password taken out of URL forms (scheme://user:pass@host).
+local function remotes_of(config)
+  local list, in_remote = {}, false
+  for line in config:gmatch("[^\r\n]+") do
+    local section = line:match("^%s*%[([^%]]*)%]")
+    if section then
+      in_remote = section:find("^%s*remote[%s\"]") ~= nil
+    elseif in_remote then
+      local url = line:match("^%s*url%s*=%s*(%S+)")
+      if url then
+        list[#list + 1] = (url:gsub("^(%a[%w+.%-]*://)[^/]*@", "%1"))
+      end
+    end
+  end
+  return list
 end
 
 -- What one root holds: the structured table and the report's lines; nil
 -- when its .git/HEAD is not a Git reference.
 local function check_root(host, port, root)
   local head = get(host, port, root .. ".git/HEAD")
-  if not head or not (head:find("^ref: ") or head:find("^" .. ("%x"):rep(40))) then
+  if not head or not is_head(head) then
     return nil
   end
   local bodies, found, ok = {}, fero.output_table(), 0
@@ -147,10 +186,7 @@ local function check_root(host, port, root)
 
   local config = bodies[".git/config"]
   if config then
-    local remotes = {}
-    for url in ("\n" .. config):gmatch("\n%s*url%s*=%s*(%S*/%S*)") do
-      remotes[#remotes + 1] = url
-    end
+    local remotes = remotes_of(config)
     if #remotes > 0 then
       info.remotes = remotes
       lines[#lines + 1] = "Remotes:"

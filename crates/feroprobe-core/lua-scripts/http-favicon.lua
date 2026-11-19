@@ -24,29 +24,47 @@ categories = { "default", "discovery", "safe" }
 
 portrule = fero.portrule.http
 
+-- The position of the ">" that ends the tag whose text starts at `pos`,
+-- skipping any ">" inside a quoted attribute value; the body's end when
+-- there is none.
+local function tag_end(body, pos)
+  while true do
+    local i = body:find("[\"'>]", pos)
+    if not i then return #body end
+    local c = body:sub(i, i)
+    if c == ">" then return i end
+    local close = body:find(c, i + 1, true)
+    if not close then return #body end
+    pos = close + 1
+  end
+end
+
+-- The attributes of one tag's text, names in lower case; a quoted value
+-- ends at the quote it started with.
+local function attributes(tag)
+  local attrs = {}
+  for name, _, value in tag:gmatch("([%w%-:]+)%s*=%s*([\"'])(.-)%2") do
+    attrs[name:lower()] = attrs[name:lower()] or value
+  end
+  for name, value in tag:gmatch("([%w%-:]+)%s*=%s*([^%s\"'>]+)") do
+    attrs[name:lower()] = attrs[name:lower()] or value
+  end
+  return attrs
+end
+
 -- The href of the first <link> whose rel names "icon", or nil.
 local function find_icon(body)
   local pos = 1
   while true do
     local s, e = body:find("<%s*[Ll][Ii][Nn][Kk][%s/]", pos)
     if not s then return nil end
-    local close = body:find(">", e, true) or #body
-    local tag = body:sub(e, close)
+    local close = tag_end(body, e)
+    local attrs = attributes(body:sub(e, close))
     pos = close + 1
-    local rel, href
-    for name, value in tag:gmatch("([%w%-]+)%s*=%s*([\"'][^\"']*[\"'])") do
-      value = value:sub(2, -2)
-      if name:lower() == "rel" then rel = value end
-      if name:lower() == "href" then href = value end
-    end
-    for name, value in tag:gmatch("([%w%-]+)%s*=%s*([^%s\"'>]+)") do
-      if name:lower() == "rel" and not rel then rel = value end
-      if name:lower() == "href" and not href then href = value end
-    end
-    if rel and href then
-      for word in rel:gmatch("%S+") do
+    if attrs.rel and attrs.href then
+      for word in attrs.rel:gmatch("%S+") do
         if word:lower() == "icon" then
-          return (href:gsub("&amp;", "&"))
+          return (attrs.href:gsub("&amp;", "&"))
         end
       end
     end
@@ -103,7 +121,7 @@ action = function(host, port)
   local uri = fero.args.get("favicon.uri")
   local icon
   if type(uri) == "string" then
-    icon = fetch(host, port, root .. "/" .. uri)
+    icon = fetch(host, port, root .. "/" .. (uri:gsub("^/+", "")))
   else
     local page = fetch(host, port, root .. "/")
     if page and (page.status == 200 or page.status == 503) then
@@ -116,11 +134,12 @@ action = function(host, port)
         fero.debug(1, "icon elsewhere, not fetched: " .. href)
       end
     end
-    if not icon or icon.status ~= 200 then
+    if not icon or icon.status ~= 200 or icon.truncated then
       icon = fetch(host, port, root .. "/favicon.ico")
     end
   end
-  if not icon or icon.status ~= 200 then return nil end
+  -- An icon cut short by the body size limit would give a wrong hash.
+  if not icon or icon.status ~= 200 or icon.truncated then return nil end
   local md5 = fero.hex(fero.crypto.digest("md5", icon.body)):upper()
   fero.debug(1, "favicon MD5 " .. md5)
   if fero.verbosity() > 0 then

@@ -7,9 +7,9 @@ Asks a web server which request methods it lets other web sites' pages
 use (Cross-Origin Resource Sharing). Sends one CORS preflight (OPTIONS
 with Origin and Access-Control-Request-Method) per method: HEAD, GET,
 POST, PUT, DELETE, TRACE, OPTIONS, CONNECT and PATCH, and lists the
-methods whose answer allows both the origin (by name or "*") and the
-method. Only OPTIONS is sent; no method is tried. FeroProbe's
-User-Agent marks each request.
+methods whose successful (2xx) answer allows both the origin (by name
+or "*") and the method (by name or "*"). Only OPTIONS is sent; no
+method is tried. FeroProbe's User-Agent marks each request.
 
 Script arguments:
   http-cors.path    The path to ask about (default "/").
@@ -24,18 +24,20 @@ portrule = fero.portrule.http
 
 local METHODS = { "HEAD", "GET", "POST", "PUT", "DELETE", "TRACE", "OPTIONS", "CONNECT", "PATCH" }
 
+-- The Fetch standard's CORS check: Access-Control-Allow-Origin holds
+-- one value, "*" or the origin itself.
 local function origin_ok(allowed, origin)
   if not allowed then return false end
-  for o in allowed:gmatch("%S+") do
-    if o == "*" or o == origin then return true end
-  end
-  return false
+  allowed = allowed:match("^%s*(.-)%s*$")
+  return allowed == "*" or allowed == origin
 end
 
+-- Access-Control-Allow-Methods lists methods, or "*" for all (requests
+-- without credentials, as these are).
 local function method_ok(allowed, method)
   if not allowed then return false end
   for m in allowed:gmatch("[^,%s]+") do
-    if m == method then return true end
+    if m == "*" or m == method then return true end
   end
   return false
 end
@@ -56,7 +58,8 @@ action = function(host, port)
       -- A server that does not answer one preflight will not answer the
       -- next ones either.
       if err == "TIMEOUT" then break end
-    elseif origin_ok(resp.header["access-control-allow-origin"], origin)
+    elseif resp.status >= 200 and resp.status < 300
+      and origin_ok(resp.header["access-control-allow-origin"], origin)
       and method_ok(resp.header["access-control-allow-methods"], method) then
       allowed[#allowed + 1] = method
     end

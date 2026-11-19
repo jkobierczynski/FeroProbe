@@ -3,13 +3,14 @@
 -- header, PROPFIND and the 207 Multi-Status answer); GPL-3.0-or-later.
 
 description = [[
-Detects WebDAV on a web server. Sends an OPTIONS request: a DAV header
-naming compliance class 1 marks WebDAV, and the answer's allowed methods,
-server name and date are shown. Then sends one PROPFIND (Depth: 1, no
-body, which asks for all properties) and, when the server answers with
-a WebDAV Multi-Status, lists the resources it names and any private
-(RFC 1918) IPv4 addresses that leak in it. Nothing is created, changed
-or deleted. Two requests with FeroProbe's User-Agent.
+Detects WebDAV on a web server. Sends an OPTIONS request: a successful
+answer whose DAV header names compliance class 1 marks WebDAV, and its
+allowed methods, server name and date are shown. Then sends one
+PROPFIND (Depth: 1, no body, which asks for all properties) and, when
+the server answers with a WebDAV Multi-Status (207, a DAV: multistatus
+document), lists the resources it names and any private (RFC 1918)
+IPv4 addresses that leak in it. Nothing is created, changed or deleted.
+Two requests with FeroProbe's User-Agent.
 
 Script arguments:
   http-webdav-scan.path  The path to ask about (default "/").
@@ -30,10 +31,15 @@ local function options(host, port, path)
     fero.debug(1, "OPTIONS failed: " .. tostring(err))
     return nil
   end
-  if resp.status ~= 200 then return nil end
+  if resp.status < 200 or resp.status >= 300 then return nil end
   local h = resp.header
   local dav = h["dav"]
-  if not dav or not dav:find("%f[%w]1%f[^%w]") then return nil end
+  -- Compliance class 1 as one member of the DAV list (RFC 4918 10.1).
+  local class1 = false
+  for member in (dav or ""):gmatch("[^,]+") do
+    if member:match("^%s*(.-)%s*$") == "1" then class1 = true end
+  end
+  if not class1 then return nil end
   local kind = "Unknown"
   if h["x-msdavext"] then kind = "SHAREPOINT DAV" end
   if dav:lower():find("apache", 1, true) then kind = "Apache DAV" end
@@ -81,21 +87,38 @@ local function propfind(host, port, path)
   end
   if resp.status ~= 207 then return nil end
   local body = resp.body
-  -- A Multi-Status with at least one property found ("200 OK"), whatever
-  -- the XML prefix of the DAV: namespace.
-  if not body:find("<[%w%-%._]*:?[Ss][Tt][Aa][Tt][Uu][Ss]>%s*HTTP/1%.[01] 200") then
-    return nil
-  end
+  -- A WebDAV Multi-Status: a multistatus element in the DAV: namespace,
+  -- whatever prefix it carries, whatever its properties' own results.
+  local _, _, prefix = body:find("<([%w%-%._]*:?)multistatus[%s>/]")
+  if not prefix then return nil end
+  -- The prefix as a pattern: its "-" and "." are magic there.
+  local p = prefix:gsub("%p", "%%%0")
+  local ns = prefix == "" and "xmlns" or ("xmlns:" .. p:sub(1, -3))
+  if not body:find(ns .. "%s*=%s*[\"']DAV:[\"']") then return nil end
   local ret = {
     ["Server Type"] = resp.header["server"],
     ["Server Date"] = resp.header["date"],
   }
   local ips = private_ips(body)
   if #ips > 0 then ret["Exposed Internal IPs"] = ips end
+  -- Each response's own href (its first child), not hrefs inside its
+  -- properties (such as a lock root). The patterns never backtrack far:
+  -- the href text runs to the next "<".
   local listing = {}
-  for href in body:gmatch("<[%w%-%._]*:?[Hh][Rr][Ee][Ff]>%s*([^<]-)%s*</") do
-    if #listing >= MAX_LISTED then break end
-    listing[#listing + 1] = href
+  local resp_pat = "<" .. p .. "response[%s>]"
+  local href_pat = "^[^<]*<" .. p .. "href>%s*([^<]*)"
+  local pos = 1
+  while #listing < MAX_LISTED do
+    local _, e = body:find(resp_pat, pos)
+    if not e then break end
+    local gt = body:find(">", e, true) or e
+    local href = body:match(href_pat, gt + 1)
+    if href then
+      href = href:gsub("%s+$", ""):gsub("&lt;", "<"):gsub("&gt;", ">")
+        :gsub("&quot;", '"'):gsub("&apos;", "'"):gsub("&amp;", "&")
+      listing[#listing + 1] = href
+    end
+    pos = gt + 1
   end
   if #listing > 0 then ret["Directory Listing"] = listing end
   return ret

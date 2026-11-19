@@ -6,7 +6,10 @@ description = [[
 Checks the session cookies a web page sets (PHPSESSID, JSESSIONID,
 ASP.NET_SessionId and the like): reports each one set without the
 HttpOnly flag, and each one set over TLS without the Secure flag.
-Other cookies are not reported. One GET with FeroProbe's User-Agent.
+Other cookies are not reported. One GET with FeroProbe's User-Agent,
+without following a redirect; when the answer is a redirect, a second
+GET follows it (up to three, within scope) and the cookies of both
+answers are checked.
 
 Script arguments:
   http-cookie-flags.path    The page to ask for (default "/").
@@ -49,27 +52,51 @@ action = function(host, port)
     is_session = function(name) return name == only end
   end
 
-  local resp, err = fero.http.get(host, port, path, { truncated_ok = true })
+  local found = fero.output_table()
+  local count = 0
+  -- The issues of every session cookie in `resp`, merged per name (a
+  -- name set twice, say for two paths, keeps the issues of both).
+  local function check(resp)
+    for _, cookie in ipairs(resp.cookies) do
+      if cookie.name ~= "" and is_session(cookie.name) then
+        local issues = {}
+        if resp.ssl and not cookie.secure then
+          issues[#issues + 1] = "secure flag not set and HTTPS in use"
+        end
+        if not cookie.httponly then
+          issues[#issues + 1] = "httponly flag not set"
+        end
+        if #issues > 0 then
+          local have = found[cookie.name]
+          if have == nil then
+            count = count + 1
+            found[cookie.name] = issues
+          else
+            for _, i in ipairs(issues) do
+              local known = false
+              for _, h in ipairs(have) do
+                if h == i then known = true end
+              end
+              if not known then have[#have + 1] = i end
+            end
+          end
+        end
+      end
+    end
+  end
+
+  -- The page's own answer first, without following a redirect, so a
+  -- cookie set on the redirect itself is checked too; then, when it was
+  -- a redirect, the page it leads to (within scope).
+  local resp, err = fero.http.get(host, port, path, { truncated_ok = true, redirect_ok = false })
   if not resp then
     fero.debug(1, "request failed: " .. tostring(err))
     return nil
   end
-  local found = fero.output_table()
-  local count = 0
-  for _, cookie in ipairs(resp.cookies) do
-    if is_session(cookie.name) then
-      local issues = {}
-      if resp.ssl and not cookie.secure then
-        issues[#issues + 1] = "secure flag not set and HTTPS in use"
-      end
-      if not cookie.httponly then
-        issues[#issues + 1] = "httponly flag not set"
-      end
-      if #issues > 0 then
-        if found[cookie.name] == nil then count = count + 1 end
-        found[cookie.name] = issues
-      end
-    end
+  check(resp)
+  if resp.status >= 300 and resp.status < 400 and resp.header["location"] then
+    local final = fero.http.get(host, port, path, { truncated_ok = true })
+    if final and #final.location > 0 then check(final) end
   end
   if count == 0 then return nil end
   local out = fero.output_table()

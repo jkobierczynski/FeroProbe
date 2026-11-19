@@ -358,7 +358,19 @@ def http(conn):
     with conn:
         try:
             conn.settimeout(10)
+            # The whole request head (a request can come in pieces), at
+            # most 16 KiB. A probe that is no HTTP request (no blank line)
+            # is answered after a second's wait for more, as before.
             req = conn.recv(4096)
+            conn.settimeout(1)
+            while req and b"\r\n\r\n" not in req and len(req) < 16384:
+                try:
+                    data = conn.recv(4096)
+                except socket.timeout:
+                    break
+                if not data:
+                    break
+                req += data
             if req:
                 conn.sendall(http_reply(req))
         except OSError:

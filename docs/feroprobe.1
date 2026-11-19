@@ -2590,7 +2590,10 @@ default, safe, vuln
 T}@T{
 web ports
 T}@T{
-One GET; for each session cookie it sets (named as sessions commonly
+One GET without following a redirect, and when the answer is a redirect
+a second GET that follows it (within scope), so a cookie set by the
+redirect itself is checked too (nmap\[aq]s sees only the final
+page\[aq]s); for each session cookie set (named as sessions commonly
 are: \f[V]PHPSESSID\f[R], \f[V]JSESSIONID\f[R],
 \f[V]ASP.NET_SessionId\f[R], \f[V]session\f[R], any
 \f[V]session...id\f[R], ...), says \f[V]httponly flag not set\f[R] when
@@ -2614,7 +2617,9 @@ T}@T{
 Sends one CORS preflight (OPTIONS with \f[V]Origin\f[R] and
 \f[V]Access-Control-Request-Method\f[R]) for each of HEAD, GET, POST,
 PUT, DELETE, TRACE, OPTIONS, CONNECT and PATCH, and lists the methods
-whose answer allows both the origin and the method.
+whose successful (2xx) answer allows both the origin (\f[V]*\f[R] or
+exactly the origin named) and the method (by name or \f[V]*\f[R]), as
+the Fetch standard\[aq]s CORS check does.
 Tries no method.
 nmap\[aq]s counts an origin as allowed only when the answer says
 \f[V]*\f[R] (it compares the answer with the wrong value) and asks about
@@ -2685,14 +2690,19 @@ T}@T{
 Asks for \f[V]/.git/HEAD\f[R]; when that holds a Git reference, reads
 \f[V].gitignore\f[R], \f[V].git/COMMIT_EDITMSG\f[R],
 \f[V].git/config\f[R], \f[V].git/description\f[R] and
-\f[V].git/info/exclude\f[R] (six GETs at most per root, no Git object)
-and shows \f[V]Git repository found!\f[R] (or
+\f[V].git/info/exclude\f[R] (six GETs at most per root, no Git object; a
+redirect or an HTML page is not counted as the file, so a site that
+answers every path with its own page is not taken for a repository, and
+HEAD must be a whole \f[V]ref: refs/...\f[R] line or object name) and
+shows \f[V]Git repository found!\f[R] (or
 \f[V]Potential Git repository found\f[R] when three or more are
 missing), which files contain the words \f[V]bug\f[R], \f[V]key\f[R],
 \f[V]passw\f[R], \f[V]pw\f[R], \f[V]user\f[R], \f[V]secret\f[R] or
 \f[V]uid\f[R], the description and last commit message (60 characters),
-the remotes from \f[V].git/config\f[R], and the kind of project the
-ignore files suggest, as nmap\[aq]s.
+the remote URLs from the \f[V][remote]\f[R] sections of
+\f[V].git/config\f[R] (with any user name and password in them left out
+of the report; nmap\[aq]s shows them as found and also lists submodule
+URLs), and the kind of project the ignore files suggest, as nmap\[aq]s.
 One request at a time (nmap pipelines them).
 Argument: \f[V]http-git.root\f[R] (default \f[V]/\f[R]; a list
 \f[V]{/,/app/}\f[R] tries each)
@@ -2789,18 +2799,20 @@ default, discovery, safe
 T}@T{
 web ports
 T}@T{
-One OPTIONS: a \f[V]DAV\f[R] header naming class 1 marks WebDAV, and the
-allowed methods (\f[V]Allow\f[R], \f[V]Public\f[R]), \f[V]Server\f[R],
-\f[V]Date\f[R] and the WebDAV type (Apache DAV, SharePoint DAV or
-unknown) are shown.
-Then one PROPFIND (\f[V]Depth: 1\f[R], no body); a Multi-Status with a
-property found (\f[V]200\f[R]) also marks WebDAV, and its resources (100
-at most) and any private IPv4 addresses in it are listed.
+One OPTIONS: a successful (2xx) answer whose \f[V]DAV\f[R] header lists
+class 1 marks WebDAV, and the allowed methods (\f[V]Allow\f[R],
+\f[V]Public\f[R]), \f[V]Server\f[R], \f[V]Date\f[R] and the WebDAV type
+(Apache DAV, SharePoint DAV or unknown) are shown.
+Then one PROPFIND (\f[V]Depth: 1\f[R], no body); a 207 Multi-Status
+document in the \f[V]DAV:\f[R] namespace also marks WebDAV, and the
+resource each response names (100 at most; not hrefs inside properties,
+such as a lock root) and any private IPv4 addresses in it are listed.
 Nothing is created or changed.
 nmap\[aq]s accepts the Multi-Status only with the \f[V]D:\f[R] prefix
-and \f[V]HTTP/1.1\f[R], and never sees SharePoint\[aq]s
-\f[V]X-MSDAVEXT\f[R] header (it looks for it in upper case);
-FeroProbe\[aq]s takes any prefix and finds the header.
+and a literal \f[V]HTTP/1.1 200 OK\f[R] property status, lists every
+href, and never sees SharePoint\[aq]s \f[V]X-MSDAVEXT\f[R] header (it
+looks for it in upper case); FeroProbe\[aq]s takes any prefix and finds
+the header.
 Argument: \f[V]http-webdav-scan.path\f[R] (default \f[V]/\f[R])
 T}
 T{

@@ -20,7 +20,23 @@ categories = { "default", "discovery", "safe" }
 
 portrule = fero.portrule.http
 
--- The attributes of one tag's text, names in lower case.
+-- The position of the ">" that ends the tag whose text starts at `pos`,
+-- skipping any ">" inside a quoted attribute value; the body's end when
+-- there is none.
+local function tag_end(body, pos)
+  while true do
+    local i = body:find("[\"'>]", pos)
+    if not i then return #body end
+    local c = body:sub(i, i)
+    if c == ">" then return i end
+    local close = body:find(c, i + 1, true)
+    if not close then return #body end
+    pos = close + 1
+  end
+end
+
+-- The attributes of one tag's text, names in lower case; a quoted value
+-- ends at the quote it started with.
 local function attributes(tag)
   local attrs = {}
   for name, _, value in tag:gmatch("([%w%-:]+)%s*=%s*([\"'])(.-)%2") do
@@ -46,7 +62,7 @@ action = function(host, port)
   while true do
     local s, e = body:find("<%s*[Mm][Ee][Tt][Aa][%s/]", pos)
     if not s then return nil end
-    local close = body:find(">", e, true) or #body
+    local close = tag_end(body, e)
     local attrs = attributes(body:sub(e, close))
     pos = close + 1
     if attrs.name and attrs.name:lower() == "generator" and attrs.content and attrs.content ~= "" then

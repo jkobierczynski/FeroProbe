@@ -4154,3 +4154,190 @@ async fn http_cors_lists_the_allowed_methods() {
         "{seen:?}"
     );
 }
+
+#[tokio::test]
+async fn http_cookie_flags_checks_a_redirect_and_merges_repeats() {
+    let (port, seen) = web(|req| {
+        if req.starts_with("GET / ") {
+            b"HTTP/1.1 302 Found\r\nLocation: /home\r\nSet-Cookie: PHPSESSID=1; Secure\r\n\
+              Content-Length: 0\r\n\r\n"
+                .to_vec()
+        } else {
+            b"HTTP/1.1 200 OK\r\nSet-Cookie: PHPSESSID=2; HttpOnly\r\nSet-Cookie: PHPSESSID=3\r\n\
+              Content-Length: 0\r\n\r\n"
+                .to_vec()
+        }
+    })
+    .await;
+    // The redirect's own cookie lacks HttpOnly; the page's are merged
+    // under the one name, each issue once.
+    assert_eq!(
+        http_output("http-cookie-flags", port, "").await.as_deref(),
+        Some("\n  /: \n    PHPSESSID: \n      httponly flag not set")
+    );
+    assert_eq!(seen.lock().unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn http_cors_needs_a_successful_answer() {
+    let (port, _) = web(|req| {
+        if req.starts_with("OPTIONS /denied ") {
+            b"HTTP/1.1 403 Forbidden\r\nAccess-Control-Allow-Origin: *\r\n\
+              Access-Control-Allow-Methods: *\r\nContent-Length: 0\r\n\r\n"
+                .to_vec()
+        } else if req.starts_with("OPTIONS /two ") {
+            b"HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: example.com https://other.example\r\n\
+              Access-Control-Allow-Methods: GET\r\nContent-Length: 0\r\n\r\n"
+                .to_vec()
+        } else {
+            b"HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: example.com\r\n\
+              Access-Control-Allow-Methods: *\r\nContent-Length: 0\r\n\r\n"
+                .to_vec()
+        }
+    })
+    .await;
+    // "*" allows every method.
+    assert_eq!(
+        http_output("http-cors", port, "").await.as_deref(),
+        Some("HEAD GET POST PUT DELETE TRACE OPTIONS CONNECT PATCH")
+    );
+    // A refused preflight allows nothing, whatever its headers say.
+    assert_eq!(
+        http_output("http-cors", port, "http-cors.path=/denied").await,
+        None
+    );
+    // Two origins in one header are no valid answer.
+    assert_eq!(
+        http_output("http-cors", port, "http-cors.path=/two").await,
+        None
+    );
+}
+
+#[tokio::test]
+async fn http_git_skips_fallback_pages_and_hides_passwords() {
+    let (port, _) = web(|req| {
+        let body: &[u8] = if req.starts_with("GET /.git/HEAD ") {
+            b"0123456789abcdef0123456789abcdef01234567\n"
+        } else if req.starts_with("GET /.git/config ") {
+            b"[remote \"origin\"]\n\turl = https://dev:s3cret@git.example/site.git\n\
+              [remote \"backup\"]\n\turl = git@backup.example:site.git\n\
+              [submodule \"lib\"]\n\turl = https://git.example/lib.git\n"
+        } else if req.starts_with("GET /.git/description ") {
+            b"Site\n"
+        } else if req.starts_with("GET /.git/COMMIT_EDITMSG ") {
+            return b"HTTP/1.1 302 Found\r\nLocation: /login\r\nContent-Length: 0\r\n\r\n".to_vec();
+        } else {
+            // Every other path: the site's own page.
+            b"<!DOCTYPE html><html><title>Shop</title></html>"
+        };
+        let mut r =
+            format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len()).into_bytes();
+        r.extend_from_slice(body);
+        r
+    })
+    .await;
+    assert_eq!(
+        http_output("http-git", port, "").await,
+        Some(format!(
+            "\n  127.0.0.1:{port}/.git/\n    Potential Git repository found (found 3/6 expected files)\
+             \n    Repository description: Site \
+             \n    Remotes:\n      https://git.example/site.git\n      git@backup.example:site.git"
+        ))
+    );
+    // A HEAD that is no Git reference: nothing.
+    let (port, _) =
+        web(|_| b"HTTP/1.1 200 OK\r\nContent-Length: 16\r\n\r\nref: unavailable".to_vec()).await;
+    assert_eq!(http_output("http-git", port, "").await, None);
+}
+
+#[tokio::test]
+async fn http_webdav_scan_reads_any_prefix() {
+    let (port, _) = web(|req| {
+        if req.starts_with("OPTIONS ") {
+            b"HTTP/1.1 204 No Content\r\nDAV: 1, 2, <http://apache.org/dav/propset/fs/1>\r\n\
+              Allow: GET, PROPFIND\r\n\r\n"
+                .to_vec()
+        } else if req.starts_with("PROPFIND ") {
+            let body = "<?xml version=\"1.0\"?><x.d:multistatus xmlns:x.d=\"DAV:\">\
+                <x.d:response><x.d:href>/a%20b?x=1&amp;y=2</x.d:href><x.d:propstat><x.d:prop>\
+                <x.d:lockdiscovery><x.d:activelock><x.d:lockroot><x.d:href>/</x.d:href></x.d:lockroot>\
+                </x.d:activelock></x.d:lockdiscovery></x.d:prop>\
+                <x.d:status>HTTP/1.1 403 Forbidden</x.d:status></x.d:propstat></x.d:response>\
+                </x.d:multistatus>";
+            format!(
+                "HTTP/1.1 207 Multi-Status\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            )
+            .into_bytes()
+        } else {
+            b"HTTP/1.1 405 No\r\nContent-Length: 0\r\n\r\n".to_vec()
+        }
+    })
+    .await;
+    assert_eq!(
+        http_output("http-webdav-scan", port, "").await.as_deref(),
+        Some(
+            "\n  Allowed Methods: GET, PROPFIND\n  WebDAV type: Apache DAV\n  Directory Listing: \n    /a%20b?x=1&y=2"
+        )
+    );
+    // "DAV: 11" is not class 1, and a 207 outside the DAV: namespace is
+    // no WebDAV answer.
+    let (port, _) = web(|req| {
+        if req.starts_with("OPTIONS ") {
+            b"HTTP/1.1 200 OK\r\nDAV: 11\r\nContent-Length: 0\r\n\r\n".to_vec()
+        } else {
+            b"HTTP/1.1 207 Multi-Status\r\nContent-Length: 50\r\n\r\n<m:multistatus xmlns:m=\"urn:other\"></m:multistatus>"
+                .to_vec()
+        }
+    })
+    .await;
+    assert_eq!(http_output("http-webdav-scan", port, "").await, None);
+}
+
+#[tokio::test]
+async fn http_favicon_and_generator_read_quoted_values() {
+    let (port, _) = web(|req| {
+        let body: &[u8] = if req.starts_with("GET / ") {
+            b"<link rel=\"icon\" title=\"a > b\" href=\"/site's.ico\"><meta name=generator content=\"CMS > 2\">"
+        } else if req.starts_with("GET /site's.ico ") {
+            b"ICON"
+        } else {
+            return b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".to_vec();
+        };
+        let mut r = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len()).into_bytes();
+        r.extend_from_slice(body);
+        r
+    })
+    .await;
+    assert_eq!(
+        http_result(
+            "http-favicon",
+            port,
+            "http",
+            "",
+            Some(("fero.verbosity()", "1"))
+        )
+        .await
+        .map(|r| r.output)
+        .as_deref(),
+        Some("Unknown favicon MD5: DD912956B69FB3E570820021206968A3")
+    );
+    // favicon.uri with a leading slash names the same path.
+    assert_eq!(
+        http_result(
+            "http-favicon",
+            port,
+            "http",
+            "favicon.uri=/site's.ico",
+            Some(("fero.verbosity()", "1"))
+        )
+        .await
+        .map(|r| r.output)
+        .as_deref(),
+        Some("Unknown favicon MD5: DD912956B69FB3E570820021206968A3")
+    );
+    assert_eq!(
+        http_output("http-generator", port, "").await.as_deref(),
+        Some("CMS > 2")
+    );
+}
