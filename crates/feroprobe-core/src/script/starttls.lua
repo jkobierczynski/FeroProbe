@@ -188,14 +188,19 @@ local function xmpp(sock, _, host, port)
   -- Prefixes the stream header binds to the TLS namespace
   -- (xmlns:tls='...' on <stream:stream>), which the answer may use.
   local bound = {}
-  for prefix, uri in buf:gmatch("xmlns:([%w_%.%-]+)%s*=%s*['\"]([^'\"]*)['\"]") do
+  local hs = buf:find("<[%w_%.%-]*:?stream[%s>]")
+  local he = hs and buf:find(">", hs, true)
+  local header = he and buf:sub(hs, he) or ""
+  for prefix, uri in header:gmatch("xmlns:([%w_%.%-]+)%s*=%s*['\"]([^'\"]*)['\"]") do
     if uri == TLS_NS then bound[prefix .. ":"] = true end
   end
   sock:send("<starttls xmlns='urn:ietf:params:xml:ns:xmpp-tls'/>")
   -- The answer is a whole <proceed/> or <failure/> element in the TLS
   -- namespace, with or without a prefix. A binding on the element itself
   -- (<tls:proceed xmlns:tls='...'/>, or xmlns='...' when unprefixed) wins;
-  -- otherwise a prefix must be one the stream header bound.
+  -- otherwise a prefix must be one the stream header bound. A bare
+  -- <proceed/> is taken as is, like nmap: a wrong guess only ends in a
+  -- failed TLS handshake, which is reported.
   local function answer(b, name)
     local s, e, prefix = b:find("<([%w_%.%-]*:?)" .. name .. "[%s/>]")
     if not s then return false end

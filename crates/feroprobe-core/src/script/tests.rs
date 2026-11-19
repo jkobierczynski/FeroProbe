@@ -3466,6 +3466,25 @@ end"#;
         hosts[0].ports[0].scripts[0].output,
         "failed: STARTTLS refused"
     );
+    // A prefix bound only on <stream:features> is out of scope for the
+    // answer, so its <tls:proceed/> does not count either.
+    const XMPP_FEATURES_ONLY: &[(&[u8], &[u8])] = &[
+        (
+            b"version='1.0'>",
+            b"<stream:stream version='1.0'><stream:features \
+              xmlns:tls='urn:ietf:params:xml:ns:xmpp-tls'><tls:starttls/></stream:features>",
+        ),
+        (b"<starttls", b"<tls:proceed/><failure/>"),
+    ];
+    let (port, _) = starttls_server(XMPP_FEATURES_ONLY, |_| None).await;
+    let scan =
+        ScriptScan::new(vec![script("s", src)], args::parse("p=xmpp").unwrap(), None).unwrap();
+    let mut hosts = vec![host_with_services(&[(port, "unknown")])];
+    scan.scan_hosts(&mut hosts).await;
+    assert_eq!(
+        hosts[0].ports[0].scripts[0].output,
+        "failed: STARTTLS refused"
+    );
     // A refusal is reported, and nothing is switched.
     let (port, _) = line_server("+OK ready\r\n", mail_answer).await;
     let scan =
