@@ -2074,6 +2074,37 @@ CredSSP or SPNEGO) and reads it: \f[V]target_name\f[R],
 server gives it; or \f[V]nil\f[R] and a message
 T}
 T{
+\f[V]fero.ssh.connect(host, port [, timeout])\f[R]
+T}@T{
+Connects, reads the server\[aq]s version line (lines before it are
+skipped) and sends FeroProbe\[aq]s,
+\f[V]SSH-2.0-FeroProbe_Scripting_Engine\f[R] (IDS rule 9100007).
+Returns the socket, a \f[V]fero.reader\f[R] on it and the server\[aq]s
+version line; or \f[V]nil\f[R] and a message when the server is not SSH
+2.0 or 1.99.
+\f[V]timeout\f[R] in ms, default 10000
+T}
+T{
+\f[V]fero.ssh.kexinit(lists)\f[R], \f[V]fero.ssh.packet(payload)\f[R]
+T}@T{
+A KEXINIT payload from \f[V]lists\f[R] (a name-list, as an array or a
+comma-separated string, under each RFC 4253 name in
+\f[V]fero.ssh.KEXINIT_LISTS\f[R]; a missing one is empty; random
+cookie), and an unencrypted SSH packet around a payload
+T}
+T{
+\f[V]fero.ssh.read_kexinit(reader)\f[R],
+\f[V]fero.ssh.parse_kexinit(payload)\f[R]
+T}@T{
+Reads packets until the server\[aq]s KEXINIT (skipping IGNORE, DEBUG and
+UNIMPLEMENTED) and parses it: a table with each name-list as an array
+under its RFC 4253 name (\f[V]kex_algorithms\f[R],
+\f[V]server_host_key_algorithms\f[R],
+\f[V]encryption_algorithms_client_to_server\f[R], ...)
+and \f[V]first_kex_packet_follows\f[R]; or \f[V]nil\f[R] and a message.
+\f[V]fero.ssh.read_packet(reader)\f[R] reads one packet\[aq]s payload
+T}
+T{
 \f[V]fero.starttls.protocol(port)\f[R]
 T}@T{
 The protocol a TCP port switches to TLS with: by its service name, else
@@ -2535,6 +2566,65 @@ servers answer STAT only after a login; then only SYST is shown).
 Argument: \f[V]ftp-syst.timeout\f[R]
 T}
 T{
+\f[V]http-auth\f[R]
+T}@T{
+default, auth, safe
+T}@T{
+web ports
+T}@T{
+One GET; when the page answers 401 Unauthorized, shows the status line
+and each challenge in its \f[V]WWW-Authenticate\f[R] header (every
+header of that name, read as RFC 9110 lays them out): the scheme with
+its parameters (\f[V]Basic realm=Lab\f[R],
+\f[V]Digest realm=lab qop=auth nonce=...\f[R]) or its bare token
+(\f[V]Negotiate YIIB...\f[R]).
+XML and JSON: one table per challenge, with \f[V]scheme\f[R], and
+\f[V]params\f[R] or \f[V]token68\f[R].
+Sends no credentials.
+Argument: \f[V]http-auth.path\f[R] (default \f[V]/\f[R])
+T}
+T{
+\f[V]http-cookie-flags\f[R]
+T}@T{
+default, safe, vuln
+T}@T{
+web ports
+T}@T{
+One GET; for each session cookie it sets (named as sessions commonly
+are: \f[V]PHPSESSID\f[R], \f[V]JSESSIONID\f[R],
+\f[V]ASP.NET_SessionId\f[R], \f[V]session\f[R], any
+\f[V]session...id\f[R], ...), says \f[V]httponly flag not set\f[R] when
+it lacks HttpOnly and, when the answer came over TLS,
+\f[V]secure flag not set and HTTPS in use\f[R] when it lacks Secure.
+nmap\[aq]s checks Secure only when the port\[aq]s service is named
+\f[V]https\f[R], so it misses TLS found by \f[V]-sV\f[R]
+(\f[V]ssl/http\f[R]); FeroProbe\[aq]s goes by the connection.
+nmap\[aq]s also checks the pages \f[V]http-enum\f[R] found; FeroProbe
+has no \f[V]http-enum\f[R].
+Arguments: \f[V]http-cookie-flags.path\f[R] (default \f[V]/\f[R]),
+\f[V]http-cookie-flags.cookie\f[R] (check only this cookie name)
+T}
+T{
+\f[V]http-cors\f[R]
+T}@T{
+default, discovery, safe
+T}@T{
+web ports
+T}@T{
+Sends one CORS preflight (OPTIONS with \f[V]Origin\f[R] and
+\f[V]Access-Control-Request-Method\f[R]) for each of HEAD, GET, POST,
+PUT, DELETE, TRACE, OPTIONS, CONNECT and PATCH, and lists the methods
+whose answer allows both the origin and the method.
+Tries no method.
+nmap\[aq]s counts an origin as allowed only when the answer says
+\f[V]*\f[R] (it compares the answer with the wrong value) and asks about
+\f[V]/\f[R] whatever \f[V]http-cors.path\f[R] says; FeroProbe\[aq]s also
+counts the origin named, and asks about the path given.
+Arguments: \f[V]http-cors.path\f[R] (default \f[V]/\f[R]),
+\f[V]http-cors.origin\f[R] (default \f[V]example.com\f[R], as
+nmap\[aq]s)
+T}
+T{
 \f[V]http-date\f[R]
 T}@T{
 discovery, safe
@@ -2549,6 +2639,63 @@ notes the difference for \f[V]clock-skew\f[R].
 Reads all three HTTP-date forms.
 Follows no redirect.
 Not in \f[V]default\f[R], as in nmap
+T}
+T{
+\f[V]http-favicon\f[R]
+T}@T{
+default, discovery, safe
+T}@T{
+web ports
+T}@T{
+Fetches the icon the front page names in a
+\f[V]<link rel=\[dq]icon\[dq]>\f[R] (only when it is on the scanned host
+and port), else \f[V]/favicon.ico\f[R], and shows
+\f[V]Unknown favicon MD5: ...\f[R] with \f[V]-v\f[R].
+nmap names the application from its icon database and shows the MD5 of
+an unknown icon only with \f[V]-v\f[R]; FeroProbe has no icon database
+(nmap\[aq]s cannot be redistributed), so every icon is unknown and
+nothing is shown without \f[V]-v\f[R].
+Three GETs at most.
+Arguments (nmap\[aq]s names): \f[V]favicon.uri\f[R] (the icon\[aq]s
+path, no search), \f[V]favicon.root\f[R] (a path before the others)
+T}
+T{
+\f[V]http-generator\f[R]
+T}@T{
+default, discovery, safe
+T}@T{
+web ports
+T}@T{
+One GET (following up to 3 redirects within scope); shows the
+\f[V]content\f[R] of the page\[aq]s
+\f[V]<meta name=\[dq]generator\[dq]>\f[R] tag, where content management
+systems name themselves and often their version.
+Reads the tag\[aq]s attributes in any order and quoting; nmap\[aq]s
+matches only \f[V]name\f[R] before \f[V]content\f[R].
+Arguments: \f[V]http-generator.path\f[R] (default \f[V]/\f[R]),
+\f[V]http-generator.redirects\f[R] (default 3)
+T}
+T{
+\f[V]http-git\f[R]
+T}@T{
+default, safe, vuln
+T}@T{
+web ports
+T}@T{
+Asks for \f[V]/.git/HEAD\f[R]; when that holds a Git reference, reads
+\f[V].gitignore\f[R], \f[V].git/COMMIT_EDITMSG\f[R],
+\f[V].git/config\f[R], \f[V].git/description\f[R] and
+\f[V].git/info/exclude\f[R] (six GETs at most per root, no Git object)
+and shows \f[V]Git repository found!\f[R] (or
+\f[V]Potential Git repository found\f[R] when three or more are
+missing), which files contain the words \f[V]bug\f[R], \f[V]key\f[R],
+\f[V]passw\f[R], \f[V]pw\f[R], \f[V]user\f[R], \f[V]secret\f[R] or
+\f[V]uid\f[R], the description and last commit message (60 characters),
+the remotes from \f[V].git/config\f[R], and the kind of project the
+ignore files suggest, as nmap\[aq]s.
+One request at a time (nmap pipelines them).
+Argument: \f[V]http-git.root\f[R] (default \f[V]/\f[R]; a list
+\f[V]{/,/app/}\f[R] tries each)
 T}
 T{
 \f[V]http-headers\f[R]
@@ -2634,6 +2781,27 @@ Fetches a web server\[aq]s front page and shows its title, following
 redirects within scope (and saying where the page came from), or where a
 redirect it did not follow points.
 Argument: \f[V]http-title.path\f[R] (default \f[V]/\f[R])
+T}
+T{
+\f[V]http-webdav-scan\f[R]
+T}@T{
+default, discovery, safe
+T}@T{
+web ports
+T}@T{
+One OPTIONS: a \f[V]DAV\f[R] header naming class 1 marks WebDAV, and the
+allowed methods (\f[V]Allow\f[R], \f[V]Public\f[R]), \f[V]Server\f[R],
+\f[V]Date\f[R] and the WebDAV type (Apache DAV, SharePoint DAV or
+unknown) are shown.
+Then one PROPFIND (\f[V]Depth: 1\f[R], no body); a Multi-Status with a
+property found (\f[V]200\f[R]) also marks WebDAV, and its resources (100
+at most) and any private IPv4 addresses in it are listed.
+Nothing is created or changed.
+nmap\[aq]s accepts the Multi-Status only with the \f[V]D:\f[R] prefix
+and \f[V]HTTP/1.1\f[R], and never sees SharePoint\[aq]s
+\f[V]X-MSDAVEXT\f[R] header (it looks for it in upper case);
+FeroProbe\[aq]s takes any prefix and finds the header.
+Argument: \f[V]http-webdav-scan.path\f[R] (default \f[V]/\f[R])
 T}
 T{
 \f[V]imap-ntlm-info\f[R]
@@ -2901,6 +3069,32 @@ The client announces itself as
 \f[V]SSH-2.0-FeroProbe_Scripting_Engine\f[R].
 Key exchange: curve25519 or the Diffie-Hellman groups 14, 16, 18 and 1.
 Argument: \f[V]ssh-hostkey.timeout\f[R] (ms, default 10000)
+T}
+T{
+\f[V]ssh2-enum-algos\f[R]
+T}@T{
+discovery, safe
+T}@T{
+22, \f[V]ssh\f[R]
+T}@T{
+Lists what the server offers in its KEXINIT: \f[V]kex_algorithms\f[R],
+\f[V]server_host_key_algorithms\f[R], \f[V]encryption_algorithms\f[R],
+\f[V]mac_algorithms\f[R] and \f[V]compression_algorithms\f[R], with the
+number of each; with \f[V]-v\f[R] also each algorithm, in the
+server\[aq]s order of preference.
+nmap 7.95 lists the algorithms at any verbosity; FeroProbe keeps the
+normal report short.
+A group the server offers differently in each direction is shown twice,
+under the RFC 4253 names
+(\f[V]encryption_algorithms_client_to_server\f[R],
+\f[V]..._server_to_client\f[R]).
+The XML and JSON reports always hold the full lists.
+One connection: the version lines (FeroProbe\[aq]s is
+\f[V]SSH-2.0-FeroProbe_Scripting_Engine\f[R]), FeroProbe\[aq]s KEXINIT,
+the server\[aq]s KEXINIT, then it closes; no key exchange, nothing logs
+in.
+Not in \f[V]default\f[R], as in nmap.
+Argument: \f[V]ssh2-enum-algos.timeout\f[R] (ms, default 10000)
 T}
 T{
 \f[V]ssl-cert\f[R]
