@@ -1755,7 +1755,15 @@ async fn ssh2_enum_algos_counts_the_server_algorithms() {
             ScriptValue::Str("ssh-ed25519".into())
         ]
     );
-    // FeroProbe's version line, then its KEXINIT (message 20).
+    // FeroProbe's version line, then its KEXINIT (message 20). The lab's
+    // connection task notes the packet after the script may have finished,
+    // so wait for it (2 s at most).
+    for _ in 0..200 {
+        if seen.lock().unwrap().len() >= 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     let seen = seen.lock().unwrap();
     assert_eq!(
         *seen,
