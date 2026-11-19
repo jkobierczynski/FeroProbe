@@ -1930,6 +1930,19 @@ What arrived before a timeout or the end of the connection is returned
 too
 T}
 T{
+\f[V]sock:receive_buf(delimiter, keep)\f[R]
+T}@T{
+The data up to the first match of \f[V]delimiter\f[R], a Lua pattern
+(such as \f[V]\[dq]\[rs]r?\[rs]n\[dq]\f[R]) or a function that is given
+the buffered data and returns where its delimiter starts and ends, as
+\f[V]string.find\f[R] does; with the delimiter when \f[V]keep\f[R] is
+true.
+What follows stays buffered for the next receive call.
+Without a match before a timeout, the end of the connection or 16 MiB,
+returns \f[V]false\f[R] and the message, and keeps what arrived for the
+next call
+T}
+T{
 \f[V]sock:set_timeout(ms)\f[R]
 T}@T{
 How long each call waits (default 30 seconds)
@@ -2045,6 +2058,40 @@ CredSSP or SPNEGO) and reads it: \f[V]target_name\f[R],
 server gives it; or \f[V]nil\f[R] and a message
 T}
 T{
+\f[V]fero.output_table()\f[R]
+T}@T{
+A table for output that keeps its names in the order they are first set
+(one removed and set again goes last), as nmap\[aq]s
+\f[V]stdnse.output_table\f[R]; see Output below
+T}
+T{
+\f[V]fero.registry.get(name)\f[R], \f[V].set(name, value)\f[R],
+\f[V].append(name, value)\f[R]
+T}@T{
+Values shared by every script of the run, as nmap\[aq]s
+\f[V]nmap.registry\f[R]; see The registry
+T}
+T{
+\f[V]fero.host_registry.get(name)\f[R], \f[V].set(...)\f[R],
+\f[V].append(...)\f[R]
+T}@T{
+The same for the host the script runs against, as nmap\[aq]s
+\f[V]host.registry\f[R]; \f[V]nil\f[R] in prerule and postrule scripts
+T}
+T{
+\f[V]fero.record_skew(remote [, scanner])\f[R]
+T}@T{
+Notes how far a service\[aq]s clock (\f[V]remote\f[R], Unix seconds) is
+from the scanner\[aq]s (\f[V]scanner\f[R], default \f[V]os.time()\f[R])
+for \f[V]clock-skew\f[R], as nmap\[aq]s \f[V]datetime.record_skew\f[R]
+T}
+T{
+\f[V]fero.format_time(seconds)\f[R]
+T}@T{
+A time span as nmap writes one: \f[V]0s\f[R], \f[V]5s\f[R],
+\f[V]-1m05s\f[R], \f[V]2h03m04s\f[R], \f[V]1d02h03m04s\f[R]
+T}
+T{
 \f[V]fero.reader(sock)\f[R]
 T}@T{
 A buffered reader over a connected socket: \f[V]r:line()\f[R] (one line,
@@ -2101,10 +2148,11 @@ T}
 .PP
 \f[B]Output.\f[R] \f[V]action\f[R] returns a string, which is the output
 as it is; a table, which the report lays out as indented lines (its
-numbered entries first, as their value alone, then its named entries in
-name order, as \f[V]name: value\f[R]) and which XML and JSON keep as
-structured data; or a table and a string, the string being the text
-shown.
+numbered entries first, as their value alone, then its named entries as
+\f[V]name: value\f[R], in name order, or for a table from
+\f[V]fero.output_table()\f[R] in the order they were set) and which XML
+and JSON keep as structured data; or a table and a string, the string
+being the text shown.
 Returning nothing gives no output.
 An error in a rule or action gives no output either; \f[V]-d\f[R] shows
 it.
@@ -2128,6 +2176,33 @@ action = function(host, port)
 end
 \f[R]
 .fi
+.SS The registry
+.PP
+Each script run has a Lua state of its own, so scripts leave values for
+each other in the registry, which lives outside them all:
+\f[V]set(name, value)\f[R] stores a copy (\f[V]nil\f[R] removes it),
+\f[V]get(name)\f[R] returns a copy (or \f[V]nil\f[R]), and
+\f[V]append(name, value)\f[R] adds a copy to the end of the list under
+\f[V]name\f[R], starting the list when there is none, in one step, so
+scripts that run at the same time never lose each other\[aq]s entries.
+Changing a table after \f[V]set\f[R] or \f[V]get\f[R] changes only the
+script\[aq]s own copy; store it again to share the change.
+Only plain data is kept: \f[V]nil\f[R], booleans, numbers, strings, and
+tables of them (keys: numbers, strings or booleans) up to 32 levels
+deep.
+A function, a socket or another userdata is refused with an error, so
+nothing in the registry can run in another script.
+All values together may take 16 MiB.
+.PP
+\f[V]fero.registry\f[R] is the run\[aq]s, shared by every script, the
+prerule and postrule ones included; \f[V]fero.host_registry\f[R] is the
+host\[aq]s, shared by the scripts that run against that host.
+A script that reads what another one leaves names it in
+\f[V]dependencies\f[R], so that it runs after it when both are chosen.
+In nmap the registry is a plain table that scripts change in place;
+FeroProbe\[aq]s is called through these functions, as values are copied
+between states.
+The NSE compatibility layer (planned) can offer nmap\[aq]s form on top.
 .SS Script TLS and HTTP
 .PP
 \f[B]TLS.\f[R] Script TLS (\f[V]\[dq]ssl\[dq]\f[R] sockets,
@@ -2345,6 +2420,28 @@ Arguments: \f[V]banner.timeout\f[R] (ms, default 5000),
 \f[V]banner.length\f[R] (characters, default 200)
 T}
 T{
+\f[V]clock-skew\f[R]
+T}@T{
+default, safe
+T}@T{
+hosts where another script noted a clock
+T}@T{
+Sums up how far the host\[aq]s clocks are from the scanner\[aq]s, from
+what \f[V]http-date\f[R], \f[V]ntp-info\f[R], \f[V]rdp-ntlm-info\f[R],
+\f[V]smb2-time\f[R] and \f[V]ssl-date\f[R] saw (it runs after them and
+sends nothing): the one value when there is one (\f[V]5s\f[R]), else
+\f[V]mean: ..., deviation: ..., median: ...\f[R] (the population
+standard deviation); XML and JSON have \f[V]mean\f[R], \f[V]stddev\f[R],
+\f[V]median\f[R] and \f[V]count\f[R] in seconds.
+After the scan, when two or more hosts had a value, it lists the hosts
+grouped by their median (\f[V]Post-scan script results\f[R]).
+The differences include the time an answer took and the rounding to
+whole seconds, so \f[V]-1s\f[R] or \f[V]1s\f[R] usually means the clocks
+agree.
+nmap\[aq]s also counts services FeroProbe has no scripts for yet (SMB1,
+the other NTLM-info scripts)
+T}
+T{
 \f[V]dns-nsid\f[R]
 T}@T{
 default, discovery, safe
@@ -2395,6 +2492,22 @@ T}@T{
 Sends SYST and STAT without logging in and shows the answers (many
 servers answer STAT only after a login; then only SYST is shown).
 Argument: \f[V]ftp-syst.timeout\f[R]
+T}
+T{
+\f[V]http-date\f[R]
+T}@T{
+discovery, safe
+T}@T{
+web ports
+T}@T{
+One GET of the front page; shows its \f[V]Date\f[R] header and how far
+it is from the scanner\[aq]s clock, as
+\f[V]Wed, 19 Nov 2026 03:00:05 GMT; +5s from local time.\f[R] (XML and
+JSON: \f[V]date\f[R] in ISO form and \f[V]delta\f[R] in seconds), and
+notes the difference for \f[V]clock-skew\f[R].
+Reads all three HTTP-date forms.
+Follows no redirect.
+Not in \f[V]default\f[R], as in nmap
 T}
 T{
 \f[V]http-headers\f[R]
@@ -2519,6 +2632,7 @@ T}@T{
 One NTP client request (the server\[aq]s receive time) and one
 control-message READVAR request (version, system, stratum, reference ID
 and the other system variables, which many servers refuse).
+The receive time is noted for \f[V]clock-skew\f[R].
 Not the \f[V]monlist\f[R] request used for amplification
 T}
 T{
@@ -2542,7 +2656,8 @@ Asks for TLS and CredSSP (Network Level Authentication) in the
 connection request, sends an NTLM NEGOTIATE inside a CredSSP message
 over TLS and shows what the server\[aq]s NTLM CHALLENGE says: target
 name, NetBIOS and DNS domain and computer names, DNS tree name, product
-version and system time (UTC).
+version and system time (UTC), in that order, as nmap\[aq]s; the system
+time is noted for \f[V]clock-skew\f[R].
 No credentials are sent.
 A server that does not offer CredSSP gives no output.
 The connection request carries the routing cookie
@@ -2584,9 +2699,8 @@ T}@T{
 hosts with 445 or 139 open
 T}@T{
 The server\[aq]s clock and start time from its NEGOTIATE answer
-(\f[V]N/A\f[R] when it gives none, as current Windows does), in UTC.
-nmap\[aq]s also adds a \f[V]clock-skew\f[R] line to the host\[aq]s
-script results; FeroProbe\[aq]s does not yet.
+(\f[V]N/A\f[R] when it gives none, as current Windows does), in UTC; the
+clock is noted for \f[V]clock-skew\f[R].
 Arguments: \f[V]smbport\f[R], \f[V]smb2-time.timeout\f[R]
 T}
 T{
@@ -2656,9 +2770,8 @@ A ServerHello split across several records is read; only its first 10
 bytes are read, within one timeout.
 The hello\[aq]s random carries \f[V]FeroProbeSSLDate\f[R] after the time
 field.
-Direct TLS only (no STARTTLS, which nmap\[aq]s also tries); nmap\[aq]s
-also adds a \f[V]clock-skew\f[R] line to the host\[aq]s script results,
-FeroProbe\[aq]s does not yet.
+The server\[aq]s clock is noted for \f[V]clock-skew\f[R].
+Direct TLS only (no STARTTLS, which nmap\[aq]s also tries).
 Argument: \f[V]ssl-date.timeout\f[R] (ms, default 8000)
 T}
 T{

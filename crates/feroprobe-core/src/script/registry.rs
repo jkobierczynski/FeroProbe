@@ -1,0 +1,393 @@
+//! `fero.registry` and `fero.host_registry`: values scripts leave for
+//! other scripts, as nmap's `nmap.registry` and `host.registry`.
+//!
+//! Every script run has a Lua state of its own, so the registry lives
+//! here, outside them all, and holds copies: `set` and `append` copy a
+//! value in, `get` copies it out. Only plain data is kept (nil, booleans,
+//! numbers, strings and tables of them), never functions or userdata, so
+//! nothing can run in another script's state. A script that needs another
+//! one's values names it in `dependencies`, so that it runs after it.
+//!
+//! The run-wide registry is shared by every script of the run, the
+//! prerule and postrule ones included; each host has one more, for the
+//! scripts that run against it.
+
+use std::collections::HashMap;
+use std::net::IpAddr;
+use std::sync::{Arc, Mutex};
+
+use mlua::{Lua, Table, Value};
+
+/// Deepest table nesting a stored value may have.
+const MAX_DEPTH: usize = 32;
+/// Most bytes all stored values may take together (strings counted in
+/// full, every other value and table entry as 16 bytes).
+pub(crate) const MAX_BYTES: usize = 16 * 1024 * 1024;
+/// What each entry costs on top of its strings.
+const ENTRY_COST: usize = 16;
+
+/// A key in a stored table.
+#[derive(Debug, Clone, PartialEq)]
+enum Key {
+    Int(i64),
+    Num(f64),
+    Bool(bool),
+    Str(Vec<u8>),
+}
+
+/// A stored value.
+#[derive(Debug, Clone, PartialEq)]
+enum Stored {
+    Bool(bool),
+    Int(i64),
+    Num(f64),
+    Str(Vec<u8>),
+    Table(Vec<(Key, Stored)>),
+}
+
+/// One registry: names to values, with the bytes each takes.
+#[derive(Debug, Default)]
+struct Map {
+    values: HashMap<Vec<u8>, (Stored, usize)>,
+}
+
+/// The registries of a run.
+#[derive(Debug, Default)]
+pub(crate) struct Registry {
+    inner: Mutex<Inner>,
+}
+
+#[derive(Debug, Default)]
+struct Inner {
+    run: Map,
+    hosts: HashMap<IpAddr, Map>,
+    /// Bytes stored in all of them.
+    bytes: usize,
+}
+
+/// Which registry a call uses.
+#[derive(Debug, Clone, Copy)]
+enum Which {
+    Run,
+    Host(IpAddr),
+}
+
+/// Copy a Lua value in, counting its size; an error for what cannot be
+/// stored.
+fn store(v: &Value, depth: usize, size: &mut usize) -> Result<Option<Stored>, String> {
+    *size = size.saturating_add(ENTRY_COST);
+    if *size > MAX_BYTES {
+        return Err("value too large for the registry".into());
+    }
+    Ok(Some(match v {
+        Value::Nil => return Ok(None),
+        Value::Boolean(b) => Stored::Bool(*b),
+        Value::Integer(i) => Stored::Int(*i),
+        Value::Number(n) => Stored::Num(*n),
+        Value::String(s) => {
+            let b = s.as_bytes().to_vec();
+            *size = size.saturating_add(b.len());
+            if *size > MAX_BYTES {
+                return Err("value too large for the registry".into());
+            }
+            Stored::Str(b)
+        }
+        Value::Table(t) => {
+            if depth >= MAX_DEPTH {
+                return Err(format!(
+                    "table nested too deeply for the registry (at most {MAX_DEPTH} levels)"
+                ));
+            }
+            let mut entries = Vec::new();
+            // The numbered entries first, in order, then the rest.
+            let mut n = 0i64;
+            loop {
+                match t.raw_get::<Value>(n + 1).map_err(|e| e.to_string())? {
+                    Value::Nil => break,
+                    x => {
+                        n += 1;
+                        if let Some(s) = store(&x, depth + 1, size)? {
+                            entries.push((Key::Int(n), s));
+                        }
+                    }
+                }
+            }
+            for pair in t.pairs::<Value, Value>() {
+                let (k, x) = pair.map_err(|e| e.to_string())?;
+                let key = match k {
+                    Value::Integer(i) if (1..=n).contains(&i) => continue,
+                    Value::Integer(i) => Key::Int(i),
+                    Value::Number(f) => Key::Num(f),
+                    Value::Boolean(b) => Key::Bool(b),
+                    Value::String(s) => {
+                        let b = s.as_bytes().to_vec();
+                        *size = size.saturating_add(b.len());
+                        Key::Str(b)
+                    }
+                    other => {
+                        return Err(format!(
+                            "a {} cannot be a key in the registry",
+                            other.type_name()
+                        ));
+                    }
+                };
+                if let Some(s) = store(&x, depth + 1, size)? {
+                    entries.push((key, s));
+                }
+            }
+            Stored::Table(entries)
+        }
+        other => {
+            return Err(format!(
+                "a {} cannot be stored in the registry",
+                other.type_name()
+            ));
+        }
+    }))
+}
+
+/// Copy a stored value out into `lua`.
+fn load(lua: &Lua, s: &Stored) -> mlua::Result<Value> {
+    Ok(match s {
+        Stored::Bool(b) => Value::Boolean(*b),
+        Stored::Int(i) => Value::Integer(*i),
+        Stored::Num(n) => Value::Number(*n),
+        Stored::Str(b) => Value::String(lua.create_string(b)?),
+        Stored::Table(entries) => {
+            let t = lua.create_table()?;
+            for (k, v) in entries {
+                let key = match k {
+                    Key::Int(i) => Value::Integer(*i),
+                    Key::Num(n) => Value::Number(*n),
+                    Key::Bool(b) => Value::Boolean(*b),
+                    Key::Str(b) => Value::String(lua.create_string(b)?),
+                };
+                t.raw_set(key, load(lua, v)?)?;
+            }
+            Value::Table(t)
+        }
+    })
+}
+
+impl Registry {
+    fn with<R>(&self, which: Which, f: impl FnOnce(&mut Map, &mut usize) -> R) -> R {
+        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let Inner { run, hosts, bytes } = &mut *g;
+        let map = match which {
+            Which::Run => run,
+            Which::Host(ip) => hosts.entry(ip).or_default(),
+        };
+        f(map, bytes)
+    }
+
+    fn get(&self, lua: &Lua, which: Which, name: &[u8]) -> mlua::Result<Value> {
+        // Copied out of the lock first, so no Lua code runs under it.
+        let found = self.with(which, |m, _| m.values.get(name).map(|(s, _)| s.clone()));
+        match found {
+            Some(s) => load(lua, &s),
+            None => Ok(Value::Nil),
+        }
+    }
+
+    fn set(&self, which: Which, name: &[u8], v: &Value) -> Result<(), String> {
+        let mut size = name.len();
+        let stored = store(v, 0, &mut size)?;
+        self.with(which, |m, bytes| {
+            let old = m.values.get(name).map_or(0, |(_, n)| *n);
+            match stored {
+                None => {
+                    m.values.remove(name);
+                    *bytes -= old;
+                }
+                Some(s) => {
+                    let total = bytes.saturating_sub(old).saturating_add(size);
+                    if total > MAX_BYTES {
+                        return Err("the registry is full".to_string());
+                    }
+                    *bytes = total;
+                    m.values.insert(name.to_vec(), (s, size));
+                }
+            }
+            Ok(())
+        })
+    }
+
+    /// Add `v` to the end of the list under `name`, making the list when
+    /// there is none. One call, so scripts running at once never lose
+    /// each other's entries.
+    fn append(&self, which: Which, name: &[u8], v: &Value) -> Result<(), String> {
+        let mut size = 0;
+        let Some(stored) = store(v, 1, &mut size)? else {
+            return Ok(());
+        };
+        self.with(which, |m, bytes| {
+            if *bytes + size + name.len() > MAX_BYTES {
+                return Err("the registry is full".to_string());
+            }
+            match m.values.get_mut(name) {
+                Some((Stored::Table(entries), n)) => {
+                    let next = entries
+                        .iter()
+                        .filter_map(|(k, _)| match k {
+                            Key::Int(i) => Some(*i),
+                            _ => None,
+                        })
+                        .max()
+                        .unwrap_or(0)
+                        + 1;
+                    entries.push((Key::Int(next), stored));
+                    *n += size;
+                    *bytes += size;
+                }
+                Some(_) => return Err("the value under that name is not a list".to_string()),
+                None => {
+                    let n = size + name.len() + ENTRY_COST;
+                    m.values.insert(
+                        name.to_vec(),
+                        (Stored::Table(vec![(Key::Int(1), stored)]), n),
+                    );
+                    *bytes += n;
+                }
+            }
+            Ok(())
+        })
+    }
+}
+
+/// The `get`, `set` and `append` functions of one registry, as a table.
+fn functions(
+    lua: &Lua,
+    reg: &Arc<Registry>,
+    which: Which,
+    label: &'static str,
+) -> mlua::Result<Table> {
+    let t = lua.create_table()?;
+    let r = reg.clone();
+    t.raw_set(
+        "get",
+        lua.create_function(move |lua, name: mlua::LuaString| r.get(lua, which, &name.as_bytes()))?,
+    )?;
+    let r = reg.clone();
+    t.raw_set(
+        "set",
+        lua.create_function(move |_, (name, v): (mlua::LuaString, Value)| {
+            r.set(which, &name.as_bytes(), &v)
+                .map_err(|e| mlua::Error::runtime(format!("{label}.set: {e}")))
+        })?,
+    )?;
+    let r = reg.clone();
+    t.raw_set(
+        "append",
+        lua.create_function(move |_, (name, v): (mlua::LuaString, Value)| {
+            r.append(which, &name.as_bytes(), &v)
+                .map_err(|e| mlua::Error::runtime(format!("{label}.append: {e}")))
+        })?,
+    )?;
+    Ok(t)
+}
+
+/// Put `fero.registry` (the run's) and, for a script that runs against a
+/// host, `fero.host_registry` (that host's) into `fero`.
+pub(crate) fn install(
+    lua: &Lua,
+    fero: &Table,
+    reg: &Arc<Registry>,
+    host: Option<IpAddr>,
+) -> mlua::Result<()> {
+    fero.raw_set(
+        "registry",
+        functions(lua, reg, Which::Run, "fero.registry")?,
+    )?;
+    if let Some(ip) = host {
+        fero.raw_set(
+            "host_registry",
+            functions(lua, reg, Which::Host(ip), "fero.host_registry")?,
+        )?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn copies_in_and_out() {
+        let reg = Arc::new(Registry::default());
+        let a = Lua::new();
+        let b = Lua::new();
+        let fa = a.create_table().unwrap();
+        let fb = b.create_table().unwrap();
+        let ip: IpAddr = "192.0.2.1".parse().unwrap();
+        install(&a, &fa, &reg, Some(ip)).unwrap();
+        install(&b, &fb, &reg, Some(ip)).unwrap();
+        a.globals().set("fero", fa).unwrap();
+        b.globals().set("fero", fb).unwrap();
+        a.load(
+            r#"
+            local t = { 1, 2, x = { y = "z" }, [true] = 3.5 }
+            fero.registry.set("t", t)
+            t.x.y = "changed"
+            fero.host_registry.append("l", 5)
+            fero.host_registry.append("l", "six")
+            "#,
+        )
+        .exec()
+        .unwrap();
+        let (y, n, l2, b3, other) = b
+            .load(
+                r#"
+                local t = fero.registry.get("t")
+                local l = fero.host_registry.get("l")
+                return t.x.y, #t, l[2], t[true], fero.registry.get("l")
+                "#,
+            )
+            .eval::<(String, i64, String, f64, Value)>()
+            .unwrap();
+        assert_eq!((y.as_str(), n, l2.as_str(), b3), ("z", 2, "six", 3.5));
+        assert!(other.is_nil());
+        // Another host has its own registry; nil removes a value.
+        let c = Lua::new();
+        let fc = c.create_table().unwrap();
+        install(&c, &fc, &reg, Some("192.0.2.2".parse().unwrap())).unwrap();
+        c.globals().set("fero", fc).unwrap();
+        let none: Value = c
+            .load(r#"return fero.host_registry.get("l")"#)
+            .eval()
+            .unwrap();
+        assert!(none.is_nil());
+        a.load(r#"fero.registry.set("t", nil)"#).exec().unwrap();
+        let gone: Value = b.load(r#"return fero.registry.get("t")"#).eval().unwrap();
+        assert!(gone.is_nil());
+        let g = reg.inner.lock().unwrap();
+        assert_eq!(g.bytes, g.hosts[&ip].values[&b"l".to_vec()].1);
+    }
+
+    #[test]
+    fn refuses_what_cannot_be_kept() {
+        let reg = Arc::new(Registry::default());
+        let a = Lua::new();
+        let f = a.create_table().unwrap();
+        install(&a, &f, &reg, None).unwrap();
+        a.globals().set("fero", f).unwrap();
+        // No host registry outside a host.
+        let h: Value = a.load("return fero.host_registry").eval().unwrap();
+        assert!(h.is_nil());
+        for bad in [
+            r#"fero.registry.set("f", print)"#,
+            r#"fero.registry.set("f", { print })"#,
+            r#"local t = {} t.t = t fero.registry.set("c", t)"#,
+            r#"fero.registry.set("big", string.rep("x", 17 * 1024 * 1024))"#,
+            r#"fero.registry.set("s", 1) fero.registry.append("s", 2)"#,
+        ] {
+            assert!(a.load(bad).exec().is_err(), "{bad}");
+        }
+        // Filling it up stops at the limit.
+        let fill = r#"
+            local chunk = string.rep("x", 1024 * 1024)
+            for i = 1, 20 do fero.registry.append("many", chunk) end
+        "#;
+        assert!(a.load(fill).exec().is_err());
+        assert!(reg.inner.lock().unwrap().bytes <= MAX_BYTES);
+    }
+}

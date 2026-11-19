@@ -54,6 +54,7 @@ script-http      | lan    | root | -sS -p 80 --script http-title,http-headers,ht
 script-dns-tcp   | lan    | root | -sS -p 53 --script dns-nsid
 script-dns-udp   | lan    | root | -sU -p 53 --script dns-nsid
 script-nbstat    | lan    | root | -sU -p 137 --script nbstat
+script-date      | lan    | root | -sS -p 80 --script http-date,clock-skew
 
 # --- Loopback (nmap treats localhost specially) ----------------------------
 syn-local        | local  | root | -sS -p @TCP

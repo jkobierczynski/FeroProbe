@@ -73,6 +73,7 @@ action = function(host, port)
     if ok and #reply >= 48 and reply:byte(1) & 7 == 4 then
       local secs = string.unpack(">I4", reply, 33)
       if secs ~= 0 then
+        fero.record_skew(secs - NTP_EPOCH)
         local when = os.date("!%Y-%m-%dT%H:%M:%S", secs - NTP_EPOCH)
         data["receive time stamp"] = when
         lines[#lines + 1] = "receive time stamp: " .. when

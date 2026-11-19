@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use mlua::{Lua, MultiValue, UserData, UserDataMethods, Value};
+use mlua::{Function, Lua, MultiValue, Table, UserData, UserDataMethods, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::Mutex;
 
@@ -360,6 +360,123 @@ async fn receive(lua: Lua, state: Arc<Mutex<State>>, want: Want) -> mlua::Result
     }
 }
 
+/// Where `delim` first matches in `buf`: the 1-based start and end Lua
+/// gives (`string.find` for a pattern, the function's own two results
+/// for a function), as the byte range before and after the delimiter.
+fn find_delimiter(
+    lua: &Lua,
+    find: &Function,
+    delim: &Value,
+    buf: &[u8],
+) -> mlua::Result<Option<(usize, usize)>> {
+    if buf.is_empty() {
+        return Ok(None);
+    }
+    let s = lua.create_string(buf)?;
+    let r: MultiValue = match delim {
+        Value::String(p) => find.call((s, p.clone()))?,
+        _ => find.call(s)?,
+    };
+    let mut it = r.into_iter();
+    let int = |v: Option<Value>| match v {
+        Some(Value::Integer(i)) => Some(i),
+        Some(Value::Number(n)) if n.fract() == 0.0 => Some(n as i64),
+        _ => None,
+    };
+    match (int(it.next()), int(it.next())) {
+        (Some(a), Some(b)) if a >= 1 && b >= a - 1 && b as u64 <= buf.len() as u64 => {
+            Ok(Some((a as usize - 1, b as usize)))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// `receive_buf(delimiter, keep)`: the data up to the first match of
+/// `delimiter` (a Lua pattern, or a function that returns where its
+/// delimiter starts and ends, as `string.find` does), with the delimiter
+/// when `keep` is true. What follows stays buffered for the next receive.
+/// Without a match before the end, the timeout, or [`MAX_RECEIVE`]
+/// bytes, it fails and keeps what came in the buffer, as nmap's does.
+async fn receive_buf(
+    lua: Lua,
+    state: Arc<Mutex<State>>,
+    delim: Value,
+    keep: bool,
+) -> mlua::Result<MultiValue> {
+    let find: Function = match &delim {
+        Value::Function(f) => f.clone(),
+        Value::String(_) => lua.globals().get::<Table>("string")?.get("find")?,
+        _ => {
+            return Err(mlua::Error::runtime(
+                "receive_buf: the delimiter must be a pattern or a function",
+            ));
+        }
+    };
+    let mut st = state.lock().await;
+    let st = &mut *st;
+    let take = |st: &mut State, (start, end): (usize, usize)| {
+        let cut = if keep { end } else { start };
+        let data = st.buf[..cut].to_vec();
+        st.buf.drain(..end);
+        ok_with(&lua, &data)
+    };
+    if let Some(at) = find_delimiter(&lua, &find, &delim, &st.buf)? {
+        return take(st, at);
+    }
+    let timeout = st.timeout;
+    // The outer error is the script's (a bad pattern, a failing
+    // function), passed on as it is; the inner one the connection's.
+    let read = async {
+        let mut chunk = vec![0u8; 65536];
+        loop {
+            let n = match &mut st.conn {
+                Conn::Closed => {
+                    return mlua::Result::Ok(Err("socket is not connected".to_string()));
+                }
+                Conn::Tcp(s) => s.read(&mut chunk).await.map_err(read_error),
+                Conn::Tls(s) => s.read(&mut chunk).await.map_err(read_error),
+                Conn::Udp(s) => s.recv(&mut chunk).await.map_err(|e| e.to_string()),
+            };
+            let n = match n {
+                Ok(n) => n,
+                Err(e) => return Ok(Err(e)),
+            };
+            if n == 0 && matches!(st.conn, Conn::Tcp(_) | Conn::Tls(_)) {
+                return Ok(Err("EOF".to_string()));
+            }
+            if let Some(e) = &st.ends {
+                e.data(Dir::In, &chunk[..n]);
+            }
+            st.buf.extend_from_slice(&chunk[..n]);
+            if st.buf.len() > MAX_RECEIVE {
+                return Ok(Err("too much data".to_string()));
+            }
+            if let Some(at) = find_delimiter(&lua, &find, &delim, &st.buf)? {
+                return Ok(Ok(at));
+            }
+        }
+    };
+    let outcome = match tokio::time::timeout(timeout, read).await {
+        Ok(r) => r?,
+        Err(_) => Err("TIMEOUT".to_string()),
+    };
+    if let (Err(e), Some(ends)) = (&outcome, &st.ends) {
+        ends.event(Dir::In, e);
+    }
+    match outcome {
+        Ok(at) => take(st, at),
+        Err(e) => {
+            if e == "too much data" {
+                st.conn = Conn::Closed;
+                st.buf = Vec::new();
+                st.slot = None;
+                st.ends = None;
+            }
+            fail(&lua, e)
+        }
+    }
+}
+
 impl UserData for ScriptSocket {
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
         methods.add_async_method(
@@ -511,6 +628,12 @@ impl UserData for ScriptSocket {
         methods.add_async_method("receive_lines", |lua, this, n: usize| {
             receive(lua, this.state.clone(), Want::Lines(n))
         });
+        methods.add_async_method(
+            "receive_buf",
+            |lua, this, (delim, keep): (Value, Option<bool>)| {
+                receive_buf(lua, this.state.clone(), delim, keep.unwrap_or(false))
+            },
+        );
         methods.add_method("set_timeout", |_, this, ms: u64| {
             if let Ok(mut st) = this.state.try_lock() {
                 st.timeout = Duration::from_millis(ms);

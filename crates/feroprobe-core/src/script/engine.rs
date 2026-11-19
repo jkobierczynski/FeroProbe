@@ -10,6 +10,7 @@ use mlua::{Function, Lua, MultiValue, Table, Value};
 
 use super::args::{ArgTable, ArgValue};
 use super::output::{ScriptResult, ScriptTable, ScriptValue, bytes_to_text_max, name_to_text_max};
+use super::registry::Registry;
 use super::sandbox::{self, Budget};
 use super::socket::{Scope, ScriptSocket};
 use super::{Script, ScriptError};
@@ -215,6 +216,45 @@ fero.http.post = function(host, port, path, options, content)
 end
 fero.http.form_encode = form_encode
 
+-- A table for a script's output that keeps its names in the order they
+-- are set, as nmap's stdnse.output_table: the normal report, XML and
+-- JSON then show them in that order instead of sorted.
+fero.output_table = function()
+  local order = {}
+  return setmetatable({}, {
+    __fero_order = order,
+    __newindex = function(t, k, v)
+      if v ~= nil and type(k) == "string" then order[#order + 1] = k end
+      rawset(t, k, v)
+    end,
+  })
+end
+
+-- A number of seconds as nmap writes a time span: "0s", "5s", "-1m05s",
+-- "2h03m04s", "1d02h03m04s".
+fero.format_time = function(d)
+  d = math.tointeger(d) or math.floor(d + 0.5)
+  if d == 0 then return "0s" end
+  local sign = d < 0 and "-" or ""
+  d = math.abs(d)
+  local days, h, m, s = d // 86400, d // 3600 % 24, d // 60 % 60, d % 60
+  if days > 0 then return string.format("%s%dd%02dh%02dm%02ds", sign, days, h, m, s) end
+  if h > 0 then return string.format("%s%dh%02dm%02ds", sign, h, m, s) end
+  if m > 0 then return string.format("%s%dm%02ds", sign, m, s) end
+  return string.format("%s%ds", sign, s)
+end
+
+-- fero.record_skew(remote, scanner): note how far the clock of a service
+-- on this host (Unix seconds `remote`) is from the scanner's when the
+-- answer came (`scanner`, os.time() when left out), for clock-skew.
+fero.record_skew = function(remote, scanner)
+  if fero.host_registry == nil or type(remote) ~= "number" then return end
+  scanner = scanner or os.time()
+  fero.host_registry.append("clock_skew", {
+    script = SCRIPT_NAME, skew = math.floor(remote - scanner + 0.5),
+  })
+end
+
 -- Bytes as lower-case hex, with an optional separator between bytes.
 fero.hex = function(s, sep)
   local t = {}
@@ -362,6 +402,7 @@ pub(crate) fn install_library(
     kind: &str,
     args: &ArgTable,
     scope: &Arc<Scope>,
+    registry: &Arc<Registry>,
 ) -> mlua::Result<()> {
     let g = lua.globals();
     g.raw_set("SCRIPT_NAME", id)?;
@@ -378,6 +419,7 @@ pub(crate) fn install_library(
         )?;
     }
     fero.raw_set("socket", socket)?;
+    super::registry::install(lua, &fero, registry, scope.addr)?;
     let http = lua.create_table()?;
     {
         let scope = scope.clone();
@@ -701,7 +743,22 @@ fn convert(lua: &Lua, v: &Value, depth: usize, kept: &mut Kept) -> ScriptValue {
             _ => None,
         })
         .collect();
-    named.sort_by(|a, b| a.0.as_bytes()[..].cmp(&b.0.as_bytes()[..]));
+    // A table from `fero.output_table()` keeps its names in the order
+    // they were first set (a name removed and set again goes last); any
+    // other table's names, and names set without the table seeing them
+    // (`rawset`), are sorted.
+    let order = output_order(t);
+    named.sort_by(|a, b| {
+        let pos = |k: &mlua::LuaString| {
+            order
+                .as_ref()
+                .and_then(|o| o.get(&k.as_bytes()[..]).copied())
+                .unwrap_or(usize::MAX)
+        };
+        pos(&a.0)
+            .cmp(&pos(&b.0))
+            .then_with(|| a.0.as_bytes()[..].cmp(&b.0.as_bytes()[..]))
+    });
     for (k, x) in named {
         if kept.full() {
             break;
@@ -711,6 +768,23 @@ fn convert(lua: &Lua, v: &Value, depth: usize, kept: &mut Kept) -> ScriptValue {
         out.named.push((k, convert(lua, &x, depth + 1, kept)));
     }
     ScriptValue::Table(out)
+}
+
+/// The metatable field where `fero.output_table()` lists its names in
+/// the order they were set.
+const ORDER_FIELD: &str = "__fero_order";
+
+/// Where each name of an ordered table comes: its last place in the
+/// table's list of names, or `None` for a table that keeps no order.
+fn output_order(t: &Table) -> Option<std::collections::HashMap<Vec<u8>, usize>> {
+    let list: Table = t.metatable()?.raw_get(ORDER_FIELD).ok()?;
+    let mut order = std::collections::HashMap::new();
+    for (i, k) in list.sequence_values::<Value>().enumerate() {
+        if let Ok(Value::String(s)) = k {
+            order.insert(s.as_bytes().to_vec(), i);
+        }
+    }
+    Some(order)
 }
 
 /// An action's return values as a result, like nmap: a string is the
@@ -788,6 +862,8 @@ pub struct ScriptScan {
     scripts: Vec<Arc<Script>>,
     levels: Vec<Vec<Arc<Script>>>,
     args: Arc<ArgTable>,
+    /// What the scripts leave for each other (`fero.registry`).
+    registry: Arc<Registry>,
     /// `--script-timeout`: the longest one script run against one host
     /// or port may take. `None` for no limit.
     pub timeout: Option<Duration>,
@@ -808,6 +884,7 @@ impl ScriptScan {
             scripts,
             levels,
             args: Arc::new(args),
+            registry: Arc::new(Registry::default()),
             timeout,
             parallel: DEFAULT_PARALLEL,
         })
@@ -821,8 +898,15 @@ impl ScriptScan {
     fn state(&self, script: &Script, on: Against<'_>, budget: &Arc<Budget>) -> Result<Lua, String> {
         let lua = sandbox::new_state(budget).map_err(|e| e.to_string())?;
         let scope = Arc::new(scope_of(&script.id, on.host()));
-        install_library(&lua, &script.id, on.kind(), &self.args, &scope)
-            .map_err(|e| e.to_string())?;
+        install_library(
+            &lua,
+            &script.id,
+            on.kind(),
+            &self.args,
+            &scope,
+            &self.registry,
+        )
+        .map_err(|e| e.to_string())?;
         if let Some(h) = on.host() {
             install_port_state(&lua, h).map_err(|e| e.to_string())?;
         }

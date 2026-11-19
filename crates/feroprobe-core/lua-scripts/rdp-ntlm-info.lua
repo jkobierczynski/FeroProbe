@@ -7,10 +7,10 @@ description = [[
 Reads what a Remote Desktop server says about itself in the NTLM
 challenge of a Network Level Authentication (CredSSP) exchange: its
 NetBIOS and DNS computer and domain names, the Windows version and its
-clock. Asks for TLS and CredSSP in the connection request, sends an NTLM
-NEGOTIATE inside a CredSSP message over TLS, reads the server's
-CHALLENGE and closes; no credentials are sent and nothing logs in. A
-server that does not offer CredSSP gives no output.
+clock (also noted for clock-skew). Asks for TLS and CredSSP in the
+connection request, sends an NTLM NEGOTIATE inside a CredSSP message over
+TLS, reads the server's CHALLENGE and closes; no credentials are sent and
+nothing logs in. A server that does not offer CredSSP gives no output.
 
 The connection request carries the routing cookie
 "Cookie: mstshash=FeroProbe", so the server's logs name the client.
@@ -116,17 +116,18 @@ action = function(host, port)
   if not reply then return nil end
   local c = fero.ntlm.parse_challenge(reply)
   if not c then return nil end
-  local data, lines = {}, {}
+  local data, any = fero.output_table(), false
   for _, l in ipairs(LABELS) do
     if c[l[1]] then
       data[l[2]] = c[l[1]]
-      lines[#lines + 1] = l[2] .. ": " .. c[l[1]]
+      any = true
     end
   end
   if c.timestamp then
     data.System_Time = os.date("!%Y-%m-%dT%H:%M:%S+00:00", c.timestamp)
-    lines[#lines + 1] = "System_Time: " .. data.System_Time
+    fero.record_skew(c.timestamp)
+    any = true
   end
-  if #lines == 0 then return nil end
-  return data, "\n  " .. table.concat(lines, "\n  ")
+  if not any then return nil end
+  return data
 end

@@ -21,6 +21,7 @@ mod engine;
 mod http;
 pub mod output;
 mod pattern;
+mod registry;
 mod sandbox;
 pub mod select;
 mod socket;
@@ -42,9 +43,14 @@ pub use socket::Scope;
 /// The scripts built into FeroProbe, written for it: (id, source).
 const BUILT_IN: &[(&str, &str)] = &[
     ("banner", include_str!("../../lua-scripts/banner.lua")),
+    (
+        "clock-skew",
+        include_str!("../../lua-scripts/clock-skew.lua"),
+    ),
     ("dns-nsid", include_str!("../../lua-scripts/dns-nsid.lua")),
     ("ftp-anon", include_str!("../../lua-scripts/ftp-anon.lua")),
     ("ftp-syst", include_str!("../../lua-scripts/ftp-syst.lua")),
+    ("http-date", include_str!("../../lua-scripts/http-date.lua")),
     (
         "http-headers",
         include_str!("../../lua-scripts/http-headers.lua"),
@@ -209,6 +215,7 @@ impl Script {
             "load",
             &ArgTable::default(),
             &Arc::new(Scope::default()),
+            &Arc::new(registry::Registry::default()),
         )
         .map_err(|e| ScriptError(format!("{name}: {e}")))?;
         lua.load(source)
