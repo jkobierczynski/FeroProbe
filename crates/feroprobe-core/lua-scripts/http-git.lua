@@ -132,7 +132,7 @@ local function remotes_of(config)
         if url:sub(1, 1) == '"' then
           url = url:sub(2):gsub('"%s*$', ""):gsub("\\(.)", "%1")
         end
-        list[#list + 1] = (url:gsub("^(%a[%w+.%-]*://)[^/]*@", "%1"))
+        list[#list + 1] = (url:gsub("^(%a[%w+.%-]*://)[^/?#]*@", "%1"))
       end
     end
   end

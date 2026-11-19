@@ -36,13 +36,14 @@ local function tag_end(body, pos)
 end
 
 -- The attributes of one tag's text, names in lower case: read from left
--- to right, each value (quoted, ending at the quote it started with, or
+-- to right, each name taken whole (any character but space, quotes, ">",
+-- "/" and "="), each value (quoted, ending at the quote it started with, or
 -- bare) taken whole before the next name, so text inside a value is
 -- never read as an attribute.
 local function attributes(tag)
   local attrs, pos = {}, 1
   while true do
-    local s, e, name = tag:find("([%w%-:]+)", pos)
+    local s, e, name = tag:find("([^%s\"'>/=]+)", pos)
     if not s then break end
     name = name:lower()
     local _, eq = tag:find("^%s*=%s*", e + 1)

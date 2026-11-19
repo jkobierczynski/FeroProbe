@@ -4226,6 +4226,7 @@ async fn http_git_skips_fallback_pages_and_hides_passwords() {
         } else if req.starts_with("GET /.git/config ") {
             b"[remote \"origin\"]\n\turl = \"https://dev:s3cret@git.example/site.git\"\n\
               [remote \"backup\"]\n\turl = git@backup.example:site.git\n\
+              [remote \"query\"]\n\turl = \"https://git.example?owner=dev@example.org\"\n\
               [submodule \"lib\"]\n\turl = https://git.example/lib.git\n"
         } else if req.starts_with("GET /.git/description ") {
             b"Site\n"
@@ -4246,7 +4247,8 @@ async fn http_git_skips_fallback_pages_and_hides_passwords() {
         Some(format!(
             "\n  127.0.0.1:{port}/.git/\n    Potential Git repository found (found 3/6 expected files)\
              \n    Repository description: Site \
-             \n    Remotes:\n      https://git.example/site.git\n      git@backup.example:site.git"
+             \n    Remotes:\n      https://git.example/site.git\n      git@backup.example:site.git\
+             \n      https://git.example?owner=dev@example.org"
         ))
     );
     // A HEAD that is no Git reference: nothing.
@@ -4264,7 +4266,9 @@ async fn http_webdav_scan_reads_any_prefix() {
                 .to_vec()
         } else if req.starts_with("PROPFIND ") {
             let body = "<?xml version=\"1.0\"?><x.d:multistatus xmlns:x.d=\"DAV:\" xmlns=\"DAV:\">\
-                <response><href>/a%20b?x=1&amp;y=2</href></response>\
+                <response><href>/a%20b?x=1&amp;y=2</href><propstat><prop>\
+                <otherresponse><otherhref>/phantom</otherhref></otherresponse>\
+                </prop></propstat></response>\
                 <x.d:response><x.d:href>/second</x.d:href><x.d:propstat><x.d:prop>\
                 <x.d:lockdiscovery><x.d:activelock><x.d:lockroot><x.d:href>/</x.d:href></x.d:lockroot>\
                 </x.d:activelock></x.d:lockdiscovery></x.d:prop>\
@@ -4305,9 +4309,9 @@ async fn http_favicon_and_generator_read_quoted_values() {
     let (port, _) = web(|req| {
         let body: &[u8] = if req.starts_with("GET / ") {
             b"<link title=\"rel=icon href=/wrong.ico\" rel=stylesheet href=/style.css>\
-              <link rel=\"icon\" title=\"a > b\" href=\"/site's.ico\">\
+              <link data-ui_href=/wrong.ico rel=\"icon\" title=\"a > b\" href=\"/site's.ico\">\
               <meta title=\"> name=generator content=Fake\" name=viewport content=width=device-width>\
-              <meta name=generator content=\"CMS > 2\">"
+              <meta data-ui_content=placeholder name=generator content=\"CMS > 2\">"
         } else if req.starts_with("GET /site's.ico ") {
             b"ICON"
         } else {

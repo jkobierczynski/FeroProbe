@@ -89,7 +89,8 @@ local function propfind(host, port, path)
   local body = resp.body
   -- A WebDAV Multi-Status: a multistatus element in the DAV: namespace,
   -- whatever prefix it carries, whatever its properties' own results.
-  local _, _, prefix = body:find("<([%w%-%._]*:?)multistatus[%s>/]")
+  local _, _, prefix = body:find("<([%w%-%._]+:)multistatus[%s>/]")
+  if not prefix and body:find("<multistatus[%s>/]") then prefix = "" end
   if not prefix then return nil end
   -- The prefix as a pattern: its "-" and "." are magic there.
   local p = prefix:gsub("%p", "%%%0")
@@ -107,15 +108,18 @@ local function propfind(host, port, path)
   local listing = {}
   -- Children may carry another prefix bound to DAV: (or none, under a
   -- default namespace), so any prefix is taken inside this document.
-  local resp_pat = "<[%w%-%._]*:?response[%s>]"
-  local href_pat = "^[^<]*<[%w%-%._]*:?href>%s*([^<]*)"
+  -- A prefix is always followed by ":", so names that merely end in
+  -- "response" or "href" do not count.
   local pos = 1
   while #listing < MAX_LISTED do
-    local _, e = body:find(resp_pat, pos)
+    local _, e = body:find("<[%w%-%._]+:response[%s>]", pos)
+    local _, e2 = body:find("<response[%s>]", pos)
+    if e2 and (not e or e2 < e) then e = e2 end
     if not e then break end
     local gt = body:find(">", e, true)
     if not gt then break end
-    local href = body:match(href_pat, gt + 1)
+    local href = body:match("^[^<]*<[%w%-%._]+:href>%s*([^<]*)", gt + 1)
+      or body:match("^[^<]*<href>%s*([^<]*)", gt + 1)
     if href then
       href = href:gsub("%s+$", ""):gsub("&lt;", "<"):gsub("&gt;", ">")
         :gsub("&quot;", '"'):gsub("&apos;", "'"):gsub("&amp;", "&")
