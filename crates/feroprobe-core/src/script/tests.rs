@@ -3413,6 +3413,15 @@ end"#;
             b"<tls:proceed xmlns:tls='urn:ietf:params:xml:ns:xmpp-tls'/>",
         ),
     ];
+    // So does a prefix the stream header binds to the TLS namespace.
+    const XMPP_STREAM_PREFIX: &[(&[u8], &[u8])] = &[
+        (
+            b"version='1.0'>",
+            b"<stream:stream xmlns:tls=\"urn:ietf:params:xml:ns:xmpp-tls\" version='1.0'>\
+              <stream:features><tls:starttls/></stream:features>",
+        ),
+        (b"<starttls", b"<tls:proceed/>"),
+    ];
     for (proto, steps) in [
         ("ftp", FTP),
         ("pop3", POP3),
@@ -3422,6 +3431,7 @@ end"#;
         ("postgresql", POSTGRES),
         ("xmpp", XMPP),
         ("xmpp", XMPP_PREFIXED),
+        ("xmpp", XMPP_STREAM_PREFIX),
     ] {
         let (port, _) = starttls_server(steps, |_| None).await;
         let scan = ScriptScan::new(
