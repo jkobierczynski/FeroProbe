@@ -429,12 +429,19 @@ async fn receive_buf(
     let read = async {
         let mut chunk = vec![0u8; 65536];
         loop {
-            // Never read past the limit: a delimiter within it is still
-            // found, and what lies beyond stays unread.
-            let room = MAX_RECEIVE.saturating_sub(st.buf.len()).min(chunk.len());
+            // Never read a stream past the limit: a delimiter within it is
+            // still found, and what lies beyond stays unread. A datagram is
+            // read whole (a shorter read would drop its end), so the buffer
+            // may pass the limit by at most one datagram.
+            let room = MAX_RECEIVE.saturating_sub(st.buf.len());
             if room == 0 {
                 return mlua::Result::Ok(Err("too much data".to_string()));
             }
+            let room = if matches!(st.conn, Conn::Udp(_)) {
+                chunk.len()
+            } else {
+                room.min(chunk.len())
+            };
             let chunk = &mut chunk[..room];
             let n = match &mut st.conn {
                 Conn::Closed => {
