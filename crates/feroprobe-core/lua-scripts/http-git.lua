@@ -12,10 +12,11 @@ not count as the file). Shows the repository's description, its last
 commit message (from COMMIT_EDITMSG, which can also hold a message whose
 commit was given up), the URLs of its remotes (with any user name and
 password left out), the kind of project its ignore files suggest, and
-which files mention words such as "passw", "key" or "secret". A file
-whose text is what the site sends for a path that does not exist
-(.git/feroprobe-no-such-file, asked for once) is not counted, nor a
-.git/config without a [section] line. Plain GETs with FeroProbe's
+which files mention words such as "passw", "key" or "secret". A
+.git/config without a [section] line is not counted, and when the site
+answers .git/feroprobe-no-such-file (asked for once) with a 200, only
+.git/config can be told from its answer for a missing file, so the
+other files are not counted. Plain GETs with FeroProbe's
 User-Agent, seven at most per root; no Git object is downloaded.
 
 Script arguments:
@@ -152,14 +153,14 @@ local function check_root(host, port, root)
   if not head or not is_head(head) then
     return nil
   end
-  -- What the site sends for a file that does not exist: a site that
-  -- answers every path with the same text (say "Not found" with a 200)
-  -- has none of these files when it sends that text.
-  local fallback = get(host, port, root .. NO_SUCH_FILE, true)
+  -- A site that sends a 200 for a file that does not exist (say "Not
+  -- found: <path>") cannot be believed for the free-text files: only a
+  -- .git/config, whose [section] lines are checked, counts there.
+  local answers_all = get(host, port, root .. NO_SUCH_FILE, true) ~= nil
   local bodies, found, ok = {}, fero.output_table(), 0
   for _, name in ipairs(FILES) do
     local body = get(host, port, root .. name)
-    if body and fallback and body == fallback then body = nil end
+    if body and answers_all and name ~= ".git/config" then body = nil end
     -- A Git config is made of [section] lines.
     if body and name == ".git/config" and not body:find("^%s*%[") and not body:find("\n%s*%[") then
       body = nil

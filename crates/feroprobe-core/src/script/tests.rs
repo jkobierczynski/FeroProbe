@@ -4255,16 +4255,17 @@ async fn http_git_skips_fallback_pages_and_hides_passwords() {
     let (port, _) =
         web(|_| b"HTTP/1.1 200 OK\r\nContent-Length: 16\r\n\r\nref: unavailable".to_vec()).await;
     assert_eq!(http_output("http-git", port, "").await, None);
-    // Every other path answered with the same plain text: only HEAD and
-    // the one file whose text differs count.
+    // Every other path answered with a 200 naming the path: the
+    // free-text files cannot be believed, and a "config" without
+    // [section] lines is no config.
     let (port, _) = web(|req| {
-        let body: &[u8] = if req.starts_with("GET /.git/HEAD ") {
-            b"ref: refs/heads/main\n"
-        } else if req.starts_with("GET /.git/description ") {
-            b"Shop\n"
+        let body: Vec<u8> = if req.starts_with("GET /.git/HEAD ") {
+            b"ref: refs/heads/main\n".to_vec()
         } else {
-            b"Not found"
+            let path = req.split(' ').nth(1).unwrap_or("");
+            format!("Not found: {path}\n").into_bytes()
         };
+        let body = &body[..];
         let mut r = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n",
             body.len()
@@ -4277,8 +4278,7 @@ async fn http_git_skips_fallback_pages_and_hides_passwords() {
     assert_eq!(
         http_output("http-git", port, "").await,
         Some(format!(
-            "\n  127.0.0.1:{port}/.git/\n    Potential Git repository found (found 2/6 expected files)\
-             \n    Repository description: Shop "
+            "\n  127.0.0.1:{port}/.git/\n    Potential Git repository found (found 1/6 expected files)"
         ))
     );
 }

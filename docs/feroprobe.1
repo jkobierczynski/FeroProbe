@@ -2691,12 +2691,13 @@ Asks for \f[V]/.git/HEAD\f[R]; when that holds a Git reference, reads
 \f[V].gitignore\f[R], \f[V].git/COMMIT_EDITMSG\f[R],
 \f[V].git/config\f[R], \f[V].git/description\f[R] and
 \f[V].git/info/exclude\f[R] (seven GETs at most per root, no Git object;
-a redirect, an HTML page, or the text the site sends for
-\f[V].git/feroprobe-no-such-file\f[R] (asked for once) is not counted as
-the file, nor a \f[V].git/config\f[R] without a \f[V][section]\f[R]
-line, so a site that answers every path with its own page is not taken
-for a repository, and HEAD must be a whole \f[V]ref: refs/...\f[R] line
-or object name) and shows \f[V]Git repository found!\f[R] (or
+a redirect or an HTML page is not counted as the file, nor a
+\f[V].git/config\f[R] without a \f[V][section]\f[R] line, and when the
+site answers \f[V].git/feroprobe-no-such-file\f[R] (asked for once) with
+a 200 only \f[V].git/config\f[R] is counted, so a site that answers
+every path with its own page is not taken for a repository, and HEAD
+must be a whole \f[V]ref: refs/...\f[R] line or object name) and shows
+\f[V]Git repository found!\f[R] (or
 \f[V]Potential Git repository found\f[R] when three or more are
 missing), which files contain the words \f[V]bug\f[R], \f[V]key\f[R],
 \f[V]passw\f[R], \f[V]pw\f[R], \f[V]user\f[R], \f[V]secret\f[R] or
