@@ -107,33 +107,49 @@ local function propfind(host, port, path)
   -- the href text runs to the next "<".
   local listing = {}
   -- Children may carry another prefix bound to DAV: (or none, under a
-  -- default namespace), so any prefix is taken inside this document.
-  -- A prefix is always followed by ":", so names that merely end in
-  -- "response" or "href" do not count.
+  -- default DAV: namespace). Only prefixes the document binds to DAV:
+  -- count, and no prefix only when it declares DAV: as the default, so
+  -- a response or href element of another namespace (say inside a
+  -- custom property) is not listed. A prefix is always followed by ":",
+  -- so names that merely end in "response" or "href" do not count.
+  local dav = {}
+  for name in body:gmatch("xmlns:([%w%-%._]+)%s*=%s*[\"']DAV:[\"']") do
+    dav[name] = true
+  end
+  local default_dav = body:find("xmlns%s*=%s*[\"']DAV:[\"']") ~= nil
   -- Each form's next match is kept and searched again only once `pos`
   -- has passed it, so the body is scanned once per form, not once per
   -- response.
-  local pats = { "<[%w%-%._]+:response[%s>]", "<response[%s>]" }
-  local starts, ends = { 0, 0 }, { 0, 0 }
+  local pats = { "<([%w%-%._]+):response[%s>]", "<()response[%s>]" }
+  local starts, ends, prefixes = { 0, default_dav and 0 or nil }, { 0, 0 }, {}
   local pos = 1
   while #listing < MAX_LISTED do
-    local e
+    local e, which
     for i, pat in ipairs(pats) do
       if starts[i] and starts[i] < pos then
-        starts[i], ends[i] = body:find(pat, pos)
+        starts[i], ends[i], prefixes[i] = body:find(pat, pos)
       end
-      if starts[i] and (not e or ends[i] < e) then e = ends[i] end
+      if starts[i] and (not e or ends[i] < e) then e, which = ends[i], i end
     end
     if not e then break end
     local gt = body:find(">", e, true)
     if not gt then break end
-    local href = body:match("^[^<]*<[%w%-%._]+:href>%s*([^<]*)", gt + 1)
-      or body:match("^[^<]*<href>%s*([^<]*)", gt + 1)
-    if href then
-      href = href:gsub("%s+$", ""):gsub("&lt;", "<"):gsub("&gt;", ">")
-        :gsub("&quot;", '"'):gsub("&apos;", "'"):gsub("&amp;", "&")
-      listing[#listing + 1] = href
+    if which == 1 and not dav[prefixes[1]] then goto next end
+    do
+      local href
+      local hp, ht = body:match("^[^<]*<([%w%-%._]+):href>%s*([^<]*)", gt + 1)
+      if hp and dav[hp] then
+        href = ht
+      elseif default_dav then
+        href = body:match("^[^<]*<href>%s*([^<]*)", gt + 1)
+      end
+      if href then
+        href = href:gsub("%s+$", ""):gsub("&lt;", "<"):gsub("&gt;", ">")
+          :gsub("&quot;", '"'):gsub("&apos;", "'"):gsub("&amp;", "&")
+        listing[#listing + 1] = href
+      end
     end
+    ::next::
     pos = gt + 1
   end
   if #listing > 0 then ret["Directory Listing"] = listing end

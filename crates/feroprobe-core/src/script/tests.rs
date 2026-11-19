@@ -4294,6 +4294,7 @@ async fn http_webdav_scan_reads_any_prefix() {
             let body = "<?xml version=\"1.0\"?><x.d:multistatus xmlns:x.d=\"DAV:\" xmlns=\"DAV:\">\
                 <response><href>/a%20b?x=1&amp;y=2</href><propstat><prop>\
                 <otherresponse><otherhref>/phantom</otherhref></otherresponse>\
+                <o:response xmlns:o=\"urn:other\"><o:href>/other</o:href></o:response>\
                 </prop></propstat></response>\
                 <x.d:response><x.d:href>/second</x.d:href><x.d:propstat><x.d:prop>\
                 <x.d:lockdiscovery><x.d:activelock><x.d:lockroot><x.d:href>/</x.d:href></x.d:lockroot>\
