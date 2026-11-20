@@ -130,6 +130,22 @@ const BUILT_IN: &[(&str, &str)] = &[
     ),
     ("rpcinfo", include_str!("../../lua-scripts/rpcinfo.lua")),
     (
+        "smb-os-discovery",
+        include_str!("../../lua-scripts/smb-os-discovery.lua"),
+    ),
+    (
+        "smb-protocols",
+        include_str!("../../lua-scripts/smb-protocols.lua"),
+    ),
+    (
+        "smb-security-mode",
+        include_str!("../../lua-scripts/smb-security-mode.lua"),
+    ),
+    (
+        "smb2-capabilities",
+        include_str!("../../lua-scripts/smb2-capabilities.lua"),
+    ),
+    (
         "smb2-security-mode",
         include_str!("../../lua-scripts/smb2-security-mode.lua"),
     ),

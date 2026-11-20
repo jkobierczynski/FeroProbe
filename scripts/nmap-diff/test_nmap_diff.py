@@ -305,6 +305,44 @@ class Listeners(unittest.TestCase):
         self.assertIsNone(listeners.nbstat_reply(q[:-4] + struct.pack(">HH", 0x20, 1)))
         self.assertIsNone(listeners.nbstat_reply(b"hello" * 20))
 
+    def test_smb1_negotiate_and_session_setup(self):
+        def smb1(cmd, flags2, words=b"", data=b""):
+            head = b"\xffSMB" + struct.pack("<BIBHH", cmd, 0, 0x18, flags2, 0) + bytes(10)
+            head += struct.pack("<HHHH", 0, 0x5046, 0, 1)
+            return head + bytes([len(words) // 2]) + words + struct.pack("<H", len(data)) + data
+        dialects = b"\x02NT LM 0.12\0"
+        # plain: the challenge, then the domain and server in UTF-16
+        r = listeners.smb1(smb1(0x72, 0x4001, data=dialects))
+        self.assertEqual(r[32], 17)
+        self.assertEqual(r[67 + 2 + 8:], "LAB\0FPDLAB\0".encode("utf-16-le"))
+        # extended security: the server GUID and a SPNEGO blob
+        r = listeners.smb1(smb1(0x72, 0x4801, data=dialects))
+        self.assertEqual(r[69:85], listeners.SMB_GUID)
+        # no NT LM 0.12: dialect index 0xffff
+        r = listeners.smb1(smb1(0x72, 0x4001, data=b"\x02PC NETWORK PROGRAM 1.0\0"))
+        self.assertEqual(r[32:35], b"\x01\xff\xff")
+        # the first leg of a session setup: the NTLM challenge and the OS
+        ntlm = b"NTLMSSP\0" + struct.pack("<I", 1) + bytes(24)
+        words = struct.pack("<BBHHHHIHII", 0xFF, 0, 0, 4356, 1, 1, 0, len(ntlm), 0, 0)
+        r = listeners.smb1(smb1(0x73, 0x4801, words, ntlm + b"x\0x\0"))
+        self.assertEqual(struct.unpack("<I", r[5:9])[0], 0xC0000016)
+        self.assertIn(listeners.NTLM_CHALLENGE, r)
+        self.assertIn(listeners.SMB_NATIVE_OS.encode() + b"\0", r)
+
+    def test_smb2_negotiate(self):
+        def smb2(dialects):
+            head = b"\xfeSMB" + struct.pack("<HHIHHII", 64, 0, 0, 0, 1, 0, 0) + bytes(40)
+            body = struct.pack("<HHHHI", 36, len(dialects), 1, 0, 0) + b"g" * 16 + bytes(8)
+            return head + body + b"".join(struct.pack("<H", d) for d in dialects)
+        r = listeners.smb2(smb2([0x0202, 0x0210]))
+        self.assertEqual(len(r[:64]), 64)
+        self.assertEqual(struct.unpack("<HHH", r[64:70]), (65, 1, 0x0210))
+        r = listeners.smb2(smb2(listeners.SMB_DIALECTS))
+        self.assertEqual(struct.unpack("<H", r[68:70])[0], 0x0311)
+        self.assertEqual(struct.unpack("<H", r[70:72])[0], 1)  # a context
+        r = listeners.smb2(smb2([0x02FF]))
+        self.assertNotEqual(struct.unpack("<I", r[8:12])[0], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

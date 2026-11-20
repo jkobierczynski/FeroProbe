@@ -83,7 +83,11 @@ that holds 53 (`fast`, with `-F`, finds it open). The same goes for the
 NTLM responders of the `script-ntlm` case: telnet on 23, SMTP on 25, POP3
 on 110, NNTP on 119, IMAP on 143 and MS-SQL (TDS) on 1433 each answer an
 NTLM NEGOTIATE with a fixed CHALLENGE, and port 80 does so for a request
-with `Authorization: NTLM`. ICMP rate limits
+with `Authorization: NTLM`. TCP 445 has a small SMB server for the
+`script-smb` case: NT LM 0.12 (with and without extended security, a
+session setup answered with the NTLM challenge and Windows Server 2003 OS
+strings) and SMB 2.0.2 to 3.1.1 NEGOTIATE; cases scanning the default or
+`-F` port lists find it open too. ICMP rate limits
 are off in every namespace, and the neighbour caches are flushed before each
 run, so both tools start from the same state.
 

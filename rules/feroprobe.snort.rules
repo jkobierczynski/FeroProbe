@@ -67,3 +67,9 @@ alert tcp any any -> $HOME_NET any (msg:"FeroProbe DNS CHAOS TXT query over TCP 
 # carry it as is.
 alert tcp any any -> $HOME_NET any (msg:"FeroProbe script NTLM NEGOTIATE in base64 (*-ntlm-info)"; flow:established,to_server; content:"TlRMTVNTUAABAAAAB6IIogAAAAAAAAAACQAJACgAAAAAAAAAAAAAD0ZFUk9QUk9CRQ=="; classtype:attempted-recon; sid:9100016; rev:1;)
 alert tcp any any -> $HOME_NET any (msg:"FeroProbe script NTLM NEGOTIATE (*-ntlm-info)"; flow:established,to_server; content:"NTLMSSP|00 01 00 00 00 07 A2 08 A2 00 00 00 00 00 00 00 00 09 00 09 00 28 00 00 00 00 00 00 00 00 00 00 0F|FEROPROBE"; classtype:attempted-recon; sid:9100017; rev:1;)
+# smb-os-discovery / smb-security-mode / smb-protocols: the SMB1 NEGOTIATE
+# offering only NT LM 0.12, with FeroProbe's process ID "FP" (TCP 445, or 139
+# after the NetBIOS session request). smb-os-discovery's session setup
+# carries the NTLM NEGOTIATE of SID 9100017 and the NativeOS and
+# NativeLanMan "FeroProbe".
+alert tcp any any -> $HOME_NET any (msg:"FeroProbe script SMB1 NEGOTIATE (process ID FP)"; flow:established,to_server; content:"|FF|SMB|72|"; offset:4; depth:5; content:"|00 00 00 00 00 00 00 00 00 00 00 00 00 00|FP|00 00 01 00 00 0C 00 02|NT LM 0.12|00|"; distance:7; within:35; classtype:attempted-recon; sid:9100018; rev:1;)

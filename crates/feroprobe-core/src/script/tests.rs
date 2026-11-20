@@ -2150,6 +2150,8 @@ fn the_default_category() {
             "pop3-ntlm-info",
             "rdp-ntlm-info",
             "rpcinfo",
+            "smb-os-discovery",
+            "smb-security-mode",
             "smb2-security-mode",
             "smb2-time",
             "smtp-commands",
@@ -2242,7 +2244,7 @@ async fn smb2_security_mode_and_time() {
     let arg = format!("smbport={port}");
     assert_eq!(
         host_output_of("smb2-security-mode", port, "microsoft-ds", &arg).await,
-        ["\n  3:1:1: \n    Message signing enabled but not required"]
+        ["\n  3.1.1: \n    Message signing enabled but not required"]
     );
     assert_eq!(
         host_output_of("smb2-time", port, "microsoft-ds", &arg).await,
@@ -2263,7 +2265,7 @@ async fn smb2_security_mode_and_time() {
     let arg = format!("smbport={port}");
     assert_eq!(
         host_output_of("smb2-security-mode", port, "netbios-ssn", &arg).await,
-        ["\n  3:1:1: \n    Message signing enabled and required"]
+        ["\n  3.1.1: \n    Message signing enabled and required"]
     );
     assert!(seen.lock().unwrap()[0].starts_with("session  CKFDENECFDEFFCFGEFFCCACACACACACA"));
 
@@ -2297,16 +2299,29 @@ async fn smb2_security_mode_and_time() {
 /// An NTLM CHALLENGE message as a Windows server sends it: target name
 /// "LAB", the usual AV pairs, version 10.0.14393 and the clock `now`.
 fn ntlm_challenge(now: i64) -> Vec<u8> {
-    let u16le = |s: &str| -> Vec<u8> { s.encode_utf16().flat_map(u16::to_le_bytes).collect() };
+    ntlm_challenge_naming(
+        now,
+        &[
+            (2, "LAB"),
+            (1, "SRV01"),
+            (4, "lab.local"),
+            (3, "srv01.lab.local"),
+            (5, "lab.local"),
+        ],
+    )
+}
+
+/// UTF-16LE text.
+fn u16le(s: &str) -> Vec<u8> {
+    s.encode_utf16().flat_map(u16::to_le_bytes).collect()
+}
+
+/// An NTLM CHALLENGE (target name "LAB", version 10.0.14393, the clock
+/// `now`) with the name AV pairs `names`.
+fn ntlm_challenge_naming(now: i64, names: &[(u16, &str)]) -> Vec<u8> {
     let name = u16le("LAB");
     let mut info = Vec::new();
-    for (id, v) in [
-        (2u16, "LAB"),
-        (1, "SRV01"),
-        (4, "lab.local"),
-        (3, "srv01.lab.local"),
-        (5, "lab.local"),
-    ] {
+    for &(id, v) in names {
         let v = u16le(v);
         info.extend(id.to_le_bytes());
         info.extend((v.len() as u16).to_le_bytes());
@@ -4382,4 +4397,399 @@ async fn http_favicon_and_generator_read_quoted_values() {
         http_output("http-generator", port, "").await.as_deref(),
         Some("CMS > 2")
     );
+}
+
+// ---- SMB1 scripts and smb2-capabilities (v0.7.0 step 5) ----
+
+/// How the stand-in SMB server of [`smb1_server`] behaves.
+#[derive(Clone)]
+struct SmbLab {
+    /// Answers SMB1 (NT LM 0.12); else drops an SMB1 NEGOTIATE, as
+    /// Windows with SMB1 turned off does.
+    smb1: bool,
+    /// The SMB1 SecurityMode byte.
+    mode: u8,
+    /// The session setup answer's strings in UTF-16 (with the pad byte).
+    unicode: bool,
+    /// The domain or workgroup the plain NEGOTIATE names.
+    domain: &'static str,
+    /// The names in the NTLM challenge.
+    names: Vec<(u16, &'static str)>,
+    /// The newest SMB2 dialect it speaks (0: none).
+    smb2_top: u16,
+}
+
+impl Default for SmbLab {
+    fn default() -> Self {
+        SmbLab {
+            smb1: true,
+            mode: 0x03,
+            unicode: false,
+            domain: "LAB",
+            names: vec![
+                (2, "LAB"),
+                (1, "SRV01"),
+                (4, "lab.local"),
+                (3, "srv01.lab.local"),
+                (5, "lab.local"),
+            ],
+            smb2_top: 0x0311,
+        }
+    }
+}
+
+/// The SMB clock of [`smb1_server`]: 2026-01-02T03:04:05Z.
+const SMB_NOW: i64 = 1_767_323_045;
+
+/// An SMB1 reply to `req` (its command and MID echoed).
+fn smb1_reply(req: &[u8], status: u32, flags2: u16, words: &[u8], data: &[u8]) -> Vec<u8> {
+    let mut m = b"\xffSMB".to_vec();
+    m.push(req[4]);
+    m.extend(status.to_le_bytes());
+    m.push(0x98);
+    m.extend(flags2.to_le_bytes());
+    m.extend([0u8; 12]);
+    m.extend(&req[24..32]);
+    m.push((words.len() / 2) as u8);
+    m.extend(words);
+    m.extend((data.len() as u16).to_le_bytes());
+    m.extend(data);
+    m
+}
+
+/// The answer of `lab` to one SMB message, or `None` to hang up.
+fn smb_lab_answer(lab: &SmbLab, req: &[u8], seen: &Seen) -> Option<Vec<u8>> {
+    let filetime = |t: i64| ((t + 11_644_473_600) * 10_000_000).to_le_bytes();
+    if req.starts_with(b"\xffSMB") && req.len() >= 35 {
+        seen.lock()
+            .unwrap()
+            .push(format!("smb1 {:02x} {}", req[4], hexs(req)));
+        if !lab.smb1 {
+            return None;
+        }
+        let flags2 = u16::from_le_bytes([req[10], req[11]]);
+        let extended = flags2 & 0x0800 != 0;
+        let wc = req[32] as usize;
+        let data = &req[35 + 2 * wc..];
+        if req[4] == 0x72 {
+            let mut w = vec![0u8, 0, lab.mode, 50, 0, 1, 0];
+            w.extend(16644u32.to_le_bytes());
+            w.extend(65536u32.to_le_bytes());
+            w.extend(0x1234u32.to_le_bytes());
+            let caps: u32 = 0xe3fd | if extended { 0x8000_0000 } else { 0 };
+            w.extend(caps.to_le_bytes());
+            w.extend(filetime(SMB_NOW));
+            w.extend((-60i16).to_le_bytes()); // UTC+1
+            w.push(if extended { 0 } else { 8 });
+            let mut d = Vec::new();
+            if extended {
+                d.extend(*b"server-guid-0123");
+                d.extend(b"\x60\x06spnego");
+            } else {
+                d.extend(*b"chalenge");
+                for n in [lab.domain, "SRV01"] {
+                    d.extend(u16le(n));
+                    d.extend([0, 0]);
+                }
+            }
+            return Some(smb1_reply(req, 0, 0xc001 | (flags2 & 0x0800), &w, &d));
+        }
+        if req[4] == 0x73 {
+            let blob = ntlm_challenge_naming(SMB_NOW, &lab.names);
+            let mut b = b"\xa1\x81\x00wrapped".to_vec();
+            b.extend(&blob);
+            let mut w = vec![0xff, 0, 0, 0, 0, 0];
+            w.extend((b.len() as u16).to_le_bytes());
+            let mut d = b.clone();
+            let strings = [
+                "Windows Server 2003 3790 Service Pack 2",
+                "Windows Server 2003 5.2",
+                "LAB",
+            ];
+            if lab.unicode {
+                // Unicode strings start on an even offset from the header.
+                if (32 + 1 + w.len() + 2 + d.len()) % 2 == 1 {
+                    d.push(0);
+                }
+                for t in strings {
+                    d.extend(u16le(t));
+                    d.extend([0, 0]);
+                }
+            } else {
+                for t in strings {
+                    d.extend(t.as_bytes());
+                    d.push(0);
+                }
+            }
+            let _ = data;
+            let f2 = 0x4801 | if lab.unicode { 0x8000 } else { 0 };
+            return Some(smb1_reply(req, 0xc000_0016, f2, &w, &d));
+        }
+        return None;
+    }
+    if req.starts_with(b"\xfeSMB") && req.len() >= 100 {
+        let count = u16::from_le_bytes([req[66], req[67]]) as usize;
+        let offered: Vec<u16> = (0..count)
+            .map(|i| u16::from_le_bytes([req[100 + 2 * i], req[101 + 2 * i]]))
+            .collect();
+        seen.lock().unwrap().push(format!("smb2 {offered:04x?}"));
+        let d = offered
+            .iter()
+            .copied()
+            .filter(|&d| d <= lab.smb2_top)
+            .max()?;
+        let mut m = b"\xfeSMB".to_vec();
+        m.extend(64u16.to_le_bytes());
+        m.extend([0u8; 58]);
+        m.extend(65u16.to_le_bytes());
+        m.extend(1u16.to_le_bytes());
+        m.extend(d.to_le_bytes());
+        m.extend(0u16.to_le_bytes());
+        m.extend(*b"server-guid-0123");
+        // Capabilities: DFS from 2.0.2, leasing and multi-credit from 2.1,
+        // none at all for 3.0.2 (to show "All capabilities are disabled").
+        let caps: u32 = match d {
+            0x0202 => 0x01,
+            0x0302 => 0,
+            _ => 0x07,
+        };
+        m.extend(caps.to_le_bytes());
+        m.extend([0u8; 12]);
+        m.extend(filetime(SMB_NOW));
+        m.extend([0u8; 8]);
+        m.extend([0u8; 9]);
+        return Some(m);
+    }
+    None
+}
+
+/// A stand-in SMB server behaving as `lab` (NetBIOS session requests
+/// accepted), keeping a line for each request.
+async fn smb1_server(lab: SmbLab) -> (u16, Seen) {
+    let seen: Seen = Default::default();
+    let keep = seen.clone();
+    let port = tcp_server(move |mut s| {
+        let keep = keep.clone();
+        let lab = lab.clone();
+        async move {
+            loop {
+                let mut head = [0u8; 4];
+                if s.read_exact(&mut head).await.is_err() {
+                    return;
+                }
+                let len = u32::from_be_bytes([0, head[1], head[2], head[3]]) as usize;
+                let mut req = vec![0u8; len];
+                if s.read_exact(&mut req).await.is_err() {
+                    return;
+                }
+                if head[0] == 0x81 {
+                    keep.lock().unwrap().push("netbios session".into());
+                    let _ = s.write_all(&[0x82, 0, 0, 0]).await;
+                    continue;
+                }
+                let Some(reply) = smb_lab_answer(&lab, &req, &keep) else {
+                    return;
+                };
+                let mut out = (reply.len() as u32).to_be_bytes().to_vec();
+                out.extend(reply);
+                if s.write_all(&out).await.is_err() {
+                    return;
+                }
+            }
+        }
+    })
+    .await;
+    (port, seen)
+}
+
+/// Every output of built-in `id` against `lab`, on a port known as
+/// `service`.
+async fn smb_lab_output(id: &str, lab: SmbLab, service: &str) -> (Vec<String>, Seen) {
+    let (port, seen) = smb1_server(lab).await;
+    let out = host_output_of(id, port, service, &format!("smbport={port}")).await;
+    (out, seen)
+}
+
+#[tokio::test]
+async fn smb_os_discovery_reads_a_domain_member() {
+    let (out, seen) = smb_lab_output("smb-os-discovery", SmbLab::default(), "microsoft-ds").await;
+    assert_eq!(
+        out,
+        [
+            "\n  OS: Windows Server 2003 3790 Service Pack 2 (Windows Server 2003 5.2)\
+          \n  OS CPE: cpe:/o:microsoft:windows_server_2003::sp2\
+          \n  Computer name: srv01\
+          \n  NetBIOS computer name: SRV01\
+          \n  Domain name: lab.local\
+          \n  Forest name: lab.local\
+          \n  FQDN: srv01.lab.local\
+          \n  NetBIOS domain name: LAB\
+          \n  System time: 2026-01-02T04:04:05+01:00"
+        ]
+    );
+    let seen = seen.lock().unwrap().clone();
+    // A plain NEGOTIATE, then one with extended security and the session
+    // setup on a second connection.
+    assert_eq!(seen.len(), 3, "{seen:?}");
+    // The plain NEGOTIATE, byte for byte (IDS rule 9100018): FeroProbe's
+    // process ID "FP", NT LM 0.12 only.
+    assert_eq!(
+        seen[0],
+        "smb1 72 ff534d4272000000001801400000000000000000000000000000465000000100\
+         000c00024e54204c4d20302e313200"
+    );
+    assert!(seen[1].starts_with("smb1 72 ff534d4272000000001801480000"));
+    // The session setup: SPNEGO around FeroProbe's NTLM NEGOTIATE (rule
+    // 9100017), NativeOS and NativeLanMan "FeroProbe".
+    let neg = hexs(
+        b"NTLMSSP\x00\x01\x00\x00\x00\x07\xa2\x08\xa2\x00\x00\x00\x00\x00\x00\x00\x00\
+          \x09\x00\x09\x00\x28\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x0fFEROPROBE",
+    );
+    assert!(seen[2].starts_with("smb1 73 "));
+    assert!(seen[2].contains(&format!("{neg}{}", hexs(b"FeroProbe\0FeroProbe\0"))));
+    assert!(seen[2].contains("2b0601050502")); // the SPNEGO OID
+}
+
+#[tokio::test]
+async fn smb_os_discovery_reads_a_workgroup_host_in_unicode() {
+    let lab = SmbLab {
+        unicode: true,
+        domain: "WORKGROUP",
+        names: vec![(2, "SRV01"), (1, "SRV01"), (4, "srv01"), (3, "srv01")],
+        ..SmbLab::default()
+    };
+    let (out, _) = smb_lab_output("smb-os-discovery", lab, "netbios-ssn").await;
+    assert_eq!(
+        out,
+        [
+            "\n  OS: Windows Server 2003 3790 Service Pack 2 (Windows Server 2003 5.2)\
+          \n  OS CPE: cpe:/o:microsoft:windows_server_2003::sp2\
+          \n  Computer name: srv01\
+          \n  NetBIOS computer name: SRV01\
+          \n  Workgroup: WORKGROUP\
+          \n  System time: 2026-01-02T04:04:05+01:00"
+        ]
+    );
+}
+
+#[tokio::test]
+async fn smb1_scripts_stay_quiet_without_smb1() {
+    let lab = SmbLab {
+        smb1: false,
+        ..SmbLab::default()
+    };
+    for id in ["smb-os-discovery", "smb-security-mode"] {
+        let (out, seen) = smb_lab_output(id, lab.clone(), "microsoft-ds").await;
+        assert!(out.is_empty(), "{id}: {out:?}");
+        assert!(!seen.lock().unwrap().is_empty());
+    }
+    let (out, _) = smb_lab_output("smb-protocols", lab, "microsoft-ds").await;
+    assert_eq!(
+        out,
+        ["\n  dialects: \n    2.0.2\n    2.1\n    3.0\n    3.0.2\n    3.1.1"]
+    );
+}
+
+#[tokio::test]
+async fn smb_security_mode_reads_the_negotiate() {
+    let (out, seen) = smb_lab_output("smb-security-mode", SmbLab::default(), "microsoft-ds").await;
+    assert_eq!(
+        out,
+        [
+            "\n  authentication_level: user\n  challenge_response: supported\
+          \n  message_signing: disabled (dangerous, but default)"
+        ]
+    );
+    // One NEGOTIATE, with extended security, and no login.
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(seen.len(), 1);
+    assert!(seen[0].starts_with("smb1 72 ff534d4272000000001801480000"));
+
+    let lab = SmbLab {
+        mode: 0x0d, // user level, plaintext only, signing required
+        ..SmbLab::default()
+    };
+    let (out, _) = smb_lab_output("smb-security-mode", lab, "microsoft-ds").await;
+    assert_eq!(
+        out,
+        [
+            "\n  authentication_level: user\n  challenge_response: plaintext-only (dangerous)\
+          \n  message_signing: required"
+        ]
+    );
+    let lab = SmbLab {
+        mode: 0x06, // share level, signing supported
+        ..SmbLab::default()
+    };
+    let (out, _) = smb_lab_output("smb-security-mode", lab, "microsoft-ds").await;
+    assert_eq!(
+        out,
+        [
+            "\n  authentication_level: share (dangerous)\n  challenge_response: supported\
+          \n  message_signing: supported"
+        ]
+    );
+}
+
+#[tokio::test]
+async fn smb_protocols_lists_every_dialect() {
+    let lab = SmbLab {
+        smb2_top: 0x0300,
+        ..SmbLab::default()
+    };
+    let (out, seen) = smb_lab_output("smb-protocols", lab, "microsoft-ds").await;
+    assert_eq!(
+        out,
+        [
+            "\n  dialects: \n    NT LM 0.12 (SMBv1) [dangerous, but default]\n    2.0.2\n    2.1\n    3.0"
+        ]
+    );
+    let smb2: Vec<String> = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|l| l.starts_with("smb2"))
+        .cloned()
+        .collect();
+    // All together, then each older one alone.
+    assert_eq!(
+        smb2,
+        [
+            "smb2 [0202, 0210, 0300, 0302, 0311]",
+            "smb2 [0202]",
+            "smb2 [0210]"
+        ]
+    );
+    // Nothing accepted: no output.
+    let lab = SmbLab {
+        smb1: false,
+        smb2_top: 0,
+        ..SmbLab::default()
+    };
+    let (out, _) = smb_lab_output("smb-protocols", lab, "microsoft-ds").await;
+    assert!(out.is_empty());
+}
+
+#[tokio::test]
+async fn smb2_capabilities_per_dialect() {
+    let (out, _) = smb_lab_output("smb2-capabilities", SmbLab::default(), "microsoft-ds").await;
+    assert_eq!(
+        out,
+        ["\n  2.0.2: \n    Distributed File System\
+          \n  2.1: \n    Distributed File System\n    Leasing\n    Multi-credit operations\
+          \n  3.0: \n    Distributed File System\n    Leasing\n    Multi-credit operations\
+          \n  3.0.2: \n    All capabilities are disabled\
+          \n  3.1.1: \n    Distributed File System\n    Leasing\n    Multi-credit operations"]
+    );
+    let lab = SmbLab {
+        smb2_top: 0,
+        ..SmbLab::default()
+    };
+    let (out, _) = smb_lab_output("smb2-capabilities", lab, "microsoft-ds").await;
+    assert!(out.is_empty());
+}
+
+/// Bytes as lower-case hex.
+fn hexs(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
 }

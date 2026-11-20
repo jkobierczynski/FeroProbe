@@ -28,6 +28,11 @@ against a real host:
             and MS-SQL (TDS PRELOGIN, and LOGIN7 with integrated security),
             each answering
             an NTLM NEGOTIATE with a fixed CHALLENGE (not in @TCP either)
+  TCP 445   an SMB server for the smb-* and smb2-* script cases: NT LM
+            0.12 (with and without extended security; session setup
+            answers with an NTLM challenge naming LAB / FPDLAB and the
+            OS "Windows Server 2003 3790 Service Pack 2") and SMB 2.0.2
+            to 3.1.1 NEGOTIATE (not in @TCP either)
   UDP 53    echoes every datagram back (so UDP 53 reads as open)
   UDP 137   answers a NetBIOS NODE STATUS request (RFC 1002) with a fixed
             name table and MAC address, and ignores anything else
@@ -42,6 +47,7 @@ import socket
 import struct
 import sys
 import threading
+import time
 
 SSH_BANNER = b"SSH-2.0-OpenSSH_9.6p1 Debian-4\r\n"
 HTTP_REPLY = (
@@ -507,6 +513,163 @@ def mssql(conn):
             pass
 
 
+# SMB (MS-CIFS, MS-SMB, MS-SMB2): a server that speaks NT LM 0.12 and
+# SMB 2.0.2 to 3.1.1, member of the domain LAB (the NTLM challenge above).
+SMB_DIALECTS = (0x0202, 0x0210, 0x0300, 0x0302, 0x0311)
+SMB_NATIVE_OS = "Windows Server 2003 3790 Service Pack 2"
+SMB_NATIVE_LANMAN = "Windows Server 2003 5.2"
+SMB_GUID = b"fpdlab-smb-guid!"
+# SMB2 capabilities per dialect: DFS (2.0.2), + leasing and multi-credit
+# (2.1), + encryption (3.0 and 3.0.2; 3.1.1 negotiates it in a context).
+SMB2_CAPS = {0x0202: 0x01, 0x0210: 0x07, 0x0300: 0x47, 0x0302: 0x47, 0x0311: 0x07}
+
+
+def der(tag, value):
+    n = len(value)
+    if n < 0x80:
+        head = bytes([n])
+    elif n < 0x100:
+        head = bytes([0x81, n])
+    else:
+        head = b"\x82" + struct.pack(">H", n)
+    return bytes([tag]) + head + value
+
+
+NTLMSSP_OID = der(0x06, bytes.fromhex("2b0601040182370202 0a".replace(" ", "")))
+# NegTokenInit2 offering NTLMSSP, as a NEGOTIATE reply's security blob.
+SMB_NEG_BLOB = der(0x60, der(0x06, bytes.fromhex("2b0601050502"))
+                   + der(0xA0, der(0x30, der(0xA0, der(0x30, NTLMSSP_OID)))))
+# NegTokenResp (accept-incomplete) carrying the NTLM CHALLENGE.
+SMB_CHALLENGE_BLOB = der(0xA1, der(0x30, der(0xA0, der(0x0A, b"\x01"))
+                                   + der(0xA1, NTLMSSP_OID)
+                                   + der(0xA2, der(0x04, NTLM_CHALLENGE))))
+
+
+def filetime(t):
+    return int((t + 11644473600) * 10000000)
+
+
+def smb1_text(text, unicode):
+    return text.encode("utf-16-le") + b"\0\0" if unicode else text.encode() + b"\0"
+
+
+def smb1_reply(req, status, words, data, flags2, uid=0):
+    """An SMB1 reply to `req`: its command, TID, PID and MID echoed."""
+    cmd = req[4]
+    tid, pid, _, mid = struct.unpack("<HHHH", req[24:32])
+    head = b"\xffSMB" + struct.pack("<BIBHH", cmd, status, 0x98, flags2, 0) + bytes(8)
+    head += struct.pack("<HHHHH", 0, tid, pid, uid, mid)
+    return head + bytes([len(words) // 2]) + words + struct.pack("<H", len(data)) + data
+
+
+def smb1(req):
+    if len(req) < 35:
+        return None
+    cmd = req[4]
+    rflags2 = struct.unpack("<H", req[10:12])[0]
+    unicode = bool(rflags2 & 0x8000)
+    extended = bool(rflags2 & 0x0800)
+    flags2 = 0x4001 | (rflags2 & 0x8800)
+    wc = req[32]
+    data = req[35 + 2 * wc:]
+    if cmd == 0x72:  # NEGOTIATE
+        names = data.split(b"\x02")
+        names = [n.rstrip(b"\0") for n in names[1:]]
+        if b"NT LM 0.12" not in names:
+            return smb1_reply(req, 0, struct.pack("<H", 0xFFFF), b"", flags2)
+        index = names.index(b"NT LM 0.12")
+        caps = 0x0000F3FD | (0x80000000 if extended else 0)
+        if not unicode:
+            caps &= ~0x4
+        words = struct.pack("<HBHHIIIIqhB", index, 0x03, 50, 1, 16644, 65536, 0,
+                            caps, filetime(time.time()), -60, 0 if extended else 8)
+        if extended:
+            body = SMB_GUID + SMB_NEG_BLOB
+        else:
+            # the names are UTF-16 whatever the client asked, as in Windows
+            body = b"labchal!" + smb1_text("LAB", True) + smb1_text("FPDLAB", True)
+        return smb1_reply(req, 0, words, body, flags2)
+    if cmd == 0x73:  # SESSION_SETUP_ANDX
+        if wc == 12:  # extended security: NTLMSSP in SPNEGO or raw
+            blen = struct.unpack("<H", req[33 + 14:33 + 16])[0]
+            blob = data[:blen]
+            at = blob.find(b"NTLMSSP\0")
+            kind = struct.unpack("<I", blob[at + 8:at + 12])[0] if at >= 0 else 0
+            if kind == 1:
+                status, out, action = 0xC0000016, SMB_CHALLENGE_BLOB, 0
+            else:  # the AUTHENTICATE (nmap logs in as guest): accept it
+                status, out, action = 0, der(0xA1, der(0x30, der(0xA0, der(0x0A, b"\x00")))), 1
+            words = struct.pack("<BBHHH", 0xFF, 0, 0, action, len(out))
+        else:  # basic: anonymous or guest, accepted as guest
+            status, out = 0, b""
+            words = struct.pack("<BBHH", 0xFF, 0, 0, 1)
+        body = out
+        if unicode and (32 + 1 + len(words) + 2 + len(body)) % 2:
+            body += b"\0"
+        body += smb1_text(SMB_NATIVE_OS, unicode) + smb1_text(SMB_NATIVE_LANMAN, unicode)
+        body += smb1_text("LAB", unicode)
+        return smb1_reply(req, status, words, body, flags2, uid=0x0800)
+    # anything else (LOGOFF, TREE_DISCONNECT ...): a plain success
+    return smb1_reply(req, 0, b"\xff\x00\x00\x00" if cmd == 0x74 else b"", b"", flags2)
+
+
+def smb2(req):
+    if len(req) < 64 + 36 or struct.unpack("<H", req[12:14])[0] != 0:
+        return None
+    count = struct.unpack("<H", req[66:68])[0]
+    offered = struct.unpack("<%dH" % count, req[100:100 + 2 * count])
+    dialects = [d for d in offered if d in SMB_DIALECTS]
+    msg_id = req[24:32]
+    head = b"\xfeSMB" + struct.pack("<HHIHHII", 64, 0, 0, 0, 1, 1, 0) + msg_id + bytes(32)
+    if not dialects:
+        return head[:8] + struct.pack("<I", 0xC00000BB) + head[12:] + struct.pack("<HBBI", 9, 0, 0, 0) + b"\0"
+    d = max(dialects)
+    ctx = b""
+    if d == 0x0311:
+        salt = bytes(32)
+        pre = struct.pack("<HHH", 1, len(salt), 1) + salt
+        ctx = struct.pack("<HHI", 1, len(pre), 0) + pre
+    body = struct.pack("<HHHH", 65, 0x01, d, 1 if ctx else 0) + SMB_GUID
+    body += struct.pack("<IIII", SMB2_CAPS[d], 65536, 65536, 65536)
+    body += struct.pack("<qq", filetime(time.time()), 0)
+    body += struct.pack("<HHI", 128, 0, 128 if ctx else 0)
+    return head + body + ctx
+
+
+def smb(conn):
+    """SMB on TCP 445 (and 139's NetBIOS session request): NT LM 0.12
+    NEGOTIATE with and without extended security, the first two legs of a
+    session setup (the NTLM challenge, then any AUTHENTICATE accepted as
+    guest; a basic session setup accepted as guest), each answer naming
+    Windows Server 2003; and SMB2 NEGOTIATE for 2.0.2 to 3.1.1."""
+    with conn:
+        try:
+            conn.settimeout(10)
+            buf = b""
+            while True:
+                while len(buf) < 4 or len(buf) < 4 + int.from_bytes(buf[1:4], "big"):
+                    data = conn.recv(4096)
+                    if not data:
+                        return
+                    buf += data
+                n = int.from_bytes(buf[1:4], "big")
+                kind, msg, buf = buf[0], buf[4:4 + n], buf[4 + n:]
+                if kind == 0x81:  # NetBIOS session request
+                    conn.sendall(b"\x82\0\0\0")
+                    continue
+                if msg[:4] == b"\xffSMB":
+                    reply = smb1(msg)
+                elif msg[:4] == b"\xfeSMB":
+                    reply = smb2(msg)
+                else:
+                    reply = None
+                if reply is None:
+                    return
+                conn.sendall(struct.pack(">I", len(reply)) + reply)
+        except (OSError, struct.error, ValueError):
+            pass
+
+
 def silent(conn):
     with conn:
         try:
@@ -554,7 +717,8 @@ def echo(data):
 def main():
     addrs = sys.argv[1:] or ["127.0.0.1"]
     tcp = ((22, ssh), (23, telnet), (25, SMTP), (53, dns_tcp), (80, http),
-           (110, POP3), (119, NNTP), (143, IMAP), (1433, mssql), (8080, silent))
+           (110, POP3), (119, NNTP), (143, IMAP), (445, smb), (1433, mssql),
+           (8080, silent))
     udp = ((53, echo), (137, nbstat_reply))
     # Bind every socket before saying "ready", so the harness never scans a
     # lab with a service missing; on a failure close them all and exit.
