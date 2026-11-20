@@ -33,12 +33,10 @@ local SMB1_NATIVE = "FeroProbe"
 -- The one SMB1 dialect offered, as nmap offers it.
 smb.SMB1_DIALECT = "NT LM 0.12"
 
--- A dialect as nmap writes it: 0x0311 is "3.1.1", a sub-minor 0 is left
--- out (0x0210 is "2.1").
+-- A dialect as nmap (7.94 and 7.95) writes it, one digit per nibble:
+-- 0x0311 is "3:1:1", 0x0210 is "2:1:0".
 function smb.dialect_name(d)
-  local major, minor, sub = d >> 8, (d >> 4) & 0xf, d & 0xf
-  if sub == 0 then return string.format("%d.%d", major, minor) end
-  return string.format("%d.%d.%d", major, minor, sub)
+  return string.format("%d:%d:%d", d >> 8, (d >> 4) & 0xf, d & 0xf)
 end
 
 -- The port to reach SMB on: --script-args smbport=N when given (and that
@@ -446,7 +444,7 @@ end
 -- The dialects the server accepts, each tried as nmap's smb-protocols
 -- tries them: NT LM 0.12 on its own, then SMB2/SMB3 all together (the
 -- server picks the newest it speaks), then each older one alone. A list
--- of names ("NT LM 0.12", "2.0.2" ... "3.1.1"), oldest first; empty when
+-- of names ("NT LM 0.12", "2:0:2" ... "3:1:1"), oldest first; empty when
 -- it accepts none.
 function smb.list_dialects(host, port, timeout)
   local out = {}

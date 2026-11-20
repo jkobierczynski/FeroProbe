@@ -2244,7 +2244,7 @@ async fn smb2_security_mode_and_time() {
     let arg = format!("smbport={port}");
     assert_eq!(
         host_output_of("smb2-security-mode", port, "microsoft-ds", &arg).await,
-        ["\n  3.1.1: \n    Message signing enabled but not required"]
+        ["\n  3:1:1: \n    Message signing enabled but not required"]
     );
     assert_eq!(
         host_output_of("smb2-time", port, "microsoft-ds", &arg).await,
@@ -2265,7 +2265,7 @@ async fn smb2_security_mode_and_time() {
     let arg = format!("smbport={port}");
     assert_eq!(
         host_output_of("smb2-security-mode", port, "netbios-ssn", &arg).await,
-        ["\n  3.1.1: \n    Message signing enabled and required"]
+        ["\n  3:1:1: \n    Message signing enabled and required"]
     );
     assert!(seen.lock().unwrap()[0].starts_with("session  CKFDENECFDEFFCFGEFFCCACACACACACA"));
 
@@ -4689,7 +4689,7 @@ async fn smb1_scripts_stay_quiet_without_smb1() {
     let (out, _) = smb_lab_output("smb-protocols", lab, "microsoft-ds").await;
     assert_eq!(
         out,
-        ["\n  dialects: \n    2.0.2\n    2.1\n    3.0\n    3.0.2\n    3.1.1"]
+        ["\n  dialects: \n    2:0:2\n    2:1:0\n    3:0:0\n    3:0:2\n    3:1:1"]
     );
 }
 
@@ -4744,7 +4744,7 @@ async fn smb_protocols_lists_every_dialect() {
     assert_eq!(
         out,
         [
-            "\n  dialects: \n    NT LM 0.12 (SMBv1) [dangerous, but default]\n    2.0.2\n    2.1\n    3.0"
+            "\n  dialects: \n    NT LM 0.12 (SMBv1) [dangerous, but default]\n    2:0:2\n    2:1:0\n    3:0:0"
         ]
     );
     let smb2: Vec<String> = seen
@@ -4779,11 +4779,11 @@ async fn smb2_capabilities_per_dialect() {
     let (out, _) = smb_lab_output("smb2-capabilities", SmbLab::default(), "microsoft-ds").await;
     assert_eq!(
         out,
-        ["\n  2.0.2: \n    Distributed File System\
-          \n  2.1: \n    Distributed File System\n    Leasing\n    Multi-credit operations\
-          \n  3.0: \n    Distributed File System\n    Leasing\n    Multi-credit operations\
-          \n  3.0.2: \n    All capabilities are disabled\
-          \n  3.1.1: \n    Distributed File System\n    Leasing\n    Multi-credit operations"]
+        ["\n  2:0:2: \n    Distributed File System\
+          \n  2:1:0: \n    Distributed File System\n    Leasing\n    Multi-credit operations\
+          \n  3:0:0: \n    Distributed File System\n    Leasing\n    Multi-credit operations\
+          \n  3:0:2: \n    All capabilities are disabled\
+          \n  3:1:1: \n    Distributed File System\n    Leasing\n    Multi-credit operations"]
     );
     let lab = SmbLab {
         smb2_top: 0,
