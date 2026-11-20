@@ -5221,6 +5221,41 @@ async fn sslv2_lists_the_server_ciphers() {
 }
 
 #[tokio::test]
+async fn sslv2_reads_padded_records() {
+    // A three-byte record header: the third byte counts padding at the end,
+    // which never stands in for a missing connection ID.
+    async fn answer(with_id: bool) -> Option<String> {
+        let port = tcp_server(move |mut s| async move {
+            let mut head = [0u8; 2];
+            if s.read_exact(&mut head).await.is_err() {
+                return;
+            }
+            let mut body = vec![0u8; (u16::from_be_bytes(head) & 0x7fff) as usize];
+            if s.read_exact(&mut body).await.is_err() {
+                return;
+            }
+            let mut m = vec![4, 0, 1, 0, 2, 0, 0, 0, 3, 0, 16];
+            m.extend([0x01, 0x00, 0x80]);
+            if with_id {
+                m.extend([1u8; 16]);
+            }
+            m.extend([0u8; 16]);
+            let mut out = (m.len() as u16).to_be_bytes().to_vec();
+            out.push(16);
+            out.extend(m);
+            let _ = s.write_all(&out).await;
+        })
+        .await;
+        output_of("sslv2", port, "https").await
+    }
+    assert_eq!(
+        answer(true).await.as_deref(),
+        Some("\n  SSLv2 supported\n  ciphers: \n    SSL2_RC4_128_WITH_MD5")
+    );
+    assert_eq!(answer(false).await, None);
+}
+
+#[tokio::test]
 async fn tls_library_reads_suite_names() {
     let probe = script(
         "probe",

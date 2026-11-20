@@ -969,12 +969,16 @@ function tls.sslv2_read_server_hello(sock, timeout)
   end
   ok, err = need(head + len)
   if not ok then return nil, err end
-  local msg = buf:sub(head + 1, head + len)
+  -- The third header byte counts the padding at the record's end, which
+  -- is not part of the message.
+  local pad = head == 3 and buf:byte(3) or 0
+  if pad > len then return nil, "bad SERVER-HELLO" end
+  local msg = buf:sub(head + 1, head + len - pad)
   local okp, typ, _, _, version, cert_len, specs_len, id_len, pos =
     pcall(string.unpack, ">BBBI2I2I2I2", msg)
   if not okp or typ ~= 4 then return nil, "not a SERVER-HELLO" end
   -- The message must hold its certificate, cipher specs and connection
-  -- ID (the record's padding, if any, was left out above).
+  -- ID.
   if specs_len % 3 ~= 0 or id_len == 0
     or pos + cert_len + specs_len + id_len - 1 > #msg then
     return nil, "bad SERVER-HELLO"
