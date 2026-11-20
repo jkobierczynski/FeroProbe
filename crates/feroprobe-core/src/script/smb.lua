@@ -297,11 +297,23 @@ local function negotiate_v1_on(c, extended)
   else
     -- Windows and Samba send the names in UTF-16 even though the request
     -- does not ask for Unicode, and do not always say so in Flags2; an
-    -- old CIFS server may send OEM text. UTF-16 when Flags2 says so or
-    -- the first character's high byte is zero, else OEM.
+    -- old CIFS server may send OEM text. UTF-16 when Flags2 says so;
+    -- else the encoding in which both names, each terminated, fill the
+    -- data exactly (UTF-16 first); else guess from the first character.
     local at = clen + 1
-    local unicode = m.flags2 & FLAGS2_UNICODE ~= 0
-      or (m.data:byte(at) or 0) ~= 0 and m.data:byte(at + 1) == 0
+    local function fits(unicode)
+      local _, p = read_string(m.data, at, unicode)
+      _, p = read_string(m.data, p, unicode)
+      return p == #m.data + 1
+    end
+    local unicode
+    if m.flags2 & FLAGS2_UNICODE ~= 0 or fits(true) then
+      unicode = true
+    elseif fits(false) then
+      unicode = false
+    else
+      unicode = (m.data:byte(at) or 0) ~= 0 and m.data:byte(at + 1) == 0
+    end
     local pos
     out.domain, pos = read_string(m.data, at, unicode)
     out.server = read_string(m.data, pos, unicode)
