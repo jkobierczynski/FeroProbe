@@ -2128,10 +2128,17 @@ fn the_default_category() {
             "dns-nsid",
             "ftp-anon",
             "ftp-syst",
+            "http-auth",
+            "http-cookie-flags",
+            "http-cors",
+            "http-favicon",
+            "http-generator",
+            "http-git",
             "http-methods",
             "http-ntlm-info",
             "http-robots.txt",
             "http-title",
+            "http-webdav-scan",
             "imap-capabilities",
             "imap-ntlm-info",
             "ms-sql-ntlm-info",
@@ -3801,5 +3808,578 @@ async fn ms_sql_ntlm_info_logs_in_with_integrated_security() {
     assert!(
         body.contains("4600450052004f00500052004f0042004500"),
         "{body}"
+    );
+}
+
+// ---- nmap's remaining HTTP default scripts (v0.7.0 step 4) ----
+
+/// The port script result of built-in `id` (its source changed by
+/// `edit`, if given) on a host whose only port is `port`, known as
+/// `service`, with `args`.
+async fn http_result(
+    id: &str,
+    port: u16,
+    service: &str,
+    args: &str,
+    edit: Option<(&str, &str)>,
+) -> Option<ScriptResult> {
+    let mut src = Script::built_in()
+        .unwrap()
+        .into_iter()
+        .find(|s| s.id == id)
+        .unwrap()
+        .source;
+    if let Some((from, to)) = edit {
+        assert!(src.contains(from));
+        src = src.replace(from, to).into();
+    }
+    let scan = ScriptScan::new(vec![script(id, &src)], args::parse(args).unwrap(), None).unwrap();
+    let mut hosts = vec![host_with_services(&[(port, service)])];
+    scan.scan_hosts(&mut hosts).await;
+    assert!(hosts[0].ports[0].scripts.len() <= 1);
+    hosts[0].ports[0].scripts.first().cloned()
+}
+
+async fn http_output(id: &str, port: u16, args: &str) -> Option<String> {
+    http_result(id, port, "http", args, None)
+        .await
+        .map(|r| r.output)
+}
+
+#[tokio::test]
+async fn http_auth_lists_the_challenges() {
+    let (port, seen) = web(|req| {
+        if req.starts_with("GET /private/ ") {
+            b"HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"Lab Admin\"\r\n\
+              WWW-Authenticate: Digest realm=\"lab\", qop=\"auth,auth-int\", nonce=\"a\\\"b\", algorithm=MD5, NTLM\r\n\
+              WWW-Authenticate: Negotiate YIIBhg==\r\nContent-Length: 0\r\n\r\n"
+                .to_vec()
+        } else if req.starts_with("GET /bare ") {
+            b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n".to_vec()
+        } else if req.starts_with("GET /odd ") {
+            b"HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"open\r\nContent-Length: 0\r\n\r\n"
+                .to_vec()
+        } else {
+            b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n".to_vec()
+        }
+    })
+    .await;
+    let r = http_result("http-auth", port, "http", "http-auth.path=/private/", None)
+        .await
+        .unwrap();
+    assert_eq!(
+        r.output,
+        "\nHTTP/1.1 401 Unauthorized\n  Basic realm=Lab Admin\
+         \n  Digest realm=lab qop=auth,auth-int nonce=a\"b algorithm=MD5\n  NTLM\n  Negotiate YIIBhg=="
+    );
+    let data = format!("{:?}", r.data);
+    assert!(data.contains("scheme") && data.contains("realm"), "{data}");
+    assert!(seen.lock().unwrap()[0].contains("FeroProbe Scripting Engine"));
+    assert_eq!(
+        http_output("http-auth", port, "http-auth.path=/bare")
+            .await
+            .as_deref(),
+        Some(
+            "\nHTTP/1.1 401 Unauthorized\n  Server returned status 401 but no WWW-Authenticate header."
+        )
+    );
+    assert_eq!(
+        http_output("http-auth", port, "http-auth.path=/odd")
+            .await
+            .as_deref(),
+        Some(
+            "\nHTTP/1.1 401 Unauthorized\n  Server returned status 401 but the WWW-Authenticate header could not be parsed.\
+             \n  WWW-Authenticate: Basic realm=\"open"
+        )
+    );
+    // No login asked for: nothing.
+    assert_eq!(http_output("http-auth", port, "").await, None);
+}
+
+#[tokio::test]
+async fn http_cookie_flags_reports_session_cookies() {
+    let (port, _) = web(|req| {
+        if req.starts_with("GET / ") {
+            b"HTTP/1.1 200 OK\r\nSet-Cookie: PHPSESSID=1; path=/\r\n\
+              Set-Cookie: JSESSIONID=2; Path=/; HttpOnly\r\nSet-Cookie: my_session-id=3\r\n\
+              Set-Cookie: theme=dark\r\nContent-Length: 0\r\n\r\n"
+                .to_vec()
+        } else {
+            b"HTTP/1.1 200 OK\r\nSet-Cookie: JSESSIONID=2; Path=/; HttpOnly\r\nContent-Length: 0\r\n\r\n"
+                .to_vec()
+        }
+    })
+    .await;
+    assert_eq!(
+        http_output("http-cookie-flags", port, "").await.as_deref(),
+        Some(
+            "\n  /: \n    PHPSESSID: \n      httponly flag not set\n    my_session-id: \n      httponly flag not set"
+        )
+    );
+    // One cookie by name, whatever it is called.
+    assert_eq!(
+        http_output("http-cookie-flags", port, "http-cookie-flags.cookie=theme")
+            .await
+            .as_deref(),
+        Some("\n  /: \n    theme: \n      httponly flag not set")
+    );
+    // All flags set: nothing.
+    assert_eq!(
+        http_output("http-cookie-flags", port, "http-cookie-flags.path=/login").await,
+        None
+    );
+}
+
+#[tokio::test]
+async fn http_git_reads_an_exposed_repository() {
+    let (port, seen) = web(|req| {
+        let body: &[u8] = if req.starts_with("GET /.git/HEAD ") {
+            b"ref: refs/heads/main\n"
+        } else if req.starts_with("GET /.git/config ") {
+            b"[core]\n\tbare = false\n[remote \"origin\"]\n\turl = https://git.example/site.git\n[user]\n\tname = dev\n"
+        } else if req.starts_with("GET /.git/description ") {
+            b"The lab site, a repository with a rather long description line\n"
+        } else if req.starts_with("GET /.gitignore ") {
+            b"*.pyc\nlocal_settings.py\n"
+        } else {
+            return b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".to_vec();
+        };
+        let mut r = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len()).into_bytes();
+        r.extend_from_slice(body);
+        r
+    })
+    .await;
+    assert_eq!(
+        http_output("http-git", port, "").await,
+        Some(format!(
+            "\n  127.0.0.1:{port}/.git/\n    Git repository found!\
+             \n    .git/config matched patterns 'user'\
+             \n    Repository description: The lab site, a repository with a rather long description li...\
+             \n    Remotes:\n      https://git.example/site.git\
+             \n    Project type: Django web application (guessed from .gitignore)"
+        ))
+    );
+    assert_eq!(seen.lock().unwrap().len(), 7);
+    // Another root, and none there: nothing, after one request.
+    seen.lock().unwrap().clear();
+    assert_eq!(
+        http_output("http-git", port, "http-git.root=app").await,
+        None
+    );
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.len(), 1);
+    assert!(seen[0].starts_with("GET /app/.git/HEAD "), "{seen:?}");
+}
+
+#[tokio::test]
+async fn http_webdav_scan_reads_options_and_propfind() {
+    let (port, seen) = web(|req| {
+        if req.starts_with("OPTIONS / ") {
+            b"HTTP/1.1 200 OK\r\nDAV: 1,2\r\nAllow: GET, PROPFIND, MKCOL\r\nServer: Apache/2.4.58\r\n\
+              Date: Thu, 19 Nov 2026 10:00:00 GMT\r\nContent-Length: 0\r\n\r\n"
+                .to_vec()
+        } else if req.starts_with("PROPFIND / ") {
+            let body = "<?xml version=\"1.0\"?><d:multistatus xmlns:d=\"DAV:\">\
+                <d:response><d:href>/</d:href><d:propstat><d:status>HTTP/1.1 200 OK</d:status></d:propstat></d:response>\
+                <d:response><d:href>/notes.txt</d:href><d:prop>host 192.168.1.20, 10.0.0.300, 8.8.8.8</d:prop></d:response>\
+                </d:multistatus>";
+            format!(
+                "HTTP/1.1 207 Multi-Status\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            )
+            .into_bytes()
+        } else {
+            b"HTTP/1.1 405 No\r\nContent-Length: 0\r\n\r\n".to_vec()
+        }
+    })
+    .await;
+    assert_eq!(
+        http_output("http-webdav-scan", port, "").await.as_deref(),
+        Some(
+            "\n  Allowed Methods: GET, PROPFIND, MKCOL\n  Server Type: Apache/2.4.58\
+             \n  Server Date: Thu, 19 Nov 2026 10:00:00 GMT\n  WebDAV type: Unknown\
+             \n  Exposed Internal IPs: \n    192.168.1.20\n  Directory Listing: \n    /\n    /notes.txt"
+        )
+    );
+    {
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        let pf = seen.iter().find(|r| r.starts_with("PROPFIND")).unwrap();
+        assert!(
+            pf.contains("\r\nDepth: 1\r\n") && pf.contains("\r\nContent-Length: 0\r\n"),
+            "{pf}"
+        );
+    }
+    // No WebDAV: nothing.
+    let (port, _) =
+        web(|_| b"HTTP/1.1 200 OK\r\nAllow: GET\r\nContent-Length: 0\r\n\r\n".to_vec()).await;
+    assert_eq!(http_output("http-webdav-scan", port, "").await, None);
+}
+
+#[tokio::test]
+async fn http_favicon_hashes_the_icon() {
+    let (port, seen) = web(|req| {
+        if req.starts_with("GET / ") {
+            b"HTTP/1.1 200 OK\r\nContent-Length: 64\r\n\r\n<html><LINK href='/static/i.ico' rel=\"shortcut icon\"></html>    "
+                .to_vec()
+        } else if req.starts_with("GET /static/i.ico ") {
+            b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nICON".to_vec()
+        } else if req.starts_with("GET /favicon.ico ") {
+            b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\nico".to_vec()
+        } else {
+            b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".to_vec()
+        }
+    })
+    .await;
+    let verbose = Some(("fero.verbosity()", "1"));
+    let icon = |r: Option<ScriptResult>| r.map(|r| r.output);
+    // MD5("ICON")
+    assert_eq!(
+        icon(http_result("http-favicon", port, "http", "", verbose).await).as_deref(),
+        Some("Unknown favicon MD5: DD912956B69FB3E570820021206968A3")
+    );
+    assert_eq!(seen.lock().unwrap().len(), 2);
+    // Without -v an unknown icon is not shown, as in nmap.
+    assert_eq!(
+        icon(
+            http_result(
+                "http-favicon",
+                port,
+                "http",
+                "",
+                Some(("fero.verbosity()", "0"))
+            )
+            .await
+        ),
+        None
+    );
+    // favicon.uri is fetched as it is; MD5("ico").
+    assert_eq!(
+        icon(
+            http_result(
+                "http-favicon",
+                port,
+                "http",
+                "favicon.uri=favicon.ico",
+                verbose
+            )
+            .await
+        )
+        .as_deref(),
+        Some("Unknown favicon MD5: 65F034C0F853471ED478CEB34164523B")
+    );
+    // An icon on another host is not fetched: /favicon.ico instead.
+    let (port, seen) = web(|req| {
+        if req.starts_with("GET / ") {
+            b"HTTP/1.1 200 OK\r\nContent-Length: 53\r\n\r\n<link rel=icon href=\"http://other.example/i.ico\">    "
+                .to_vec()
+        } else if req.starts_with("GET /favicon.ico ") {
+            b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nICON".to_vec()
+        } else {
+            b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".to_vec()
+        }
+    })
+    .await;
+    assert_eq!(
+        icon(http_result("http-favicon", port, "http", "", verbose).await).as_deref(),
+        Some("Unknown favicon MD5: DD912956B69FB3E570820021206968A3")
+    );
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.len(), 2, "{seen:?}");
+}
+
+#[tokio::test]
+async fn http_generator_reads_the_meta_tag() {
+    let (port, _) = web(|req| {
+        if req.starts_with("GET / ") {
+            b"HTTP/1.1 200 OK\r\nContent-Length: 88\r\n\r\n<head><meta charset=utf-8><META content=\"WordPress 6.4.2\" NAME='Generator' /></head>    "
+                .to_vec()
+        } else {
+            b"HTTP/1.1 200 OK\r\nContent-Length: 13\r\n\r\n<p>plain</p>\n".to_vec()
+        }
+    })
+    .await;
+    assert_eq!(
+        http_output("http-generator", port, "").await.as_deref(),
+        Some("WordPress 6.4.2")
+    );
+    assert_eq!(
+        http_output("http-generator", port, "http-generator.path=/x").await,
+        None
+    );
+}
+
+#[tokio::test]
+async fn http_cors_lists_the_allowed_methods() {
+    let (port, seen) = web(|req| {
+        if !req.starts_with("OPTIONS ") {
+            return b"HTTP/1.1 405 No\r\nContent-Length: 0\r\n\r\n".to_vec();
+        }
+        let origin = if req.contains("\r\nOrigin: https://app.example\r\n") {
+            "https://app.example"
+        } else if req.starts_with("OPTIONS /star ") {
+            "*"
+        } else {
+            "https://app.example"
+        };
+        format!(
+            "HTTP/1.1 204 No Content\r\nAccess-Control-Allow-Origin: {origin}\r\n\
+             Access-Control-Allow-Methods: GET,POST, OPTIONS\r\n\r\n"
+        )
+        .into_bytes()
+    })
+    .await;
+    assert_eq!(
+        http_output("http-cors", port, "http-cors.path=/star")
+            .await
+            .as_deref(),
+        Some("GET POST OPTIONS")
+    );
+    assert_eq!(seen.lock().unwrap().len(), 9);
+    // The origin allowed by name.
+    assert_eq!(
+        http_output("http-cors", port, "http-cors.origin=https://app.example")
+            .await
+            .as_deref(),
+        Some("GET POST OPTIONS")
+    );
+    // Another origin: nothing.
+    assert_eq!(http_output("http-cors", port, "").await, None);
+    let seen = seen.lock().unwrap();
+    assert!(
+        seen.iter().any(
+            |r| r.contains("\r\nAccess-Control-Request-Method: PATCH\r\n")
+                && r.contains("\r\nOrigin: example.com\r\n")
+        ),
+        "{seen:?}"
+    );
+}
+
+#[tokio::test]
+async fn http_cookie_flags_checks_a_redirect_and_merges_repeats() {
+    let (port, seen) = web(|req| {
+        if req.starts_with("GET / ") {
+            b"HTTP/1.1 302 Found\r\nLocation: /home\r\nSet-Cookie: JSESSIONID=1; Secure\r\n\
+              Content-Length: 0\r\n\r\n"
+                .to_vec()
+        } else {
+            b"HTTP/1.1 200 OK\r\nSet-Cookie: PHPSESSID=2; HttpOnly\r\nSet-Cookie: PHPSESSID=3\r\n\
+              Content-Length: 0\r\n\r\n"
+                .to_vec()
+        }
+    })
+    .await;
+    // The redirect's own cookie lacks HttpOnly, and so does one of the
+    // page's two of one name (merged, each issue once).
+    assert_eq!(
+        http_output("http-cookie-flags", port, "").await.as_deref(),
+        Some(
+            "\n  /: \n    JSESSIONID: \n      httponly flag not set\n    PHPSESSID: \n      httponly flag not set"
+        )
+    );
+    assert_eq!(seen.lock().unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn http_cors_needs_a_successful_answer() {
+    let (port, _) = web(|req| {
+        if req.starts_with("OPTIONS /denied ") {
+            b"HTTP/1.1 403 Forbidden\r\nAccess-Control-Allow-Origin: *\r\n\
+              Access-Control-Allow-Methods: *\r\nContent-Length: 0\r\n\r\n"
+                .to_vec()
+        } else if req.starts_with("OPTIONS /two ") {
+            b"HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: example.com https://other.example\r\n\
+              Access-Control-Allow-Methods: GET\r\nContent-Length: 0\r\n\r\n"
+                .to_vec()
+        } else {
+            b"HTTP/1.1 200 OK\r\nAccess-Control-Allow-Origin: example.com\r\n\
+              Access-Control-Allow-Methods: *\r\nContent-Length: 0\r\n\r\n"
+                .to_vec()
+        }
+    })
+    .await;
+    // "*" allows every method.
+    assert_eq!(
+        http_output("http-cors", port, "").await.as_deref(),
+        Some("HEAD GET POST PUT DELETE TRACE OPTIONS CONNECT PATCH")
+    );
+    // A refused preflight allows nothing, whatever its headers say.
+    assert_eq!(
+        http_output("http-cors", port, "http-cors.path=/denied").await,
+        None
+    );
+    // Two origins in one header are no valid answer.
+    assert_eq!(
+        http_output("http-cors", port, "http-cors.path=/two").await,
+        None
+    );
+}
+
+#[tokio::test]
+async fn http_git_skips_fallback_pages_and_hides_passwords() {
+    let (port, _) = web(|req| {
+        let body: &[u8] = if req.starts_with("GET /.git/HEAD ") {
+            // Served as HTML by a careless server: the body decides.
+            return b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 41\r\n\r\n\
+                     0123456789abcdef0123456789abcdef01234567\n"
+                .to_vec();
+        } else if req.starts_with("GET /.git/config ") {
+            b"[remote \"origin\"]\n\turl = \"https://dev:s3cret@git.example/site.git\"\n\
+              [remote \"backup\"]\n\turl = git@backup.example:site.git\n\
+              [remote \"query\"]\n\turl = \"https://git.example?owner=dev@example.org\"\n\
+              [submodule \"lib\"]\n\turl = https://git.example/lib.git\n"
+        } else if req.starts_with("GET /.git/description ") {
+            b"Site\n"
+        } else if req.starts_with("GET /.git/COMMIT_EDITMSG ") {
+            return b"HTTP/1.1 302 Found\r\nLocation: /login\r\nContent-Length: 0\r\n\r\n".to_vec();
+        } else {
+            // Every other path: the site's own page.
+            b"<!DOCTYPE html><html><title>Shop</title></html>"
+        };
+        let mut r =
+            format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len()).into_bytes();
+        r.extend_from_slice(body);
+        r
+    })
+    .await;
+    assert_eq!(
+        http_output("http-git", port, "").await,
+        Some(format!(
+            "\n  127.0.0.1:{port}/.git/\n    Potential Git repository found (found 2/6 expected files)\
+             \n    Remotes:\n      https://git.example/site.git\n      git@backup.example:site.git\
+             \n      https://git.example?owner=dev@example.org"
+        ))
+    );
+    // A HEAD that is no Git reference: nothing.
+    let (port, _) =
+        web(|_| b"HTTP/1.1 200 OK\r\nContent-Length: 16\r\n\r\nref: unavailable".to_vec()).await;
+    assert_eq!(http_output("http-git", port, "").await, None);
+    // Every other path answered with a 200 naming the path: the
+    // free-text files cannot be believed, and a "config" without
+    // [section] lines is no config.
+    let (port, _) = web(|req| {
+        let body: Vec<u8> = if req.starts_with("GET /.git/HEAD ") {
+            b"ref: refs/heads/main\n".to_vec()
+        } else if req.starts_with("GET /.git/feroprobe-no-such-file ") {
+            // The missing file gets an HTML page; its 200 still counts.
+            b"<html><body>No such page</body></html>".to_vec()
+        } else {
+            let path = req.split(' ').nth(1).unwrap_or("");
+            format!("Not found: {path}\n").into_bytes()
+        };
+        let body = &body[..];
+        let mut r = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        )
+        .into_bytes();
+        r.extend_from_slice(body);
+        r
+    })
+    .await;
+    assert_eq!(
+        http_output("http-git", port, "").await,
+        Some(format!(
+            "\n  127.0.0.1:{port}/.git/\n    Potential Git repository found (found 1/6 expected files)"
+        ))
+    );
+}
+
+#[tokio::test]
+async fn http_webdav_scan_reads_any_prefix() {
+    let (port, _) = web(|req| {
+        if req.starts_with("OPTIONS ") {
+            b"HTTP/1.1 204 No Content\r\nDAV: 1, 2, <http://apache.org/dav/propset/fs/1>\r\n\
+              Allow: GET, PROPFIND\r\n\r\n"
+                .to_vec()
+        } else if req.starts_with("PROPFIND ") {
+            let body = "<?xml version=\"1.0\"?><x.d:multistatus xmlns:x.d=\"DAV:\" xmlns=\"DAV:\">\
+                <response><href>/a%20b?x=1&amp;y=2</href><propstat><prop>\
+                <otherresponse><otherhref>/phantom</otherhref></otherresponse>\
+                <o:response xmlns:o=\"urn:other\"><o:href>/other</o:href></o:response>\
+                </prop></propstat></response>\
+                <x.d:response><x.d:href>/second</x.d:href><x.d:propstat><x.d:prop>\
+                <x.d:lockdiscovery><x.d:activelock><x.d:lockroot><x.d:href>/</x.d:href></x.d:lockroot>\
+                </x.d:activelock></x.d:lockdiscovery></x.d:prop>\
+                <x.d:status>HTTP/1.1 403 Forbidden</x.d:status></x.d:propstat></x.d:response>\
+                </x.d:multistatus>";
+            format!(
+                "HTTP/1.1 207 Multi-Status\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            )
+            .into_bytes()
+        } else {
+            b"HTTP/1.1 405 No\r\nContent-Length: 0\r\n\r\n".to_vec()
+        }
+    })
+    .await;
+    assert_eq!(
+        http_output("http-webdav-scan", port, "").await.as_deref(),
+        Some(
+            "\n  Allowed Methods: GET, PROPFIND\n  WebDAV type: Apache DAV\n  Directory Listing: \n    /a%20b?x=1&y=2\n    /second"
+        )
+    );
+    // "DAV: 11" is not class 1, and a 207 outside the DAV: namespace is
+    // no WebDAV answer.
+    let (port, _) = web(|req| {
+        if req.starts_with("OPTIONS ") {
+            b"HTTP/1.1 200 OK\r\nDAV: 11\r\nContent-Length: 0\r\n\r\n".to_vec()
+        } else {
+            b"HTTP/1.1 207 Multi-Status\r\nContent-Length: 50\r\n\r\n<m:multistatus xmlns:m=\"urn:other\"></m:multistatus>"
+                .to_vec()
+        }
+    })
+    .await;
+    assert_eq!(http_output("http-webdav-scan", port, "").await, None);
+}
+
+#[tokio::test]
+async fn http_favicon_and_generator_read_quoted_values() {
+    let (port, _) = web(|req| {
+        let body: &[u8] = if req.starts_with("GET / ") {
+            b"<link title=\"rel=icon href=/wrong.ico\" rel=stylesheet href=/style.css>\
+              <link data-ui_href=/wrong.ico rel=\"icon\" title=\"a > b\" href=\"/site's.ico\">\
+              <meta title=\"> name=generator content=Fake\" name=viewport content=width=device-width>\
+              <meta data-ui_content=placeholder name=generator content=\"CMS > 2\">"
+        } else if req.starts_with("GET /site's.ico ") {
+            b"ICON"
+        } else {
+            return b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".to_vec();
+        };
+        let mut r = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len()).into_bytes();
+        r.extend_from_slice(body);
+        r
+    })
+    .await;
+    assert_eq!(
+        http_result(
+            "http-favicon",
+            port,
+            "http",
+            "",
+            Some(("fero.verbosity()", "1"))
+        )
+        .await
+        .map(|r| r.output)
+        .as_deref(),
+        Some("Unknown favicon MD5: DD912956B69FB3E570820021206968A3")
+    );
+    // favicon.uri with a leading slash names the same path.
+    assert_eq!(
+        http_result(
+            "http-favicon",
+            port,
+            "http",
+            "favicon.uri=/site's.ico",
+            Some(("fero.verbosity()", "1"))
+        )
+        .await
+        .map(|r| r.output)
+        .as_deref(),
+        Some("Unknown favicon MD5: DD912956B69FB3E570820021206968A3")
+    );
+    assert_eq!(
+        http_output("http-generator", port, "").await.as_deref(),
+        Some("CMS > 2")
     );
 }

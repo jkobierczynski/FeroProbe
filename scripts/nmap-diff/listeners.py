@@ -10,7 +10,14 @@ against a real host:
             a KEXINIT (OpenSSH 9.6's lists) for ssh2-enum-algos, and
             closes at the client's next packet (no key exchange)
   TCP 80    answers any request with a small HTTP/1.0 response; one that
-            carries "Authorization: NTLM" gets a 401 with an NTLM challenge
+            carries "Authorization: NTLM" gets a 401 with an NTLM challenge.
+            For the HTTP default scripts it also serves a .git directory
+            (http-git), /favicon.ico, a 401 Basic page at /private/
+            (http-auth), a session cookie without flags at /login
+            (http-cookie-flags), a generator tag at /cms (http-generator),
+            WebDAV at /dav/ (OPTIONS and PROPFIND, http-webdav-scan) and
+            CORS preflights (any OPTIONS with an Origin, http-cors); "/"
+            and every other path keep the plain answer
   TCP 8080  accepts and stays silent (the "unknown service" path)
   TCP 53    a small DNS server for the script cases: answers CHAOS TXT
             id.server, hostname.bind and version.bind, and the EDNS(0)
@@ -283,18 +290,89 @@ def ssh(conn):
             pass
 
 
+# Files served for http-git: a repository's HEAD and a few small files.
+HTTP_FILES = {
+    b"/.git/HEAD": b"ref: refs/heads/main\n",
+    b"/.git/config": (b"[core]\n\tbare = false\n[remote \"origin\"]\n"
+                      b"\turl = https://git.lab.invalid/site.git\n"),
+    b"/.git/description": b"FeroProbe nmap-diff lab site\n",
+    b"/.git/COMMIT_EDITMSG": b"Lab commit\n",
+    b"/.gitignore": b"*.pyc\nlocal_settings.py\n",
+    b"/favicon.ico": b"\x00\x00\x01\x00lab-icon",
+    b"/cms": (b"<html><head><meta name=\"generator\" content=\"LabCMS 1.0\">"
+              b"</head></html>\n"),
+}
+
+DAV_PROPFIND = (
+    b'<?xml version="1.0" encoding="utf-8"?>\n'
+    b'<D:multistatus xmlns:D="DAV:">'
+    b"<D:response><D:href>/dav/</D:href><D:propstat><D:prop>"
+    b"<D:displayname>lab 10.20.30.40</D:displayname></D:prop>"
+    b"<D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>"
+    b"<D:response><D:href>/dav/notes.txt</D:href><D:propstat><D:prop/>"
+    b"<D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>"
+    b"</D:multistatus>\n"
+)
+
+
+def http_answer(status, headers=b"", body=b""):
+    return (b"HTTP/1.0 " + status + b"\r\nServer: nginx/1.24.0\r\n" + headers
+            + b"Content-Length: " + str(len(body)).encode() + b"\r\n\r\n" + body)
+
+
+def http_reply(req):
+    """The lab's answer to one HTTP request."""
+    lower = req.lower()
+    if b"\r\nauthorization: ntlm " in lower:
+        return (b"HTTP/1.0 401 Unauthorized\r\nServer: nginx/1.24.0\r\n"
+                b"WWW-Authenticate: NTLM " + NTLM_B64.encode()
+                + b"\r\nContent-Length: 0\r\n\r\n")
+    parts = req.split(b"\r\n", 1)[0].split(b" ")
+    method, path = (parts[0], parts[1]) if len(parts) >= 3 else (b"", b"")
+    if method == b"OPTIONS" and b"\r\norigin:" in lower:
+        return http_answer(b"204 No Content",
+                           b"Access-Control-Allow-Origin: *\r\n"
+                           b"Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n")
+    if method == b"OPTIONS" and path == b"/dav/":
+        return http_answer(b"200 OK",
+                           b"DAV: 1,2\r\nAllow: OPTIONS, GET, HEAD, PROPFIND\r\n"
+                           b"Date: Thu, 19 Nov 2026 12:00:00 GMT\r\n")
+    if method == b"PROPFIND" and path == b"/dav/":
+        return http_answer(b"207 Multi-Status",
+                           b"Content-Type: application/xml; charset=utf-8\r\n",
+                           DAV_PROPFIND)
+    if method == b"GET" and path == b"/private/":
+        return http_answer(b"401 Unauthorized",
+                           b'WWW-Authenticate: Basic realm="lab"\r\n')
+    if method == b"GET" and path == b"/login":
+        return http_answer(b"200 OK", b"Set-Cookie: PHPSESSID=lab; path=/\r\n"
+                           b"Content-Type: text/html\r\n", b"<p>login</p>\n")
+    if method == b"GET" and path in HTTP_FILES:
+        return http_answer(b"200 OK", b"", HTTP_FILES[path])
+    if method == b"GET" and (path.startswith(b"/.git") or path == b"/.gitignore"):
+        return http_answer(b"404 Not Found")
+    return HTTP_REPLY
+
+
 def http(conn):
     with conn:
         try:
             conn.settimeout(10)
+            # The whole request head (a request can come in pieces), at
+            # most 16 KiB. A probe that is no HTTP request (no blank line)
+            # is answered after a second's wait for more, as before.
             req = conn.recv(4096)
-            if b"\r\nauthorization: ntlm " in req.lower():
-                conn.sendall(
-                    b"HTTP/1.0 401 Unauthorized\r\nServer: nginx/1.24.0\r\n"
-                    b"WWW-Authenticate: NTLM " + NTLM_B64.encode()
-                    + b"\r\nContent-Length: 0\r\n\r\n")
-            elif req:
-                conn.sendall(HTTP_REPLY)
+            conn.settimeout(1)
+            while req and b"\r\n\r\n" not in req and len(req) < 16384:
+                try:
+                    data = conn.recv(4096)
+                except socket.timeout:
+                    break
+                if not data:
+                    break
+                req += data
+            if req:
+                conn.sendall(http_reply(req))
         except OSError:
             pass
 
@@ -483,14 +561,15 @@ def main():
     served = []
     try:
         for addr in addrs:
-            for port, handler in tcp:
-                served.append((serve_tcp, bind(addr, port, socket.SOCK_STREAM), handler))
-            for port, handler in udp:
-                served.append((serve_udp, bind(addr, port, socket.SOCK_DGRAM), handler))
+            for proto, kind, serve, ports in (("tcp", socket.SOCK_STREAM, serve_tcp, tcp),
+                                              ("udp", socket.SOCK_DGRAM, serve_udp, udp)):
+                for port, handler in ports:
+                    where = f"{addr} {proto}/{port}"
+                    served.append((serve, bind(addr, port, kind), handler))
     except OSError as e:
         for _, s, _ in served:
             s.close()
-        print(f"listener setup failed: {e}", flush=True)
+        print(f"listener setup failed on {where}: {e}", flush=True)
         sys.exit(1)
     threads = [threading.Thread(target=f, args=(s, h), daemon=True) for f, s, h in served]
     for t in threads:

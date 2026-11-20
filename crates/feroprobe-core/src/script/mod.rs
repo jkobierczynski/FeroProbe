@@ -50,7 +50,22 @@ const BUILT_IN: &[(&str, &str)] = &[
     ("dns-nsid", include_str!("../../lua-scripts/dns-nsid.lua")),
     ("ftp-anon", include_str!("../../lua-scripts/ftp-anon.lua")),
     ("ftp-syst", include_str!("../../lua-scripts/ftp-syst.lua")),
+    ("http-auth", include_str!("../../lua-scripts/http-auth.lua")),
+    (
+        "http-cookie-flags",
+        include_str!("../../lua-scripts/http-cookie-flags.lua"),
+    ),
+    ("http-cors", include_str!("../../lua-scripts/http-cors.lua")),
     ("http-date", include_str!("../../lua-scripts/http-date.lua")),
+    (
+        "http-favicon",
+        include_str!("../../lua-scripts/http-favicon.lua"),
+    ),
+    (
+        "http-generator",
+        include_str!("../../lua-scripts/http-generator.lua"),
+    ),
+    ("http-git", include_str!("../../lua-scripts/http-git.lua")),
     (
         "http-headers",
         include_str!("../../lua-scripts/http-headers.lua"),
@@ -74,6 +89,10 @@ const BUILT_IN: &[(&str, &str)] = &[
     (
         "http-title",
         include_str!("../../lua-scripts/http-title.lua"),
+    ),
+    (
+        "http-webdav-scan",
+        include_str!("../../lua-scripts/http-webdav-scan.lua"),
     ),
     (
         "imap-capabilities",
