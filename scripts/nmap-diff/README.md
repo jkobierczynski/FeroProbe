@@ -73,7 +73,7 @@ Lab ports (the same on the target and on 127.0.0.1):
 | | open | closed | filtered (dropped) |
 | --- | --- | --- | --- |
 | TCP | 22 (SSH banner, then a KEXINIT), 80 (HTTP; also a `.git` directory, a favicon, `/private/` (401), `/login` (session cookie), `/cms` (generator tag), WebDAV at `/dav/` and CORS preflights for the HTTP default scripts), 8080 (silent) | 443, 3389 | 8443 |
-| UDP | 53 (echo), 137 (NetBIOS NODE STATUS) | 123 | 161 |
+| UDP | 53 (echo), 137 (NetBIOS NODE STATUS) | 123 | 162 |
 
 In `matrix.txt`, `@TCP` and `@UDP` expand to these lists. TCP 53 also has a
 small DNS server for the script cases (CHAOS TXT `id.server`,
@@ -91,7 +91,12 @@ strings) and SMB 2.0.2 to 3.1.1 NEGOTIATE; cases scanning the default or
 TLS 1.2 and 1.3 (Python's `ssl` module, ALPN `h2` and `http/1.1`, a
 self-signed certificate the `openssl` command makes when the lab starts, so
 the lab host needs it) and TCP 993 is an SSLv2-only stand-in that answers a
-CLIENT-HELLO with a SERVER-HELLO taking two SSLv2 ciphers. ICMP rate limits
+CLIENT-HELLO with a SERVER-HELLO taking two SSLv2 ciphers. UDP 161 has a
+small SNMP agent for the `script-snmp` case (community `public`, SNMPv1
+and v2c Get and GetNext over the system group, `ifTable` and
+`ipAddrTable`, and a Report with a net-snmp style engine ID to the
+SNMPv3 engine discovery request); it is not in `@UDP`, which is why the
+filtered UDP port is 162 (it was 161 before the SNMP scripts). ICMP rate limits
 are off in every namespace, and the neighbour caches are flushed before each
 run, so both tools start from the same state.
 

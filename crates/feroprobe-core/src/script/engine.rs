@@ -75,6 +75,9 @@ const STARTTLS_LIBRARY: &str = include_str!("starttls.lua");
 /// `fero.tls`: TLS and SSLv2 hellos built and read by hand.
 const TLS_LIBRARY: &str = include_str!("tls.lua");
 
+/// `fero.snmp`: SNMP requests, walks and SNMPv3 engine discovery.
+const SNMP_LIBRARY: &str = include_str!("snmp.lua");
+
 /// The library every script gets, written for FeroProbe, on top of the
 /// `fero` table the engine fills in.
 const LIBRARY: &str = r##"
@@ -584,6 +587,9 @@ pub(crate) fn install_library(
         .call::<()>(fero.clone())?;
     lua.load(TLS_LIBRARY)
         .set_name("=fero.tls")
+        .call::<()>(fero.clone())?;
+    lua.load(SNMP_LIBRARY)
+        .set_name("=fero.snmp")
         .call::<()>(fero)?;
     Ok(())
 }

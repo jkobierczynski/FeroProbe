@@ -158,6 +158,15 @@ const BUILT_IN: &[(&str, &str)] = &[
         "smtp-ntlm-info",
         include_str!("../../lua-scripts/smtp-ntlm-info.lua"),
     ),
+    ("snmp-info", include_str!("../../lua-scripts/snmp-info.lua")),
+    (
+        "snmp-interfaces",
+        include_str!("../../lua-scripts/snmp-interfaces.lua"),
+    ),
+    (
+        "snmp-sysdescr",
+        include_str!("../../lua-scripts/snmp-sysdescr.lua"),
+    ),
     (
         "ssh-hostkey",
         include_str!("../../lua-scripts/ssh-hostkey.lua"),

@@ -2257,6 +2257,33 @@ SERVER-HELLO read: \f[V]version\f[R], \f[V]certificate\f[R],
 \f[V]ciphers\f[R] (nmap\[aq]s names, \f[V]SSL2_RC4_128_WITH_MD5\f[R]...)
 T}
 T{
+\f[V]fero.snmp.session(host, port [, opts])\f[R]
+T}@T{
+An SNMP session over UDP with a scanned port: \f[V]s:get(oid, ...)\f[R]
+(GetRequest), \f[V]s:getnext(oid)\f[R] (GetNextRequest),
+\f[V]s:walk(base [, max])\f[R] (the variables under \f[V]base\f[R], one
+GetNextRequest at a time, at most 65,536), \f[V]s:discover()\f[R] (the
+SNMPv3 engine discovery request: \f[V]engine_id\f[R], \f[V]boots\f[R],
+\f[V]time\f[R]), \f[V]s:close()\f[R].
+Answers are tables (\f[V]version\f[R], \f[V]community\f[R],
+\f[V]request_id\f[R], \f[V]error_status\f[R], \f[V]error_index\f[R],
+\f[V]varbinds\f[R], each with \f[V]oid\f[R], \f[V]tag\f[R],
+\f[V]value\f[R] and \f[V]exception\f[R]); an answer counts only when it
+carries FeroProbe\[aq]s request-id \f[V]0x4650\f[R] (\[dq]FP\[dq], IDS
+rule 9100021), the version and community asked with and, for GetRequest,
+the variables asked for, for GetNextRequest one that comes after the one
+asked (so a late answer to an earlier step of a walk is skipped).
+Options from \f[V]--script-args\f[R], as nmap\[aq]s SNMP library takes
+them: \f[V]creds.snmp\f[R] (the community, or nmap\[aq]s
+\f[V]user:pass\f[R] form; default \f[V]public\f[R]),
+\f[V]snmp.version\f[R] (\f[V]v1\f[R], the default, or \f[V]v2c\f[R]),
+\f[V]snmp.timeout\f[R] (ms, or with a unit such as \f[V]5s\f[R]; default
+5000), \f[V]snmp.retries\f[R] (default 1).
+\f[V]fero.snmp.parse(msg)\f[R], \f[V]fero.snmp.parse_v3(msg)\f[R],
+\f[V]fero.snmp.compare(a, b)\f[R] (OID order),
+\f[V]fero.snmp.format_ticks(t)\f[R] (TimeTicks as nmap writes an uptime)
+T}
+T{
 \f[V]fero.output_table()\f[R]
 T}@T{
 A table for output that keeps its names in the order they are first set
@@ -3268,6 +3295,74 @@ The NTLM NEGOTIATE names no user and the workstation
 Over TLS from the start on 465 and when \f[V]-sV\f[R] found TLS.
 Arguments: \f[V]smtp-ntlm-info.domain\f[R] or \f[V]smtp.domain\f[R] (the
 EHLO name), \f[V]smtp-ntlm-info.timeout\f[R] (ms, default 10000)
+T}
+T{
+\f[V]snmp-info\f[R]
+T}@T{
+default, version, safe
+T}@T{
+UDP 161, \f[V]snmp\f[R] (UDP), open or open|filtered, when scanned
+(\f[V]-sU -p U:161\f[R])
+T}@T{
+Sends the SNMPv3 engine discovery request (no user, no credentials, sent
+twice at most) and shows what the agent\[aq]s Report gives:
+\f[V]enterprise\f[R] (the vendor\[aq]s IANA Private Enterprise Number,
+by name for some 40 common vendors, else the number),
+\f[V]engineIDFormat\f[R] (\f[V]ipv4\f[R], \f[V]ipv6\f[R], \f[V]mac\f[R],
+\f[V]text\f[R], \f[V]octets\f[R] or \f[V]unknown\f[R]) and
+\f[V]engineIDData\f[R], \f[V]snmpEngineBoots\f[R] and
+\f[V]snmpEngineTime\f[R].
+msgID and request-id \f[V]0x4650\f[R] (\[dq]FP\[dq]).
+nmap\[aq]s names every registered enterprise from its copy of the IANA
+list, and its result also sets the port\[aq]s version
+(\f[V]<enterprise> SNMPv3 server\f[R]); FeroProbe\[aq]s does not change
+\f[V]-sV\f[R]\[aq]s result.
+Arguments: \f[V]snmp.timeout\f[R], \f[V]snmp.retries\f[R]
+T}
+T{
+\f[V]snmp-interfaces\f[R]
+T}@T{
+default, discovery, safe
+T}@T{
+UDP 161, \f[V]snmp\f[R] (UDP), open or open|filtered, when scanned
+T}@T{
+Walks IF-MIB\[aq]s \f[V]ifTable\f[R] (the \f[V]ifDescr\f[R],
+\f[V]ifType\f[R], \f[V]ifSpeed\f[R], \f[V]ifPhysAddress\f[R],
+\f[V]ifOperStatus\f[R], \f[V]ifInOctets\f[R] and \f[V]ifOutOctets\f[R]
+columns, one GetNextRequest at a time) and \f[V]ipAddrTable\f[R], and
+lists each interface as nmap does: its name,
+\f[V]IP address: ...  Netmask: ...\f[R] (every address it has;
+nmap\[aq]s shows only the last), \f[V]MAC address:\f[R] with the vendor
+from the OUI list, \f[V]Type:\f[R] (the IANA ifType name) and
+\f[V]Speed:\f[R], and \f[V]Traffic stats: ... sent, ... received\f[R].
+Interfaces that are not up, and every \f[V]Status:\f[R] line, only with
+\f[V]-v\f[R] (see Verbosity of scripts chosen by name).
+Reads only the columns it shows, about half the requests nmap\[aq]s walk
+of the whole table sends.
+nmap\[aq]s can also run before the scan against a host named in
+\f[V]snmp-interfaces.host\f[R] and add its addresses as targets;
+FeroProbe\[aq]s runs only against scanned ports.
+Arguments: \f[V]creds.snmp\f[R], \f[V]snmp.version\f[R],
+\f[V]snmp.timeout\f[R], \f[V]snmp.retries\f[R]
+T}
+T{
+\f[V]snmp-sysdescr\f[R]
+T}@T{
+default, discovery, safe
+T}@T{
+UDP 161, \f[V]snmp\f[R] (UDP), open or open|filtered, when scanned
+T}@T{
+Asks for \f[V]sysDescr.0\f[R] (the device, its operating system and
+often its version) and \f[V]sysUpTime.0\f[R], two GetRequests, and shows
+the description and
+\f[V]System uptime: 28d17h18m59.00s (248153900 timeticks)\f[R], as
+nmap\[aq]s.
+A description with CR LF line ends keeps its lines.
+nmap\[aq]s sets the port \f[V]open\f[R] when the agent answers;
+FeroProbe\[aq]s leaves the state to the scan (an agent that answers the
+\f[V]-sU\f[R] probe is already \f[V]open\f[R]).
+Arguments: \f[V]creds.snmp\f[R], \f[V]snmp.version\f[R],
+\f[V]snmp.timeout\f[R], \f[V]snmp.retries\f[R]
 T}
 T{
 \f[V]ssh-hostkey\f[R]
@@ -5575,6 +5670,37 @@ Names the account it would log in with (\f[V]account_used: guest\f[R]),
 although it logs in to nothing
 T}@T{
 No \f[V]account_used\f[R] line: no account is used
+T}
+T{
+Verbosity of scripts chosen by name
+T}@T{
+A script chosen by its name (\f[V]--script snmp-interfaces\f[R], not
+\f[V]--script default\f[R] or \f[V]-sC\f[R]) is told the verbosity is
+one higher than set, so it gives its \f[V]-v\f[R] output without
+\f[V]-v\f[R]: \f[V]snmp-interfaces\f[R] lists interfaces that are down
+and their status, \f[V]ssh2-enum-algos\f[R] lists every algorithm,
+\f[V]http-favicon\f[R] shows an unknown icon\[aq]s MD5
+T}@T{
+\f[V]fero.verbosity()\f[R] is the verbosity set with \f[V]-v\f[R],
+however the script was chosen; add \f[V]-v\f[R] for the fuller output
+T}
+T{
+SNMP scripts
+T}@T{
+\f[V]snmp-info\f[R] names every registered enterprise from nmap\[aq]s
+copy of the IANA list and sets the port\[aq]s version;
+\f[V]snmp-sysdescr\f[R] and \f[V]snmp-interfaces\f[R] set the port
+\f[V]open\f[R] when the agent answers; \f[V]snmp-interfaces\f[R] walks
+the whole \f[V]ifTable\f[R], shows one address per interface, and can
+run before the scan against \f[V]snmp-interfaces.host\f[R], adding its
+addresses as targets
+T}@T{
+\f[V]snmp-info\f[R] names some 40 common vendors and shows other
+enterprise numbers as numbers, and leaves \f[V]-sV\f[R]\[aq]s result
+alone; the port state is the scan\[aq]s; \f[V]snmp-interfaces\f[R] reads
+only the columns it shows (about half the requests), shows every
+address, and runs only against scanned ports.
+Every SNMP request has request-id \f[V]0x4650\f[R] (\[dq]FP\[dq])
 T}
 T{
 SMB2 NEGOTIATE client capabilities (\f[V]smb2-capabilities\f[R] and the
