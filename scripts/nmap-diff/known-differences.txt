@@ -48,3 +48,10 @@ os | ^icmp echo-request (code|df): | own OS probe set: one plain echo request (O
 # Packet contents (v0.5.0): --data-length is random bytes in both tools, so the
 # bytes differ on every run while the length must match.
 data-length | ^tcp/\d+ \[[A-Za-z]+\] payload: nmap \[20B [^]]*\] vs FeroProbe \[20B [^]]*\]$ | random --data-length bytes in both tools (manual, "Packet contents")
+
+# The TLS scripts (v0.7.0 step 6): own hellos with the FeroProbeTLSScan mark.
+# nmap 7.94's tls-alpn gets no ServerHello from the lab's Python TLS server
+# (TLS 1.2 minimum); FeroProbe's asks with a TLS 1.2 hello and lists h2 and
+# http/1.1.
+script-tls | ^tcp/\d+ \[(PA|A|FA|RA|R)\]( payload)?: | own scripts: ClientHello random and SSLv2 challenge FeroProbeTLSScan (ssl-enum-ciphers; docs/responsible-use.md)
+script-tls | ^tcp/995 script tls-alpn: nmap reports '\(not listed\)', FeroProbe 'output'$ | nmap's tls-alpn gets no answer from a TLS 1.2-minimum Python server (tls-alpn)

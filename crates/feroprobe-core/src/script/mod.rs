@@ -168,10 +168,20 @@ const BUILT_IN: &[(&str, &str)] = &[
     ),
     ("ssl-date", include_str!("../../lua-scripts/ssl-date.lua")),
     ("ssl-cert", include_str!("../../lua-scripts/ssl-cert.lua")),
+    (
+        "ssl-enum-ciphers",
+        include_str!("../../lua-scripts/ssl-enum-ciphers.lua"),
+    ),
     ("sshv1", include_str!("../../lua-scripts/sshv1.lua")),
+    ("sslv2", include_str!("../../lua-scripts/sslv2.lua")),
     (
         "telnet-ntlm-info",
         include_str!("../../lua-scripts/telnet-ntlm-info.lua"),
+    ),
+    ("tls-alpn", include_str!("../../lua-scripts/tls-alpn.lua")),
+    (
+        "tls-nextprotoneg",
+        include_str!("../../lua-scripts/tls-nextprotoneg.lua"),
     ),
     ("vnc-info", include_str!("../../lua-scripts/vnc-info.lua")),
     (

@@ -33,6 +33,15 @@ against a real host:
             answers with an NTLM challenge naming LAB / FPDLAB and the
             OS "Windows Server 2003 3790 Service Pack 2") and SMB 2.0.2
             to 3.1.1 NEGOTIATE (not in @TCP either)
+  TCP 995   TLS 1.2 and 1.3 (Python's ssl module, a self-signed RSA
+            certificate made with the openssl command at start) offering
+            ALPN h2 and http/1.1, for the TLS script cases; it answers
+            nothing inside TLS (not in @TCP either). No NPN: Python's ssl
+            module no longer advertises it, so tls-nextprotoneg gives no
+            output in either tool
+  TCP 993   an SSLv2-only stand-in for sslv2: answers an SSLv2
+            CLIENT-HELLO with a SERVER-HELLO taking RC4_128_WITH_MD5 and
+            DES_192_EDE3_CBC_WITH_MD5, then closes (not in @TCP either)
   UDP 53    echoes every datagram back (so UDP 53 reads as open)
   UDP 137   answers a NetBIOS NODE STATUS request (RFC 1002) with a fixed
             name table and MAC address, and ignores anything else
@@ -43,9 +52,13 @@ filtered ones with iptables. Usage: listeners.py ADDR [ADDR ...] (default
 """
 
 import base64
+import os
 import socket
+import ssl
 import struct
+import subprocess
 import sys
+import tempfile
 import threading
 import time
 
@@ -702,6 +715,75 @@ def dns_tcp(conn):
             pass
 
 
+def tls_context():
+    """A TLS 1.2/1.3 server context with a fresh self-signed certificate
+    and ALPN h2 and http/1.1; also the certificate in DER for the SSLv2
+    stand-in."""
+    d = tempfile.mkdtemp(prefix="fplab-tls-")
+    key, cert = os.path.join(d, "key.pem"), os.path.join(d, "cert.pem")
+    subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+                    "-keyout", key, "-out", cert, "-days", "30", "-subj", "/CN=fplab"],
+                   check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    ctx.load_cert_chain(cert, key)
+    ctx.set_alpn_protocols(["h2", "http/1.1"])
+    with open(cert) as f:
+        der = ssl.PEM_cert_to_DER_cert(f.read())
+    return ctx, der
+
+
+TLS_CONTEXT, TLS_CERT_DER = None, None
+
+
+def tls(conn):
+    with conn:
+        try:
+            conn.settimeout(10)
+            with TLS_CONTEXT.wrap_socket(conn, server_side=True) as t:
+                t.recv(4096)
+        except (OSError, ssl.SSLError, ValueError):
+            pass
+
+
+# The SSLv2 cipher kinds the stand-in takes (SSL 2.0 draft, appendix C).
+SSLV2_TAKES = (0x010080, 0x0700C0)
+
+
+def sslv2(conn):
+    """An SSLv2 SERVER-HELLO for a CLIENT-HELLO (SSL 2.0 draft 2.6)."""
+    with conn:
+        try:
+            conn.settimeout(10)
+            buf = b""
+            while len(buf) < 2:
+                data = conn.recv(4096)
+                if not data:
+                    return
+                buf += data
+            if not buf[0] & 0x80:
+                return
+            n = ((buf[0] & 0x7F) << 8) | buf[1]
+            while len(buf) < 2 + n:
+                data = conn.recv(4096)
+                if not data:
+                    return
+                buf += data
+            msg = buf[2:2 + n]
+            if len(msg) < 9 or msg[0] != 1:
+                return
+            specs_len = struct.unpack(">H", msg[3:5])[0]
+            specs = msg[9:9 + specs_len]
+            offered = {int.from_bytes(specs[i:i + 3], "big") for i in range(0, len(specs) - 2, 3)}
+            take = b"".join(k.to_bytes(3, "big") for k in SSLV2_TAKES if k in offered)
+            body = (struct.pack(">BBBHHHH", 4, 0, 1, 0x0002, len(TLS_CERT_DER), len(take), 16)
+                    + TLS_CERT_DER + take + os.urandom(16))
+            conn.sendall(struct.pack(">H", 0x8000 | len(body)) + body)
+            conn.recv(4096)
+        except OSError:
+            pass
+
+
 def serve_udp(s, handler):
     while True:
         data, peer = s.recvfrom(65535)
@@ -715,10 +797,16 @@ def echo(data):
 
 
 def main():
+    global TLS_CONTEXT, TLS_CERT_DER
     addrs = sys.argv[1:] or ["127.0.0.1"]
+    try:
+        TLS_CONTEXT, TLS_CERT_DER = tls_context()
+    except (OSError, subprocess.CalledProcessError, ssl.SSLError) as e:
+        print(f"listener setup failed on TLS (needs the openssl command): {e}", flush=True)
+        sys.exit(1)
     tcp = ((22, ssh), (23, telnet), (25, SMTP), (53, dns_tcp), (80, http),
-           (110, POP3), (119, NNTP), (143, IMAP), (445, smb), (1433, mssql),
-           (8080, silent))
+           (110, POP3), (119, NNTP), (143, IMAP), (445, smb), (993, sslv2),
+           (995, tls), (1433, mssql), (8080, silent))
     udp = ((53, echo), (137, nbstat_reply))
     # Bind every socket before saying "ready", so the harness never scans a
     # lab with a service missing; on a failure close them all and exit.

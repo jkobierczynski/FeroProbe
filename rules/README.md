@@ -29,6 +29,8 @@ teams can flag FeroProbe scans without writing their own.
 | `telnet-ntlm-info`, `ms-sql-ntlm-info`, `smb-os-discovery` (default scripts) | The same NEGOTIATE as raw bytes (`NTLMSSP\0` ... `FEROPROBE`, SID 9100017) |
 | `nbstat` (default script), and the `-sU`/`-sV` probe to UDP 137 | NetBIOS NODE STATUS request to UDP 137 with transaction ID `0x4650` ("FP") |
 | `ssl-date` (default script) | TLS ClientHello random `FeroProbeSSLDate` (bytes 15-30 of the record) |
+| `tls-alpn`, `tls-nextprotoneg` (default scripts), `ssl-enum-ciphers` | TLS ClientHello random `FeroProbeTLSScan` (bytes 15-30 of the record, SID 9100019) |
+| `sslv2` (default script) | SSLv2 CLIENT-HELLO challenge `FeroProbeTLSScan` (SID 9100020) |
 | `dns-nsid` (default script) | DNS CHAOS TXT queries (`id.server`, `version.bind`) with transaction ID `0x4650` ("FP") and only the RD flag set, over UDP (SID 9100014) or TCP (SID 9100015) |
 
 The TCP window of a scan probe is otherwise meaningless, because the scan

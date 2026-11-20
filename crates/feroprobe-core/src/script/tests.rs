@@ -2160,7 +2160,10 @@ fn the_default_category() {
             "ssl-date",
             "ssl-cert",
             "sshv1",
+            "sslv2",
             "telnet-ntlm-info",
+            "tls-alpn",
+            "tls-nextprotoneg",
             "vnc-info",
             "x11-access",
         ]
@@ -4856,4 +4859,477 @@ async fn smb2_capabilities_per_dialect() {
 /// Bytes as lower-case hex.
 fn hexs(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+// ---- The TLS scripts (fero.tls), against a stand-in TLS server ----
+
+/// What the stand-in TLS server takes: per version, its suites (in its
+/// order of preference when `server_pref`), plus ALPN and NPN protocols.
+#[derive(Clone, Default)]
+struct TlsLab {
+    /// (version, suites, server_pref), for each version it speaks.
+    versions: Vec<(u16, Vec<u16>, bool)>,
+    alpn: Vec<&'static str>,
+    npn: Vec<&'static str>,
+}
+
+type Hellos = std::sync::Arc<std::sync::Mutex<Vec<Vec<u8>>>>;
+
+fn tls_record(kind: u8, body: &[u8]) -> Vec<u8> {
+    let mut r = vec![kind, 3, 3];
+    r.extend((body.len() as u16).to_be_bytes());
+    r.extend(body);
+    r
+}
+
+fn handshake(kind: u8, body: &[u8]) -> Vec<u8> {
+    let mut h = vec![kind];
+    h.extend(&(body.len() as u32).to_be_bytes()[1..]);
+    h.extend(body);
+    h
+}
+
+/// A ClientHello's legacy version, suites, and extensions (type, data).
+type ClientHello = (u16, Vec<u16>, Vec<(u16, Vec<u8>)>);
+
+/// The parts of a ClientHello the stand-in needs.
+fn parse_client_hello(rec: &[u8]) -> Option<ClientHello> {
+    let b = rec.get(5..)?;
+    if *b.first()? != 1 {
+        return None;
+    }
+    let b = &b[4..];
+    let version = u16::from_be_bytes([b[0], b[1]]);
+    let mut p = 34;
+    p += 1 + b[p] as usize;
+    let n = u16::from_be_bytes([b[p], b[p + 1]]) as usize;
+    let suites = b[p + 2..p + 2 + n]
+        .chunks(2)
+        .map(|c| u16::from_be_bytes([c[0], c[1]]))
+        .collect();
+    p += 2 + n;
+    p += 1 + b[p] as usize;
+    let mut exts = Vec::new();
+    if p + 2 <= b.len() {
+        let end = p + 2 + u16::from_be_bytes([b[p], b[p + 1]]) as usize;
+        p += 2;
+        while p + 4 <= end {
+            let kind = u16::from_be_bytes([b[p], b[p + 1]]);
+            let len = u16::from_be_bytes([b[p + 2], b[p + 3]]) as usize;
+            exts.push((kind, b[p + 4..p + 4 + len].to_vec()));
+            p += 4 + len;
+        }
+    }
+    Some((version, suites, exts))
+}
+
+/// The stand-in server's answer to one ClientHello record.
+fn tls_lab_answer(lab: &TlsLab, hello: &[u8], cert: &[u8]) -> Vec<u8> {
+    let alert = |code: u8| tls_record(21, &[2, code]);
+    let Some((legacy, offered, exts)) = parse_client_hello(hello) else {
+        return alert(10);
+    };
+    let ext = |k: u16| exts.iter().find(|(t, _)| *t == k).map(|(_, d)| d.clone());
+    let version = match ext(0x002b) {
+        Some(d) => u16::from_be_bytes([d[1], d[2]]),
+        None => legacy,
+    };
+    let Some((_, suites, server_pref)) = lab.versions.iter().find(|(v, _, _)| *v == version) else {
+        return alert(70);
+    };
+    let pick = if *server_pref {
+        suites.iter().find(|s| offered.contains(s)).copied()
+    } else {
+        offered.iter().find(|s| suites.contains(s)).copied()
+    };
+    let Some(cipher) = pick else {
+        return alert(40);
+    };
+    let mut sh_exts = Vec::new();
+    let mut add = |kind: u16, data: Vec<u8>| {
+        sh_exts.extend(kind.to_be_bytes());
+        sh_exts.extend((data.len() as u16).to_be_bytes());
+        sh_exts.extend(data);
+    };
+    if version >= 0x0304 {
+        add(0x002b, 0x0304u16.to_be_bytes().to_vec());
+        let mut ks = vec![0, 29, 0, 32];
+        ks.extend([9u8; 32]);
+        add(0x0033, ks);
+    }
+    if let Some(d) = ext(0x0010) {
+        // The client's list, then the first of ours that is in it.
+        let mut names = Vec::new();
+        let mut p = 2;
+        while p < d.len() {
+            let n = d[p] as usize;
+            names.push(String::from_utf8_lossy(&d[p + 1..p + 1 + n]).to_string());
+            p += 1 + n;
+        }
+        if let Some(name) = lab.alpn.iter().find(|a| names.iter().any(|n| n == *a)) {
+            let mut list = vec![name.len() as u8];
+            list.extend(name.as_bytes());
+            let mut data = (list.len() as u16).to_be_bytes().to_vec();
+            data.extend(list);
+            add(0x0010, data);
+        }
+    }
+    if ext(0x3374).is_some() && !lab.npn.is_empty() {
+        let mut data = Vec::new();
+        for n in &lab.npn {
+            data.push(n.len() as u8);
+            data.extend(n.as_bytes());
+        }
+        add(0x3374, data);
+    }
+    let mut sh = std::cmp::min(version, 0x0303).to_be_bytes().to_vec();
+    sh.extend([7u8; 32]);
+    sh.push(0);
+    sh.extend(cipher.to_be_bytes());
+    sh.push(0);
+    sh.extend((sh_exts.len() as u16).to_be_bytes());
+    sh.extend(sh_exts);
+    let mut flight = handshake(2, &sh);
+    if version < 0x0304 {
+        let mut certs = (cert.len() as u32).to_be_bytes()[1..].to_vec();
+        certs.extend(cert);
+        let mut msg = ((certs.len()) as u32).to_be_bytes()[1..].to_vec();
+        msg.extend(certs);
+        flight.extend(handshake(11, &msg));
+        let ske = match cipher {
+            // ECDHE: secp256r1, an uncompressed point (no signature check).
+            0xc02c | 0xc009 | 0xc008 => {
+                let mut s = vec![3, 0, 23, 65, 4];
+                s.extend([5u8; 64]);
+                s.extend([4, 3, 0, 2, 0, 0]);
+                Some(s)
+            }
+            // DH_anon: a 1024-bit prime, g = 2, Ys.
+            0x0034 => {
+                let mut s = vec![0, 128, 0xff];
+                s.extend([0xabu8; 127]);
+                s.extend([0, 1, 2, 0, 1, 5]);
+                Some(s)
+            }
+            _ => None,
+        };
+        if let Some(s) = ske {
+            flight.extend(handshake(12, &s));
+        }
+        flight.extend(handshake(14, &[]));
+    }
+    // Split over two records, as servers may.
+    let cut = flight.len() / 2;
+    let mut out = tls_record(22, &flight[..cut]);
+    out.extend(tls_record(22, &flight[cut..]));
+    out
+}
+
+/// A stand-in TLS server following `lab`, keeping each ClientHello.
+async fn tls_lab(lab: TlsLab) -> (u16, Hellos) {
+    let key = rcgen::KeyPair::generate().unwrap();
+    let cert = rcgen::CertificateParams::new(vec!["localhost".into()])
+        .unwrap()
+        .self_signed(&key)
+        .unwrap()
+        .der()
+        .to_vec();
+    let seen: Hellos = Default::default();
+    let keep = seen.clone();
+    let port = tcp_server(move |mut s| {
+        let (lab, keep, cert) = (lab.clone(), keep.clone(), cert.clone());
+        async move {
+            let mut head = [0u8; 5];
+            if s.read_exact(&mut head).await.is_err() {
+                return;
+            }
+            let mut rec = head.to_vec();
+            if head[0] & 0x80 != 0 {
+                // An SSLv2 CLIENT-HELLO: this stand-in speaks no SSLv2.
+                keep.lock().unwrap().push(rec);
+                return;
+            }
+            let mut body = vec![0u8; u16::from_be_bytes([head[3], head[4]]) as usize];
+            if s.read_exact(&mut body).await.is_err() {
+                return;
+            }
+            rec.extend(body);
+            keep.lock().unwrap().push(rec.clone());
+            let _ = s.write_all(&tls_lab_answer(&lab, &rec, &cert)).await;
+            let mut rest = [0u8; 64];
+            let _ = s.read(&mut rest).await;
+        }
+    })
+    .await;
+    (port, seen)
+}
+
+#[tokio::test]
+async fn ssl_enum_ciphers_lists_suites_grades_and_preference() {
+    let lab = TlsLab {
+        versions: vec![
+            // TLS 1.2 by the server's order: ECDHE AES-256-GCM, ECDHE
+            // AES-128-CBC, ECDHE 3DES, anonymous DH.
+            (0x0303, vec![0xc02c, 0xc009, 0xc008, 0x0034], true),
+            // TLS 1.3 by the client's order.
+            (0x0304, vec![0x1302, 0x1301], false),
+        ],
+        ..TlsLab::default()
+    };
+    let (port, seen) = tls_lab(lab).await;
+    let out = output_of("ssl-enum-ciphers", port, "https").await.unwrap();
+    assert_eq!(
+        out,
+        "\n  TLSv1.2: \
+         \n    ciphers: \
+         \n      TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384 (secp256r1) - A\
+         \n      TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA (secp256r1) - A\
+         \n      TLS_ECDHE_ECDSA_WITH_3DES_EDE_CBC_SHA (secp256r1) - C\
+         \n      TLS_DH_anon_WITH_AES_128_CBC_SHA (dh 1024) - F\
+         \n    compressors: \
+         \n      NULL\
+         \n    cipher preference: server\
+         \n    warnings: \
+         \n      64-bit block cipher 3DES vulnerable to SWEET32 attack\
+         \n      Anonymous key exchange, score capped at F\
+         \n  TLSv1.3: \
+         \n    ciphers: \
+         \n      TLS_AKE_WITH_AES_128_GCM_SHA256 (ecdh_x25519) - A\
+         \n      TLS_AKE_WITH_AES_256_GCM_SHA384 (ecdh_x25519) - A\
+         \n    cipher preference: client\
+         \n  least strength: F"
+    );
+    let seen = seen.lock().unwrap();
+    for hello in seen.iter() {
+        // Every hello carries the mark after the time bytes, and the
+        // target's name as SNI (no extensions in an SSLv3 hello).
+        assert_eq!(hello[0], 22);
+        assert_eq!(&hello[15..31], b"FeroProbeTLSScan");
+        if hello[2] != 0 {
+            assert!(hello.windows(9).any(|w| w == b"localhost"));
+        }
+    }
+    // SSLv3 and TLS 1.0 and 1.1 are asked once each, then given up.
+    for v in [0x0300u16, 0x0301, 0x0302] {
+        let n = seen
+            .iter()
+            .filter(|h| {
+                parse_client_hello(h)
+                    .is_some_and(|(l, _, e)| l == v && e.iter().all(|(t, _)| *t != 0x002b))
+            })
+            .count();
+        assert_eq!(n, 1, "version {v:#06x}");
+    }
+}
+
+#[tokio::test]
+async fn ssl_enum_ciphers_with_one_suite() {
+    let lab = TlsLab {
+        versions: vec![(0x0303, vec![0xc02c], false)],
+        ..TlsLab::default()
+    };
+    let (port, _) = tls_lab(lab).await;
+    let out = output_of("ssl-enum-ciphers", port, "https").await.unwrap();
+    assert_eq!(
+        out,
+        "\n  TLSv1.2: \
+         \n    ciphers: \
+         \n      TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384 (secp256r1) - A\
+         \n    compressors: \
+         \n      NULL\
+         \n    cipher preference: indeterminate\
+         \n    cipher preference error: Too few ciphers supported\
+         \n  least strength: A"
+    );
+    // ssl-enum-ciphers is not a default script, as in nmap.
+    let s = built_in("ssl-enum-ciphers");
+    assert_eq!(s.categories, ["discovery", "intrusive"]);
+}
+
+#[tokio::test]
+async fn tls_alpn_and_nextprotoneg() {
+    let lab = TlsLab {
+        versions: vec![(0x0303, vec![0xc02c], true)],
+        alpn: vec!["h2", "http/1.1"],
+        npn: vec!["spdy/3", "http/1.1"],
+    };
+    let (port, seen) = tls_lab(lab).await;
+    assert_eq!(
+        output_of("tls-alpn", port, "https").await.as_deref(),
+        Some("\n  h2\n  http/1.1")
+    );
+    // One hello per protocol found, and one the server takes none from.
+    assert_eq!(seen.lock().unwrap().len(), 3);
+    assert_eq!(
+        output_of("tls-nextprotoneg", port, "https")
+            .await
+            .as_deref(),
+        Some("\n  spdy/3\n  http/1.1")
+    );
+    // A server without ALPN or NPN: no output.
+    let lab = TlsLab {
+        versions: vec![(0x0303, vec![0xc02c], true)],
+        ..TlsLab::default()
+    };
+    let (port, _) = tls_lab(lab).await;
+    assert_eq!(output_of("tls-alpn", port, "https").await, None);
+    assert_eq!(output_of("tls-nextprotoneg", port, "https").await, None);
+    // A TLS stand-in sends no SSLv2 SERVER-HELLO.
+    assert_eq!(output_of("sslv2", port, "https").await, None);
+}
+
+#[tokio::test]
+async fn sslv2_lists_the_server_ciphers() {
+    let seen: Hellos = Default::default();
+    let keep = seen.clone();
+    let port = tcp_server(move |mut s| {
+        let keep = keep.clone();
+        async move {
+            let mut head = [0u8; 2];
+            if s.read_exact(&mut head).await.is_err() {
+                return;
+            }
+            let mut body = vec![0u8; (u16::from_be_bytes(head) & 0x7fff) as usize];
+            if s.read_exact(&mut body).await.is_err() {
+                return;
+            }
+            keep.lock().unwrap().push(body);
+            // SERVER-HELLO: no session hit, X.509, version 2, a 3-byte
+            // "certificate", two cipher kinds, a 16-byte connection ID.
+            let mut m = vec![4, 0, 1, 0, 2, 0, 3, 0, 6, 0, 16];
+            m.extend(b"crt");
+            m.extend([0x01, 0x00, 0x80, 0x07, 0x00, 0xc0]);
+            m.extend([1u8; 16]);
+            let mut out = (0x8000u16 | m.len() as u16).to_be_bytes().to_vec();
+            out.extend(m);
+            let _ = s.write_all(&out).await;
+        }
+    })
+    .await;
+    assert_eq!(
+        output_of("sslv2", port, "https").await.as_deref(),
+        Some(
+            "\n  SSLv2 supported\n  ciphers: \
+             \n    SSL2_RC4_128_WITH_MD5\n    SSL2_DES_192_EDE3_CBC_WITH_MD5"
+        )
+    );
+    let seen = seen.lock().unwrap();
+    // CLIENT-HELLO, version 2, eight cipher kinds, no session, and the mark
+    // as the challenge.
+    assert_eq!(&seen[0][..9], &[1, 0, 2, 0, 24, 0, 0, 0, 16]);
+    assert!(seen[0].ends_with(b"FeroProbeTLSScan"));
+}
+
+#[tokio::test]
+async fn sslv2_reads_padded_records() {
+    // A three-byte record header: the third byte counts padding at the end,
+    // which never stands in for a missing connection ID.
+    async fn answer(with_id: bool) -> Option<String> {
+        let port = tcp_server(move |mut s| async move {
+            let mut head = [0u8; 2];
+            if s.read_exact(&mut head).await.is_err() {
+                return;
+            }
+            let mut body = vec![0u8; (u16::from_be_bytes(head) & 0x7fff) as usize];
+            if s.read_exact(&mut body).await.is_err() {
+                return;
+            }
+            let mut m = vec![4, 0, 1, 0, 2, 0, 0, 0, 3, 0, 16];
+            m.extend([0x01, 0x00, 0x80]);
+            if with_id {
+                m.extend([1u8; 16]);
+            }
+            m.extend([0u8; 16]);
+            let mut out = (m.len() as u16).to_be_bytes().to_vec();
+            out.push(16);
+            out.extend(m);
+            let _ = s.write_all(&out).await;
+        })
+        .await;
+        output_of("sslv2", port, "https").await
+    }
+    assert_eq!(
+        answer(true).await.as_deref(),
+        Some("\n  SSLv2 supported\n  ciphers: \n    SSL2_RC4_128_WITH_MD5")
+    );
+    assert_eq!(answer(false).await, None);
+}
+
+#[tokio::test]
+async fn tls_library_reads_suite_names() {
+    let probe = script(
+        "probe",
+        r#"
+description = "test"
+categories = {"safe"}
+portrule = function() return true end
+action = function()
+  local t = fero.tls
+  local i = t.cipher_info("TLS_RSA_WITH_3DES_EDE_CBC_SHA")
+  local j = t.cipher_info("TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384")
+  local k = t.cipher_info("TLS_DH_anon_EXPORT_WITH_RC4_40_MD5")
+  local hello = t.client_hello({ version = 0x0300, ciphers = { 0x002f } })
+  return table.concat({
+    i.cipher, i.size, i.block, i.mode, i.hash, tostring(i.forward_secrecy),
+    j.cipher, j.size, j.mode, j.hash, tostring(j.forward_secrecy), tostring(j.tls12),
+    k.cipher, k.size, tostring(k.export), tostring(k.anon),
+    t.cipher_name(0x1301), t.cipher_code("TLS_RSA_WITH_AES_128_CBC_SHA"),
+    t.group_name(23), t.group_strength("secp384r1"),
+    -- An SSLv3 hello: record version 3.0 and no extensions.
+    string.format("%02x%02x", hello:byte(2, 3)), #hello,
+  }, " ")
+end
+"#,
+    );
+    let port = greeter(b"").await;
+    let scan = ScriptScan::new(vec![probe], ArgTable::default(), None).unwrap();
+    let mut hosts = vec![host_with(&[(port, PortState::Open)])];
+    scan.scan_hosts(&mut hosts).await;
+    assert_eq!(
+        hosts[0].ports[0].scripts[0].output,
+        "3DES 112 64 CBC SHA false AES 256 GCM SHA384 true true RC4 40 true true \
+         TLS_AKE_WITH_AES_128_GCM_SHA256 47 secp256r1 7680 0300 50"
+    );
+}
+
+#[tokio::test]
+async fn tls_library_checks_server_hello_extensions() {
+    let probe = script(
+        "probe",
+        r#"
+description = "test"
+categories = {"safe"}
+portrule = function() return true end
+action = function()
+  local t = fero.tls
+  local function sh(exts)
+    local e = ""
+    for _, x in ipairs(exts) do e = e .. string.pack(">I2s2", x[1], x[2]) end
+    return t.parse_server_hello(string.pack(">I2", 0x0303) .. string.rep("\7", 32)
+      .. "\0" .. string.pack(">I2B", 0xc02f, 0) .. string.pack(">s2", e))
+  end
+  local one = sh({ { 0x0010, string.pack(">s2", string.pack(">s1", "h2")) } })
+  local two = sh({ { 0x0010, string.pack(">s2", string.pack(">s1", "h2") .. string.pack(">s1", "http/1.1")) } })
+  local npn = sh({ { 0x3374, string.pack(">s1", "spdy/3") .. string.pack(">s1", "http/1.1") } })
+  local cut = sh({ { 0x3374, string.pack(">s1", "spdy/3") .. "\9ab" } })
+  -- A TLS 1.3 hello offering only secp256r1 sends an empty key share.
+  local h = t.client_hello({ version = 0x0304, groups = { 23 } })
+  local ks = h:find("\0\51\0\2\0\0", 1, true) ~= nil
+  return table.concat({
+    tostring(one.alpn), tostring(two.alpn), table.concat(npn.npn, ","), tostring(cut.npn),
+    t.cipher_info("TLS_PSK_DHE_WITH_AES_128_CCM_8").kex,
+    tostring(t.cipher_info("TLS_PSK_WITH_AES_128_CBC_SHA256").tls12),
+    tostring(ks),
+  }, " ")
+end
+"#,
+    );
+    let port = greeter(b"").await;
+    let scan = ScriptScan::new(vec![probe], ArgTable::default(), None).unwrap();
+    let mut hosts = vec![host_with(&[(port, PortState::Open)])];
+    scan.scan_hosts(&mut hosts).await;
+    assert_eq!(
+        hosts[0].ports[0].scripts[0].output,
+        "h2 nil spdy/3,http/1.1 nil DHE_PSK false true"
+    );
 }
