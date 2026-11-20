@@ -3377,10 +3377,12 @@ client\[aq]s (\f[V]client\f[R], listed by name), and warnings; then
 \f[V]least strength\f[R], the weakest grade.
 Layout, names and warning texts as nmap\[aq]s.
 Finds the suites with ClientHellos offering 64 at a time, asking again
-without each one the server picks; the order with the found suites
-forwards and backwards (\f[V]indeterminate\f[R] with
-\f[V]cipher preference error: Too few ciphers supported\f[R] for one
-suite).
+without each one the server picks; the order as nmap decides it: the
+first two suites found are offered alone, in both orders, and a
+different pick each time means \f[V]client\f[R] (\f[V]indeterminate\f[R]
+with \f[V]cipher preference error: Too few ciphers supported\f[R] for
+one suite; no \f[V]cipher preference\f[R] line, only the error, when a
+comparison gets no answer).
 Grades (from the Qualys SSL Labs rating guide, without its protocol
 part, as nmap\[aq]s): 3 parts key exchange strength (in RSA bits,
 elliptic curves converted by NIST SP 800-57) and 4 parts cipher key
@@ -3477,6 +3479,9 @@ TLS ports
 T}@T{
 One TLS 1.2 ClientHello with an empty NPN (Next Protocol Negotiation)
 extension; lists the protocols the server advertises, in its order.
+Both this script and \f[V]tls-alpn\f[R] send the target\[aq]s name (SNI)
+like \f[V]ssl-enum-ciphers\f[R]; nmap 7.95\[aq]s print nothing for some
+name-based hosts (seen on a Cloudflare site).
 Argument: \f[V]tls-nextprotoneg.timeout\f[R] (ms, default 5000)
 T}
 T{

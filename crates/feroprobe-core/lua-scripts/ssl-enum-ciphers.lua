@@ -139,33 +139,33 @@ local function find_ciphers(ctx, version)
   return accepted, answers
 end
 
--- Whether the server picks by its own preference ("server"), the
--- client's ("client") or neither ("indeterminate", with a reason); for
--- "server", the suites in its order.
+-- Whether the server picks by its own preference ("server") or the
+-- client's ("client"), as nmap decides it: the first two suites found are
+-- offered alone, in both orders; a different pick each time means the
+-- client's order. For "server", also the suites in its order, or an error
+-- when that order could not be found (the suites are then listed by name).
+-- nil and an error when a comparison gets no answer.
 local function preference(ctx, version, accepted)
   if #accepted < 2 then return "indeterminate", "Too few ciphers supported" end
-  local a1 = ask(ctx, version, accepted)
-  local reversed = {}
-  for i = #accepted, 1, -1 do reversed[#reversed + 1] = accepted[i] end
-  local a2 = ask(ctx, version, reversed)
-  if not a1 or not a2 then return "indeterminate", "Network error" end
-  local c1, c2 = a1.server_hello.cipher, a2.server_hello.cipher
-  if c1 == accepted[1] and c2 == reversed[1] then return "client" end
-  if c1 ~= c2 then return "indeterminate", "Unknown preference" end
-  local order, left = { c1 }, {}
-  for _, c in ipairs(accepted) do
-    if c ~= c1 then left[#left + 1] = c end
+  local a, b = accepted[1], accepted[2]
+  local f = ask(ctx, version, { a, b })
+  local r = f and ask(ctx, version, { b, a })
+  if not f or not r then
+    return nil, string.format("Error when comparing %s and %s",
+      tls.cipher_name(a), tls.cipher_name(b))
   end
+  if f.server_hello.cipher ~= r.server_hello.cipher then return "client" end
+  local order, left = {}, table.move(accepted, 1, #accepted, 1, {})
   while #left > 1 do
-    local a = ask(ctx, version, left)
-    -- An order with a gap would be a guess: say so instead.
-    if not a then return "indeterminate", "Network error" end
-    local c = a.server_hello.cipher
+    local answer = ask(ctx, version, left)
+    -- An order with a gap would be a guess: list by name instead.
+    if not answer then return "server", "Network error" end
+    local c = answer.server_hello.cipher
     order[#order + 1] = c
     table.remove(left, index_of(left, c))
   end
   -- The one suite left is the server's last.
-  if left[1] then order[#order + 1] = left[1] end
+  order[#order + 1] = left[1]
   return "server", nil, order
 end
 
@@ -330,8 +330,10 @@ local function enumerate(ctx, name)
     lines[#lines + 1] = "\n    compressors: "
     for _, c in ipairs(t.compressors) do lines[#lines + 1] = "\n      " .. c end
   end
-  t["cipher preference"] = pref
-  lines[#lines + 1] = "\n    cipher preference: " .. pref
+  if pref then
+    t["cipher preference"] = pref
+    lines[#lines + 1] = "\n    cipher preference: " .. pref
+  end
   if pref_err then
     t["cipher preference error"] = pref_err
     lines[#lines + 1] = "\n    cipher preference error: " .. pref_err
