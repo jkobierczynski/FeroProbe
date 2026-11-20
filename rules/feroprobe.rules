@@ -80,3 +80,10 @@ alert tcp any any -> $HOME_NET any (msg:"FeroProbe script NTLM NEGOTIATE (*-ntlm
 # carries the NTLM NEGOTIATE of SID 9100017 and the NativeOS and
 # NativeLanMan "FeroProbe".
 alert tcp any any -> $HOME_NET any (msg:"FeroProbe script SMB1 NEGOTIATE (process ID FP)"; flow:established,to_server; content:"|FF|SMB|72|"; offset:4; depth:5; content:"|00 00 00 00 00 00 00 00 00 00 00 00 00 00|FP|00 00 01 00 00 0C 00 02|NT LM 0.12|00|"; distance:7; within:35; classtype:attempted-recon; metadata:tool FeroProbe; sid:9100018; rev:1;)
+# ssl-enum-ciphers / tls-alpn / tls-nextprotoneg (fero.tls): every TLS
+# ClientHello (SSLv3 to TLS 1.3) carries "FeroProbeTLSScan" in its random,
+# right after the four time bytes.
+alert tcp any any -> $HOME_NET any (msg:"FeroProbe script TLS ClientHello (ssl-enum-ciphers, tls-alpn, tls-nextprotoneg)"; flow:established,to_server; content:"|16 03|"; depth:2; content:"FeroProbeTLSScan"; distance:13; within:16; classtype:attempted-recon; metadata:tool FeroProbe; sid:9100019; rev:1;)
+# sslv2: the SSLv2 CLIENT-HELLO (version 2) whose 16-byte challenge is
+# "FeroProbeTLSScan".
+alert tcp any any -> $HOME_NET any (msg:"FeroProbe script SSLv2 CLIENT-HELLO (sslv2)"; flow:established,to_server; content:"|01 00 02|"; offset:2; depth:3; content:"FeroProbeTLSScan"; distance:6; within:300; classtype:attempted-recon; metadata:tool FeroProbe; sid:9100020; rev:1;)

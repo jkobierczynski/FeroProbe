@@ -29,7 +29,7 @@ no external binaries.
 | Service and version detection, `-sV`, with our own probes and rules | ✅ |
 | OS detection, `-O`, a multi-probe fingerprint matched against our own OS database, with `--osscan-limit`, `--osscan-guess`, `--max-os-tries`, IPv4 and IPv6 (Linux, root) | ✅ |
 | Traceroute, `--traceroute`, IPv4 and IPv6 (Linux, root), and `-A` (`-sV -O -sC --traceroute`) | ✅ |
-| Script scanning, `--script`, `--script-args`, `--script-help`, `--script-timeout`, `--script-trace`, `--script-updatedb`, `-sC`: sandboxed Lua scripts that can only reach the scanned host's probed ports, with our own script library (sockets, TLS, an HTTP client) and our own default scripts (SSH host keys, FTP, SMTP, POP3, IMAP, MySQL, VNC, X11, RPC, NTP, HTTP title, methods and robots.txt, TLS certificates, SMB OS discovery, dialects and signing) | ✅ |
+| Script scanning, `--script`, `--script-args`, `--script-help`, `--script-timeout`, `--script-trace`, `--script-updatedb`, `-sC`: sandboxed Lua scripts that can only reach the scanned host's probed ports, with our own script library (sockets, TLS, an HTTP client) and our own default scripts (SSH host keys, FTP, SMTP, POP3, IMAP, MySQL, VNC, X11, RPC, NTP, HTTP title, methods and robots.txt, TLS certificates, cipher suites, ALPN, NPN and SSLv2, SMB OS discovery, dialects and signing) | ✅ |
 
 **[The FeroProbe manual](docs/manual.md)** documents every option, its
 default and how options interact, laid out like nmap's reference guide. It

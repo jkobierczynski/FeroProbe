@@ -196,6 +196,8 @@ who asked:
 | `rdp-ntlm-info` | The RDP routing cookie `Cookie: mstshash=FeroProbe` in the connection request (clear text, before TLS); then the NTLM NEGOTIATE below, inside TLS | — |
 | `http-ntlm-info`, `smtp-ntlm-info`, `imap-ntlm-info`, `pop3-ntlm-info`, `nntp-ntlm-info`, `telnet-ntlm-info`, `ms-sql-ntlm-info` | An NTLM NEGOTIATE that names the workstation `FEROPROBE` and no user or domain, the same 49 bytes every time: in base64 over HTTP (`Authorization: NTLM`, beside the `User-Agent` above), SMTP, IMAP, POP3 and NNTP (rule 9100016), as is over telnet and MS-SQL (rule 9100017). `ms-sql-ntlm-info`'s login also gives the host name `FEROPROBE` and the application name `FeroProbe Scripting Engine`; `smtp-ntlm-info` says `EHLO feroprobe.invalid`. These scripts switch to TLS with STARTTLS where the server allows it, and the NEGOTIATE is then encrypted | NEGOTIATE with no workstation |
 | `ssl-date` | `FeroProbeSSLDate` in the TLS ClientHello random, after its four time bytes (clear text, it is the first message of the handshake) | — |
+| `tls-alpn`, `tls-nextprotoneg` (and `ssl-enum-ciphers` when chosen) | `FeroProbeTLSScan` in every TLS ClientHello random, after its four time bytes (rule 9100019); no handshake is finished | — |
+| `sslv2` | `FeroProbeTLSScan` as the 16-byte challenge of the SSLv2 CLIENT-HELLO (rule 9100020) | — |
 | `nbstat` | The NetBIOS transaction ID `0x4650` ("FP") of its NODE STATUS request to UDP 137 (a weak mark of 2 bytes: rule 9100013 also needs the rest of the request to match, and a tool that picks its IDs at random still matches about once in 65,536 such requests) | — |
 | `dns-nsid` | The DNS transaction ID `0x4650` ("FP") of its CHAOS TXT queries for `id.server` and `version.bind` (the first one asking for the NSID too). A weak mark of 2 bytes: rules 9100014 (UDP) and 9100015 (TCP) also need only the RD flag (as in nmap's queries), one question and that question (`id.server` or `version.bind`, CHAOS TXT), which few other clients send; a tool that picks its IDs at random still matches about once in 65,536 such queries | — |
 | `http-title`, `http-methods`, `http-robots.txt`, `http-auth`, `http-cookie-flags`, `http-cors`, `http-favicon`, `http-generator`, `http-git`, `http-webdav-scan` (and `http-date`, `http-headers`, `http-server-header` when chosen) | The `User-Agent` above. `http-cors` also sends `Origin: example.com` (nmap's default), `http-webdav-scan` one `PROPFIND` with `Depth: 1`, `http-git` GETs of `/.git/HEAD`, a few small `.git` files and `/.git/feroprobe-no-such-file` | `Nmap Scripting Engine` |
@@ -212,7 +214,7 @@ password, and each stays within the ports the scan probed.
 
 The repository ships Suricata and Snort rules that match the probe
 signature, so blue teams can flag FeroProbe scans without writing their
-own. Rules 9100006 to 9100018 match the script markers above in clear
+own. Rules 9100006 to 9100020 match the script markers above in clear
 text. They are in [`rules/`](../rules/): `rules/feroprobe.rules` for
 Suricata and `rules/feroprobe.snort.rules` for Snort 2.9 and
 `rules/feroprobe.snort3.rules` for Snort 3, with setup notes in

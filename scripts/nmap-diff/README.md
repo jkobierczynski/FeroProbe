@@ -87,7 +87,11 @@ with `Authorization: NTLM`. TCP 445 has a small SMB server for the
 `script-smb` case: NT LM 0.12 (with and without extended security, a
 session setup answered with the NTLM challenge and Windows Server 2003 OS
 strings) and SMB 2.0.2 to 3.1.1 NEGOTIATE; cases scanning the default or
-`-F` port lists find it open too. ICMP rate limits
+`-F` port lists find it open too. For the `script-tls` case TCP 995 speaks
+TLS 1.2 and 1.3 (Python's `ssl` module, ALPN `h2` and `http/1.1`, a
+self-signed certificate the `openssl` command makes when the lab starts, so
+the lab host needs it) and TCP 993 is an SSLv2-only stand-in that answers a
+CLIENT-HELLO with a SERVER-HELLO taking two SSLv2 ciphers. ICMP rate limits
 are off in every namespace, and the neighbour caches are flushed before each
 run, so both tools start from the same state.
 

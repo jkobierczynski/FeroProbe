@@ -251,7 +251,9 @@ end
 -- and a reason. `opts.timeout` (milliseconds, default 10000) bounds each
 -- wait; `opts.protocol` names the protocol instead of the port;
 -- `opts.domain` is the name SMTP and LMTP say EHLO/LHLO with (else
--- smtp.domain, else feroprobe.invalid).
+-- smtp.domain, else feroprobe.invalid); `opts.plain` returns the socket
+-- once the server agreed, before any TLS, for a script that sends its own
+-- hello (fero.tls).
 function starttls.connect(host, port, opts)
   opts = opts or {}
   local name = opts.protocol or starttls.protocol(port)
@@ -266,6 +268,7 @@ function starttls.connect(host, port, opts)
     sock:close()
     return nil, err
   end
+  if opts.plain then return sock end
   ok, err = sock:reconnect_ssl()
   if not ok then
     sock:close()

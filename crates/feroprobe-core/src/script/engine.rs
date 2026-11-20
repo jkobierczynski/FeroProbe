@@ -72,6 +72,9 @@ const SSH_LIBRARY: &str = include_str!("ssh.lua");
 /// `fero.starttls`: switching a plain-text connection to TLS.
 const STARTTLS_LIBRARY: &str = include_str!("starttls.lua");
 
+/// `fero.tls`: TLS and SSLv2 hellos built and read by hand.
+const TLS_LIBRARY: &str = include_str!("tls.lua");
+
 /// The library every script gets, written for FeroProbe, on top of the
 /// `fero` table the engine fills in.
 const LIBRARY: &str = r##"
@@ -479,6 +482,17 @@ pub(crate) fn install_library(
         })?,
     )?;
     fero.raw_set("crypto", crypto)?;
+    // fero.tls.parse_certificate(der): a certificate read from a TLS
+    // handshake, as sock:get_ssl_certificate() gives it; the rest of
+    // fero.tls is in tls.lua.
+    let tls = lua.create_table()?;
+    tls.raw_set(
+        "parse_certificate",
+        lua.create_function(|lua, der: mlua::LuaString| {
+            super::tls::cert_table(lua, &der.as_bytes())
+        })?,
+    )?;
+    fero.raw_set("tls", tls)?;
     // fero.sleep(seconds): wait without blocking other scripts, as nmap's
     // stdnse.sleep; at most ten minutes per call.
     fero.raw_set(
@@ -560,6 +574,9 @@ pub(crate) fn install_library(
         .call::<()>(fero.clone())?;
     lua.load(STARTTLS_LIBRARY)
         .set_name("=fero.starttls")
+        .call::<()>(fero.clone())?;
+    lua.load(TLS_LIBRARY)
+        .set_name("=fero.tls")
         .call::<()>(fero)?;
     Ok(())
 }

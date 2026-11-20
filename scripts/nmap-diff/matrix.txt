@@ -65,6 +65,10 @@ script-smb       | lan    | root | -sS -p 445 --script smb-os-discovery,smb-secu
 # The HTTP defaults against port 80's extra paths; -v so http-favicon shows
 # its (unknown) icon's MD5 in both tools.
 script-http-defaults | lan | root | -sS -v -p 80 --script http-auth,http-cookie-flags,http-cors,http-favicon,http-generator,http-git,http-webdav-scan --script-args http-auth.path=/private/,http-cookie-flags.path=/login,http-generator.path=/cms,http-webdav-scan.path=/dav/
+# The TLS scripts against the lab's TLS server on TCP 995 (TLS 1.2 and 1.3,
+# ALPN h2 and http/1.1, no NPN) and its SSLv2-only stand-in on TCP 993
+# (neither in @TCP).
+script-tls       | lan    | root | -sS -p 993,995 --script ssl-enum-ciphers,tls-alpn,tls-nextprotoneg,sslv2
 
 # --- Loopback (nmap treats localhost specially) ----------------------------
 syn-local        | local  | root | -sS -p @TCP
