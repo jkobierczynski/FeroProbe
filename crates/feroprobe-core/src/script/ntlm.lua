@@ -55,6 +55,10 @@ local function utf16(s)
   return table.concat(out)
 end
 
+-- UTF-16LE text as UTF-8, unprintable characters escaped (fero.smb reads
+-- its Unicode strings with it too).
+ntlm.utf16 = utf16
+
 -- A field (len, maxlen, offset) of the message `m`, or nil when it points
 -- outside it.
 local function field(m, at)

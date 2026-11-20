@@ -21,6 +21,7 @@ dependencies = {
   "http-date", "ntp-info", "rdp-ntlm-info", "smb2-time", "ssl-date",
   "http-ntlm-info", "imap-ntlm-info", "ms-sql-ntlm-info", "nntp-ntlm-info",
   "pop3-ntlm-info", "smtp-ntlm-info", "telnet-ntlm-info",
+  "smb-os-discovery", "smb-security-mode",
 }
 
 local function skews()

@@ -59,6 +59,9 @@ script-nbstat    | lan    | root | -sU -p 137 --script nbstat
 script-date      | lan    | root | -sS -p 80 --script http-date,clock-skew
 script-ntlm      | lan    | root | -sS -p 23,25,80,110,119,143,1433 --script http-ntlm-info,smtp-ntlm-info,imap-ntlm-info,pop3-ntlm-info,nntp-ntlm-info,telnet-ntlm-info,ms-sql-ntlm-info
 script-ssh       | lan    | root | -sS -p 22 --script ssh2-enum-algos
+# The SMB scripts against the lab's SMB server on TCP 445 (not in @TCP):
+# NT LM 0.12 and SMB 2.0.2 to 3.1.1, member of the domain LAB.
+script-smb       | lan    | root | -sS -p 445 --script smb-os-discovery,smb-security-mode,smb-protocols,smb2-capabilities,smb2-security-mode,smb2-time
 # The HTTP defaults against port 80's extra paths; -v so http-favicon shows
 # its (unknown) icon's MD5 in both tools.
 script-http-defaults | lan | root | -sS -v -p 80 --script http-auth,http-cookie-flags,http-cors,http-favicon,http-generator,http-git,http-webdav-scan --script-args http-auth.path=/private/,http-cookie-flags.path=/login,http-generator.path=/cms,http-webdav-scan.path=/dav/

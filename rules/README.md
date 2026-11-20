@@ -22,10 +22,11 @@ teams can flag FeroProbe scans without writing their own.
 | `ssh-hostkey` (default script), `ssh2-enum-algos` | SSH client version `SSH-2.0-FeroProbe_Scripting_Engine` |
 | `smtp-commands` (default script) | `EHLO feroprobe.invalid` |
 | `ftp-anon` (default script) | `PASS feroprobe@` |
-| `smb2-security-mode`, `smb2-time` (default scripts) | SMB2 NEGOTIATE client GUID `FeroProbeSMBScan`; on port 139 the NetBIOS calling name `FEROPROBE` |
+| `smb2-security-mode`, `smb2-time` (default scripts), `smb2-capabilities`, `smb-protocols` | SMB2 NEGOTIATE client GUID `FeroProbeSMBScan`; on port 139 the NetBIOS calling name `FEROPROBE` |
+| `smb-os-discovery`, `smb-security-mode` (default scripts), `smb-protocols` | SMB1 NEGOTIATE (NT LM 0.12 only) with the process ID `0x5046` ("FP", SID 9100018); `smb-os-discovery`'s session setup carries the raw NTLM NEGOTIATE (SID 9100017) inside SPNEGO, and NativeOS and NativeLanMan `FeroProbe` |
 | `rdp-ntlm-info` (default script) | RDP connection request cookie `Cookie: mstshash=FeroProbe` |
 | `http-`, `smtp-`, `imap-`, `pop3-`, `nntp-ntlm-info` (default scripts) | NTLM NEGOTIATE naming the workstation `FEROPROBE`, in base64 (`TlRMTVNTUAABAAAAB6IIogAAAAAAAAAACQAJACgAAAAAAAAAAAAAD0ZFUk9QUk9CRQ==`, SID 9100016) |
-| `telnet-ntlm-info`, `ms-sql-ntlm-info` (default scripts) | The same NEGOTIATE as raw bytes (`NTLMSSP\0` ... `FEROPROBE`, SID 9100017) |
+| `telnet-ntlm-info`, `ms-sql-ntlm-info`, `smb-os-discovery` (default scripts) | The same NEGOTIATE as raw bytes (`NTLMSSP\0` ... `FEROPROBE`, SID 9100017) |
 | `nbstat` (default script), and the `-sU`/`-sV` probe to UDP 137 | NetBIOS NODE STATUS request to UDP 137 with transaction ID `0x4650` ("FP") |
 | `ssl-date` (default script) | TLS ClientHello random `FeroProbeSSLDate` (bytes 15-30 of the record) |
 | `dns-nsid` (default script) | DNS CHAOS TXT queries (`id.server`, `version.bind`) with transaction ID `0x4650` ("FP") and only the RD flag set, over UDP (SID 9100014) or TCP (SID 9100015) |

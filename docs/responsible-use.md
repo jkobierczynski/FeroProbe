@@ -191,7 +191,8 @@ who asked:
 | `ssh-hostkey` (and `ssh2-enum-algos` when chosen) | The client version line `SSH-2.0-FeroProbe_Scripting_Engine` (in clear text, before encryption starts) | `SSH-2.0-Nmap-SSH2-Hostkey`, `SSH-2.0-Nmap-SSH2-Enum-Algos` |
 | `smtp-commands` | `EHLO feroprobe.invalid` (`.invalid` is a reserved name, RFC 2606) | the target's name, or `nmap.scanme.org` |
 | `ftp-anon` | `USER anonymous`, `PASS feroprobe@` | `PASS IEUser@` |
-| `smb2-security-mode`, `smb2-time` | The SMB2 NEGOTIATE client GUID `FeroProbeSMBScan` (16 bytes of ASCII); on port 139 the NetBIOS calling name `FEROPROBE` | — |
+| `smb2-security-mode`, `smb2-time` (and `smb2-capabilities`, `smb-protocols` when chosen) | The SMB2 NEGOTIATE client GUID `FeroProbeSMBScan` (16 bytes of ASCII); on port 139 the NetBIOS calling name `FEROPROBE` | client GUID `1234567890123456` |
+| `smb-os-discovery`, `smb-security-mode` (and `smb-protocols` when chosen) | The SMB1 process ID `0x5046` ("FP") of each SMB1 request (rule 9100018 matches the NEGOTIATE); `smb-os-discovery`'s session setup also carries NativeOS and NativeLanMan `FeroProbe` and the NTLM NEGOTIATE naming `FEROPROBE` (rule 9100017), and stops at the server's challenge, so nothing logs in | NativeOS `Nmap`, NativeLanMan `Native Lanman`; nmap logs in anonymously or as guest |
 | `rdp-ntlm-info` | The RDP routing cookie `Cookie: mstshash=FeroProbe` in the connection request (clear text, before TLS); then the NTLM NEGOTIATE below, inside TLS | — |
 | `http-ntlm-info`, `smtp-ntlm-info`, `imap-ntlm-info`, `pop3-ntlm-info`, `nntp-ntlm-info`, `telnet-ntlm-info`, `ms-sql-ntlm-info` | An NTLM NEGOTIATE that names the workstation `FEROPROBE` and no user or domain, the same 49 bytes every time: in base64 over HTTP (`Authorization: NTLM`, beside the `User-Agent` above), SMTP, IMAP, POP3 and NNTP (rule 9100016), as is over telnet and MS-SQL (rule 9100017). `ms-sql-ntlm-info`'s login also gives the host name `FEROPROBE` and the application name `FeroProbe Scripting Engine`; `smtp-ntlm-info` says `EHLO feroprobe.invalid`. These scripts switch to TLS with STARTTLS where the server allows it, and the NEGOTIATE is then encrypted | NEGOTIATE with no workstation |
 | `ssl-date` | `FeroProbeSSLDate` in the TLS ClientHello random, after its four time bytes (clear text, it is the first message of the handshake) | — |
@@ -211,7 +212,7 @@ password, and each stays within the ports the scan probed.
 
 The repository ships Suricata and Snort rules that match the probe
 signature, so blue teams can flag FeroProbe scans without writing their
-own. Rules 9100006 to 9100017 match the script markers above in clear
+own. Rules 9100006 to 9100018 match the script markers above in clear
 text. They are in [`rules/`](../rules/): `rules/feroprobe.rules` for
 Suricata and `rules/feroprobe.snort.rules` for Snort 2.9 and
 `rules/feroprobe.snort3.rules` for Snort 3, with setup notes in
