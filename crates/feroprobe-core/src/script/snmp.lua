@@ -75,17 +75,19 @@ end
 local function oid(s)
   local t = arcs(s)
   if not t then error("fero.snmp: not an OID: " .. tostring(s), 3) end
-  local out = { string.char(t[1] * 40 + t[2]) }
-  for i = 3, #t do
-    local n = t[i]
+  -- Each subidentifier in base 128, the first two arcs combined into
+  -- one (X.690 8.19): "2.100" is 180, 81 34.
+  local function base128(n)
     local b = { string.char(n & 0x7f) }
     n = n >> 7
     while n > 0 do
       table.insert(b, 1, string.char(0x80 | (n & 0x7f)))
       n = n >> 7
     end
-    out[#out + 1] = table.concat(b)
+    return table.concat(b)
   end
+  local out = { base128(t[1] * 40 + t[2]) }
+  for i = 3, #t do out[#out + 1] = base128(t[i]) end
   return tlv(OID, table.concat(out))
 end
 
@@ -389,31 +391,41 @@ function Session:response_to(r)
     and r.version == self.opts.version and r.community == self.opts.community
 end
 
+-- Whether the variables of `r` are exactly `oids`, as in an answer to a
+-- GetRequest and in an error answer, which echoes the request's
+-- variables (RFC 3416 4.2.1); an error answer may also carry none.
+local function names(r, oids)
+  if r.error_status ~= 0 and #r.varbinds == 0 then return true end
+  if #r.varbinds ~= #oids then return false end
+  for i, o in ipairs(oids) do
+    if r.varbinds[i].oid ~= o then return false end
+  end
+  return true
+end
+
 -- GetRequest for `oids`: the response (see snmp.parse), or nil and a
 -- message. A response naming other variables is not ours.
 function Session:get(...)
   local oids = { ... }
   return self:exchange(snmp.message(self.opts.version, self.opts.community, GET, oids),
     snmp.parse, function(r)
-      if not self:response_to(r) then return false end
-      if r.error_status ~= 0 then return true end
-      if #r.varbinds ~= #oids then return false end
-      for i, o in ipairs(oids) do
-        if r.varbinds[i].oid ~= o then return false end
-      end
-      return true
+      return self:response_to(r) and names(r, oids)
     end)
 end
 
 -- GetNextRequest for one OID: the response, or nil and a message. Its
 -- variable must come after `o`, so a late answer to an earlier step of a
--- walk is not taken for this one.
+-- walk is not taken for this one; an error answer or a v2 endOfMibView
+-- names `o` itself.
 function Session:getnext(o)
   return self:exchange(snmp.message(self.opts.version, self.opts.community, GETNEXT, { o }),
     snmp.parse, function(r)
       if not self:response_to(r) then return false end
-      if r.error_status ~= 0 then return true end
-      return #r.varbinds == 1 and snmp.compare(r.varbinds[1].oid, o) > 0
+      if r.error_status ~= 0 then return names(r, { o }) end
+      if #r.varbinds ~= 1 then return false end
+      local vb = r.varbinds[1]
+      if vb.exception == "endOfMibView" then return vb.oid == o end
+      return snmp.compare(vb.oid, o) > 0
     end)
 end
 

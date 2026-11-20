@@ -132,6 +132,11 @@ local IFTYPE = {
   [289] = "ptm", [290] = "ghn",
 }
 
+-- ifOperStatus values (RFC 2863).
+local OPER_STATUS = {
+  "up", "down", "testing", "unknown", "dormant", "notPresent", "lowerLayerDown",
+}
+
 -- A speed in bits per second as nmap writes it: "1 Gbps", "100 Mbps",
 -- "64 Kbps".
 local function speed(v)
@@ -251,7 +256,7 @@ action = function(host, port)
       entry[#entry + 1] = string.format("Type: %s  Speed: %s", item.type, item.speed)
     end
     local st = num(cols.status[i])
-    local status = (st == 1 and "up") or (st == 2 and "down") or nil
+    local status = st and OPER_STATUS[st]
     item.status = status
     if verbose and status then
       entry[#entry + 1] = "Status: " .. status

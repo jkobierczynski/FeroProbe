@@ -3335,8 +3335,11 @@ lists each interface as nmap does: its name,
 nmap\[aq]s shows only the last), \f[V]MAC address:\f[R] with the vendor
 from the OUI list, \f[V]Type:\f[R] (the IANA ifType name) and
 \f[V]Speed:\f[R], and \f[V]Traffic stats: ... sent, ... received\f[R].
-Interfaces that are not up, and every \f[V]Status:\f[R] line, only with
-\f[V]-v\f[R] (see Verbosity of scripts chosen by name).
+Interfaces that are not up, and every \f[V]Status:\f[R] line (any RFC
+2863 state: \f[V]up\f[R], \f[V]down\f[R], \f[V]testing\f[R],
+\f[V]unknown\f[R], \f[V]dormant\f[R], \f[V]notPresent\f[R],
+\f[V]lowerLayerDown\f[R]; nmap\[aq]s names only the first two), only
+with \f[V]-v\f[R] (see Verbosity of scripts chosen by name).
 Reads only the columns it shows, about half the requests nmap\[aq]s walk
 of the whole table sends.
 nmap\[aq]s can also run before the scan against a host named in

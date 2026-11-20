@@ -5758,3 +5758,39 @@ fn snmp_scripts_stay_on_scanned_udp() {
     rt.block_on(scan.scan_hosts(&mut hosts));
     assert!(hosts.iter().all(|h| h.ports[0].scripts.is_empty()));
 }
+
+#[tokio::test]
+async fn snmp_library_walk_ends_at_end_of_mib_and_encodes_oids() {
+    // The agent's last variable is 1.3.6.1.2.1.25.1.1.0: a v2c walk past
+    // it gets endOfMibView for the OID asked, which ends the walk at once.
+    let (port, seen) = snmp_agent(false).await;
+    let src = r#"
+description = "test"
+categories = { "safe" }
+portrule = fero.portrule.match({}, { "snmp" }, "udp")
+action = function(host, port)
+  local s = fero.snmp.session(host, port, { version = 1 })
+  local vars = s:walk("1.3.6.1.2.1.25.1")
+  s:close()
+  local m = fero.snmp.message(0, "public", 0xa0, { "2.100.3" })
+  return string.format("%d %s %s", #vars, vars[1].oid, fero.hex(m:sub(-7)))
+end
+"#;
+    let scan = ScriptScan::new(vec![script("snmp-lib", src)], ArgTable::default(), None).unwrap();
+    let mut host = host_with_services(&[(port, "snmp")]);
+    host.ports[0].protocol = Protocol::Udp;
+    let mut hosts = vec![host];
+    let start = std::time::Instant::now();
+    scan.scan_hosts(&mut hosts).await;
+    assert!(
+        start.elapsed() < Duration::from_secs(3),
+        "{:?}",
+        start.elapsed()
+    );
+    // "2.100.3": first subidentifier 180 in base 128 (81 34), then 03.
+    assert_eq!(
+        hosts[0].ports[0].scripts[0].output,
+        "1 1.3.6.1.2.1.25.1.1.0 06038134030500"
+    );
+    assert_eq!(seen.lock().unwrap().len(), 2);
+}
