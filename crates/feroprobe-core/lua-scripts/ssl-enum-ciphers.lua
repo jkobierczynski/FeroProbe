@@ -158,15 +158,14 @@ local function preference(ctx, version, accepted)
   end
   while #left > 1 do
     local a = ask(ctx, version, left)
-    if not a then break end
+    -- An order with a gap would be a guess: say so instead.
+    if not a then return "indeterminate", "Network error" end
     local c = a.server_hello.cipher
     order[#order + 1] = c
     table.remove(left, index_of(left, c))
   end
-  -- What could not be ordered (one suite left, or a failed hello) goes
-  -- last, by name.
-  table.sort(left, function(x, y) return tls.cipher_name(x) < tls.cipher_name(y) end)
-  for _, c in ipairs(left) do order[#order + 1] = c end
+  -- The one suite left is the server's last.
+  if left[1] then order[#order + 1] = left[1] end
   return "server", nil, order
 end
 
@@ -281,7 +280,10 @@ local function grade(version, info, kex_strength, cert, warn)
       capped("F", "Insecure certificate signature (SHA1), score capped at F")
     end
   end
-  if not kex_strength or not info.size then return "unknown" end
+  -- A cap at F needs no score; otherwise a missing input leaves it open.
+  if not kex_strength or not info.size then
+    return cap == "F" and "F" or "unknown"
+  end
   local g = letter(3 * kex_score(kex_strength) + 4 * cipher_score(info.size))
   if RANK[cap] > RANK[g] then g = cap end
   return g
@@ -353,7 +355,13 @@ action = function(host, port)
   if not tunnelled(port) then ctx.starttls = fero.starttls.protocol(port) end
   if ctx.starttls then
     -- A server that will not switch is asked straight away instead.
-    local sock = tls.connect(host, port, { starttls = ctx.starttls, timeout = ctx.timeout })
+    -- Two tries, so one dropped connection does not turn every hello
+    -- into a plain one.
+    local sock
+    for _ = 1, 2 do
+      sock = tls.connect(host, port, { starttls = ctx.starttls, timeout = ctx.timeout })
+      if sock then break end
+    end
     if sock then
       sock:close()
     else

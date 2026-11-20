@@ -33,7 +33,8 @@ local PROTOCOLS = {
   "h3", "h2c", "stun.turn", "stun.nat-discovery", "webrtc", "c-webrtc",
   "ftp", "imap", "pop3", "managesieve", "coap", "xmpp-client",
   "xmpp-server", "mqtt", "dot", "ntske/1", "sunrpc", "smb", "irc", "nntp",
-  "nnsp", "doq", "sip/2", "tds/8.0", "dicom", "postgresql",
+  "nnsp", "doq", "sip/2", "tds/8.0", "dicom", "postgresql", "radius/1.0",
+  "radius/1.1",
 }
 
 action = function(host, port)

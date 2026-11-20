@@ -523,6 +523,13 @@ pub(crate) fn install_library(
             Ok(crate::oui::lookup(crate::arp::MacAddr(b)).map(str::to_string))
         })?,
     )?;
+    // fero.clock_ms(): milliseconds on a monotonic clock, for deadlines
+    // finer than os.time's whole seconds.
+    let start = std::time::Instant::now();
+    fero.raw_set(
+        "clock_ms",
+        lua.create_function(move |_, ()| Ok(start.elapsed().as_millis() as i64))?,
+    )?;
     fero.raw_set(
         "verbosity",
         lua.create_function(|_, ()| Ok(crate::debug::verbosity()))?,

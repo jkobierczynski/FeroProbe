@@ -28,8 +28,9 @@ for name, v in pairs(tls.VERSIONS) do VERSION_NAME[v] = name end
 -- The name of a protocol version number (0x0303 is "TLSv1.2"), or nil.
 function tls.version_name(v) return VERSION_NAME[v] end
 
--- Every cipher suite in the IANA registry (signalling values left out),
--- by code. TLS 1.3 suites are named as nmap names them, with "AKE_WITH"
+-- The cipher suites of the IANA registry, by code: all but the
+-- signalling values and the national and password suites (ECCPWD, SM4,
+-- GOST R 34.12-2015), which no ClientHello here offers. TLS 1.3 suites are named as nmap names them, with "AKE_WITH"
 -- (IANA: TLS_AES_128_GCM_SHA256), so each name reads KEX_WITH_CIPHER.
 tls.CIPHERS = {
   { 0x0000, "TLS_NULL_WITH_NULL_NULL" },
@@ -381,6 +382,10 @@ tls.CIPHERS = {
   { 0xccac, "TLS_ECDHE_PSK_WITH_CHACHA20_POLY1305_SHA256" },
   { 0xccad, "TLS_DHE_PSK_WITH_CHACHA20_POLY1305_SHA256" },
   { 0xccae, "TLS_RSA_PSK_WITH_CHACHA20_POLY1305_SHA256" },
+  { 0xd001, "TLS_ECDHE_PSK_WITH_AES_128_GCM_SHA256" },
+  { 0xd002, "TLS_ECDHE_PSK_WITH_AES_256_GCM_SHA384" },
+  { 0xd003, "TLS_ECDHE_PSK_WITH_AES_128_CCM_8_SHA256" },
+  { 0xd005, "TLS_ECDHE_PSK_WITH_AES_128_CCM_SHA256" },
 }
 
 local CODE, NAME = {}, {}
@@ -408,6 +413,8 @@ end
 function tls.cipher_info(name)
   local kex, rest = name:match("^TLS_(.-)_WITH_(.+)$")
   if not kex then return nil end
+  -- RFC 6655 spells two DHE-PSK suites PSK_DHE; they are DHE_PSK.
+  if kex == "PSK_DHE" then kex = "DHE_PSK" end
   local info = { kex = kex, tls13 = kex == "AKE" }
   info.export = kex:find("EXPORT", 1, true) ~= nil
   info.anon = kex:find("anon", 1, true) ~= nil
@@ -448,8 +455,11 @@ function tls.cipher_info(name)
     if not alg then return nil end
     set(alg, tonumber(size), mode, 128)
   end
+  -- AEAD suites need TLS 1.2; so do the SHA-256/384 MAC suites, except
+  -- the PSK ones of RFC 5487 and 5489, which TLS 1.0 and 1.1 may use.
   info.tls12 = info.tls13 or info.mode == "GCM" or info.mode == "CCM"
-    or info.mode == "AEAD" or hash == "SHA256" or hash == "SHA384"
+    or info.mode == "AEAD"
+    or ((hash == "SHA256" or hash == "SHA384") and not kex:find("PSK", 1, true))
   return info
 end
 
@@ -560,7 +570,8 @@ end
 --   version       the protocol version asked for (default 0x0303, TLS 1.2;
 --                 0x0304 sends 0x0303 and the supported_versions
 --                 extension, with a random x25519 key share)
---   ciphers       cipher suites, as codes or names (default all but TLS 1.3)
+--   ciphers       cipher suites, as codes or names (default the TLS 1.3
+--                 ones for TLS 1.3, else all the others)
 --   compressors   compression methods (default { 0 }, NULL)
 --   server_name   the name for SNI (left out for an address)
 --   alpn          a list of protocol names for ALPN
@@ -575,15 +586,17 @@ function tls.client_hello(opts)
   local ciphers = cipher_codes(opts.ciphers or {})
   if not opts.ciphers then
     for _, c in ipairs(tls.CIPHERS) do
-      if c[1] < 0x1301 or c[1] > 0x13ff then ciphers[#ciphers + 1] = c[1] end
+      local is13 = c[1] >= 0x1301 and c[1] <= 0x13ff
+      if tls13 == is13 then ciphers[#ciphers + 1] = c[1] end
     end
   end
   local exts = {}
+  local groups = opts.groups or (tls13 and OFFER_GROUPS_13 or OFFER_GROUPS)
   if version > 0x0300 then
     if sni_ok(opts.server_name) then
       exts[#exts + 1] = ext(0x0000, string.pack(">s2", "\0" .. string.pack(">s2", opts.server_name)))
     end
-    exts[#exts + 1] = ext(0x000a, string.pack(">s2", u16_list(opts.groups or (tls13 and OFFER_GROUPS_13 or OFFER_GROUPS))))
+    exts[#exts + 1] = ext(0x000a, string.pack(">s2", u16_list(groups)))
     exts[#exts + 1] = ext(0x000b, "\1\0")
     if version >= 0x0303 then
       exts[#exts + 1] = ext(0x000d, string.pack(">s2", u16_list(SIGNATURES)))
@@ -597,8 +610,13 @@ function tls.client_hello(opts)
     if tls13 then
       exts[#exts + 1] = ext(0x002b, string.pack(">s1", u16_list({ version })))
       exts[#exts + 1] = ext(0x002d, "\1\1")
-      exts[#exts + 1] = ext(0x0033, string.pack(">s2",
-        string.pack(">I2s2", 29, fero.crypto.random_bytes(32))))
+      -- A key share only for a group offered: x25519 when it is, else
+      -- none, and the server asks again for the group it wants.
+      local share = ""
+      for _, g in ipairs(groups) do
+        if g == 29 then share = string.pack(">I2s2", 29, fero.crypto.random_bytes(32)) end
+      end
+      exts[#exts + 1] = ext(0x0033, string.pack(">s2", share))
     else
       exts[#exts + 1] = ext(0xff01, "\0")
     end
@@ -653,21 +671,26 @@ function tls.parse_server_hello(b)
   if e[0x002b] and #e[0x002b] == 2 then sh.version = string.unpack(">I2", e[0x002b]) end
   if e[0x0033] and #e[0x0033] >= 2 then sh.group = string.unpack(">I2", e[0x0033]) end
   if e[0x0010] then
-    local okp, list = pcall(string.unpack, ">s2", e[0x0010])
-    if okp and #list > 0 then
-      local okn, name = pcall(string.unpack, ">s1", list)
-      if okn then sh.alpn = name end
+    -- Exactly one non-empty name, filling the extension (RFC 7301 3.1).
+    local okp, list, after = pcall(string.unpack, ">s2", e[0x0010])
+    if okp and after == #e[0x0010] + 1 and #list > 0 then
+      local okn, name, nafter = pcall(string.unpack, ">s1", list)
+      if okn and #name > 0 and nafter == #list + 1 then sh.alpn = name end
     end
   end
   if e[0x3374] then
-    local list, p = {}, 1
+    -- Only a list read to its end; a cut one is not reported.
+    local list, p, whole = {}, 1, true
     while p <= #e[0x3374] do
       local okn, name, nextp = pcall(string.unpack, ">s1", e[0x3374], p)
-      if not okn then break end
+      if not okn then
+        whole = false
+        break
+      end
       list[#list + 1] = name
       p = nextp
     end
-    sh.npn = list
+    if whole then sh.npn = list end
   end
   return sh
 end
@@ -711,7 +734,7 @@ local MAX_ANSWER = 256 * 1024
 -- Read a server's answer to a ClientHello from `sock`: its records until
 -- ServerHelloDone, an alert, or (with `opts.hello_only`, and always for a
 -- TLS 1.3 ServerHello) the ServerHello. All of it within `opts.timeout`
--- milliseconds (default 5000; counted in whole seconds, as os.time is),
+-- milliseconds (default 5000, on fero.clock_ms),
 -- however slowly the server sends. Returns a table with what came:
 -- `server_hello` (tls.parse_server_hello), `certificates` (DER, server's
 -- first), `server_key_exchange` (the message body), `done`, `alert`
@@ -720,13 +743,13 @@ local MAX_ANSWER = 256 * 1024
 function tls.read_answer(sock, opts)
   opts = opts or {}
   local timeout = tonumber(opts.timeout) or 5000
-  local deadline = os.time() + math.max(1, (timeout + 999) // 1000)
+  local deadline = fero.clock_ms() + timeout
   local buf, total = "", 0
   local function need(n)
     while #buf < n do
-      local left = deadline - os.time()
+      local left = deadline - fero.clock_ms()
       if left <= 0 then return false, "TIMEOUT" end
-      sock:set_timeout(math.min(left * 1000, timeout))
+      sock:set_timeout(left)
       local ok, data = sock:receive()
       if not ok then return false, data end
       total = total + #data
@@ -918,13 +941,13 @@ end
 -- "unknown 0x......") }; or nil and a message.
 function tls.sslv2_read_server_hello(sock, timeout)
   timeout = tonumber(timeout) or 5000
-  local deadline = os.time() + math.max(1, (timeout + 999) // 1000)
+  local deadline = fero.clock_ms() + timeout
   local buf = ""
   local function need(n)
     while #buf < n do
-      local left = deadline - os.time()
+      local left = deadline - fero.clock_ms()
       if left <= 0 then return false, "TIMEOUT" end
-      sock:set_timeout(math.min(left * 1000, timeout))
+      sock:set_timeout(left)
       local ok, data = sock:receive()
       if not ok then return false, data end
       buf = buf .. data
@@ -947,10 +970,13 @@ function tls.sslv2_read_server_hello(sock, timeout)
   ok, err = need(head + len)
   if not ok then return nil, err end
   local msg = buf:sub(head + 1, head + len)
-  local okp, typ, _, _, version, cert_len, specs_len, _, pos =
+  local okp, typ, _, _, version, cert_len, specs_len, id_len, pos =
     pcall(string.unpack, ">BBBI2I2I2I2", msg)
   if not okp or typ ~= 4 then return nil, "not a SERVER-HELLO" end
-  if specs_len % 3 ~= 0 or pos + cert_len + specs_len - 1 > #msg then
+  -- The message must hold its certificate, cipher specs and connection
+  -- ID (the record's padding, if any, was left out above).
+  if specs_len % 3 ~= 0 or id_len == 0
+    or pos + cert_len + specs_len + id_len - 1 > #msg then
     return nil, "bad SERVER-HELLO"
   end
   local cert = cert_len > 0 and msg:sub(pos, pos + cert_len - 1) or nil

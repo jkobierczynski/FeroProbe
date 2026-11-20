@@ -2191,11 +2191,12 @@ T{
 T}@T{
 A ClientHello in one record: \f[V]version\f[R] (\f[V]0x0300\f[R] SSLv3
 to \f[V]0x0304\f[R] TLS 1.3, default \f[V]0x0303\f[R]; TLS 1.3 is asked
-through \f[V]supported_versions\f[R] with a random x25519 key share),
-\f[V]ciphers\f[R] (codes or names; default every suite before TLS 1.3),
-\f[V]compressors\f[R] (default \f[V]{0}\f[R]), \f[V]server_name\f[R]
-(SNI; \f[V]fero.tls.hello\f[R] uses the host\[aq]s name, never an
-address), \f[V]alpn\f[R] (protocol names), \f[V]npn\f[R]
+through \f[V]supported_versions\f[R], with a random x25519 key share
+when x25519 is among the groups, else none), \f[V]ciphers\f[R] (codes or
+names; default the TLS 1.3 suites for TLS 1.3, every other suite
+otherwise), \f[V]compressors\f[R] (default \f[V]{0}\f[R]),
+\f[V]server_name\f[R] (SNI; \f[V]fero.tls.hello\f[R] uses the host\[aq]s
+name, never an address), \f[V]alpn\f[R] (protocol names), \f[V]npn\f[R]
 (\f[V]true\f[R]), \f[V]groups\f[R], \f[V]extensions\f[R]
 (\f[V]{type, data}\f[R] pairs).
 SSLv3 hellos carry no extensions.
@@ -2207,14 +2208,13 @@ T{
 T}@T{
 Reads a server\[aq]s answer to a ClientHello until ServerHelloDone, an
 alert, a TLS 1.3 ServerHello or, with \f[V]opts.hello_only\f[R], the
-ServerHello, all within \f[V]opts.timeout\f[R] ms (default 5000, in
-whole seconds) however slowly the bytes come, and at most 256 KiB:
-\f[V]server_hello\f[R] (\f[V]version\f[R], \f[V]cipher\f[R],
-\f[V]compressor\f[R], \f[V]extensions\f[R] by type, \f[V]hrr\f[R],
-\f[V]group\f[R], \f[V]alpn\f[R], \f[V]npn\f[R]), \f[V]certificates\f[R]
-(DER, the server\[aq]s first), \f[V]server_key_exchange\f[R],
-\f[V]done\f[R], \f[V]alert\f[R] (\f[V]level\f[R], \f[V]code\f[R],
-\f[V]name\f[R])
+ServerHello, all within \f[V]opts.timeout\f[R] ms (default 5000) however
+slowly the bytes come, and at most 256 KiB: \f[V]server_hello\f[R]
+(\f[V]version\f[R], \f[V]cipher\f[R], \f[V]compressor\f[R],
+\f[V]extensions\f[R] by type, \f[V]hrr\f[R], \f[V]group\f[R],
+\f[V]alpn\f[R], \f[V]npn\f[R]), \f[V]certificates\f[R] (DER, the
+server\[aq]s first), \f[V]server_key_exchange\f[R], \f[V]done\f[R],
+\f[V]alert\f[R] (\f[V]level\f[R], \f[V]code\f[R], \f[V]name\f[R])
 T}
 T{
 \f[V]fero.tls.cipher_name(code)\f[R],
@@ -2312,6 +2312,12 @@ T{
 \f[V]fero.crypto.random_bytes(n)\f[R]
 T}@T{
 \f[V]n\f[R] random bytes from the system (at most 65536)
+T}
+T{
+\f[V]fero.clock_ms()\f[R]
+T}@T{
+Milliseconds on a monotonic clock (from the script\[aq]s start), for
+deadlines finer than \f[V]os.time()\f[R]
 T}
 T{
 \f[V]fero.mac_vendor(mac)\f[R]
@@ -2413,6 +2419,10 @@ address).
 nmap, through OpenSSL, can also speak older versions, so a device that
 only knows SSLv3 to TLS 1.1 answers nmap\[aq]s scripts but not
 FeroProbe\[aq]s.
+The scripts built on \f[V]fero.tls\f[R] (\f[V]ssl-enum-ciphers\f[R],
+\f[V]sslv2\f[R], \f[V]tls-alpn\f[R], \f[V]tls-nextprotoneg\f[R]) are the
+exception: they send their own hellos, from SSLv2 and SSLv3 up to TLS
+1.3, and read the answer without finishing a handshake.
 .PP
 \f[V]sock:get_ssl_certificate()\f[R] returns \f[V]subject\f[R] and
 \f[V]issuer\f[R] (tables of attribute names such as
@@ -3383,10 +3393,11 @@ Makes many connections (often over a hundred), hence intrusive, as
 nmap\[aq]s; not in \f[V]default\f[R].
 nmap 7.94 misses TLS 1.3 on some servers whose certificate key is ECDSA
 P-384 (seen with OpenSSL 3); FeroProbe\[aq]s finds it.
-Its portrule takes FeroProbe\[aq]s TLS port and service list
-(\f[V]fero.portrule.ssl\f[R]), so on other ports it needs \f[V]-sV\f[R]
-to find TLS (or \f[V]+ssl-enum-ciphers\f[R]); nmap\[aq]s also runs on
-some other ports without \f[V]-sV\f[R].
+It runs on ports in FeroProbe\[aq]s TLS port and service list
+(\f[V]fero.portrule.ssl\f[R]) and on ports that switch to TLS on
+request; only on a port that is neither does it need \f[V]-sV\f[R] to
+find TLS (or \f[V]+ssl-enum-ciphers\f[R]); nmap\[aq]s also runs on some
+other ports without \f[V]-sV\f[R].
 Argument: \f[V]ssl-enum-ciphers.timeout\f[R] (ms per answer, default
 5000)
 T}

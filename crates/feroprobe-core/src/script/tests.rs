@@ -5256,3 +5256,45 @@ end
          TLS_AKE_WITH_AES_128_GCM_SHA256 47 secp256r1 7680 0300 50"
     );
 }
+
+#[tokio::test]
+async fn tls_library_checks_server_hello_extensions() {
+    let probe = script(
+        "probe",
+        r#"
+description = "test"
+categories = {"safe"}
+portrule = function() return true end
+action = function()
+  local t = fero.tls
+  local function sh(exts)
+    local e = ""
+    for _, x in ipairs(exts) do e = e .. string.pack(">I2s2", x[1], x[2]) end
+    return t.parse_server_hello(string.pack(">I2", 0x0303) .. string.rep("\7", 32)
+      .. "\0" .. string.pack(">I2B", 0xc02f, 0) .. string.pack(">s2", e))
+  end
+  local one = sh({ { 0x0010, string.pack(">s2", string.pack(">s1", "h2")) } })
+  local two = sh({ { 0x0010, string.pack(">s2", string.pack(">s1", "h2") .. string.pack(">s1", "http/1.1")) } })
+  local npn = sh({ { 0x3374, string.pack(">s1", "spdy/3") .. string.pack(">s1", "http/1.1") } })
+  local cut = sh({ { 0x3374, string.pack(">s1", "spdy/3") .. "\9ab" } })
+  -- A TLS 1.3 hello offering only secp256r1 sends an empty key share.
+  local h = t.client_hello({ version = 0x0304, groups = { 23 } })
+  local ks = h:find("\0\51\0\2\0\0", 1, true) ~= nil
+  return table.concat({
+    tostring(one.alpn), tostring(two.alpn), table.concat(npn.npn, ","), tostring(cut.npn),
+    t.cipher_info("TLS_PSK_DHE_WITH_AES_128_CCM_8").kex,
+    tostring(t.cipher_info("TLS_PSK_WITH_AES_128_CBC_SHA256").tls12),
+    tostring(ks),
+  }, " ")
+end
+"#,
+    );
+    let port = greeter(b"").await;
+    let scan = ScriptScan::new(vec![probe], ArgTable::default(), None).unwrap();
+    let mut hosts = vec![host_with(&[(port, PortState::Open)])];
+    scan.scan_hosts(&mut hosts).await;
+    assert_eq!(
+        hosts[0].ports[0].scripts[0].output,
+        "h2 nil spdy/3,http/1.1 nil DHE_PSK false true"
+    );
+}
