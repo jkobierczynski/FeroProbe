@@ -3300,7 +3300,12 @@ fn dry_run_notes(args: &Args, plan: &Plan, d: &DryOrder, privileged: bool) -> Ve
         ));
     }
     if plan.version && !plan.ping_only {
-        let tcp = if plan.tcp.is_some() { d.tcp } else { &[] };
+        // An FTP bounce scan (-b) finds TCP ports too, without plan.tcp.
+        let tcp = if plan.tcp.is_some() || d.bounce.is_some() {
+            d.tcp
+        } else {
+            &[]
+        };
         let udp = if plan.udp { d.udp } else { &[] };
         notes.extend(feroprobe_core::service::dry_run_lines(d.version, tcp, udp));
     }

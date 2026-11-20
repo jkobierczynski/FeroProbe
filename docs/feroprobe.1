@@ -1098,9 +1098,11 @@ file excludes.
 The built-in rules exclude TCP 9100-9107, the raw printing ports of
 network printers (JetDirect, AppSocket): a printer prints whatever
 reaches them, so each probe would come out as a page of garbage.
-Without \f[V]--allports\f[R] those ports get nothing and show the name
-their number suggests with a \f[V]?\f[R] (\f[V]jetdirect?\f[R]), as in
-nmap, which excludes the same ports.
+Without \f[V]--allports\f[R] version detection sends those ports no
+probe (the port scan itself still reaches them, as in nmap: a TCP
+connect scan opens and closes a connection, which prints nothing) and
+they show the name their number suggests with a \f[V]?\f[R]
+(\f[V]jetdirect?\f[R]), as in nmap, which excludes the same ports.
 \f[V]--dry-run\f[R] lists the ports it would skip.
 .SS \f[V]--version-timeout <ms>\f[R]
 .PP

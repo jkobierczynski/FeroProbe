@@ -736,7 +736,9 @@ Probe every open port with `-sV`, including the ones the rules file
 excludes. The built-in rules exclude TCP 9100-9107, the raw printing ports
 of network printers (JetDirect, AppSocket): a printer prints whatever
 reaches them, so each probe would come out as a page of garbage. Without
-`--allports` those ports get nothing and show the name their number
+`--allports` version detection sends those ports no probe (the port scan
+itself still reaches them, as in nmap: a TCP connect scan opens and closes
+a connection, which prints nothing) and they show the name their number
 suggests with a `?` (`jetdirect?`), as in nmap, which excludes the same
 ports. `--dry-run` lists the ports it would skip.
 
