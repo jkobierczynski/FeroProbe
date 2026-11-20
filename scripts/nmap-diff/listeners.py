@@ -561,14 +561,15 @@ def main():
     served = []
     try:
         for addr in addrs:
-            for port, handler in tcp:
-                served.append((serve_tcp, bind(addr, port, socket.SOCK_STREAM), handler))
-            for port, handler in udp:
-                served.append((serve_udp, bind(addr, port, socket.SOCK_DGRAM), handler))
+            for proto, kind, serve, ports in (("tcp", socket.SOCK_STREAM, serve_tcp, tcp),
+                                              ("udp", socket.SOCK_DGRAM, serve_udp, udp)):
+                for port, handler in ports:
+                    where = f"{addr} {proto}/{port}"
+                    served.append((serve, bind(addr, port, kind), handler))
     except OSError as e:
         for _, s, _ in served:
             s.close()
-        print(f"listener setup failed: {e}", flush=True)
+        print(f"listener setup failed on {where}: {e}", flush=True)
         sys.exit(1)
     threads = [threading.Thread(target=f, args=(s, h), daemon=True) for f, s, h in served]
     for t in threads:
