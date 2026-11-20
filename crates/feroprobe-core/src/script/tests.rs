@@ -4413,6 +4413,9 @@ struct SmbLab {
     unicode: bool,
     /// The domain or workgroup the plain NEGOTIATE names.
     domain: &'static str,
+    /// The plain NEGOTIATE's names in OEM text (an old CIFS server), not
+    /// UTF-16.
+    oem_names: bool,
     /// The names in the NTLM challenge.
     names: Vec<(u16, &'static str)>,
     /// The newest SMB2 dialect it speaks (0: none).
@@ -4426,6 +4429,7 @@ impl Default for SmbLab {
             mode: 0x03,
             unicode: false,
             domain: "LAB",
+            oem_names: false,
             names: vec![
                 (2, "LAB"),
                 (1, "SRV01"),
@@ -4488,11 +4492,23 @@ fn smb_lab_answer(lab: &SmbLab, req: &[u8], seen: &Seen) -> Option<Vec<u8>> {
             } else {
                 d.extend(*b"chalenge");
                 for n in [lab.domain, "SRV01"] {
-                    d.extend(u16le(n));
-                    d.extend([0, 0]);
+                    if lab.oem_names {
+                        d.extend(n.as_bytes());
+                        d.push(0);
+                    } else {
+                        d.extend(u16le(n));
+                        d.extend([0, 0]);
+                    }
                 }
             }
-            return Some(smb1_reply(req, 0, 0xc001 | (flags2 & 0x0800), &w, &d));
+            let unicode = if lab.oem_names { 0 } else { 0x8000 };
+            return Some(smb1_reply(
+                req,
+                0,
+                0x4001 | unicode | (flags2 & 0x0800),
+                &w,
+                &d,
+            ));
         }
         if req[4] == 0x73 {
             let blob = ntlm_challenge_naming(SMB_NOW, &lab.names);
@@ -4673,6 +4689,19 @@ async fn smb_os_discovery_reads_a_workgroup_host_in_unicode() {
           \n  System time: 2026-01-02T04:04:05+01:00"
         ]
     );
+}
+
+#[tokio::test]
+async fn smb_os_discovery_reads_oem_negotiate_names() {
+    let lab = SmbLab {
+        domain: "WORKGROUP",
+        oem_names: true,
+        names: vec![(2, "SRV01"), (1, "SRV01"), (4, "srv01"), (3, "srv01")],
+        ..SmbLab::default()
+    };
+    let (out, _) = smb_lab_output("smb-os-discovery", lab, "microsoft-ds").await;
+    assert_eq!(out.len(), 1);
+    assert!(out[0].contains("\n  Workgroup: WORKGROUP\n"), "{out:?}");
 }
 
 #[tokio::test]

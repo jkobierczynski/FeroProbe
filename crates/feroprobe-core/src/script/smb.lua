@@ -295,11 +295,16 @@ local function negotiate_v1_on(c, extended)
     out.server_guid = m.data:sub(1, 16)
     out.security_blob = m.data:sub(17)
   else
-    -- The names are UTF-16 even when the request did not ask for
-    -- Unicode (Windows and Samba both send them so).
+    -- Windows and Samba send the names in UTF-16 even though the request
+    -- does not ask for Unicode, and do not always say so in Flags2; an
+    -- old CIFS server may send OEM text. UTF-16 when Flags2 says so or
+    -- the first character's high byte is zero, else OEM.
+    local at = clen + 1
+    local unicode = m.flags2 & FLAGS2_UNICODE ~= 0
+      or (m.data:byte(at) or 0) ~= 0 and m.data:byte(at + 1) == 0
     local pos
-    out.domain, pos = read_string(m.data, clen + 1, true)
-    out.server = read_string(m.data, pos, true)
+    out.domain, pos = read_string(m.data, at, unicode)
+    out.server = read_string(m.data, pos, unicode)
   end
   return out
 end
