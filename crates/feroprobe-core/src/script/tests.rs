@@ -4532,7 +4532,10 @@ fn smb_lab_answer(lab: &SmbLab, req: &[u8], seen: &Seen) -> Option<Vec<u8>> {
         let offered: Vec<u16> = (0..count)
             .map(|i| u16::from_le_bytes([req[100 + 2 * i], req[101 + 2 * i]]))
             .collect();
-        seen.lock().unwrap().push(format!("smb2 {offered:04x?}"));
+        let caps = u32::from_le_bytes([req[72], req[73], req[74], req[75]]);
+        seen.lock()
+            .unwrap()
+            .push(format!("smb2 {offered:04x?} caps {caps:x}"));
         let d = offered
             .iter()
             .copied()
@@ -4755,9 +4758,10 @@ async fn smb_protocols_lists_every_dialect() {
     assert_eq!(
         smb2,
         [
-            "smb2 [0202, 0210, 0300, 0302, 0311]",
-            "smb2 [0202]",
-            "smb2 [0210]"
+            // SMB3 client capabilities only when an SMB3 dialect is offered.
+            "smb2 [0202, 0210, 0300, 0302, 0311] caps 7f",
+            "smb2 [0202] caps 0",
+            "smb2 [0210] caps 0"
         ]
     );
     // Nothing accepted: no output.

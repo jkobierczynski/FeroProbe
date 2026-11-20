@@ -16,6 +16,12 @@ function smb.dialects()
   return table.move(DIALECTS, 1, #DIALECTS, 1, {})
 end
 
+-- The client capabilities offered when an SMB 3.x dialect is: DFS,
+-- leasing, large MTU, multi-channel, persistent handles, directory leasing
+-- and encryption, so the server shows the SMB3 capabilities it would only
+-- grant a client that has them ([MS-SMB2] 3.3.5.4). Older dialects get 0.
+local SMB3_CLIENT_CAPS = 0x7f
+
 -- FeroProbe's mark: the client GUID of every SMB2 NEGOTIATE it sends.
 smb.CLIENT_GUID = "FeroProbeSMBScan"
 
@@ -124,10 +130,11 @@ end
 local function negotiate_request(dialects)
   local header = "\xfeSMB" .. string.pack("<I2I2I4I2I2I4I4I8I4I4I8",
     64, 0, 0, 0, 1, 0, 0, 0, 0xfeff, 0, 0) .. string.rep("\0", 16)
-  local list, has311 = {}, false
+  local list, has311, caps = {}, false, 0
   for i, d in ipairs(dialects) do
     list[i] = string.pack("<I2", d)
     if d == 0x0311 then has311 = true end
+    if d >= 0x0300 then caps = SMB3_CLIENT_CAPS end
   end
   list = table.concat(list)
   local tail, ctx_offset, ctx_count = "", 0, 0
@@ -141,7 +148,7 @@ local function negotiate_request(dialects)
       .. string.pack("<I2I2I4", 0x0001, #preauth, 0) .. preauth
     ctx_offset, ctx_count = fixed + pad, 1
   end
-  local body = string.pack("<I2I2I2I2I4", 36, #dialects, 0x0001, 0, 0)
+  local body = string.pack("<I2I2I2I2I4", 36, #dialects, 0x0001, 0, caps)
     .. smb.CLIENT_GUID
     .. string.pack("<I4I2I2", ctx_offset, ctx_count, 0)
     .. list .. tail
@@ -395,14 +402,17 @@ end
 --                             workgroup rather than a domain
 --   fqdn, domain_dns, forest_dns   DNS names from the NTLM challenge
 --   time, timezone            clock (Unix seconds) and seconds east of UTC
+--   received                  the scanner's os.time() when the clock came
 -- or nil and a reason (no OS details, as nmap, gives nil). Logs in to
 -- nothing.
 function smb.os_info(host, port, timeout)
   local basic = smb.negotiate_v1(host, port, timeout, false)
+  local basic_at = os.time()
   local c, err = open(host, port, timeout)
   if not c then return nil, err end
   local neg, setup
   neg, err = negotiate_v1_on(c, true)
+  local neg_at = os.time()
   if neg then setup, err = session_setup_ntlm(c, neg) end
   c.sock:close()
   if not setup then return nil, err end
@@ -411,7 +421,8 @@ function smb.os_info(host, port, timeout)
   end
   local ch = setup.challenge or {}
   local b = basic or {}
-  local clock = (b.time and b) or neg
+  local clock, received = neg, neg_at
+  if b.time then clock, received = b, basic_at end
   local out = {
     os = setup.os,
     lanmanager = setup.lanmanager,
@@ -419,6 +430,7 @@ function smb.os_info(host, port, timeout)
     domain = b.domain or ch.netbios_domain,
     time = clock.time,
     timezone = clock.timezone,
+    received = received,
   }
   if ch.dns_computer or ch.dns_domain or ch.dns_tree then
     out.fqdn, out.domain_dns, out.forest_dns = ch.dns_computer, ch.dns_domain, ch.dns_tree

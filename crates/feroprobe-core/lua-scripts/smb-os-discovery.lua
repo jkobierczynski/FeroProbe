@@ -91,7 +91,7 @@ action = function(host)
     out.date = local_time(r.time, r.timezone)
     -- SMB's SystemTime is UTC, so the clock is compared as it is (nmap
     -- also takes the time zone off it, a skew of the zone's size).
-    fero.record_skew(r.time)
+    fero.record_skew(r.time, r.received)
   end
   out.fqdn = r.fqdn
   out.domain_dns = r.domain_dns
@@ -103,10 +103,12 @@ action = function(host)
   local function add(label, value)
     if value then lines[#lines + 1] = label .. ": " .. value end
   end
+  -- nmap prints "Unknown" unless both are given; a NativeOS alone is
+  -- still shown here.
   if r.os and r.lanmanager then
     add("OS", string.format("%s (%s)", windows_name(r.os), r.lanmanager))
   else
-    add("OS", "Unknown")
+    add("OS", r.os and windows_name(r.os) or "Unknown")
   end
   add("OS CPE", out.cpe)
   if r.fqdn then add("Computer name", r.fqdn:match("^([^.]+)")) end
