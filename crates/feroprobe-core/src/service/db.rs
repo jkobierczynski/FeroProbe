@@ -93,6 +93,11 @@ pub struct ServiceDb {
     pub rules: Vec<Rule>,
     /// Where the rules came from, for messages: "built-in" or a path.
     pub source: String,
+    /// TCP ports `-sV` leaves alone unless `--allports` is given (`exclude
+    /// tcp`): printers' raw ports print whatever reaches them.
+    pub exclude_tcp: Vec<u16>,
+    /// UDP ports `-sV` leaves alone unless `--allports` is given.
+    pub exclude_udp: Vec<u16>,
 }
 
 /// A mistake in a rules file.
@@ -134,6 +139,15 @@ impl ServiceDb {
         self.probes.iter().find(|p| p.name == name)
     }
 
+    /// Whether `-sV` skips `port` unless `--allports` is given.
+    pub fn excluded(&self, protocol: Protocol, port: u16) -> bool {
+        match protocol {
+            Protocol::Tcp => self.exclude_tcp.contains(&port),
+            Protocol::Udp => self.exclude_udp.contains(&port),
+            _ => false,
+        }
+    }
+
     /// The TCP TLS probe, if the rules have one.
     pub fn tls(&self) -> Option<&Probe> {
         self.probes
@@ -147,6 +161,8 @@ impl ServiceDb {
             probes: Vec::new(),
             rules: Vec::new(),
             source: source.to_string(),
+            exclude_tcp: Vec::new(),
+            exclude_udp: Vec::new(),
         };
         let mut seen_magic = false;
         // What indented attribute lines belong to.
@@ -243,6 +259,17 @@ impl ServiceDb {
                         key == "softmatch",
                         line,
                     )));
+                }
+                "exclude" => {
+                    let (proto, list) = split_word(rest);
+                    let ports = parse_ports(list).map_err(err)?;
+                    match proto {
+                        "tcp" if !ports.is_empty() => db.exclude_tcp.extend(ports),
+                        "udp" if !ports.is_empty() => db.exclude_udp.extend(ports),
+                        _ => {
+                            return Err(err("an exclude line is \"exclude tcp|udp PORTS\"".into()));
+                        }
+                    }
                 }
                 _ => return Err(err(format!("unknown directive {key:?}"))),
             }
@@ -507,10 +534,26 @@ mod tests {
         assert!(db.rules.len() > 140, "{}", db.rules.len());
         assert_eq!(db.probe("null").unwrap().rarity, 0);
         assert_eq!(db.tls().unwrap().name, "tls");
+        // Printers' raw ports are left alone, as in nmap.
+        assert!((9100..=9107).all(|p| db.excluded(Protocol::Tcp, p)));
+        assert!(!db.excluded(Protocol::Tcp, 9108));
+        assert!(!db.excluded(Protocol::Udp, 9100));
         // Every rarity is in range and every probe can be sent.
         for p in &db.probes {
             assert!(p.rarity <= 9);
             assert!(matches!(p.protocol, Protocol::Tcp | Protocol::Udp));
+        }
+    }
+
+    #[test]
+    fn exclude_lines() {
+        let db =
+            parse("feroprobe-service-rules 1\nexclude tcp 9100-9101,515\nexclude udp 7\n").unwrap();
+        assert_eq!(db.exclude_tcp, vec![9100, 9101, 515]);
+        assert!(db.excluded(Protocol::Udp, 7));
+        for bad in ["exclude sctp 1", "exclude tcp", "exclude tcp 9-1"] {
+            let e = parse(&format!("feroprobe-service-rules 1\n{bad}\n")).unwrap_err();
+            assert_eq!(e.line, 2, "{bad}");
         }
     }
 

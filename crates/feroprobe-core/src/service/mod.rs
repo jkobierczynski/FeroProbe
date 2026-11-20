@@ -177,6 +177,9 @@ pub struct VersionScan {
     /// JSON, XML or grepable report written to standard output.
     pub trace_to_stderr: bool,
     pub db: Arc<ServiceDb>,
+    /// `--allports`: probe the ports the rules exclude (printers' raw
+    /// ports) too.
+    pub all_ports: bool,
 }
 
 impl VersionScan {
@@ -195,6 +198,7 @@ impl VersionScan {
             trace: false,
             trace_to_stderr: false,
             db: ServiceDb::builtin(),
+            all_ports: false,
         }
     }
 
@@ -670,6 +674,19 @@ pub async fn detect_services(hosts: &mut [HostResult], cfg: &ScanConfig, vs: &Ve
         .collect();
     let found: Vec<_> = stream::iter(jobs)
         .map(|(h, i, addr, hostname, protocol)| async move {
+            // Like nmap, an excluded port keeps the name its number
+            // suggests, with "?": nothing was sent to check it.
+            if !vs.all_ports && vs.db.excluded(protocol, addr.port()) {
+                vs.trace(|| {
+                    format!(
+                        "Service scan skipping {} ({}): excluded, use --allports to probe it",
+                        endpoint(addr),
+                        proto_name(protocol)
+                    )
+                });
+                let name = format!("{}?", service_name(protocol, addr.port()));
+                return (h, i, Some(ServiceInfo::named(&name)));
+            }
             let info = match protocol {
                 Protocol::Tcp => detect_tcp(addr, hostname.as_deref(), cfg, vs).await,
                 Protocol::Udp => detect_udp(addr, cfg, vs).await,
@@ -682,7 +699,8 @@ pub async fn detect_services(hosts: &mut [HostResult], cfg: &ScanConfig, vs: &Ve
         .await;
     for (h, i, info) in found {
         let port = &mut hosts[h].ports[i];
-        if info.is_some() && port.state == PortState::OpenFiltered {
+        let skipped = !vs.all_ports && vs.db.excluded(port.protocol, port.port);
+        if info.is_some() && !skipped && port.state == PortState::OpenFiltered {
             port.state = PortState::Open;
             port.reason = crate::model::reason::UDP_RESPONSE;
         }
@@ -735,6 +753,39 @@ pub fn dry_run_lines(vs: &VersionScan, tcp: &[u16], udp: &[u16]) -> Vec<String> 
         probes.sort_by_key(|p| p.rarity);
         probes.iter().map(|p| p.name.clone()).collect()
     };
+    // Excluded ports (printers) are skipped unless --allports.
+    let skipped = |protocol: Protocol, ports: &[u16]| -> Vec<u16> {
+        if vs.all_ports {
+            return Vec::new();
+        }
+        ports
+            .iter()
+            .copied()
+            .filter(|&p| db.excluded(protocol, p))
+            .collect()
+    };
+    let (tcp_skip, udp_skip) = (skipped(Protocol::Tcp, tcp), skipped(Protocol::Udp, udp));
+    for (name, list) in [("TCP", &tcp_skip), ("UDP", &udp_skip)] {
+        if !list.is_empty() {
+            let ports: Vec<String> = list.iter().map(u16::to_string).collect();
+            lines.push(format!(
+                "  {name}: nothing to {} (excluded by the rules, printers print every probe; \
+                 --allports probes them)",
+                ports.join(", ")
+            ));
+        }
+    }
+    let tcp: Vec<u16> = tcp
+        .iter()
+        .copied()
+        .filter(|p| !tcp_skip.contains(p))
+        .collect();
+    let udp: Vec<u16> = udp
+        .iter()
+        .copied()
+        .filter(|p| !udp_skip.contains(p))
+        .collect();
+    let (tcp, udp) = (&tcp[..], &udp[..]);
     if !tcp.is_empty() {
         let mut steps = Vec::new();
         if let Some(t) = db.tls() {

@@ -1091,6 +1091,17 @@ line.
 nmap\[aq]s \f[V]--versiondb\f[R] takes nmap\[aq]s own format; FeroProbe
 does not read that format and says so if given an
 \f[V]nmap-service-probes\f[R] file.
+.SS \f[V]--allports\f[R]
+.PP
+Probe every open port with \f[V]-sV\f[R], including the ones the rules
+file excludes.
+The built-in rules exclude TCP 9100-9107, the raw printing ports of
+network printers (JetDirect, AppSocket): a printer prints whatever
+reaches them, so each probe would come out as a page of garbage.
+Without \f[V]--allports\f[R] those ports get nothing and show the name
+their number suggests with a \f[V]?\f[R] (\f[V]jetdirect?\f[R]), as in
+nmap, which excludes the same ports.
+\f[V]--dry-run\f[R] lists the ports it would skip.
 .SS \f[V]--version-timeout <ms>\f[R]
 .PP
 How long to wait for each service reply, in milliseconds.
@@ -1174,6 +1185,11 @@ T}@T{
 For the TLS probe: inside TLS, listen first on these ports
 T}
 .TE
+.PP
+\f[V]exclude tcp|udp LIST\f[R] names ports \f[V]-sV\f[R] leaves alone
+unless \f[V]--allports\f[R] is given, like nmap\[aq]s \f[V]Exclude\f[R]
+directive.
+The built-in file has \f[V]exclude tcp 9100-9107\f[R] (printers).
 .PP
 A probe with no payload, like \f[V]null\f[R], connects and listens.
 The built-in parsers for binary replies (SQL Server, SMB, RDP, LDAP,

@@ -720,6 +720,11 @@ struct Args {
     #[arg(long, value_name = "FILE")]
     service_rules: Option<std::path::PathBuf>,
 
+    /// With -sV, probe the ports the service rules exclude too: TCP
+    /// 9100-9107, printers' raw ports, where every probe prints as a page
+    #[arg(long)]
+    allports: bool,
+
     /// Extra attempts for probes that get no answer [default: from -T; normally 1].
     /// nmap's name --max-retries works too
     #[arg(long, value_name = "N", visible_alias = "max-retries")]
@@ -2425,6 +2430,7 @@ fn version_scan(args: &Args) -> Result<VersionScan> {
     let mut vs = VersionScan::new(Duration::from_millis(args.version_timeout));
     vs.intensity = version_intensity(args);
     vs.trace = args.version_trace;
+    vs.all_ports = args.allports;
     // nmap prints the trace to standard output; keep it off a
     // machine-readable report there.
     let outputs = Outputs::from_args(args)?;
@@ -2463,6 +2469,7 @@ fn version_option(args: &Args) -> Option<&'static str> {
         (args.version_all, "--version-all"),
         (args.version_trace, "--version-trace"),
         (args.service_rules.is_some(), "--service-rules"),
+        (args.allports, "--allports"),
     ]
     .into_iter()
     .find_map(|(given, name)| given.then_some(name))

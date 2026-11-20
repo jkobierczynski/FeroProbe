@@ -367,6 +367,54 @@ async fn fills_open_ports_only() {
     assert_eq!(hosts[0].ports[1].service, None);
 }
 
+#[tokio::test]
+async fn excluded_ports_are_left_alone() {
+    // A server that counts connections: an excluded port gets none.
+    let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = Arc::clone(&hits);
+    let addr = serve(move |s| {
+        counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        http_reply(s)
+    })
+    .await;
+    let mut db = ServiceDb::parse(
+        &format!(
+            "feroprobe-service-rules 1\nexclude tcp {}\nprobe http tcp\n  rarity 1\n  send \"GET / HTTP/1.0\\r\\n\\r\\n\"\n",
+            addr.port()
+        ),
+        "test",
+    )
+    .unwrap();
+    db.source = "test".into();
+    let mut scan = VersionScan {
+        db: Arc::new(db),
+        ..vs()
+    };
+    let open = || PortResult {
+        port: addr.port(),
+        protocol: Protocol::Tcp,
+        state: PortState::Open,
+        reason: reason::SYN_ACK,
+        rtt_ms: None,
+        service: None,
+        scripts: Vec::new(),
+    };
+    let mut hosts = vec![HostResult::new(addr.ip(), None)];
+    hosts[0].ports = vec![open()];
+    detect_services(&mut hosts, &cfg(), &scan).await;
+    let name = &hosts[0].ports[0].service.as_ref().unwrap().name;
+    assert!(name.ends_with('?'), "{name}");
+    assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+    let lines = dry_run_lines(&scan, &[addr.port()], &[]);
+    assert!(lines[1].contains("--allports"), "{lines:?}");
+    // --allports probes it.
+    scan.all_ports = true;
+    hosts[0].ports = vec![open()];
+    detect_services(&mut hosts, &cfg(), &scan).await;
+    assert_eq!(hosts[0].ports[0].service.as_ref().unwrap().name, "http");
+    assert!(hits.load(std::sync::atomic::Ordering::SeqCst) > 0);
+}
+
 #[test]
 fn printable_escapes() {
     assert_eq!(printable(b"a\\b\x00\r\n", 10), "a\\\\b\\x00\\r\\n");
