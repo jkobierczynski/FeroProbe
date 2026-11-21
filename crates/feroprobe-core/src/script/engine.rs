@@ -416,6 +416,7 @@ pub(crate) fn install_library(
     args: &ArgTable,
     scope: &Arc<Scope>,
     registry: &Arc<Registry>,
+    by_name: bool,
 ) -> mlua::Result<()> {
     let g = lua.globals();
     g.raw_set("SCRIPT_NAME", id)?;
@@ -535,7 +536,11 @@ pub(crate) fn install_library(
     )?;
     fero.raw_set(
         "verbosity",
-        lua.create_function(|_, ()| Ok(crate::debug::verbosity()))?,
+        // Like nmap, a script chosen by name or file path sees one level
+        // more than -v gave, so it shows the detail it was asked for.
+        lua.create_function(move |_, ()| {
+            Ok(crate::debug::verbosity().saturating_add(u8::from(by_name)))
+        })?,
     )?;
     fero.raw_set(
         "debugging",
@@ -948,6 +953,7 @@ impl ScriptScan {
             &self.args,
             &scope,
             &self.registry,
+            script.selection.raises_verbosity(),
         )
         .map_err(|e| e.to_string())?;
         if let Some(h) = on.host() {

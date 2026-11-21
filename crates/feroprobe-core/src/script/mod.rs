@@ -242,6 +242,15 @@ pub enum Selection {
     Directory,
 }
 
+impl Selection {
+    /// Whether the script sees one verbosity level more than `-v` gave,
+    /// like nmap does for a script chosen by name (or name pattern) or by
+    /// file path, but not by category or directory.
+    pub fn raises_verbosity(self) -> bool {
+        matches!(self, Selection::Name | Selection::File)
+    }
+}
+
 /// A loaded script.
 #[derive(Debug, Clone)]
 pub struct Script {
@@ -302,6 +311,7 @@ impl Script {
             &ArgTable::default(),
             &Arc::new(Scope::default()),
             &Arc::new(registry::Registry::default()),
+            false,
         )
         .map_err(|e| ScriptError(format!("{name}: {e}")))?;
         lua.load(source)
