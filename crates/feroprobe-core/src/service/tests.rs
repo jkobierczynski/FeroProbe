@@ -82,7 +82,7 @@ async fn unrecognized_banner() {
 }
 
 #[tokio::test]
-async fn silent_service_gives_nothing() {
+async fn silent_service_gets_a_question_mark() {
     let addr = serve(|mut s| async move {
         let mut buf = [0u8; 1024];
         while matches!(s.read(&mut buf).await, Ok(n) if n > 0) {}
@@ -92,7 +92,14 @@ async fn silent_service_gives_nothing() {
         wait: Duration::from_millis(100),
         ..vs()
     };
-    assert_eq!(detect_tcp(addr, None, &cfg(), &vs).await, None);
+    // As in nmap: "?" after the port's name, "unknown" when it has none.
+    let info = detect_tcp(addr, None, &cfg(), &vs).await.unwrap();
+    let expected = match crate::ports::service_name(Protocol::Tcp, addr.port()) {
+        "unknown" => "unknown".to_string(),
+        name => format!("{name}?"),
+    };
+    assert_eq!(info.name, expected);
+    assert_eq!(info.product, None);
 }
 
 /// A server that answers only memcached's "version" command.
@@ -120,7 +127,9 @@ async fn intensity_decides_how_deep_to_probe() {
     // The memcached probe has rarity 7: tried on any port at 7, not at 6.
     let info = detect_tcp(addr, None, &cfg(), &fast(7)).await.unwrap();
     assert_eq!(info.version_line(), "Memcached 1.6.21");
-    assert_eq!(detect_tcp(addr, None, &cfg(), &fast(6)).await, None);
+    // At 6 it stays silent to every probe sent: no product.
+    let info = detect_tcp(addr, None, &cfg(), &fast(6)).await.unwrap();
+    assert_eq!(info.product, None);
 }
 
 #[tokio::test]

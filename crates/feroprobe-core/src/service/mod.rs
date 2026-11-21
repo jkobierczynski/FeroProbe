@@ -311,6 +311,8 @@ struct Round {
     saw_tls: bool,
     /// Something answered, even an empty UDP datagram.
     answered: bool,
+    /// A TCP probe got a connection.
+    connected: bool,
 }
 
 /// Note what a reply to `probe` showed in `round`, tracing it.
@@ -404,6 +406,16 @@ fn finish(round: Round, protocol: Protocol, port: u16, vs: &VersionScan) -> Opti
             "{}?",
             service_name(protocol, port)
         ))),
+        // A TCP port that took our connections and stayed silent: like
+        // nmap, the name its number suggests with "?", unless it has none.
+        (None, None) if round.connected => {
+            let name = service_name(protocol, port);
+            Some(ServiceInfo::named(&if name == "unknown" {
+                name.to_string()
+            } else {
+                format!("{name}?")
+            }))
+        }
         (None, None) => None,
     }
 }
@@ -497,6 +509,8 @@ async fn tcp_round(
             });
             break;
         };
+        // The port took the connection, even if it then said nothing.
+        round.connected = true;
         take_reply(vs, &mut round, probe, addr, Protocol::Tcp, ssl, data);
         if round.hard.is_some() {
             break;

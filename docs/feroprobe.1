@@ -1034,6 +1034,9 @@ The XML report carries every CPE as \f[V]<cpe>\f[R] elements of
 \f[V]<service>\f[R] and the \f[V]hostname\f[R], \f[V]ostype\f[R] and
 \f[V]devicetype\f[R] attributes; the JSON report has the same fields.
 .PP
+A port that takes the connections but answers no probe gets the usual
+service name for the port with a \f[V]?\f[R] (\f[V]jetdirect?\f[R]; a
+port with no usual name stays \f[V]unknown\f[R]), as in nmap.
 A reply no rule recognizes is shown with a \f[V]?\f[R] after the usual
 service name for the port and, at intensity 7 or more (as in nmap),
 printed under \[dq]Unrecognized service replies\[dq] in normal output

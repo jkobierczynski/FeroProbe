@@ -678,8 +678,10 @@ The XML report carries every CPE as `<cpe>` elements of `<service>` and the
 `hostname`, `ostype` and `devicetype` attributes; the JSON report has the
 same fields.
 
-A reply no rule recognizes is shown with a `?` after the usual service
-name for the port and, at intensity 7 or more (as in nmap), printed under
+A port that takes the connections but answers no probe gets the usual
+service name for the port with a `?` (`jetdirect?`; a port with no usual
+name stays `unknown`), as in nmap. A reply no rule recognizes is shown with
+a `?` after the usual service name for the port and, at intensity 7 or more (as in nmap), printed under
 "Unrecognized service replies" in normal output and as `servicefp` in XML:
 the starting point for writing a new rule.
 
