@@ -32,6 +32,10 @@ teams can flag FeroProbe scans without writing their own.
 | `tls-alpn`, `tls-nextprotoneg` (default scripts), `ssl-enum-ciphers` | TLS ClientHello random `FeroProbeTLSScan` (bytes 15-30 of the record, SID 9100019) |
 | `sslv2` (default script) | SSLv2 CLIENT-HELLO challenge `FeroProbeTLSScan` (SID 9100020) |
 | `snmp-sysdescr`, `snmp-info`, `snmp-interfaces` (default scripts) | SNMP request-id `0x4650` ("FP") in every GetRequest and GetNextRequest, and as the msgID and request-id of `snmp-info`'s SNMPv3 engine discovery (SID 9100021); the `-sU`/`-sV` probe to UDP 161 keeps request-id 1 |
+| `-sV` msrpc probe (TCP 135, and other ports at intensity 5+) | DCE/RPC bind to the endpoint mapper with call ID `FPRO` (SID 9100022) |
+| `-sV` kerberos probes (88) | AS-REQ for client `FeroProbe`, realm `FEROPROBE.INVALID`, nonce `FPRO`, over TCP (SID 9100023) or UDP (SID 9100024) |
+| `-sV` netbios-ssn probe (TCP 139) | NetBIOS session request from the calling name `FEROPROBE` (SID 9100025) |
+| `-sV` mc-nmf probe (TCP 9389) | .NET Message Framing preamble with via `net.tcp://feroprobe.invalid/FeroProbe` (SID 9100026) |
 | `dns-nsid` (default script) | DNS CHAOS TXT queries (`id.server`, `version.bind`) with transaction ID `0x4650` ("FP") and only the RD flag set, over UDP (SID 9100014) or TCP (SID 9100015) |
 
 The TCP window of a scan probe is otherwise meaningless, because the scan

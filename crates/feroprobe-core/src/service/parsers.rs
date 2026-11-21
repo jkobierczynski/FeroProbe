@@ -15,6 +15,7 @@ pub(super) fn parse(probe: &str, data: &[u8]) -> Option<ServiceInfo> {
     match probe {
         "mssql" => mssql(data),
         "smb" => smb(data),
+        "netbios-ssn" => netbios_ssn(data),
         "rdp" => rdp(data),
         "ldap" => ldap(data),
         "dns-version" => super::udp_info::parse_dns(data),
@@ -34,6 +35,7 @@ pub(super) fn services(probe: &str) -> &'static [&'static str] {
     match probe {
         "mssql" => &["ms-sql-s"],
         "smb" => &["microsoft-ds"],
+        "netbios-ssn" => &["netbios-ssn"],
         "rdp" => &["ms-wbt-server"],
         "ldap" => &["ldap"],
         "dns-version" | "dns-tcp" => &["domain"],
@@ -141,6 +143,21 @@ fn smb(data: &[u8]) -> Option<ServiceInfo> {
     }
     info.extra_info = Some(extra.join("; "));
     Some(info)
+}
+
+/// The reply to a NetBIOS session request (RFC 1002): a positive response,
+/// then the SMB2 NEGOTIATE reply when the server took the session; or a
+/// negative response (the server does not answer to *SMBSERVER).
+fn netbios_ssn(data: &[u8]) -> Option<ServiceInfo> {
+    match data {
+        [0x82, 0, 0, 0, rest @ ..] => {
+            let mut info = ServiceInfo::named("netbios-ssn");
+            info.extra_info = smb(rest).and_then(|i| i.extra_info);
+            Some(info)
+        }
+        [0x83, 0, 0, 1, _, ..] => Some(ServiceInfo::named("netbios-ssn")),
+        _ => None,
+    }
 }
 
 /// RDP's X.224 Connection Confirm, with the security protocol the server
@@ -274,6 +291,24 @@ mod tests {
         let i = parse("smb", b"\x00\x00\x00\x55\xffSMBr").unwrap();
         assert_eq!(i.extra_info.as_deref(), Some("SMBv1 only"));
         assert!(parse("smb", b"\x00\x00\x00\x10junk").is_none());
+    }
+
+    #[test]
+    fn netbios_session() {
+        let mut took = vec![0x82, 0, 0, 0];
+        took.extend(smb2_reply(0x0302, 3));
+        let i = parse("netbios-ssn", &took).unwrap();
+        assert_eq!(i.name, "netbios-ssn");
+        assert_eq!(
+            i.extra_info.as_deref(),
+            Some("SMB dialect 3.0.2; signing required")
+        );
+        let i = parse("netbios-ssn", b"\x82\x00\x00\x00").unwrap();
+        assert_eq!((i.name.as_str(), i.extra_info), ("netbios-ssn", None));
+        // "Called name not present".
+        let i = parse("netbios-ssn", b"\x83\x00\x00\x01\x82").unwrap();
+        assert_eq!(i.name, "netbios-ssn");
+        assert!(parse("netbios-ssn", b"\x00\x00\x00\x10junk").is_none());
     }
 
     #[test]

@@ -127,6 +127,20 @@ can tell FeroProbe traffic apart from other traffic. The marks are:
   already identifiable as the standard probe for that service. The
   NetBIOS probe to UDP 137 carries transaction ID `0x4650` ("FP"), the
   same request as the `nbstat` script, so rule 9100013 matches both.
+- **Version detection probes** (`-sV`) are application requests over
+  ordinary TCP and UDP sockets. Where a protocol has a field for a client
+  name or an ID, the probe fills it with a FeroProbe mark, and a rule
+  matches it: the DCE/RPC bind to the endpoint mapper has call ID `FPRO`
+  (rule 9100022); the Kerberos AS-REQ asks for the client `FeroProbe` in
+  the realm `FEROPROBE.INVALID` with nonce `FPRO`, over TCP (9100023) and
+  UDP (9100024); the NetBIOS session request comes from the calling name
+  `FEROPROBE` (9100025); the .NET Message Framing preamble names the via
+  `net.tcp://feroprobe.invalid/FeroProbe` (9100026). Older probes carry
+  marks too (ONC RPC transaction ID `FPRO`, PPTP host `feroprobe` and vendor
+  `FeroProbe`, OpenVPN session ID `FEROPROB`, MQTT client `feroprobe`,
+  SIP and XMPP `feroprobe.invalid`) without rules yet; the rest are the
+  protocol's standard first question. `-sV` sends nothing to the printer
+  ports TCP 9100-9107 unless `--allports` is given, as nmap.
 - **ICMP and ICMPv6 echo requests** sent for host discovery carry the
   9-byte ASCII payload `feroprobe` (nmap's echo requests are empty). Echo
   replies copy the payload back, so the marker shows in both directions.
