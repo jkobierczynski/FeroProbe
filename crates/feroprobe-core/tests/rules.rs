@@ -86,3 +86,98 @@ fn snort_rule_files_match() {
         assert_eq!(strip(&s3), strip(&s2), "sid {sid}");
     }
 }
+
+/// The `content` matches of a Suricata rule, with their modifiers:
+/// (bytes, offset, depth, distance, within).
+type Content = (
+    Vec<u8>,
+    Option<usize>,
+    Option<usize>,
+    Option<usize>,
+    Option<usize>,
+);
+
+fn contents(rule: &str) -> Vec<Content> {
+    let mut out: Vec<Content> = Vec::new();
+    for part in rule.split("; ") {
+        if let Some(text) = part.strip_prefix("content:\"") {
+            let text = text.trim_end_matches('"');
+            let mut bytes = Vec::new();
+            for (i, piece) in text.split('|').enumerate() {
+                if i % 2 == 1 {
+                    for hex in piece.split_whitespace() {
+                        bytes.push(u8::from_str_radix(hex, 16).unwrap());
+                    }
+                } else {
+                    bytes.extend_from_slice(piece.as_bytes());
+                }
+            }
+            out.push((bytes, None, None, None, None));
+        } else if let Some((key, value)) = part.split_once(':')
+            && let Ok(n) = value.parse::<usize>()
+            && let Some(last) = out.last_mut()
+        {
+            match key {
+                "offset" => last.1 = Some(n),
+                "depth" => last.2 = Some(n),
+                "distance" => last.3 = Some(n),
+                "within" => last.4 = Some(n),
+                _ => {}
+            }
+        }
+    }
+    out
+}
+
+/// Whether the contents match `data` in order, as an IDS reads them.
+fn content_match(contents: &[Content], data: &[u8]) -> bool {
+    let mut end = 0;
+    for (i, (bytes, offset, depth, distance, within)) in contents.iter().enumerate() {
+        let (from, limit) = if i == 0 || (distance.is_none() && within.is_none()) {
+            let from = offset.unwrap_or(0);
+            (from, depth.map_or(data.len(), |d| from + d))
+        } else {
+            let from = end + distance.unwrap_or(0);
+            (from, within.map_or(data.len(), |w| from + w))
+        };
+        let window = &data[from.min(data.len())..limit.min(data.len())];
+        match window.windows(bytes.len()).position(|w| w == &bytes[..]) {
+            Some(at) => end = from + at + bytes.len(),
+            None => return false,
+        }
+    }
+    true
+}
+
+/// The rules for -sV probes match the probes FeroProbe sends.
+#[test]
+fn service_probe_rules_match_the_probes() {
+    let suricata = sids(&rules("feroprobe.rules"));
+    let db = feroprobe_core::ServiceDb::builtin();
+    for (sid, probe) in [
+        (9100022, "msrpc"),
+        (9100023, "kerberos"),
+        (9100024, "kerberos-udp"),
+        (9100025, "netbios-ssn"),
+        (9100026, "mc-nmf"),
+    ] {
+        let rule = &suricata[&sid].1;
+        assert!(
+            contents(rule).len() >= 2 || sid == 9100026,
+            "sid {sid}: {rule}"
+        );
+        let payload = db.probe(probe).unwrap().payload();
+        assert!(
+            content_match(&contents(rule), payload),
+            "sid {sid} vs probe {probe}"
+        );
+        // And not every other probe.
+        for other in db.probes.iter().filter(|p| p.name != probe) {
+            assert!(
+                !content_match(&contents(rule), other.payload()),
+                "sid {sid} matches probe {}",
+                other.name
+            );
+        }
+    }
+}

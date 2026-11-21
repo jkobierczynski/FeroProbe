@@ -737,4 +737,60 @@ mod tests {
             ("domain", Some("9.18.24-1"))
         );
     }
+
+    #[test]
+    fn windows_and_active_directory() {
+        // Samba 4.19's endpoint mapper, and a dynamic RPC port.
+        let ack = b"\x05\x00\x0c\x03\x10\x00\x00\x00\x3c\x00\x00\x00FPRO\xd0\x16\xd0\x16\
+                    \x52\xdb\x00\x00\x04\x00135\x00\x00\x00\x01\x00\x00\x00";
+        let i = mr("msrpc", ack).unwrap();
+        assert_eq!(
+            (i.name.as_str(), i.product.as_deref(), i.os_type.as_deref()),
+            ("msrpc", Some("Microsoft Windows RPC"), Some("Windows"))
+        );
+        let nak = b"\x05\x00\x0d\x03\x10\x00\x00\x00\x1a\x00\x00\x00FPRO\x04\x00";
+        assert_eq!(mr("msrpc", nak).unwrap().name, "msrpc");
+        // Another call ID is not our reply.
+        let other = b"\x05\x00\x0c\x03\x10\x00\x00\x00\x3c\x00\x00\x00ABCD\xd0\x16";
+        assert!(mr("msrpc", other).is_none());
+
+        let i = m(b"ncacn_http/1.0");
+        assert_eq!(
+            (i.name.as_str(), i.version.as_deref()),
+            ("ncacn_http", Some("1.0"))
+        );
+
+        // Samba's KDC (Heimdal): KRB_ERR_C_PRINCIPAL_UNKNOWN with its clock.
+        let err = b"\x7e\x81\x96\x30\x81\x93\xa0\x03\x02\x01\x05\xa1\x03\x02\x01\x1e\
+                    \xa4\x11\x18\x0f20261120235339Z\xa5\x05\x02\x03\x09\x8f\xbd\
+                    \xa6\x03\x02\x01\x06\xa7\x13\x1b\x11FEROPROBE.INVALID";
+        let i = mr("kerberos-udp", err).unwrap();
+        assert_eq!(i.name, "kerberos-sec");
+        assert_eq!(
+            i.extra_info.as_deref(),
+            Some("server time: 2026-11-20 23:53:39Z")
+        );
+        let mut tcp = b"\x00\x00\x00\x99".to_vec();
+        tcp.extend_from_slice(err);
+        let i = mr("kerberos", &tcp).unwrap();
+        assert_eq!(
+            i.extra_info.as_deref(),
+            Some("server time: 2026-11-20 23:53:39Z")
+        );
+        assert_eq!(
+            mr("kerberos", b"\x00\x00\x00\x10\x7e\x0e")
+                .unwrap()
+                .extra_info,
+            None
+        );
+
+        let i = mr("mc-nmf", b"\x0b").unwrap();
+        assert_eq!(
+            (i.name.as_str(), i.product.as_deref()),
+            ("mc-nmf", Some(".NET Message Framing"))
+        );
+        let fault =
+            b"\x08\x48http://schemas.microsoft.com/ws/2006/05/framing/faults/EndpointNotFound";
+        assert_eq!(mr("mc-nmf", fault).unwrap().name, "mc-nmf");
+    }
 }

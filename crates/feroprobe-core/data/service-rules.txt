@@ -101,6 +101,55 @@ probe rdp tcp
   ports 3389
   send "\x03\x00\x00\x13\x0e\xe0\x00\x00\x00\x00\x00\x01\x00\x08\x00\x03\x00\x00\x00"
 
+# DCE/RPC bind (C706 chapter 12, MS-RPCE) to the endpoint mapper interface
+# (e1af8308-5d1f-11c9-91a4-08002b14ac40 v3.0) with NDR transfer syntax.
+# The call ID is "FPRO". Any DCE/RPC server answers with bind_ack or
+# bind_nak, so it also names Windows' dynamic RPC ports (49152 and up).
+probe msrpc tcp
+  rarity 5
+  ports 135
+  send "\x05\x00\x0b\x03\x10\x00\x00\x00\x48\x00\x00\x00FPRO\xd0\x16\xd0\x16"
+  send "\x00\x00\x00\x00\x01\x00\x00\x00\x00\x00\x01\x00"
+  send "\x08\x83\xaf\xe1\x1f\x5d\xc9\x11\x91\xa4\x08\x00\x2b\x14\xac\x40\x03\x00\x00\x00"
+  send "\x04\x5d\x88\x8a\xeb\x1c\xc9\x11\x9f\xe8\x08\x00\x2b\x10\x48\x60\x02\x00\x00\x00"
+
+# NetBIOS session request (RFC 1002) from the calling name FEROPROBE to
+# *SMBSERVER, then the SMB2 NEGOTIATE of the smb probe.
+probe netbios-ssn tcp
+  rarity 8
+  ports 139
+  send "\x81\x00\x00\x44\x20CKFDENECFDEFFCFGEFFCCACACACACACA\x00"
+  send "\x20EGEFFCEPFAFCEPECEFCACACACACACAAA\x00"
+  send "\x00\x00\x00\x6c\xfeSMB\x40\x00"
+  pad 58
+  send "\x24\x00\x04\x00\x01\x00"
+  pad 30
+  send "\x02\x02\x10\x02\x00\x03\x02\x03"
+
+# Kerberos AS-REQ (RFC 4120) for the client FeroProbe in the realm
+# FEROPROBE.INVALID, nonce "FPRO", with a TCP length prefix. No KDC knows
+# the realm, so it answers with a KRB-ERROR, which carries its clock.
+probe kerberos tcp
+  rarity 8
+  ports 88
+  send "\x00\x00\x00\x9cj\x81\x990\x81\x96\xa1\x03\x02\x01\x05\xa2\x03\x02\x01\x0a"
+  send "\xa4\x81\x890\x81\x86\xa0\x07\x03\x05\x00P\x80\x00\x10"
+  send "\xa1\x160\x14\xa0\x03\x02\x01\x01\xa1\x0d0\x0b\x1b\x09FeroProbe"
+  send "\xa2\x13\x1b\x11FEROPROBE.INVALID"
+  send "\xa3&0$\xa0\x03\x02\x01\x02\xa1\x1d0\x1b\x1b\x06krbtgt\x1b\x11FEROPROBE.INVALID"
+  send "\xa5\x11\x18\x0f20370913024805Z\xa7\x06\x02\x04FPRO"
+  send "\xa8\x0b0\x09\x02\x01\x12\x02\x01\x11\x02\x01\x17"
+
+# .NET Message Framing (MS-NMF) preamble: version 1.0, duplex mode, the
+# via net.tcp://feroprobe.invalid/FeroProbe, binary encoding, preamble end.
+# Active Directory Web Services listen on 9389.
+probe mc-nmf tcp
+  rarity 8
+  ports 9389
+  send "\x00\x01\x00\x01\x02\x02\x25"
+  send "net.tcp://feroprobe.invalid/FeroProbe"
+  send "\x03\x08\x0c"
+
 # RESP array: INFO server.
 probe redis tcp
   rarity 6
@@ -274,6 +323,18 @@ probe ntp udp
   ports 123
   send "\x23"
   pad 47
+
+# Kerberos AS-REQ, as the kerberos probe but without the length prefix.
+probe kerberos-udp udp
+  rarity 6
+  ports 88
+  send "j\x81\x990\x81\x96\xa1\x03\x02\x01\x05\xa2\x03\x02\x01\x0a"
+  send "\xa4\x81\x890\x81\x86\xa0\x07\x03\x05\x00P\x80\x00\x10"
+  send "\xa1\x160\x14\xa0\x03\x02\x01\x01\xa1\x0d0\x0b\x1b\x09FeroProbe"
+  send "\xa2\x13\x1b\x11FEROPROBE.INVALID"
+  send "\xa3&0$\xa0\x03\x02\x01\x02\xa1\x1d0\x1b\x1b\x06krbtgt\x1b\x11FEROPROBE.INVALID"
+  send "\xa5\x11\x18\x0f20370913024805Z\xa7\x06\x02\x04FPRO"
+  send "\xa8\x0b0\x09\x02\x01\x12\x02\x01\x11\x02\x01\x17"
 
 probe sip-udp udp
   rarity 5
@@ -974,6 +1035,48 @@ match epmd ^\x00\x00\x11\x11name (\S+) at port (\d+)\n
 match epmd ^\x00\x00\x11\x11
   probe epmd
   product Erlang Port Mapper Daemon
+
+# -------------------------------------------------- Windows and Active Directory
+
+# A DCE/RPC bind_ack or bind_nak carrying our call ID. nmap names every
+# DCE/RPC endpoint this way, Samba's included.
+match msrpc ^\x05\x00[\x0c\x0d].{9}FPRO
+  probe msrpc
+  product Microsoft Windows RPC
+  os Windows
+  cpe cpe:/o:microsoft:windows
+
+# RPC over HTTP v1 (MS-RPCH): the server speaks first.
+match ncacn_http ^ncacn_http/(\d\.\d)
+  product Microsoft Windows RPC over HTTP
+  version ${1}
+  os Windows
+  cpe cpe:/o:microsoft:windows
+
+# A KRB-ERROR (RFC 4120 [APPLICATION 30]), with the KDC's clock (stime).
+match kerberos-sec ^\x00\x00..\x7e.*?\xa4\x11\x18\x0f(\d{4})(\d\d)(\d\d)(\d\d)(\d\d)(\d\d)Z
+  probe kerberos
+  info server time: ${1}-${2}-${3} ${4}:${5}:${6}Z
+
+match kerberos-sec ^\x00\x00..\x7e
+  probe kerberos
+
+match kerberos-sec ^\x7e.*?\xa4\x11\x18\x0f(\d{4})(\d\d)(\d\d)(\d\d)(\d\d)(\d\d)Z
+  probe kerberos-udp
+  info server time: ${1}-${2}-${3} ${4}:${5}:${6}Z
+
+match kerberos-sec ^\x7e
+  probe kerberos-udp
+
+# .NET Message Framing (MS-NMF): a preamble ack, or a fault naming why our
+# via was refused.
+match mc-nmf ^\x0b\z
+  probe mc-nmf
+  product .NET Message Framing
+
+match mc-nmf ^\x08[\x01-\x7f]http://schemas\.microsoft\.com/ws/2006/05/framing/faults/
+  probe mc-nmf
+  product .NET Message Framing
 
 # ------------------------------------------------- remote access and RPC
 

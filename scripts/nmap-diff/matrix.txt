@@ -40,6 +40,8 @@ version-udp      | lan    | root | -sU -sV -p @UDP
 version-closed   | lan    | root | -sV -p 102,502
 version-light    | lan    | root | -sV --version-light -p @TCP
 version-all      | lan    | root | -sV --version-all -p @TCP
+version-windows  | lan    | root | -sV -p 88,135,139
+version-win-udp  | lan    | root | -sU -sV -p 88
 os               | lan    | root | -O -p @TCP
 aggressive       | lan    | root | -A -p @TCP
 aggressive-routed| routed | root | -A -p @TCP

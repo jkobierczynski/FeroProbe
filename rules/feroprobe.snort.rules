@@ -86,3 +86,17 @@ alert tcp any any -> $HOME_NET any (msg:"FeroProbe script SSLv2 CLIENT-HELLO (ss
 # before its variable list; the PDU tag (GetRequest or GetNextRequest) keeps
 # the agent's answers out. The -sU/-sV probe to UDP 161 has request-id 1.
 alert udp any any -> $HOME_NET any (msg:"FeroProbe script SNMP request (snmp-sysdescr, snmp-info, snmp-interfaces)"; content:"|30|"; depth:1; content:"|02 02 46 50 02 01 00 02 01 00 30|"; distance:0; pcre:"/[\xa0\xa1](?:[\x00-\x7f]|\x81[\x80-\xff]|\x82[\x01-\xff][\x00-\xff])\x02\x02\x46\x50\x02\x01\x00\x02\x01\x00\x30/s"; classtype:attempted-recon; sid:9100021; rev:1;)
+
+# -sV msrpc probe: a DCE/RPC bind to the endpoint mapper interface whose
+# call ID is "FPRO".
+alert tcp any any -> $HOME_NET any (msg:"FeroProbe -sV DCE/RPC bind (call ID FPRO, msrpc probe)"; flow:established,to_server; content:"|05 00 0B 03 10 00 00 00 48 00 00 00|FPRO"; depth:16; content:"|08 83 AF E1 1F 5D C9 11 91 A4 08 00 2B 14 AC 40|"; distance:16; within:16; classtype:attempted-recon; sid:9100022; rev:1;)
+# -sV kerberos probes: an AS-REQ for the client FeroProbe in the realm
+# FEROPROBE.INVALID, over TCP (after a length prefix) and UDP.
+alert tcp any any -> $HOME_NET any (msg:"FeroProbe -sV Kerberos AS-REQ over TCP (realm FEROPROBE.INVALID)"; flow:established,to_server; content:"|6A 81 99 30 81 96 A1 03 02 01 05 A2 03 02 01 0A|"; offset:4; depth:16; content:"|1B 09|FeroProbe|A2 13 1B 11|FEROPROBE.INVALID"; distance:0; within:60; classtype:attempted-recon; sid:9100023; rev:1;)
+alert udp any any -> $HOME_NET any (msg:"FeroProbe -sV Kerberos AS-REQ over UDP (realm FEROPROBE.INVALID)"; content:"|6A 81 99 30 81 96 A1 03 02 01 05 A2 03 02 01 0A|"; depth:16; content:"|1B 09|FeroProbe|A2 13 1B 11|FEROPROBE.INVALID"; distance:0; within:60; classtype:attempted-recon; sid:9100024; rev:1;)
+# -sV netbios-ssn probe: a NetBIOS session request from the calling name
+# FEROPROBE (first-level encoded).
+alert tcp any any -> $HOME_NET any (msg:"FeroProbe -sV NetBIOS session request (calling name FEROPROBE)"; flow:established,to_server; content:"|81 00 00 44 20|"; depth:5; content:"|20|EGEFFCEPFAFCEPECEFCACACACACACAAA|00|"; distance:33; within:34; classtype:attempted-recon; sid:9100025; rev:1;)
+# -sV mc-nmf probe: a .NET Message Framing preamble whose via is
+# net.tcp://feroprobe.invalid/FeroProbe.
+alert tcp any any -> $HOME_NET any (msg:"FeroProbe -sV .NET Message Framing preamble (via feroprobe.invalid)"; flow:established,to_server; content:"|00 01 00 01 02 02 25|net.tcp|3A|//feroprobe.invalid/FeroProbe"; depth:44; classtype:attempted-recon; sid:9100026; rev:1;)

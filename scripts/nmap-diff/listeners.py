@@ -42,6 +42,15 @@ against a real host:
   TCP 993   an SSLv2-only stand-in for sslv2: answers an SSLv2
             CLIENT-HELLO with a SERVER-HELLO taking RC4_128_WITH_MD5 and
             DES_192_EDE3_CBC_WITH_MD5, then closes (not in @TCP either)
+  TCP 88    a Kerberos KDC stand-in for the version-windows case: answers
+            any message (after its four-byte length) with a KRB-ERROR
+            (KDC_ERR_C_PRINCIPAL_UNKNOWN) carrying the current time, as
+            Samba's KDC does (not in @TCP either)
+  TCP 135   a DCE/RPC endpoint mapper stand-in: answers a bind with a
+            bind_ack that keeps the caller's call ID (not in @TCP either)
+  TCP 139   the SMB server of TCP 445 behind a NetBIOS session request
+            (not in @TCP either)
+  UDP 88    the Kerberos stand-in of TCP 88, without the length prefix
   UDP 53    echoes every datagram back (so UDP 53 reads as open)
   UDP 137   answers a NetBIOS NODE STATUS request (RFC 1002) with a fixed
             name table and MAC address, and ignores anything else
@@ -844,6 +853,72 @@ def smb(conn):
             pass
 
 
+def krb_error():
+    """A KRB-ERROR (RFC 4120): KDC_ERR_C_PRINCIPAL_UNKNOWN, stime now."""
+    def tlv(tag, body):
+        n = len(body)
+        return bytes([tag]) + (bytes([n]) if n < 128 else bytes([0x81, n])) + body
+    stime = time.strftime("%Y%m%d%H%M%SZ", time.gmtime()).encode()
+    realm = tlv(0x1b, b"LAB.TEST")
+    body = (tlv(0xa0, b"\x02\x01\x05") + tlv(0xa1, b"\x02\x01\x1e")
+            + tlv(0xa4, tlv(0x18, stime)) + tlv(0xa5, b"\x02\x01\x00")
+            + tlv(0xa6, b"\x02\x01\x06") + tlv(0xa9, realm)
+            + tlv(0xaa, tlv(0x30, tlv(0xa0, b"\x02\x01\x02")
+                            + tlv(0xa1, tlv(0x30, tlv(0x1b, b"krbtgt") + realm)))))
+    return tlv(0x7e, tlv(0x30, body))
+
+
+def kerberos_tcp(conn):
+    """Kerberos over TCP (RFC 4120 7.2.2): a four-byte length, then the
+    message; every message gets a KRB-ERROR."""
+    with conn:
+        try:
+            conn.settimeout(10)
+            buf = b""
+            while len(buf) < 4 or len(buf) < 4 + int.from_bytes(buf[:4], "big"):
+                data = conn.recv(4096)
+                if not data:
+                    return
+                buf += data
+            reply = krb_error()
+            conn.sendall(struct.pack(">I", len(reply)) + reply)
+        except OSError:
+            pass
+
+
+def kerberos_udp(data):
+    return krb_error() if data[:1] in (b"\x6a", b"\x6c") else None
+
+
+def msrpc(conn):
+    """A DCE/RPC endpoint mapper (C706 12.6): a bind (packet type 11)
+    gets a bind_ack accepting the first context, with the caller's call
+    ID and data representation; anything else closes the connection."""
+    with conn:
+        try:
+            conn.settimeout(10)
+            head = b""
+            # The whole PDU: the 16-byte header holds its fragment length.
+            while len(head) < 16 or len(head) < struct.unpack("<H", head[8:10])[0]:
+                data = conn.recv(4096)
+                if not data:
+                    return
+                head += data
+            if head[0] != 5 or head[2] != 0x0b:
+                return
+            port = b"135\x00"
+            body = struct.pack("<HHI", 5840, 5840, 0x1234)
+            body += struct.pack("<H", len(port)) + port + b"\x00\x00"
+            body += b"\x01\x00\x00\x00" + struct.pack("<HH", 0, 0)
+            body += bytes.fromhex("045d888aeb1cc9119fe808002b104860") + struct.pack("<I", 2)
+            pdu = bytes([5, 0, 0x0c, 0x03]) + head[4:8]
+            pdu += struct.pack("<HH", 16 + len(body), 0) + head[12:16] + body
+            conn.sendall(pdu)
+            conn.recv(4096)
+        except OSError:
+            pass
+
+
 def silent(conn):
     with conn:
         try:
@@ -966,9 +1041,10 @@ def main():
         print(f"listener setup failed on TLS (needs the openssl command): {e}", flush=True)
         sys.exit(1)
     tcp = ((22, ssh), (23, telnet), (25, SMTP), (53, dns_tcp), (80, http),
-           (110, POP3), (119, NNTP), (143, IMAP), (445, smb), (993, sslv2),
+           (88, kerberos_tcp), (110, POP3), (119, NNTP), (135, msrpc), (139, smb),
+           (143, IMAP), (445, smb), (993, sslv2),
            (995, tls), (1433, mssql), (8080, silent))
-    udp = ((53, echo), (137, nbstat_reply), (161, snmp_reply))
+    udp = ((53, echo), (88, kerberos_udp), (137, nbstat_reply), (161, snmp_reply))
     # Bind every socket before saying "ready", so the harness never scans a
     # lab with a service missing; on a failure close them all and exit.
     served = []
