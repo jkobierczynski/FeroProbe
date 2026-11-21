@@ -157,13 +157,15 @@ fn netbios_ssn(data: &[u8]) -> Option<ServiceInfo> {
         }
         // Windows refuses *SMBSERVER ("called name not present"), while
         // Samba takes it, so a refusal is Windows, as nmap reports it.
-        [0x83, 0, 0, 1, _, ..] => {
+        [0x83, 0, 0, 1, 0x82, ..] => {
             let mut info = ServiceInfo::named("netbios-ssn");
             info.product = Some("Microsoft Windows netbios-ssn".into());
             info.os_type = Some("Windows".into());
             info.cpe = vec!["cpe:/o:microsoft:windows".into()];
             Some(info)
         }
+        // Any other refusal says nothing about who answered.
+        [0x83, 0, 0, 1, _, ..] => Some(ServiceInfo::named("netbios-ssn")),
         _ => None,
     }
 }
@@ -318,6 +320,12 @@ mod tests {
         assert_eq!(i.name, "netbios-ssn");
         assert_eq!(i.product.as_deref(), Some("Microsoft Windows netbios-ssn"));
         assert_eq!(i.os_type.as_deref(), Some("Windows"));
+        // "Insufficient resources" can come from anyone.
+        let i = parse("netbios-ssn", b"\x83\x00\x00\x01\x83").unwrap();
+        assert_eq!(
+            (i.name.as_str(), i.product, i.os_type),
+            ("netbios-ssn", None, None)
+        );
         assert!(parse("netbios-ssn", b"\x00\x00\x00\x10junk").is_none());
     }
 
