@@ -2156,6 +2156,9 @@ fn the_default_category() {
             "smb2-time",
             "smtp-commands",
             "smtp-ntlm-info",
+            "snmp-info",
+            "snmp-interfaces",
+            "snmp-sysdescr",
             "ssh-hostkey",
             "ssl-date",
             "ssl-cert",
@@ -5332,4 +5335,462 @@ end
         hosts[0].ports[0].scripts[0].output,
         "h2 nil spdy/3,http/1.1 nil DHE_PSK false true"
     );
+}
+
+/// BER for the stand-in SNMP agent: a TLV with a short or long length.
+fn ber(tag: u8, value: &[u8]) -> Vec<u8> {
+    let mut out = vec![tag];
+    if value.len() < 0x80 {
+        out.push(value.len() as u8);
+    } else {
+        let len = (value.len() as u32).to_be_bytes();
+        let skip = len.iter().take_while(|&&b| b == 0).count();
+        out.push(0x80 | (4 - skip) as u8);
+        out.extend(&len[skip..]);
+    }
+    out.extend(value);
+    out
+}
+
+fn ber_uint(tag: u8, v: u64) -> Vec<u8> {
+    let b = v.to_be_bytes();
+    let mut skip = b.iter().take_while(|&&x| x == 0).count().min(7);
+    let mut c = b[skip..].to_vec();
+    if c[0] >= 0x80 {
+        skip = 0;
+        c.insert(skip, 0);
+    }
+    ber(tag, &c)
+}
+
+fn ber_oid(arcs: &[u32]) -> Vec<u8> {
+    let mut c = vec![(arcs[0] * 40 + arcs[1]) as u8];
+    for &a in &arcs[2..] {
+        let mut b = vec![(a & 0x7f) as u8];
+        let mut n = a >> 7;
+        while n > 0 {
+            b.insert(0, 0x80 | (n & 0x7f) as u8);
+            n >>= 7;
+        }
+        c.extend(b);
+    }
+    ber(0x06, &c)
+}
+
+/// The elements of BER contents: (tag, contents) pairs.
+fn ber_items(mut s: &[u8]) -> Vec<(u8, Vec<u8>)> {
+    let mut out = Vec::new();
+    while s.len() >= 2 {
+        let tag = s[0];
+        let (len, head) = if s[1] < 0x80 {
+            (s[1] as usize, 2)
+        } else {
+            let n = (s[1] & 0x7f) as usize;
+            let mut l = 0usize;
+            for &b in &s[2..2 + n] {
+                l = (l << 8) | b as usize;
+            }
+            (l, 2 + n)
+        };
+        out.push((tag, s[head..head + len].to_vec()));
+        s = &s[head + len..];
+    }
+    out
+}
+
+fn ber_int(c: &[u8]) -> i64 {
+    let mut v: i64 = if c[0] >= 0x80 { -1 } else { 0 };
+    for &b in c {
+        v = (v << 8) | b as i64;
+    }
+    v
+}
+
+fn oid_arcs(c: &[u8]) -> Vec<u32> {
+    let mut out = vec![u32::from(c[0] / 40), u32::from(c[0] % 40)];
+    let mut n = 0u32;
+    for &b in &c[1..] {
+        n = (n << 7) | u32::from(b & 0x7f);
+        if b < 0x80 {
+            out.push(n);
+            n = 0;
+        }
+    }
+    out
+}
+
+fn arcs_of(s: &str) -> Vec<u32> {
+    s.split('.').map(|a| a.parse().unwrap()).collect()
+}
+
+/// A stand-in SNMP agent on 127.0.0.1: community "public", SNMPv1/v2c
+/// Get and GetNext over a small MIB (system group, ifTable with two
+/// interfaces, one down, and ipAddrTable), and an SNMPv3 Report to the
+/// engine discovery request. Keeps every request. With `late` it first
+/// sends a stale answer (wrong request-id) before each real one.
+async fn snmp_agent(late: bool) -> (u16, std::sync::Arc<std::sync::Mutex<Vec<Vec<u8>>>>) {
+    use std::collections::BTreeMap;
+    let mut mib: BTreeMap<Vec<u32>, Vec<u8>> = BTreeMap::new();
+    let mut put = |oid: &str, v: Vec<u8>| {
+        mib.insert(arcs_of(oid), v);
+    };
+    put(
+        "1.3.6.1.2.1.1.1.0",
+        ber(0x04, b"Linux lab 6.8.0 #1 SMP x86_64\r\nsecond line"),
+    );
+    put("1.3.6.1.2.1.1.3.0", ber_uint(0x43, 248_153_900));
+    put("1.3.6.1.2.1.1.5.0", ber(0x04, b"lab"));
+    for (i, name, ty, speed, mac, status, rx, tx) in [
+        (
+            1u32,
+            &b"lo"[..],
+            24u64,
+            10_000_000u64,
+            &b""[..],
+            1u64,
+            1_270_000u64,
+            1_270_000u64,
+        ),
+        (
+            2,
+            b"eth0",
+            6,
+            1_000_000_000,
+            b"\x00\x0c\x29\x01\x02\x03",
+            1,
+            28_430_000,
+            4_200,
+        ),
+        (
+            3,
+            b"eth1",
+            6,
+            100_000_000,
+            b"\x00\x0c\x29\x0a\x0b\x0c",
+            2,
+            0,
+            0,
+        ),
+    ] {
+        let p = "1.3.6.1.2.1.2.2.1";
+        put(&format!("{p}.1.{i}"), ber_uint(0x02, i.into()));
+        put(&format!("{p}.2.{i}"), ber(0x04, name));
+        put(&format!("{p}.3.{i}"), ber_uint(0x02, ty));
+        put(&format!("{p}.5.{i}"), ber_uint(0x42, speed));
+        put(&format!("{p}.6.{i}"), ber(0x04, mac));
+        put(&format!("{p}.8.{i}"), ber_uint(0x02, status));
+        put(&format!("{p}.10.{i}"), ber_uint(0x41, rx));
+        put(&format!("{p}.16.{i}"), ber_uint(0x41, tx));
+    }
+    for (addr, ifi, mask) in [
+        ([127u8, 0, 0, 1], 1u64, [255u8, 0, 0, 0]),
+        ([10, 77, 0, 2], 2, [255, 255, 255, 0]),
+        ([10, 77, 1, 2], 2, [255, 255, 255, 0]),
+    ] {
+        let idx = format!("{}.{}.{}.{}", addr[0], addr[1], addr[2], addr[3]);
+        let p = "1.3.6.1.2.1.4.20.1";
+        put(&format!("{p}.1.{idx}"), ber(0x40, &addr));
+        put(&format!("{p}.2.{idx}"), ber_uint(0x02, ifi));
+        put(&format!("{p}.3.{idx}"), ber(0x40, &mask));
+    }
+    put("1.3.6.1.2.1.25.1.1.0", ber_uint(0x43, 1));
+
+    let server = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let port = server.local_addr().unwrap().port();
+    let seen: std::sync::Arc<std::sync::Mutex<Vec<Vec<u8>>>> = Default::default();
+    let keep = seen.clone();
+    tokio::spawn(async move {
+        let mut buf = [0u8; 2048];
+        while let Ok((n, from)) = server.recv_from(&mut buf).await {
+            let req = buf[..n].to_vec();
+            keep.lock().unwrap().push(req.clone());
+            let top = ber_items(&ber_items(&req)[0].1);
+            let version = ber_int(&top[0].1);
+            let reply = if version == 3 {
+                // msgID from msgGlobalData; the Report carries the engine
+                // ID (net-snmp, enterprise 8072, MAC format), boots, time.
+                let global = ber_items(&top[1].1);
+                let msg_id = ber_int(&global[0].1) as u64;
+                let mut g = ber_uint(0x02, msg_id);
+                g.extend(ber_uint(0x02, 65507));
+                g.extend(ber(0x04, b"\x00"));
+                g.extend(ber_uint(0x02, 3));
+                let engine = b"\x80\x00\x1f\x88\x03\x00\x0c\x29\x01\x02\x03";
+                let mut usm = ber(0x04, engine);
+                usm.extend(ber_uint(0x02, 6));
+                usm.extend(ber_uint(0x02, 31_000_000));
+                for _ in 0..3 {
+                    usm.extend(ber(0x04, b""));
+                }
+                let usm = ber(0x30, &usm);
+                let mut vb = ber_oid(&arcs_of("1.3.6.1.6.3.15.1.1.4.0"));
+                vb.extend(ber_uint(0x41, 1));
+                let mut pdu = ber_uint(0x02, 0x4650);
+                pdu.extend(ber_uint(0x02, 0));
+                pdu.extend(ber_uint(0x02, 0));
+                pdu.extend(ber(0x30, &ber(0x30, &vb)));
+                let mut scoped = ber(0x04, engine);
+                scoped.extend(ber(0x04, b""));
+                scoped.extend(ber(0xa8, &pdu));
+                let mut m = ber_uint(0x02, 3);
+                m.extend(ber(0x30, &g));
+                m.extend(ber(0x04, &usm));
+                m.extend(ber(0x30, &scoped));
+                ber(0x30, &m)
+            } else {
+                if top[1].1 != b"public" {
+                    continue;
+                }
+                let pdu_tag = top[2].0;
+                let p = ber_items(&top[2].1);
+                let req_id = ber_int(&p[0].1);
+                let binds = ber_items(&p[3].1);
+                let mut out_binds = Vec::new();
+                let mut error = 0u64;
+                for (_, b) in &binds {
+                    let name = oid_arcs(&ber_items(b)[0].1);
+                    let found = if pdu_tag == 0xa0 {
+                        mib.get(&name).map(|v| (name.clone(), v.clone()))
+                    } else {
+                        mib.range((
+                            std::ops::Bound::Excluded(name.clone()),
+                            std::ops::Bound::Unbounded,
+                        ))
+                        .next()
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                    };
+                    let mut vb = Vec::new();
+                    match found {
+                        Some((k, v)) => {
+                            vb.extend(ber_oid(&k));
+                            vb.extend(v);
+                        }
+                        None => {
+                            // v1: noSuchName (2); v2c: an exception.
+                            vb.extend(ber_oid(&name));
+                            if version == 0 {
+                                error = 2;
+                                vb.extend(ber(0x05, b""));
+                            } else if pdu_tag == 0xa0 {
+                                vb.extend(ber(0x80, b""));
+                            } else {
+                                vb.extend(ber(0x82, b""));
+                            }
+                        }
+                    }
+                    out_binds.extend(ber(0x30, &vb));
+                }
+                let build = |id: i64| {
+                    let mut pdu = ber_uint(0x02, id as u64);
+                    pdu.extend(ber_uint(0x02, error));
+                    pdu.extend(ber_uint(0x02, if error > 0 { 1 } else { 0 }));
+                    pdu.extend(ber(0x30, &out_binds));
+                    let mut m = ber_uint(0x02, version as u64);
+                    m.extend(ber(0x04, b"public"));
+                    m.extend(ber(0xa2, &pdu));
+                    ber(0x30, &m)
+                };
+                if late {
+                    let _ = server.send_to(&build(req_id + 1), from).await;
+                }
+                build(req_id)
+            };
+            let _ = server.send_to(&reply, from).await;
+        }
+    });
+    (port, seen)
+}
+
+/// Run `id` against the stand-in agent on UDP `port` (named snmp).
+async fn run_snmp(id: &str, port: u16, args: &str) -> Vec<String> {
+    let scan = ScriptScan::new(vec![built_in(id)], args::parse(args).unwrap(), None).unwrap();
+    let mut host = host_with_services(&[(port, "snmp")]);
+    host.ports[0].protocol = Protocol::Udp;
+    host.ports[0].state = PortState::OpenFiltered;
+    let mut hosts = vec![host];
+    scan.scan_hosts(&mut hosts).await;
+    hosts[0].ports[0]
+        .scripts
+        .iter()
+        .map(|s| s.output.clone())
+        .collect()
+}
+
+#[tokio::test]
+async fn snmp_sysdescr_reads_description_and_uptime() {
+    let (port, seen) = snmp_agent(false).await;
+    let out = run_snmp("snmp-sysdescr", port, "").await;
+    assert_eq!(
+        out,
+        [
+            "Linux lab 6.8.0 #1 SMP x86_64\nsecond line\n  System uptime: 28d17h18m59.00s (248153900 timeticks)"
+        ]
+    );
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.len(), 2);
+    // v1, community public, GetRequest with request-id 0x4650 ("FP").
+    assert_eq!(&seen[0][2..14], b"\x02\x01\x00\x04\x06public\xa0");
+    assert!(
+        seen[0]
+            .windows(10)
+            .any(|w| w == b"\x02\x02\x46\x50\x02\x01\x00\x02\x01\x00"),
+        "{:02x?}",
+        seen[0]
+    );
+}
+
+#[tokio::test]
+async fn snmp_skips_late_answers_and_other_communities() {
+    // A stale answer (other request-id) comes before every real one.
+    let (port, seen) = snmp_agent(true).await;
+    let out = run_snmp("snmp-sysdescr", port, "snmp.version=v2c").await;
+    assert_eq!(out.len(), 1, "{out:?}");
+    assert!(out[0].starts_with("Linux lab"));
+    assert_eq!(seen.lock().unwrap()[0][4], 1, "v2c");
+    // The agent ignores community "private": no output, two tries each.
+    let (port, seen) = snmp_agent(false).await;
+    let out = run_snmp(
+        "snmp-sysdescr",
+        port,
+        "creds.snmp=:private,snmp.timeout=300ms",
+    )
+    .await;
+    assert!(out.is_empty(), "{out:?}");
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.len(), 2);
+    assert!(seen[0].windows(7).any(|w| w == b"private"));
+}
+
+#[tokio::test]
+async fn snmp_info_reads_the_engine_id() {
+    let (port, seen) = snmp_agent(false).await;
+    let out = run_snmp("snmp-info", port, "").await;
+    assert_eq!(
+        out,
+        [
+            "\n  enterprise: net-snmp\n  engineIDFormat: mac\n  engineIDData: 00:0c:29:01:02:03\n  snmpEngineBoots: 6\n  snmpEngineTime: 358d19h06m40s"
+        ]
+    );
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.len(), 1);
+    // SNMPv3, msgID 0x4650, reportable, USM; request-id 0x4650.
+    assert_eq!(&seen[0][2..5], b"\x02\x01\x03");
+    assert!(seen[0].windows(4).any(|w| w == b"\x02\x02\x46\x50"));
+    assert!(
+        seen[0]
+            .windows(10)
+            .any(|w| w == b"\x02\x02\x46\x50\x02\x01\x00\x02\x01\x00")
+    );
+}
+
+#[tokio::test]
+async fn snmp_interfaces_walks_the_tables() {
+    // v1, v2c, and v1 with a stale answer before every real one.
+    for (version, late) in [("v1", false), ("v2c", false), ("v1", true)] {
+        let (port, _) = snmp_agent(late).await;
+        let out = run_snmp("snmp-interfaces", port, &format!("snmp.version={version}")).await;
+        assert_eq!(out.len(), 1, "{out:?}");
+        let text = &out[0];
+        assert!(
+            text.starts_with(
+                "\n  lo\n    IP address: 127.0.0.1  Netmask: 255.0.0.0\n    Type: softwareLoopback  Speed: 10 Mbps\n    Traffic stats: 1.27 Mb sent, 1.27 Mb received\n  eth0\n    IP address: 10.77.0.2  Netmask: 255.255.255.0\n    IP address: 10.77.1.2  Netmask: 255.255.255.0\n    MAC address: 00:0c:29:01:02:03 ("
+            ),
+            "{text}"
+        );
+        assert!(
+            text.ends_with(
+                ")\n    Type: ethernetCsmacd  Speed: 1 Gbps\n    Traffic stats: 4.20 Kb sent, 28.43 Mb received"
+            ),
+            "{text}"
+        );
+        // eth1 is down: listed only with -v.
+        assert!(!text.contains("eth1"), "{text}");
+    }
+    // With -v every interface, with its status.
+    let src = Script::built_in()
+        .unwrap()
+        .into_iter()
+        .find(|s| s.id == "snmp-interfaces")
+        .unwrap()
+        .source
+        .replace("fero.verbosity()", "1");
+    let (port, _) = snmp_agent(false).await;
+    let scan = ScriptScan::new(
+        vec![script("snmp-interfaces", &src)],
+        ArgTable::default(),
+        None,
+    )
+    .unwrap();
+    let mut host = host_with_services(&[(port, "snmp")]);
+    host.ports[0].protocol = Protocol::Udp;
+    let mut hosts = vec![host];
+    scan.scan_hosts(&mut hosts).await;
+    let text = &hosts[0].ports[0].scripts[0].output;
+    assert!(text.contains("\n    Status: up\n"), "{text}");
+    assert!(
+        text.ends_with(
+            ")\n    Type: ethernetCsmacd  Speed: 100 Mbps\n    Status: down\n    Traffic stats: 0.00 Kb sent, 0.00 Kb received"
+        ),
+        "{text}"
+    );
+    // The vendor comes from the system's OUI list, if it has one.
+    assert!(
+        text.contains("\n  eth1\n    MAC address: 00:0c:29:0a:0b:0c ("),
+        "{text}"
+    );
+}
+
+#[test]
+fn snmp_scripts_stay_on_scanned_udp() {
+    // The portrule wants UDP 161 or a UDP port named snmp; TCP 161 and a
+    // closed port are not asked.
+    let scan = ScriptScan::new(
+        vec![built_in("snmp-sysdescr")],
+        args::parse("").unwrap(),
+        None,
+    )
+    .unwrap();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let tcp = host_with(&[(161, PortState::Open)]);
+    let mut closed = host_with(&[(161, PortState::Closed)]);
+    closed.ports[0].protocol = Protocol::Udp;
+    let mut hosts = vec![tcp, closed];
+    rt.block_on(scan.scan_hosts(&mut hosts));
+    assert!(hosts.iter().all(|h| h.ports[0].scripts.is_empty()));
+}
+
+#[tokio::test]
+async fn snmp_library_walk_ends_at_end_of_mib_and_encodes_oids() {
+    // The agent's last variable is 1.3.6.1.2.1.25.1.1.0: a v2c walk past
+    // it gets endOfMibView for the OID asked, which ends the walk at once.
+    let (port, seen) = snmp_agent(false).await;
+    let src = r#"
+description = "test"
+categories = { "safe" }
+portrule = fero.portrule.match({}, { "snmp" }, "udp")
+action = function(host, port)
+  local s = fero.snmp.session(host, port, { version = 1 })
+  local vars = s:walk("1.3.6.1.2.1.25.1")
+  s:close()
+  local m = fero.snmp.message(0, "public", 0xa0, { "2.100.3" })
+  return string.format("%d %s %s", #vars, vars[1].oid, fero.hex(m:sub(-7)))
+end
+"#;
+    let scan = ScriptScan::new(vec![script("snmp-lib", src)], ArgTable::default(), None).unwrap();
+    let mut host = host_with_services(&[(port, "snmp")]);
+    host.ports[0].protocol = Protocol::Udp;
+    let mut hosts = vec![host];
+    let start = std::time::Instant::now();
+    scan.scan_hosts(&mut hosts).await;
+    assert!(
+        start.elapsed() < Duration::from_secs(3),
+        "{:?}",
+        start.elapsed()
+    );
+    // "2.100.3": first subidentifier 180 in base 128 (81 34), then 03.
+    assert_eq!(
+        hosts[0].ports[0].scripts[0].output,
+        "1 1.3.6.1.2.1.25.1.1.0 06038134030500"
+    );
+    assert_eq!(seen.lock().unwrap().len(), 2);
 }

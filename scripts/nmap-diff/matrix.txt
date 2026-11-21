@@ -69,6 +69,10 @@ script-http-defaults | lan | root | -sS -v -p 80 --script http-auth,http-cookie-
 # ALPN h2 and http/1.1, no NPN) and its SSLv2-only stand-in on TCP 993
 # (neither in @TCP).
 script-tls       | lan    | root | -sS -p 993,995 --script ssl-enum-ciphers,tls-alpn,tls-nextprotoneg,sslv2
+# The SNMP scripts against the lab's SNMP agent on UDP 161 (not in @UDP):
+# community public, system group, ifTable (lo and eth0, both up),
+# ipAddrTable, and an SNMPv3 engine discovery Report (net-snmp engine ID).
+script-snmp      | lan    | root | -sU -p 161 --script snmp-sysdescr,snmp-info,snmp-interfaces
 
 # --- Loopback (nmap treats localhost specially) ----------------------------
 syn-local        | local  | root | -sS -p @TCP

@@ -45,6 +45,11 @@ against a real host:
   UDP 53    echoes every datagram back (so UDP 53 reads as open)
   UDP 137   answers a NetBIOS NODE STATUS request (RFC 1002) with a fixed
             name table and MAC address, and ignores anything else
+  UDP 161   a small SNMP agent for the snmp-* script case: community
+            "public", SNMPv1 and v2c GetRequest and GetNextRequest over the
+            system group, ifTable (lo, and eth0 up) and ipAddrTable, and a
+            Report with a net-snmp style engine ID to the SNMPv3 engine
+            discovery request (not in @UDP, so other cases never see it)
 
 Closed and filtered ports are not opened here; nmap-diff.py drops the
 filtered ones with iptables. Usage: listeners.py ADDR [ADDR ...] (default
@@ -113,6 +118,162 @@ NB_NAMES = (
     (b"WORKGROUP", 0x00, 0x8400),  # group, active
 )
 NB_MAC = bytes.fromhex("02000000a10b")
+
+
+# SNMP (RFC 1157, RFC 3416, RFC 3412/3414 engine discovery), BER (X.690)
+SNMP_COMMUNITY = b"public"
+SNMP_ENGINE_ID = bytes.fromhex("80001f8803") + NB_MAC
+
+
+def ber(tag, value):
+    n = len(value)
+    if n < 0x80:
+        return bytes([tag, n]) + value
+    ln = n.to_bytes((n.bit_length() + 7) // 8, "big")
+    return bytes([tag, 0x80 | len(ln)]) + ln + value
+
+
+def ber_uint(tag, v):
+    return ber(tag, v.to_bytes(v.bit_length() // 8 + 1, "big"))
+
+
+def ber_oid(arcs):
+    out = bytes([arcs[0] * 40 + arcs[1]])
+    for a in arcs[2:]:
+        b = [a & 0x7F]
+        a >>= 7
+        while a:
+            b.insert(0, 0x80 | (a & 0x7F))
+            a >>= 7
+        out += bytes(b)
+    return ber(0x06, out)
+
+
+def ber_items(s):
+    """The (tag, contents) elements of BER contents; ValueError if malformed."""
+    out, pos = [], 0
+    while pos < len(s):
+        if pos + 2 > len(s):
+            raise ValueError("short")
+        tag, n = s[pos], s[pos + 1]
+        pos += 2
+        if n & 0x80:
+            k = n & 0x7F
+            if not 0 < k <= 4 or pos + k > len(s):
+                raise ValueError("length")
+            n = int.from_bytes(s[pos:pos + k], "big")
+            pos += k
+        if pos + n > len(s):
+            raise ValueError("long")
+        out.append((tag, s[pos:pos + n]))
+        pos += n
+    return out
+
+
+def oid_arcs(c):
+    if not c:
+        raise ValueError("empty OID")
+    out, n = [min(c[0] // 40, 2)], 0
+    out.append(c[0] - out[0] * 40)
+    for b in c[1:]:
+        n = (n << 7) | (b & 0x7F)
+        if not b & 0x80:
+            out.append(n)
+            n = 0
+    return tuple(out)
+
+
+def snmp_mib():
+    """The agent's variables: {OID tuple: encoded value}."""
+    def oid(text):
+        return tuple(int(a) for a in text.split("."))
+    mib = {
+        oid("1.3.6.1.2.1.1.1.0"): ber(0x04, b"Linux fpd-tgt 6.8.0-lab #1 SMP x86_64"),
+        oid("1.3.6.1.2.1.1.3.0"): ber_uint(0x43, 12345600),
+        oid("1.3.6.1.2.1.1.5.0"): ber(0x04, b"fpd-tgt"),
+    }
+    interfaces = ((1, b"lo", 24, 10000000, b"", 1, 52000, 52000),
+                  (2, b"eth0", 6, 1000000000, NB_MAC, 1, 2843000, 127000))
+    for i, name, kind, speed, mac, status, rx, tx in interfaces:
+        base = "1.3.6.1.2.1.2.2.1."
+        mib[oid(f"{base}1.{i}")] = ber_uint(0x02, i)
+        mib[oid(f"{base}2.{i}")] = ber(0x04, name)
+        mib[oid(f"{base}3.{i}")] = ber_uint(0x02, kind)
+        mib[oid(f"{base}5.{i}")] = ber_uint(0x42, speed)
+        mib[oid(f"{base}6.{i}")] = ber(0x04, mac)
+        mib[oid(f"{base}8.{i}")] = ber_uint(0x02, status)
+        mib[oid(f"{base}10.{i}")] = ber_uint(0x41, rx)
+        mib[oid(f"{base}16.{i}")] = ber_uint(0x41, tx)
+    for addr, i, mask in (("127.0.0.1", 1, "255.0.0.0"), ("10.77.0.2", 2, "255.255.255.0")):
+        base = "1.3.6.1.2.1.4.20.1."
+        raw = bytes(int(a) for a in addr.split("."))
+        mib[oid(f"{base}1.{addr}")] = ber(0x40, raw)
+        mib[oid(f"{base}2.{addr}")] = ber_uint(0x02, i)
+        mib[oid(f"{base}3.{addr}")] = ber(0x40, bytes(int(a) for a in mask.split(".")))
+    return mib
+
+
+SNMP_MIB = snmp_mib()
+SNMP_ORDER = sorted(SNMP_MIB)
+SNMP_START = time.monotonic()
+
+
+def snmp_v3_report(top):
+    """The Report answering an SNMPv3 engine discovery request."""
+    msg_id = ber_items(top[1][1])[0][1]
+    glob = ber(0x02, msg_id) + ber_uint(0x02, 65507) + ber(0x04, b"\x00") + ber_uint(0x02, 3)
+    usm = ber(0x30, ber(0x04, SNMP_ENGINE_ID) + ber_uint(0x02, 3)
+              + ber_uint(0x02, int(time.monotonic() - SNMP_START) + 86400)
+              + ber(0x04, b"") * 3)
+    req_id = b"\x00"
+    if top[3][0] == 0x30:
+        scoped = ber_items(top[3][1])
+        if len(scoped) == 3:
+            req_id = ber_items(scoped[2][1])[0][1]
+    # usmStatsUnknownEngineIDs.0 (RFC 3414), Counter32 1
+    bind = ber(0x30, ber_oid((1, 3, 6, 1, 6, 3, 15, 1, 1, 4, 0)) + ber_uint(0x41, 1))
+    pdu = ber(0xA8, ber(0x02, req_id) + ber_uint(0x02, 0) + ber_uint(0x02, 0) + ber(0x30, bind))
+    scoped = ber(0x30, ber(0x04, SNMP_ENGINE_ID) + ber(0x04, b"") + pdu)
+    return ber(0x30, ber_uint(0x02, 3) + ber(0x30, glob) + ber(0x04, usm) + scoped)
+
+
+def snmp_reply(query):
+    """The answer to an SNMP request, or None for anything else."""
+    try:
+        outer = ber_items(query)
+        if len(outer) != 1 or outer[0][0] != 0x30:
+            return None
+        top = ber_items(outer[0][1])
+        version = int.from_bytes(top[0][1], "big")
+        if version == 3 and len(top) == 4:
+            return snmp_v3_report(top)
+        if version not in (0, 1) or len(top) != 3 or top[1][1] != SNMP_COMMUNITY:
+            return None
+        tag, body = top[2]
+        if tag not in (0xA0, 0xA1):
+            return None
+        req_id, _, _, binds = ber_items(body)
+        out, error, index = b"", 0, 0
+        for n, (_, b) in enumerate(ber_items(binds[1]), 1):
+            name = oid_arcs(ber_items(b)[0][1])
+            if tag == 0xA0:
+                found = name if name in SNMP_MIB else None
+            else:
+                found = next((o for o in SNMP_ORDER if o > name), None)
+            if found is not None:
+                out += ber(0x30, ber_oid(found) + SNMP_MIB[found])
+            elif version == 0:
+                # noSuchName (2), the variable echoed with NULL
+                error, index = error or 2, index or n
+                out += ber(0x30, ber_oid(name) + ber(0x05, b""))
+            else:
+                # noSuchObject, or endOfMibView after the last variable
+                out += ber(0x30, ber_oid(name) + ber(0x80 if tag == 0xA0 else 0x82, b""))
+        pdu = ber(0xA2, ber(0x02, req_id[1]) + ber_uint(0x02, error) + ber_uint(0x02, index)
+                  + ber(0x30, out))
+        return ber(0x30, ber_uint(0x02, version) + ber(0x04, SNMP_COMMUNITY) + pdu)
+    except (ValueError, IndexError):
+        return None
 
 
 def dns_name(msg, pos):
@@ -807,7 +968,7 @@ def main():
     tcp = ((22, ssh), (23, telnet), (25, SMTP), (53, dns_tcp), (80, http),
            (110, POP3), (119, NNTP), (143, IMAP), (445, smb), (993, sslv2),
            (995, tls), (1433, mssql), (8080, silent))
-    udp = ((53, echo), (137, nbstat_reply))
+    udp = ((53, echo), (137, nbstat_reply), (161, snmp_reply))
     # Bind every socket before saying "ready", so the harness never scans a
     # lab with a service missing; on a failure close them all and exit.
     served = []

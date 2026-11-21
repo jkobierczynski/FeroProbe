@@ -82,3 +82,9 @@ alert tcp any any -> $HOME_NET any (msg:"FeroProbe script TLS ClientHello (ssl-e
 # sslv2: the SSLv2 CLIENT-HELLO (version 2) whose 16-byte challenge is
 # "FeroProbeTLSScan".
 alert tcp any any -> $HOME_NET any (msg:"FeroProbe script SSLv2 CLIENT-HELLO (sslv2)"; flow:established,to_server; content:"|01 00 02|", offset 2, depth 3; content:"FeroProbeTLSScan", distance 6, within 300; classtype:attempted-recon; sid:9100020; rev:1;)
+# snmp-sysdescr / snmp-info / snmp-interfaces (fero.snmp): every SNMP PDU
+# they send (v1/v2c GetRequest and GetNextRequest, and the SNMPv3 engine
+# discovery's scoped PDU) has request-id 0x4650 ("FP") and no error, right
+# before its variable list; the PDU tag (GetRequest or GetNextRequest) keeps
+# the agent's answers out. The -sU/-sV probe to UDP 161 has request-id 1.
+alert udp any any -> $HOME_NET any (msg:"FeroProbe script SNMP request (snmp-sysdescr, snmp-info, snmp-interfaces)"; content:"|30|", depth 1; content:"|02 02 46 50 02 01 00 02 01 00 30|", distance 0; pcre:"/[\xa0\xa1](?:[\x00-\x7f]|\x81[\x80-\xff]|\x82[\x01-\xff][\x00-\xff])\x02\x02\x46\x50\x02\x01\x00\x02\x01\x00\x30/s"; classtype:attempted-recon; sid:9100021; rev:1;)
