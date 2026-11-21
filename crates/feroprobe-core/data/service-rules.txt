@@ -19,6 +19,9 @@
 #     tls                      a TLS handshake instead of a payload
 #     listen-ports LIST        (tls only) inside TLS, listen first here
 #
+#   exclude tcp|udp LIST       ports -sV leaves alone unless --allports
+#                              is given
+#
 #   match SERVICE REGEX        a rule; the first one that matches wins
 #   softmatch SERVICE REGEX    names the service only; probing goes on with
 #                              the probes that can tell more
@@ -36,6 +39,10 @@
 # Use \x20 for a space at either end of a pattern.
 
 feroprobe-service-rules 1
+
+# Printers' raw ports (JetDirect, AppSocket) print whatever reaches them, so
+# every probe would come out as a page of garbage. nmap skips them too.
+exclude tcp 9100-9107
 
 # ---------------------------------------------------------------- probes
 

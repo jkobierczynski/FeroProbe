@@ -82,7 +82,7 @@ async fn unrecognized_banner() {
 }
 
 #[tokio::test]
-async fn silent_service_gives_nothing() {
+async fn silent_service_gets_a_question_mark() {
     let addr = serve(|mut s| async move {
         let mut buf = [0u8; 1024];
         while matches!(s.read(&mut buf).await, Ok(n) if n > 0) {}
@@ -92,7 +92,14 @@ async fn silent_service_gives_nothing() {
         wait: Duration::from_millis(100),
         ..vs()
     };
-    assert_eq!(detect_tcp(addr, None, &cfg(), &vs).await, None);
+    // As in nmap: "?" after the port's name, "unknown" when it has none.
+    let info = detect_tcp(addr, None, &cfg(), &vs).await.unwrap();
+    let expected = match crate::ports::service_name(Protocol::Tcp, addr.port()) {
+        "unknown" => "unknown".to_string(),
+        name => format!("{name}?"),
+    };
+    assert_eq!(info.name, expected);
+    assert_eq!(info.product, None);
 }
 
 /// A server that answers only memcached's "version" command.
@@ -120,7 +127,9 @@ async fn intensity_decides_how_deep_to_probe() {
     // The memcached probe has rarity 7: tried on any port at 7, not at 6.
     let info = detect_tcp(addr, None, &cfg(), &fast(7)).await.unwrap();
     assert_eq!(info.version_line(), "Memcached 1.6.21");
-    assert_eq!(detect_tcp(addr, None, &cfg(), &fast(6)).await, None);
+    // At 6 it stays silent to every probe sent: no product.
+    let info = detect_tcp(addr, None, &cfg(), &fast(6)).await.unwrap();
+    assert_eq!(info.product, None);
 }
 
 #[tokio::test]
@@ -365,6 +374,54 @@ async fn fills_open_ports_only() {
     detect_services(&mut hosts, &cfg(), &vs()).await;
     assert_eq!(hosts[0].ports[0].service.as_ref().unwrap().name, "http");
     assert_eq!(hosts[0].ports[1].service, None);
+}
+
+#[tokio::test]
+async fn excluded_ports_are_left_alone() {
+    // A server that counts connections: an excluded port gets none.
+    let hits = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = Arc::clone(&hits);
+    let addr = serve(move |s| {
+        counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        http_reply(s)
+    })
+    .await;
+    let mut db = ServiceDb::parse(
+        &format!(
+            "feroprobe-service-rules 1\nexclude tcp {}\nprobe http tcp\n  rarity 1\n  send \"GET / HTTP/1.0\\r\\n\\r\\n\"\n",
+            addr.port()
+        ),
+        "test",
+    )
+    .unwrap();
+    db.source = "test".into();
+    let mut scan = VersionScan {
+        db: Arc::new(db),
+        ..vs()
+    };
+    let open = || PortResult {
+        port: addr.port(),
+        protocol: Protocol::Tcp,
+        state: PortState::Open,
+        reason: reason::SYN_ACK,
+        rtt_ms: None,
+        service: None,
+        scripts: Vec::new(),
+    };
+    let mut hosts = vec![HostResult::new(addr.ip(), None)];
+    hosts[0].ports = vec![open()];
+    detect_services(&mut hosts, &cfg(), &scan).await;
+    let name = &hosts[0].ports[0].service.as_ref().unwrap().name;
+    assert!(name.ends_with('?'), "{name}");
+    assert_eq!(hits.load(std::sync::atomic::Ordering::SeqCst), 0);
+    let lines = dry_run_lines(&scan, &[addr.port()], &[]);
+    assert!(lines[1].contains("--allports"), "{lines:?}");
+    // --allports probes it.
+    scan.all_ports = true;
+    hosts[0].ports = vec![open()];
+    detect_services(&mut hosts, &cfg(), &scan).await;
+    assert_eq!(hosts[0].ports[0].service.as_ref().unwrap().name, "http");
+    assert!(hits.load(std::sync::atomic::Ordering::SeqCst) > 0);
 }
 
 #[test]

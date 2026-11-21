@@ -64,6 +64,7 @@ SERVICE/VERSION DETECTION:
   --version-all: Every probe (intensity 9)
   --version-trace: Print each service probe, reply and matching rule
   --service-rules <file>: Use these probes and rules instead of the built-in ones
+  --allports: Probe printer ports 9100-9107 too (skipped by default)
 SCRIPT SCAN:
   -sC: Run the default scripts (the same as --script=default)
   --script <Lua scripts>: Run these scripts after the scan: a comma-separated
