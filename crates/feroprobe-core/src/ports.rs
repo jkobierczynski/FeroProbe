@@ -197,6 +197,7 @@ pub fn service_name(protocol: Protocol, port: u16) -> &'static str {
         (Protocol::Udp, 1900) => "upnp",
         (_, 2049) => "nfs",
         (Protocol::Tcp, 2375) => "docker",
+        (Protocol::Tcp, 2379) => "etcd-client",
         (Protocol::Tcp, 3306) => "mysql",
         (Protocol::Tcp, 3389) => "ms-wbt-server",
         (Protocol::Tcp, 4190) => "sieve",
@@ -883,6 +884,7 @@ mod tests {
         // nmap's names for banner services, so a closed port reads the same.
         assert_eq!(service_name(Protocol::Tcp, 4949), "munin");
         assert_eq!(service_name(Protocol::Tcp, 6600), "mshvlm");
+        assert_eq!(service_name(Protocol::Tcp, 2379), "etcd-client");
         assert_eq!(service_name(Protocol::Ip, 255), "reserved");
         assert_eq!(service_name(Protocol::Sctp, 3868), "diameter");
         assert_eq!(service_name(Protocol::Sctp, 80), "http");
