@@ -897,8 +897,14 @@ def msrpc(conn):
     with conn:
         try:
             conn.settimeout(10)
-            head = conn.recv(4096)
-            if len(head) < 16 or head[0] != 5 or head[2] != 0x0b:
+            head = b""
+            # The whole PDU: the 16-byte header holds its fragment length.
+            while len(head) < 16 or len(head) < struct.unpack("<H", head[8:10])[0]:
+                data = conn.recv(4096)
+                if not data:
+                    return
+                head += data
+            if head[0] != 5 or head[2] != 0x0b:
                 return
             port = b"135\x00"
             body = struct.pack("<HHI", 5840, 5840, 0x1234)
