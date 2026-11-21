@@ -1209,7 +1209,7 @@ with \f[V].\f[R] matching any byte, newlines included, and
 \f[V](?s-u)\f[R]); write \f[V]\[rs]x20\f[R] for a space at either end.
 Rules are tried in file order, hard matches before soft ones, and the
 first match wins.
-A soft match takes only \f[V]probe\f[R].
+A soft match takes only \f[V]probe\f[R] and \f[V]ports\f[R].
 Attributes:
 .PP
 .TS
@@ -1225,6 +1225,13 @@ T{
 \f[V]probe NAME\f[R]
 T}@T{
 Only read replies to this probe
+T}
+T{
+\f[V]ports LIST\f[R]
+T}@T{
+Only read replies from these ports, for a reply that means different
+services on different ports (Dovecot greets LMTP on 24 and mail
+submission on 587 the same way)
 T}
 T{
 \f[V]product\f[R], \f[V]version\f[R]

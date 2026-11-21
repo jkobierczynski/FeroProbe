@@ -72,6 +72,8 @@ pub struct Rule {
     pub soft: bool,
     /// Only match replies to this probe.
     pub probe: Option<String>,
+    /// Only match replies from these ports (none: any port).
+    pub ports: Vec<u16>,
     pub regex: Regex,
     pub product: String,
     pub version: String,
@@ -410,6 +412,7 @@ struct RuleDraft {
     soft: bool,
     pattern: String,
     probe: Option<String>,
+    ports: Vec<u16>,
     product: String,
     version: String,
     info: Vec<String>,
@@ -427,6 +430,7 @@ impl RuleDraft {
             soft,
             pattern: pattern.to_string(),
             probe: None,
+            ports: Vec::new(),
             product: String::new(),
             version: String::new(),
             info: Vec::new(),
@@ -451,6 +455,16 @@ impl RuleDraft {
             "probe" => {
                 if self.probe.replace(value.to_string()).is_some() {
                     return Err("probe is given twice".into());
+                }
+                Ok(())
+            }
+            "ports" => {
+                if !self.ports.is_empty() {
+                    return Err("ports is given twice".into());
+                }
+                self.ports = parse_ports(value)?;
+                if self.ports.is_empty() {
+                    return Err("ports needs at least one port".into());
                 }
                 Ok(())
             }
@@ -489,6 +503,7 @@ impl RuleDraft {
             service: self.service,
             soft: self.soft,
             probe: self.probe,
+            ports: self.ports,
             regex,
             product: self.product,
             version: self.version,
@@ -503,9 +518,10 @@ impl RuleDraft {
 }
 
 impl Rule {
-    /// Whether this rule may read a reply to `probe`.
-    pub fn applies_to(&self, probe: &str) -> bool {
+    /// Whether this rule may read a reply to `probe` from `port`.
+    pub fn applies_to(&self, probe: &str, port: u16) -> bool {
         self.probe.as_deref().is_none_or(|p| p == probe)
+            && (self.ports.is_empty() || self.ports.contains(&port))
     }
 
     /// Fill a template such as `OpenSSH ${2}` from the regex's groups.
@@ -543,6 +559,16 @@ mod tests {
             assert!(p.rarity <= 9);
             assert!(matches!(p.protocol, Protocol::Tcp | Protocol::Udp));
         }
+    }
+
+    #[test]
+    fn rule_ports() {
+        let db = parse("feroprobe-service-rules 1\nmatch lmtp ^220\n  ports 24,2424\nsoftmatch smtp ^2\n  ports 25\n").unwrap();
+        assert!(db.rules[0].applies_to("null", 24));
+        assert!(!db.rules[0].applies_to("null", 587));
+        assert!(db.rules[1].applies_to("null", 25));
+        let e = parse("feroprobe-service-rules 1\nmatch x ^a\n  ports 1\n  ports 2\n").unwrap_err();
+        assert_eq!(e.line, 4);
     }
 
     #[test]
