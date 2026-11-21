@@ -939,4 +939,57 @@ mod tests {
             "Prometheus Node Exporter 1.7.0"
         );
     }
+
+    /// UDP replies captured from real servers (Ubuntu 24.04 packages).
+    #[test]
+    fn udp_services() {
+        let line = |i: &ServiceInfo| i.version_line();
+        let stun = b"\x01\x01\x00H!\x12\xa4BFeroProbeSTN\x00 \x00\x08\x00\x01\x97\x03^\x12\xa4C\
+                     \x80\x22\x00\x14Coturn-4.6.1 'Gorst'";
+        let i = mr("stun", stun).unwrap();
+        assert_eq!(
+            (i.name.as_str(), line(&i).as_str()),
+            ("stun", "Coturn-4.6.1 'Gorst'")
+        );
+        let bare = b"\x01\x01\x00\x0c!\x12\xa4BFeroProbeSTN\x00 \x00\x08\x00\x01\x97\x03^\x12\xa4C";
+        assert_eq!(mr("stun", bare).unwrap().product, None);
+        // strongSwan 5.9 with no connection configured: NO_PROPOSAL_CHOSEN.
+        let ike = b"FeroProbB\xef\xd3\xf4\x0e\xb5J\xbf) \x22 \x00\x00\x00\x00\x00\x00\x00$\
+                    \x00\x00\x00\x08\x00\x00\x00\x0e";
+        let i = mr("ike", ike).unwrap();
+        assert_eq!(
+            (i.name.as_str(), i.extra_info.as_deref()),
+            ("isakmp", Some("IKEv2"))
+        );
+        let mut natt = b"\x00\x00\x00\x00".to_vec();
+        natt.extend_from_slice(ike);
+        assert_eq!(mr("ike-natt", &natt).unwrap().name, "nat-t-ike");
+        // xl2tpd's zero-length acknowledgement to our tunnel ID.
+        assert_eq!(
+            mr("l2tp", b"\xc8\x02\x00\x0cFP\x00\x00\x00\x00\x00\x01")
+                .unwrap()
+                .name,
+            "l2tp"
+        );
+        // An SCCRP naming its vendor (AVP 8).
+        let sccrp = b"\xc8\x02\x00\x30FP\x00\x00\x00\x00\x00\x01\x80\x08\x00\x00\x00\x00\x00\x02\
+                      \x00\x13\x00\x00\x00\x08xelerance.com";
+        assert_eq!(
+            mr("l2tp", sccrp).unwrap().product.as_deref(),
+            Some("xelerance.com")
+        );
+        // Asterisk 20's PONG.
+        assert_eq!(
+            mr("iax2", b"\x80\x01FP\x00\x00\x00\x00\x00\x01\x06\x03")
+                .unwrap()
+                .name,
+            "iax2"
+        );
+        // Avahi 0.8's answer.
+        let mdns = b"FP\x84\x00\x00\x01\x00\x02\x00\x00\x00\x00\t_services\x07_dns-sd\x04_udp\x05local\x00";
+        assert_eq!(
+            line(&mr("mdns", mdns).unwrap()),
+            "DNS-based service discovery"
+        );
+    }
 }

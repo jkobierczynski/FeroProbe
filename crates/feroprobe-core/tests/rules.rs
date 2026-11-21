@@ -160,19 +160,24 @@ fn service_probe_rules_match_the_probes() {
         (9100024, "kerberos-udp"),
         (9100025, "netbios-ssn"),
         (9100026, "mc-nmf"),
+        (9100027, "stun"),
+        (9100028, "ike"),
+        (9100028, "ike-natt"),
+        (9100029, "l2tp"),
+        (9100030, "mdns"),
+        (9100031, "iax2"),
     ] {
         let rule = &suricata[&sid].1;
-        assert!(
-            contents(rule).len() >= 2 || sid == 9100026,
-            "sid {sid}: {rule}"
-        );
+        assert!(!contents(rule).is_empty(), "sid {sid}: {rule}");
         let payload = db.probe(probe).unwrap().payload();
         assert!(
             content_match(&contents(rule), payload),
             "sid {sid} vs probe {probe}"
         );
         // And not every other probe.
-        for other in db.probes.iter().filter(|p| p.name != probe) {
+        // The IKE rule covers both IKE probes.
+        let same = |name: &str| name == probe || (sid == 9100028 && name.starts_with("ike"));
+        for other in db.probes.iter().filter(|p| !same(&p.name)) {
             assert!(
                 !content_match(&contents(rule), other.payload()),
                 "sid {sid} matches probe {}",

@@ -100,3 +100,20 @@ alert tcp any any -> $HOME_NET any (msg:"FeroProbe -sV NetBIOS session request (
 # -sV mc-nmf probe: a .NET Message Framing preamble whose via is
 # net.tcp://feroprobe.invalid/FeroProbe.
 alert tcp any any -> $HOME_NET any (msg:"FeroProbe -sV .NET Message Framing preamble (via feroprobe.invalid)"; flow:established,to_server; content:"|00 01 00 01 02 02 25|net.tcp|3A|//feroprobe.invalid/FeroProbe"; depth:44; classtype:attempted-recon; sid:9100026; rev:1;)
+
+# -sV stun probe: a STUN Binding Request whose transaction ID is
+# "FeroProbeSTN".
+alert udp any any -> $HOME_NET any (msg:"FeroProbe -sV STUN Binding Request (transaction ID FeroProbeSTN)"; content:"|00 01 00 00 21 12 A4 42|FeroProbeSTN"; depth:20; classtype:attempted-recon; sid:9100027; rev:1;)
+# -sV ike and ike-natt probes: an IKEv2 IKE_SA_INIT with initiator SPI
+# "FeroProb" and nonce "FeroProbeIKEv2NonceFeroProbeIKE2" (on UDP 4500
+# behind the four-byte non-ESP marker).
+alert udp any any -> $HOME_NET any (msg:"FeroProbe -sV IKEv2 IKE_SA_INIT (SPI FeroProb)"; content:"FeroProb|00 00 00 00 00 00 00 00 21 20 22 08|"; depth:24; content:"FeroProbeIKEv2NonceFeroProbeIKE2"; distance:0; classtype:attempted-recon; sid:9100028; rev:1;)
+# -sV l2tp probe: an L2TP SCCRQ from the host "feroprobe", vendor
+# "FeroProbe".
+alert udp any any -> $HOME_NET any (msg:"FeroProbe -sV L2TP SCCRQ (host feroprobe, vendor FeroProbe)"; content:"|C8 02|"; depth:2; content:"|00 07|feroprobe|00 0F 00 00 00 08|FeroProbe"; distance:0; classtype:attempted-recon; sid:9100029; rev:1;)
+# -sV mdns probe: the DNS-SD service enumeration query with transaction ID
+# 0x4650 ("FP"); a weak 2-byte mark, like rule 9100013.
+alert udp any any -> $HOME_NET any (msg:"FeroProbe -sV DNS-SD query (transaction ID FP)"; content:"FP|00 00 00 01 00 00 00 00 00 00 09|_services|07|_dns-sd|04|_udp|05|local|00 00 0C 00 01|"; depth:46; classtype:attempted-recon; sid:9100030; rev:1;)
+# -sV iax2 probe: an IAX2 POKE from source call number 0x4650 ("FP");
+# a weak 2-byte mark.
+alert udp any any -> $HOME_NET any (msg:"FeroProbe -sV IAX2 POKE (call number FP)"; content:"|C6 50 00 00 00 00 00 00 00 00 06 1E|"; depth:12; classtype:attempted-recon; sid:9100031; rev:1;)
