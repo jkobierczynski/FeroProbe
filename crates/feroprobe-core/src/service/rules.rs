@@ -35,6 +35,7 @@ pub(super) struct Matched {
 pub(super) fn match_response(
     db: &ServiceDb,
     probe: &str,
+    port: u16,
     sent: &[u8],
     data: &[u8],
 ) -> Option<Matched> {
@@ -57,7 +58,7 @@ pub(super) fn match_response(
             by: format!("built-in parser {probe}"),
         });
     }
-    let applicable = || db.rules.iter().filter(|r| r.applies_to(probe));
+    let applicable = || db.rules.iter().filter(|r| r.applies_to(probe, port));
     for rule in applicable().filter(|r| !r.soft) {
         if let Some(caps) = rule.regex.captures(data) {
             return Some(Matched {
@@ -216,11 +217,14 @@ mod tests {
 
     use crate::service::db::ServiceDb;
 
+    /// A port no rule is tied to.
+    const PORT: u16 = 40000;
+
     /// The hard match for a reply to `probe`, with the built-in rules.
     fn mr(probe: &str, data: &[u8]) -> Option<ServiceInfo> {
         let db = ServiceDb::builtin();
         let sent = db.probe(probe).map_or(&[][..], |p| p.payload());
-        match match_response(&db, probe, sent, data)?.found {
+        match match_response(&db, probe, PORT, sent, data)?.found {
             Found::Hard(info) => Some(*info),
             Found::Soft(_) => None,
         }
@@ -522,7 +526,7 @@ mod tests {
             let i = mr(probe, sent).unwrap_or_else(|| panic!("{probe}"));
             assert_eq!(i.name, "echo", "{probe}");
         }
-        let by = match_response(&db, "snmp", b"x", b"x").unwrap().by;
+        let by = match_response(&db, "snmp", PORT, b"x", b"x").unwrap().by;
         assert_eq!(by, "built-in echo check (snmp payload sent back)");
         // Only the whole payload: a reply that merely starts like it is not.
         let sent = db.probe("http").unwrap().payload();
@@ -535,7 +539,7 @@ mod tests {
     #[test]
     fn soft_matches() {
         let db = ServiceDb::builtin();
-        let soft = |probe: &str, data: &[u8]| match match_response(&db, probe, &[], data)
+        let soft = |probe: &str, data: &[u8]| match match_response(&db, probe, PORT, &[], data)
             .map(|m| m.found)
         {
             Some(Found::Soft(s)) => Some(s),
@@ -545,7 +549,7 @@ mod tests {
         assert_eq!(soft("null", b"* OK ready\r\n").as_deref(), Some("imap"));
         // Only for replies to the listen probe.
         assert_eq!(soft("http", b"+OK ready\r\n"), None);
-        let by = match_response(&db, "null", &[], b"+OK ready\r\n")
+        let by = match_response(&db, "null", PORT, &[], b"+OK ready\r\n")
             .unwrap()
             .by;
         assert!(by.starts_with("built-in rules line "), "{by}");
@@ -792,5 +796,81 @@ mod tests {
         let fault =
             b"\x08\x48http://schemas.microsoft.com/ws/2006/05/framing/faults/EndpointNotFound";
         assert_eq!(mr("mc-nmf", fault).unwrap().name, "mc-nmf");
+    }
+
+    /// Banners captured from real servers (Ubuntu 24.04 packages).
+    #[test]
+    fn talk_first_banners() {
+        let line = |i: &ServiceInfo| i.version_line();
+        let i = m(b"SSH-2.0-tinyssh_20240101-2 4sezQJsi\r\n");
+        assert_eq!(line(&i), "TinySSH 20240101 (protocol 2.0)");
+        assert_eq!(line(&m(b"+OK\r\n")), "Openwall popa3d");
+        assert_eq!(
+            line(&m(b"+OK Dovecot (Ubuntu) ready.\r\n")),
+            "Dovecot pop3d (Ubuntu)"
+        );
+        let i = m(
+            b"* OK [CAPABILITY IMAP4rev1 SASL-IR LOGIN-REFERRALS ID ENABLE IDLE \
+                    LITERAL+ STARTTLS AUTH=PLAIN] Dovecot (Ubuntu) ready.\r\n",
+        );
+        assert_eq!(line(&i), "Dovecot imapd (Ubuntu)");
+        assert_eq!(line(&m(b"* OK Dovecot ready.\r\n")), "Dovecot imapd");
+        let i = m(b"220 localhost FTP server (GNU inetutils 2.5) ready.\r\n");
+        assert_eq!(line(&i), "GNU Inetutils FTPd 2.5");
+        assert_eq!(line(&m(b"RFB 003.008\n")), "VNC (protocol 3.8)");
+        let i = m(b"# munin node at vm\n");
+        assert_eq!(
+            (i.name.as_str(), i.hostname.as_deref()),
+            ("munin", Some("vm"))
+        );
+        let i = m(b"Asterisk Call Manager/9.0.0\r\n");
+        assert_eq!(line(&i), "Asterisk Call Manager 9.0.0");
+        assert_eq!(line(&m(b"OK MPD 0.23.5\n")), "Music Player Daemon 0.23.5");
+        let sieve =
+            b"\"IMPLEMENTATION\" \"Dovecot (Ubuntu) Pigeonhole\"\r\n\"SIEVE\" \"fileinto\"\r\n\
+                      \"VERSION\" \"1.0\"\r\nOK \"Dovecot (Ubuntu) ready.\"\r\n";
+        let i = m(sieve);
+        assert_eq!(i.name, "sieve");
+        assert_eq!(line(&i), "Dovecot Pigeonhole sieve 1.0 (Ubuntu)");
+        let i = m(b"\"IMPLEMENTATION\" \"Cyrus timsieved v3.8.1\"\r\nOK\r\n");
+        assert_eq!(i.product.as_deref(), Some("Cyrus timsieved v3.8.1"));
+        // Documented greetings.
+        let i = m(b"<<<check_mk>>>\nVersion: 2.2.0p14\nAgentOS: linux\nHostname: web1\n");
+        assert_eq!(
+            line(&i),
+            "Check MK monitoring agent 2.2.0p14 (AgentOS: linux)"
+        );
+        let i = m(b"TS3\n\rWelcome to the TeamSpeak 3 ServerQuery interface, type \"help\"");
+        assert_eq!(i.name, "teamspeak3");
+        assert_eq!(
+            m(b"Content-Type: auth/request\n\n").name,
+            "freeswitch-event"
+        );
+        // ngIRCd answers our HTTP request before registration.
+        let i = mr(
+            "http",
+            b":irc.example.net 451 * :Connection not registered\r\n",
+        )
+        .unwrap();
+        assert_eq!(
+            (i.name.as_str(), i.product.as_deref(), i.hostname.as_deref()),
+            ("irc", Some("ngircd"), Some("irc.example.net"))
+        );
+    }
+
+    /// Dovecot greets LMTP and submission the same way; the port decides.
+    #[test]
+    fn rules_tied_to_ports() {
+        let db = ServiceDb::builtin();
+        let banner = b"220 vm Dovecot (Ubuntu) ready.\r\n";
+        let at = |port| match match_response(&db, "null", port, &[], banner)
+            .unwrap()
+            .found
+        {
+            Found::Hard(i) => (i.name, i.product.unwrap()),
+            Found::Soft(_) => panic!("soft"),
+        };
+        assert_eq!(at(24), ("lmtp".into(), "Dovecot lmtpd".into()));
+        assert_eq!(at(587), ("smtp".into(), "Dovecot submission".into()));
     }
 }

@@ -800,11 +800,12 @@ regular expression is the rest of the line, run on the raw reply with
 `.` matching any byte, newlines included, and `\xNN` matching byte `NN`
 (Rust regex syntax, flags `(?s-u)`); write `\x20` for a space at either end.
 Rules are tried in file order, hard matches before soft ones, and the
-first match wins. A soft match takes only `probe`. Attributes:
+first match wins. A soft match takes only `probe` and `ports`. Attributes:
 
 | Attribute | Meaning |
 | --- | --- |
 | `probe NAME` | Only read replies to this probe |
+| `ports LIST` | Only read replies from these ports, for a reply that means different services on different ports (Dovecot greets LMTP on 24 and mail submission on 587 the same way) |
 | `product`, `version` | The product and version; `${1}`, `${2}`, ... are the regex's groups |
 | `info TEXT` | Extra information; may be repeated, joined with `; ` |
 | `host`, `os`, `device` | What goes in the `Service Info` line |
