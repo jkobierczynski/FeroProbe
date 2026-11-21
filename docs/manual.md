@@ -1073,7 +1073,9 @@ As in nmap, a script chosen by its name (or a name pattern such as
 had been given once more, so it shows the detail it was asked for:
 `--script snmp-interfaces` lists interfaces that are down, which `-sC` or
 `--script default` shows only with `-v`. Scripts chosen by category or
-directory see the verbosity as set.
+directory see the verbosity as set. As in nmap, the first item that
+matches a script decides: `--script snmp-interfaces,default` gives the
+boost, `--script default,snmp-interfaces` does not.
 
 Each script is loaded (its file run in the sandbox to read its fields)
 when FeroProbe starts. Its rules are checked in one sandbox per host (the

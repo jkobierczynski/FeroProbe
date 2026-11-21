@@ -1599,6 +1599,9 @@ asked for: \f[V]--script snmp-interfaces\f[R] lists interfaces that are
 down, which \f[V]-sC\f[R] or \f[V]--script default\f[R] shows only with
 \f[V]-v\f[R].
 Scripts chosen by category or directory see the verbosity as set.
+As in nmap, the first item that matches a script decides:
+\f[V]--script snmp-interfaces,default\f[R] gives the boost,
+\f[V]--script default,snmp-interfaces\f[R] does not.
 .PP
 Each script is loaded (its file run in the sandbox to read its fields)
 when FeroProbe starts.
