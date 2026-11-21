@@ -809,12 +809,16 @@ async fn tls_web(starttls: bool) -> (u16, Seen) {
     (port, seen)
 }
 
+/// A built-in script as `--script default` would choose it, so it sees
+/// the plain `-v` level; [`Selection::Name`] would add one.
 fn built_in(id: &str) -> Script {
-    Script::built_in()
+    let mut s = Script::built_in()
         .unwrap()
         .into_iter()
         .find(|s| s.id == id)
-        .unwrap()
+        .unwrap();
+    s.selection = Selection::Category;
+    s
 }
 
 fn named<'a>(v: &'a ScriptValue, k: &str) -> &'a ScriptValue {
@@ -2484,6 +2488,32 @@ action = function()
 end"#;
     let scan = ScriptScan::new(vec![script("oem", src)], ArgTable::default(), None).unwrap();
     assert_eq!(scan.pre_scan().await[0].output, "LAB");
+}
+
+#[tokio::test]
+async fn scripts_chosen_by_name_see_one_more_verbosity_level() {
+    // As in nmap: chosen by name, name pattern or file path, a script sees
+    // -v plus one; chosen by category or directory it sees -v as given.
+    let src = r#"
+categories = {"safe"}
+prerule = function() return true end
+action = function() return tostring(fero.verbosity()) end"#;
+    let base = crate::debug::verbosity();
+    for (selection, extra) in [
+        (Selection::Name, 1),
+        (Selection::File, 1),
+        (Selection::Category, 0),
+        (Selection::Directory, 0),
+    ] {
+        let mut s = script("v", src);
+        s.selection = selection;
+        let scan = ScriptScan::new(vec![s], ArgTable::default(), None).unwrap();
+        assert_eq!(
+            scan.pre_scan().await[0].output,
+            (base + extra).to_string(),
+            "{selection:?}"
+        );
+    }
 }
 
 /// A stand-in TLS server that answers each ClientHello with a bare

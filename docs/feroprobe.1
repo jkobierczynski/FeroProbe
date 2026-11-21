@@ -1592,6 +1592,17 @@ see the ports that may be open).
 \f[V]--script\f[R] may be given more than once; the lists add up.
 \f[V]-v\f[R] prints how many scripts were loaded.
 .PP
+As in nmap, a script chosen by its name (or a name pattern such as
+\f[V]http-*\f[R], also inside an expression) or by its file path runs as
+if \f[V]-v\f[R] had been given once more, so it shows the detail it was
+asked for: \f[V]--script snmp-interfaces\f[R] lists interfaces that are
+down, which \f[V]-sC\f[R] or \f[V]--script default\f[R] shows only with
+\f[V]-v\f[R].
+Scripts chosen by category or directory see the verbosity as set.
+As in nmap, the first item that matches a script decides:
+\f[V]--script snmp-interfaces,default\f[R] gives the boost,
+\f[V]--script default,snmp-interfaces\f[R] does not.
+.PP
 Each script is loaded (its file run in the sandbox to read its fields)
 when FeroProbe starts.
 Its rules are checked in one sandbox per host (the hostrule and the
@@ -2389,7 +2400,9 @@ T}
 T{
 \f[V]fero.verbosity()\f[R], \f[V]fero.debugging()\f[R]
 T}@T{
-The \f[V]-v\f[R] and \f[V]-d\f[R] levels
+The \f[V]-v\f[R] and \f[V]-d\f[R] levels; \f[V]fero.verbosity()\f[R] is
+one higher for a script chosen by name or file path, as
+\f[V]nmap.verbosity()\f[R] is
 T}
 T{
 \f[V]fero.debug(level, message)\f[R]
@@ -2841,11 +2854,13 @@ T}@T{
 Fetches the icon the front page names in a
 \f[V]<link rel=\[dq]icon\[dq]>\f[R] (only when it is on the scanned host
 and port), else \f[V]/favicon.ico\f[R], and shows
-\f[V]Unknown favicon MD5: ...\f[R] with \f[V]-v\f[R].
+\f[V]Unknown favicon MD5: ...\f[R] with \f[V]-v\f[R] (or when chosen by
+name, which counts as one \f[V]-v\f[R], as in nmap).
 nmap names the application from its icon database and shows the MD5 of
 an unknown icon only with \f[V]-v\f[R]; FeroProbe has no icon database
 (nmap\[aq]s cannot be redistributed), so every icon is unknown and
-nothing is shown without \f[V]-v\f[R].
+nothing is shown without \f[V]-v\f[R] unless the script was chosen by
+name.
 Three GETs at most.
 Arguments (nmap\[aq]s names): \f[V]favicon.uri\f[R] (the icon\[aq]s
 path, no search), \f[V]favicon.root\f[R] (a path before the others)
@@ -3360,7 +3375,8 @@ Interfaces that are not up, and every \f[V]Status:\f[R] line (any RFC
 2863 state: \f[V]up\f[R], \f[V]down\f[R], \f[V]testing\f[R],
 \f[V]unknown\f[R], \f[V]dormant\f[R], \f[V]notPresent\f[R],
 \f[V]lowerLayerDown\f[R]; nmap\[aq]s names only the first two), only
-with \f[V]-v\f[R] (see Verbosity of scripts chosen by name).
+with \f[V]-v\f[R] (or when chosen by name, which counts as one
+\f[V]-v\f[R], as in nmap).
 Reads only the columns it shows, about half the requests nmap\[aq]s walk
 of the whole table sends.
 nmap\[aq]s can also run before the scan against a host named in
@@ -3420,8 +3436,8 @@ Lists what the server offers in its KEXINIT: \f[V]kex_algorithms\f[R],
 \f[V]mac_algorithms\f[R] and \f[V]compression_algorithms\f[R], with the
 number of each; with \f[V]-v\f[R] also each algorithm, in the
 server\[aq]s order of preference.
-nmap 7.95 lists the algorithms at any verbosity; FeroProbe keeps the
-normal report short.
+Same rule as nmap\[aq]s: \f[V]--script ssh2-enum-algos\f[R] lists them
+without \f[V]-v\f[R], \f[V]--script discovery\f[R] only with it.
 A group the server offers differently in each direction is shown twice,
 under the RFC 4253 names
 (\f[V]encryption_algorithms_client_to_server\f[R],
@@ -5694,19 +5710,6 @@ Names the account it would log in with (\f[V]account_used: guest\f[R]),
 although it logs in to nothing
 T}@T{
 No \f[V]account_used\f[R] line: no account is used
-T}
-T{
-Verbosity of scripts chosen by name
-T}@T{
-A script chosen by its name (\f[V]--script snmp-interfaces\f[R], not
-\f[V]--script default\f[R] or \f[V]-sC\f[R]) is told the verbosity is
-one higher than set, so it gives its \f[V]-v\f[R] output without
-\f[V]-v\f[R]: \f[V]snmp-interfaces\f[R] lists interfaces that are down
-and their status, \f[V]ssh2-enum-algos\f[R] lists every algorithm,
-\f[V]http-favicon\f[R] shows an unknown icon\[aq]s MD5
-T}@T{
-\f[V]fero.verbosity()\f[R] is the verbosity set with \f[V]-v\f[R],
-however the script was chosen; add \f[V]-v\f[R] for the fuller output
 T}
 T{
 SNMP scripts
