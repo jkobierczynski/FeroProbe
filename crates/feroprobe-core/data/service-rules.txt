@@ -1408,8 +1408,10 @@ match auth ^\s*\d+\s*,\s*\d+\s*:\s*ERROR\s*:\s*[A-Z\-]+
 # ------------------------------------------------------------------ UDP
 
 # STUN Binding Success (0x0101) or Error (0x0111) carrying our transaction
-# ID, with the SOFTWARE attribute (0x8022) when the server sends one.
-match stun ^\x01[\x01\x11]..\x21\x12\xa4\x42FeroProbeSTN.*?\x80\x22.([^\x00]+)
+# ID, with the SOFTWARE attribute (0x8022) when the server sends one. Its
+# value is at most 763 bytes, so the 2-byte length starts 0x00-0x02; the
+# capture stops at padding (0x00) or the next attribute (type 0x00xx/0x80xx).
+match stun ^\x01[\x01\x11]..\x21\x12\xa4\x42FeroProbeSTN.*?\x80\x22[\x00-\x02].([\x20-\x7e]+)
   probe stun
   product ${1}
 
@@ -1432,6 +1434,10 @@ match isakmp ^FeroProb.{8}.\x10\x05
   probe ike
   info IKEv1
 
+match nat-t-ike ^\x00\x00\x00\x00FeroProb.{8}.\x10\x05
+  probe ike-natt
+  info IKEv1
+
 # An L2TP control message (T, L, S bits, version 2) to our tunnel ID: the
 # SCCRP, with the vendor name AVP (8), or a zero-length acknowledgement.
 match l2tp ^\xc8\x02..FP.*?[\x00\x80][^\x00]\x00\x00\x00\x08([\x20-\x7e]+)
@@ -1441,8 +1447,9 @@ match l2tp ^\xc8\x02..FP.*?[\x00\x80][^\x00]\x00\x00\x00\x08([\x20-\x7e]+)
 match l2tp ^\xc8\x02..FP
   probe l2tp
 
-# IAX2 PONG (or ACK) to our POKE, addressed to our call number.
-match iax2 ^[\x80-\xff].FP.{6}\x06[\x03\x04]
+# IAX2 PONG (or ACK) to our POKE, addressed to our call number; the top
+# bit of the destination call number is the retransmission flag.
+match iax2 ^[\x80-\xff].[\x46\xc6]P.{6}\x06[\x03\x04]
   probe iax2
 
 match openvpn ^\x40.{8}
