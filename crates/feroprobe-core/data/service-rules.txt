@@ -1409,9 +1409,10 @@ match auth ^\s*\d+\s*,\s*\d+\s*:\s*ERROR\s*:\s*[A-Z\-]+
 
 # STUN Binding Success (0x0101) or Error (0x0111) carrying our transaction
 # ID, with the SOFTWARE attribute (0x8022) when the server sends one. Its
-# value is at most 763 bytes, so the 2-byte length starts 0x00-0x02; the
-# capture stops at padding (0x00) or the next attribute (type 0x00xx/0x80xx).
-match stun ^\x01[\x01\x11]..\x21\x12\xa4\x42FeroProbeSTN.*?\x80\x22[\x00-\x02].([\x20-\x7e]+)
+# value is UTF-8 of at most 763 bytes, so the 2-byte length starts
+# 0x00-0x02; the capture takes whole UTF-8 characters and stops at padding
+# (0x00) or the next attribute (type 0x00xx/0x80xx, never a character start).
+match stun ^\x01[\x01\x11]..\x21\x12\xa4\x42FeroProbeSTN.*?\x80\x22[\x00-\x02].((?:[\x20-\x7e]|[\xc2-\xdf][\x80-\xbf]|[\xe0-\xef][\x80-\xbf]{2}|[\xf0-\xf4][\x80-\xbf]{3})+)
   probe stun
   product ${1}
 

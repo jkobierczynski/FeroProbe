@@ -960,6 +960,13 @@ mod tests {
             mr("stun", long).unwrap().product.as_deref(),
             Some("Example STUN server version 1.2.3")
         );
+        // UTF-8 is kept whole, and stops before a FINGERPRINT that follows.
+        let utf8 = b"\x01\x01\x00\x18!\x12\xa4BFeroProbeSTN\x80\x22\x00\x0c\
+                     \xc3\x89t\xc3\xa9 STUN\xc3\xa9\x80\x28\x00\x04\x12\x34\x56\x78";
+        assert_eq!(
+            mr("stun", utf8).unwrap().product.as_deref(),
+            Some("\u{c9}t\u{e9} STUN\u{e9}")
+        );
         let bare = b"\x01\x01\x00\x0c!\x12\xa4BFeroProbeSTN\x00 \x00\x08\x00\x01\x97\x03^\x12\xa4C";
         assert_eq!(mr("stun", bare).unwrap().product, None);
         // strongSwan 5.9 with no connection configured: NO_PROPOSAL_CHOSEN.
