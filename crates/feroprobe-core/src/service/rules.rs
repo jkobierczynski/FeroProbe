@@ -878,4 +878,65 @@ mod tests {
         assert_eq!(at(24), ("lmtp".into(), "Dovecot lmtpd".into()));
         assert_eq!(at(587), ("smtp".into(), "Dovecot submission".into()));
     }
+
+    /// Replies captured from real servers (Ubuntu 24.04 packages).
+    #[test]
+    fn brokers_and_http_apps() {
+        let line = |i: &ServiceInfo| i.version_line();
+        let mqtt = b" \x02\x00\x00\x90\x03\x00\x01\x001-\x00\x13$SYS/broker/versionmosquitto version 2.0.18";
+        assert_eq!(line(&mr("mqtt", mqtt).unwrap()), "Mosquitto 2.0.18");
+        // A broker that refuses the subscription is still MQTT.
+        assert_eq!(
+            mr("mqtt", b" \x02\x00\x00\x90\x03\x00\x01\x80")
+                .unwrap()
+                .name,
+            "mqtt"
+        );
+
+        let etcd = b"HTTP/1.0 200 OK\r\nAccess-Control-Allow-Origin: *\r\nContent-Type: application/json\r\n\
+                     Content-Length: 45\r\n\r\n{\"etcdserver\":\"3.4.30\",\"etcdcluster\":\"3.4.0\"}";
+        assert_eq!(
+            line(&mr("etcd", etcd).unwrap()),
+            "etcd 3.4.30 (cluster version 3.4.0)"
+        );
+        let varnish =
+            b"HTTP/1.1 200 OK\r\nServer: Apache-Coyote/1.1\r\nX-Varnish: 36 32787\r\nAge: 7\r\n\
+                        Via: 1.1 varnish (Varnish/7.1)\r\nConnection: close\r\n\r\n<html>";
+        assert_eq!(
+            line(&mr("http", varnish).unwrap()),
+            "Varnish http accelerator 7.1"
+        );
+        let tomcat = b"HTTP/1.1 200 \r\nContent-Type: text/html\r\n\r\n<html>\n<head>\n    <title>Apache Tomcat</title>";
+        assert_eq!(line(&mr("http", tomcat).unwrap()), "Apache Tomcat");
+        let error =
+            b"HTTP/1.1 404 \r\nContent-Type: text/html\r\n\r\n<html><body><h1>HTTP Status 404</h1>\
+                      <hr class=\"line\" /><h3>Apache Tomcat/10.1.16</h3></body></html>";
+        assert_eq!(line(&mr("http", error).unwrap()), "Apache Tomcat 10.1.16");
+        let prom = b"HTTP/1.0 302 Found\r\nContent-Type: text/html; charset=utf-8\r\nLocation: /classic/graph\r\n\
+                     Content-Length: 37\r\n\r\n<a href=\"/classic/graph\">Found</a>.\n\n";
+        assert_eq!(line(&mr("http", prom).unwrap()), "Prometheus");
+        // The link must name the page Location names.
+        let mixed =
+            b"HTTP/1.0 302 Found\r\nLocation: /graph\r\n\r\n<a href=\"/query\">Found</a>.\n";
+        assert_ne!(
+            mr("http", mixed).and_then(|i| i.product).as_deref(),
+            Some("Prometheus")
+        );
+        // A lower-case header name still counts; a link outside the body does not.
+        let lower =
+            b"HTTP/1.0 302 Found\r\nlocation: /query\r\n\r\n<a href=\"/query\">Found</a>.\n";
+        assert_eq!(line(&mr("http", lower).unwrap()), "Prometheus");
+        let header = b"HTTP/1.0 302 Found\r\nLocation: /query\r\nX: <a href=\"/query\">Found</a>\r\n\r\n<a href=\"/graph\">Found</a>.\n";
+        assert_ne!(
+            mr("http", header).and_then(|i| i.product).as_deref(),
+            Some("Prometheus")
+        );
+        let ne = b"HTTP/1.0 200 OK\r\nContent-Type: text/html; charset=UTF-8\r\n\r\n<html lang=\"en\">\n  <head>\n\
+                   <title>Node Exporter</title>\n</head><body><div>Version: (version=1.7.0, branch=debian/sid, \
+                   revision=1.7.0-1ubuntu0.3)</div>";
+        assert_eq!(
+            line(&mr("http", ne).unwrap()),
+            "Prometheus Node Exporter 1.7.0"
+        );
+    }
 }

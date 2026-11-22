@@ -64,6 +64,12 @@ probe http tcp
   ports 80,81,591,2375,3000,5000,5601,7001,8000,8008,8080,8081,8088,8888,9000,9090,9200
   send "GET / HTTP/1.0\r\n\r\n"
 
+# etcd's version endpoint (its v2/v3 HTTP API on the client port).
+probe etcd tcp
+  rarity 8
+  ports 2379
+  send "GET /version HTTP/1.0\r\n\r\n"
+
 # Two empty lines: line-based services answer with an error that names them.
 probe crlf tcp
   rarity 1
@@ -215,11 +221,14 @@ probe amqp tcp
   ports 5671,5672
   send "AMQP\x00\x00\x09\x01"
 
-# MQTT 3.1.1 CONNECT, clean session, keepalive 60, client id "feroprobe".
+# MQTT 3.1.1 CONNECT, clean session, keepalive 60, client id "feroprobe";
+# then SUBSCRIBE to $SYS/broker/version, which Mosquitto answers with its
+# version (a retained message). The connection only reads.
 probe mqtt tcp
   rarity 8
   ports 1883,8883
   send "\x10\x15\x00\x04MQTT\x04\x02\x00\x3c\x00\x09feroprobe"
+  send "\x82\x18\x00\x01\x00\x13$SYS/broker/version\x00"
 
 # MongoDB OP_MSG {buildinfo: 1, $db: "admin"}, which needs no login.
 probe mongodb tcp
@@ -774,6 +783,23 @@ softmatch imap ^\* OK\x20
 # Rules run before FeroProbe's generic HTTP reader, which takes the product
 # from the Server header when no rule here matches.
 
+# Varnish names itself in Via (or only in X-Varnish), whatever the backend
+# behind it says in Server.
+match http ^HTTP/1\.[01] \d{3}[^\r\n]*\r\n(?:[^\r\n]+\r\n)*?(?i:via):[^\r\n]*\(Varnish/([\d.]+)\)
+  product Varnish http accelerator
+  version ${1}
+  cpe cpe:/a:varnish-cache:varnish:${1}
+
+match http ^HTTP/1\.[01] \d{3}[^\r\n]*\r\n(?:[^\r\n]+\r\n)*?(?i:x-varnish):
+  product Varnish http accelerator
+  cpe cpe:/a:varnish-cache:varnish
+
+match http ^HTTP/1\.[01] 200[^\r\n]*\r\n.*?\r\n\r\n\{"etcdserver":"([\w.\-]+)","etcdcluster":"([\w.\-]+)"
+  product etcd
+  version ${1}
+  info cluster version ${2}
+  cpe cpe:/a:etcd:etcd:${1}
+
 match http ^HTTP/1\.[01] \d{3}.*"cluster_name"\s*:.*"number"\s*:\s*"([\w.\-]+)".*"lucene_version"
   product Elasticsearch REST API
   version ${1}
@@ -933,6 +959,31 @@ match http ^HTTP/1\.[01] \d{3}[^\r\n]*\r\n(?:[^\r\n]+\r\n)*?(?i:server):[ \t]*CU
   version ${1}
   cpe cpe:/a:apple:cups:${1}
 
+# Pages that name the server when no Server header does (the generic
+# header reader would otherwise say only "http").
+match http ^HTTP/1\.[01] \d{3}.*?<h3>Apache Tomcat/([\d.]+)</h3>
+  product Apache Tomcat
+  version ${1}
+  cpe cpe:/a:apache:tomcat:${1}
+
+match http ^HTTP/1\.[01] 200.*?<title>Apache Tomcat(?:/([\d.]+))?</title>
+  product Apache Tomcat
+  version ${1}
+  cpe cpe:/a:apache:tomcat:${1}
+
+# Prometheus redirects / to its query page with Go's redirect body, the
+# link naming the same page as Location.
+match http ^HTTP/1\.[01] 302 Found\r\n(?:[^\r\n]+\r\n)*?(?:(?i:location): /classic/graph\r\n(?:[^\r\n]+\r\n)*\r\n<a href="/classic/graph">|(?i:location): /graph\r\n(?:[^\r\n]+\r\n)*\r\n<a href="/graph">|(?i:location): /query\r\n(?:[^\r\n]+\r\n)*\r\n<a href="/query">)Found</a>
+  product Prometheus
+  cpe cpe:/a:prometheus:prometheus
+
+# The node exporter's page. Its default port 9100 is excluded with the
+# printer ports, so there it needs --allports (as in nmap).
+match http ^HTTP/1\.[01] 200.*?<title>Node Exporter</title>.*?\(version=([\w.\-]+)
+  product Prometheus Node Exporter
+  version ${1}
+  cpe cpe:/a:prometheus:node_exporter:${1}
+
 match http ^HTTP/1\.[01] \d{3}[^\r\n]*\r\n(?:[^\r\n]+\r\n)*?(?i:x-powered-by):[ \t]*Express\r\n
   product Node.js Express framework
   cpe cpe:/a:expressjs:express
@@ -1031,6 +1082,12 @@ match amqp ^AMQP\x00\x00\x09\x01
   probe amqp
 
 # MQTT: CONNACK.
+match mqtt ^\x20\x02\x00\x00.*?[\x30-\x3f].\x00\x13\$SYS/broker/versionmosquitto version ([\w.\-]+)
+  probe mqtt
+  product Mosquitto
+  version ${1}
+  cpe cpe:/a:eclipse:mosquitto:${1}
+
 match mqtt ^\x20\x02\x00[\x00-\x05]
   probe mqtt
 
