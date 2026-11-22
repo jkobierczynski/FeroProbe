@@ -915,6 +915,13 @@ mod tests {
         let prom = b"HTTP/1.0 302 Found\r\nContent-Type: text/html; charset=utf-8\r\nLocation: /classic/graph\r\n\
                      Content-Length: 37\r\n\r\n<a href=\"/classic/graph\">Found</a>.\n\n";
         assert_eq!(line(&mr("http", prom).unwrap()), "Prometheus");
+        // The link must name the page Location names.
+        let mixed =
+            b"HTTP/1.0 302 Found\r\nLocation: /graph\r\n\r\n<a href=\"/query\">Found</a>.\n";
+        assert_ne!(
+            mr("http", mixed).and_then(|i| i.product).as_deref(),
+            Some("Prometheus")
+        );
         let ne = b"HTTP/1.0 200 OK\r\nContent-Type: text/html; charset=UTF-8\r\n\r\n<html lang=\"en\">\n  <head>\n\
                    <title>Node Exporter</title>\n</head><body><div>Version: (version=1.7.0, branch=debian/sid, \
                    revision=1.7.0-1ubuntu0.3)</div>";
