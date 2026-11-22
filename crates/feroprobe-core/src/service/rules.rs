@@ -922,6 +922,15 @@ mod tests {
             mr("http", mixed).and_then(|i| i.product).as_deref(),
             Some("Prometheus")
         );
+        // A lower-case header name still counts; a link outside the body does not.
+        let lower =
+            b"HTTP/1.0 302 Found\r\nlocation: /query\r\n\r\n<a href=\"/query\">Found</a>.\n";
+        assert_eq!(line(&mr("http", lower).unwrap()), "Prometheus");
+        let header = b"HTTP/1.0 302 Found\r\nLocation: /query\r\nX: <a href=\"/query\">Found</a>\r\n\r\n<a href=\"/graph\">Found</a>.\n";
+        assert_ne!(
+            mr("http", header).and_then(|i| i.product).as_deref(),
+            Some("Prometheus")
+        );
         let ne = b"HTTP/1.0 200 OK\r\nContent-Type: text/html; charset=UTF-8\r\n\r\n<html lang=\"en\">\n  <head>\n\
                    <title>Node Exporter</title>\n</head><body><div>Version: (version=1.7.0, branch=debian/sid, \
                    revision=1.7.0-1ubuntu0.3)</div>";

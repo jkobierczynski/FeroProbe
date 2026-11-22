@@ -973,7 +973,7 @@ match http ^HTTP/1\.[01] 200.*?<title>Apache Tomcat(?:/([\d.]+))?</title>
 
 # Prometheus redirects / to its query page with Go's redirect body, the
 # link naming the same page as Location.
-match http ^HTTP/1\.[01] 302 Found\r\n(?:[^\r\n]+\r\n)*?(?:Location: /classic/graph\r\n.*?<a href="/classic/graph">|Location: /graph\r\n.*?<a href="/graph">|Location: /query\r\n.*?<a href="/query">)Found</a>
+match http ^HTTP/1\.[01] 302 Found\r\n(?:[^\r\n]+\r\n)*?(?:(?i:location): /classic/graph\r\n(?:[^\r\n]+\r\n)*\r\n<a href="/classic/graph">|(?i:location): /graph\r\n(?:[^\r\n]+\r\n)*\r\n<a href="/graph">|(?i:location): /query\r\n(?:[^\r\n]+\r\n)*\r\n<a href="/query">)Found</a>
   product Prometheus
   cpe cpe:/a:prometheus:prometheus
 
