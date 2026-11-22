@@ -26,6 +26,7 @@
 #   softmatch SERVICE REGEX    names the service only; probing goes on with
 #                              the probes that can tell more
 #     probe NAME               only for replies to this probe
+#     ports LIST               only for replies from these ports
 #     product TEXT             ${1}, ${2}, ... are the regex's groups
 #     version TEXT
 #     info TEXT                repeatable; joined with "; "
@@ -455,6 +456,14 @@ match ssh ^SSH-([\d.]+)-dropbear_([\w.]+)
   cpe cpe:/a:matt_johnston:dropbear_ssh_server:${2}
   cpe cpe:/o:linux:linux_kernel
 
+# TinySSH: the version is its release date, then the package revision and
+# a per-connection random word.
+match ssh ^SSH-([\d.]+)-tinyssh_(\d{8})
+  product TinySSH
+  version ${2}
+  info protocol ${1}
+  cpe cpe:/a:tinyssh:tinyssh:${2}
+
 match ssh ^SSH-([\d.]+)-libssh[_-]([\d.]+)
   product libssh
   version ${2}
@@ -612,6 +621,22 @@ match smtp ^220[ -](\S+) ESMTP Haraka[/ ]([\d.]+)
   version ${2}
   host ${1}
 
+# Dovecot greets LMTP and mail submission alike ("220 host Dovecot
+# (Ubuntu) ready."), so the port tells them apart: LMTP on 24, submission
+# elsewhere (nmap names both lmtp).
+match lmtp ^220[ -](\S+) Dovecot(?: \((Ubuntu|Debian)\))? ready\.\r\n
+  ports 24
+  product Dovecot lmtpd
+  info ${2}
+  host ${1}
+  cpe cpe:/a:dovecot:dovecot
+
+match smtp ^220[ -](\S+) Dovecot(?: \((Ubuntu|Debian)\))? ready\.\r\n
+  product Dovecot submission
+  info ${2}
+  host ${1}
+  cpe cpe:/a:dovecot:dovecot
+
 match smtp ^220[ -](\S+) [^\r\n]*\bE?SMTP\b
   host ${1}
 
@@ -620,6 +645,7 @@ match smtp ^220[ -](\S+) [^\r\n]*\bE?SMTP\b
 match ftp ^220[ -][^\r\n]*\(vsFTPd ([\w.]+)\)
   product vsftpd
   version ${1}
+  os Unix
   cpe cpe:/a:beasts:vsftpd:${1}
 
 match ftp ^220[ -]ProFTPD ([\d.]+\w*) Server
@@ -668,6 +694,12 @@ match ftp ^220[ -](\S+) FTP server \(Version (wu-[\w.\-]+)
   version ${2}
   host ${1}
 
+match ftp ^220[ -](\S+) FTP server \(GNU inetutils ([\d.]+)\) ready
+  product GNU Inetutils FTPd
+  version ${2}
+  host ${1}
+  cpe cpe:/a:gnu:inetutils:${2}
+
 match ftp ^220[ -]bftpd ([\d.]+)
   product bftpd
   version ${1}
@@ -676,9 +708,15 @@ match ftp ^220[ -][^\r\n]*\bFTP\b
 
 # ------------------------------------------------------------- POP3, IMAP
 
-match pop3 ^\+OK [^\r\n]*Dovecot
+match pop3 ^\+OK [^\r\n]*Dovecot(?: \((Ubuntu|Debian)\))?
   product Dovecot pop3d
+  info ${1}
   cpe cpe:/a:dovecot:dovecot
+
+# Openwall popa3d says nothing about itself: a bare "+OK".
+match pop3 ^\+OK\r\n\z
+  product Openwall popa3d
+  cpe cpe:/a:openwall:popa3d
 
 match pop3 ^\+OK The Microsoft Exchange POP3 service is ready
   product Microsoft Exchange pop3d
@@ -703,8 +741,9 @@ match pop3 ^\+OK [^\r\n]*POP3
 softmatch pop3 ^\+OK\x20
   probe null
 
-match imap ^\* OK [^\r\n]*Dovecot
+match imap ^\* OK [^\r\n]*Dovecot(?: \((Ubuntu|Debian)\))?
   product Dovecot imapd
+  info ${1}
   cpe cpe:/a:dovecot:dovecot
 
 match imap ^\* OK The Microsoft Exchange IMAP4 service is ready
@@ -1085,7 +1124,8 @@ match vnc ^RFB 003\.889\n
   os Mac OS X
   cpe cpe:/o:apple:mac_os_x
 
-match vnc ^RFB (\d{3})\.(\d{3})\n
+# "RFB 003.008": nmap prints the protocol as 3.8.
+match vnc ^RFB 0*(\d+)\.0*(\d+)\n
   product VNC
   info protocol ${1}.${2}
 
@@ -1178,8 +1218,56 @@ match nntp ^20[01] [^\r\n]*\b(?i:nntp|news)\b
 
 match irc ^:\S+ NOTICE (?:AUTH|\*) :\*\*\* (?:Looking up|Checking|Processing)
 
+# ngIRCd's answer to any command before registration.
+match irc ^:(\S+) 451 \S+ :Connection not registered\r\n
+  product ngircd
+  host ${1}
+  cpe cpe:/a:ngircd:ngircd
+
 match irc ^:(\S+) 020 \* :
   host ${1}
+
+# ManageSieve (RFC 5804): the greeting lists capabilities, first the
+# implementation.
+match sieve ^"IMPLEMENTATION" "Dovecot(?: \((Ubuntu|Debian)\))? Pigeonhole"\r\n.*?"VERSION" "([\d.]+)"
+  product Dovecot Pigeonhole sieve
+  version ${2}
+  info ${1}
+  cpe cpe:/a:dovecot:pigeonhole
+
+match sieve ^"IMPLEMENTATION" "([^"\r\n]+)"\r\n
+  product ${1}
+
+# Checkmk agent: dumps its report on connect, starting with its version;
+# the Windows agent puts BuildDate before AgentOS (Checkmk agent
+# documentation).
+match check_mk ^<<<check_mk>>>\r?\nVersion: ([\w.\-]+)\r?\n(?:[^<\r\n][^\r\n]*\r?\n)*?AgentOS: (\w+)
+  product Check MK monitoring agent
+  version ${1}
+  info AgentOS: ${2}
+
+# TeamSpeak 3 ServerQuery greeting (TeamSpeak 3 Server Query manual).
+match teamspeak3 ^TS3\n\rWelcome to the TeamSpeak 3 ServerQuery interface
+  product TeamSpeak 3 ServerQuery
+
+# FreeSWITCH event socket (mod_event_socket): asks for the password first.
+match freeswitch-event ^Content-Type: auth/request\n\n
+  product FreeSWITCH mod_event_socket
+  cpe cpe:/a:freeswitch:freeswitch
+
+match munin ^# munin node at (\S+)\n
+  product Munin
+  host ${1}
+
+match asterisk ^Asterisk Call Manager/([\d.]+)\r\n
+  product Asterisk Call Manager
+  version ${1}
+  cpe cpe:/a:digium:asterisk
+
+match mpd ^OK MPD ([\d.]+)\n
+  product Music Player Daemon
+  version ${1}
+  cpe cpe:/a:musicpd:music_player_daemon:${1}
 
 match dict ^220 (\S+) dictd ([\w./\-]+) on ([^<\r\n]+)
   product dictd
