@@ -194,17 +194,20 @@ pub fn service_name(protocol: Protocol, port: u16) -> &'static str {
         (Protocol::Tcp, 995) => "pop3s",
         (Protocol::Tcp, 1433) => "ms-sql-s",
         (Protocol::Tcp, 1883) => "mqtt",
+        (Protocol::Udp, 1701) => "L2TP",
         (Protocol::Udp, 1900) => "upnp",
         (_, 2049) => "nfs",
         (Protocol::Tcp, 2375) => "docker",
         (Protocol::Tcp, 2379) => "etcd-client",
         (Protocol::Tcp, 3306) => "mysql",
         (Protocol::Tcp, 3389) => "ms-wbt-server",
+        (Protocol::Udp, 3478) => "stun",
         (Protocol::Tcp, 4190) => "sieve",
         (Protocol::Tcp, 4949) => "munin",
         (Protocol::Udp, 4500) => "nat-t-ike",
+        (Protocol::Udp, 4569) => "iax",
         (Protocol::Tcp, 5432) => "postgresql",
-        (Protocol::Udp, 5353) => "mdns",
+        (Protocol::Udp, 5353) => "zeroconf",
         (Protocol::Tcp, 5672) => "amqp",
         (Protocol::Tcp, 5900) => "vnc",
         (Protocol::Tcp, 6379) => "redis",
@@ -885,6 +888,11 @@ mod tests {
         assert_eq!(service_name(Protocol::Tcp, 4949), "munin");
         assert_eq!(service_name(Protocol::Tcp, 6600), "mshvlm");
         assert_eq!(service_name(Protocol::Tcp, 2379), "etcd-client");
+        // and for the UDP services batch 4 probes; nmap's file spells L2TP in capitals.
+        assert_eq!(service_name(Protocol::Udp, 3478), "stun");
+        assert_eq!(service_name(Protocol::Udp, 5353), "zeroconf");
+        assert_eq!(service_name(Protocol::Udp, 1701), "L2TP");
+        assert_eq!(service_name(Protocol::Udp, 4569), "iax");
         assert_eq!(service_name(Protocol::Ip, 255), "reserved");
         assert_eq!(service_name(Protocol::Sctp, 3868), "diameter");
         assert_eq!(service_name(Protocol::Sctp, 80), "http");
