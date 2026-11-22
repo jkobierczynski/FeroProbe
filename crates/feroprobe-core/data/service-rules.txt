@@ -346,6 +346,77 @@ probe kerberos-udp udp
   send "\xa5\x11\x18\x0f20370913024805Z\xa7\x06\x02\x04FPRO"
   send "\xa8\x0b0\x09\x02\x01\x12\x02\x01\x11\x02\x01\x17"
 
+# STUN Binding Request (RFC 8489), transaction ID "FeroProbeSTN".
+probe stun udp
+  rarity 6
+  ports 3478
+  send "\x00\x01\x00\x00\x21\x12\xa4\x42FeroProbeSTN"
+
+# DNS-SD service enumeration (RFC 6763 9) sent to the port itself, as a
+# legacy unicast query (RFC 6762 6.7): ID "FP".
+probe mdns udp
+  rarity 6
+  ports 5353
+  send "FP\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00"
+  send "\x09_services\x07_dns-sd\x04_udp\x05local\x00\x00\x0c\x00\x01"
+
+# IKEv2 IKE_SA_INIT (RFC 7296) with initiator SPI "FeroProb": one proposal
+# (AES-CBC-128, HMAC-SHA1, DH group 14), a key exchange of "F" bytes and
+# the nonce "FeroProbeIKEv2NonceFeroProbeIKE2". Any IKE responder answers,
+# usually with NO_PROPOSAL_CHOSEN or INVALID_KE_PAYLOAD; an IKEv1-only one
+# with INVALID_MAJOR_VERSION.
+probe ike udp
+  rarity 8
+  ports 500
+  send "FeroProb\x00\x00\x00\x00\x00\x00\x00\x00! \x22\x08\x00\x00\x00\x00"
+  send "\x00\x00\x01x\x22\x00\x000\x00\x00\x00,\x01\x01\x00\x04\x03\x00\x00\x0c\x01\x00\x00\x0c"
+  send "\x80\x0e\x00\x80\x03\x00\x00\x08\x02\x00\x00\x02\x03\x00\x00\x08\x03\x00\x00\x02\x00\x00\x00\x08"
+  send "\x04\x00\x00\x0e(\x00\x01\x08\x00\x0e\x00\x00"
+  send "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"
+  send "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"
+  send "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"
+  send "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"
+  send "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"
+  send "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"
+  send "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"
+  send "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"
+  send "\x00\x00\x00\x24FeroProbeIKEv2NonceFeroProbeIKE2"
+
+# The same over UDP 4500 (NAT traversal, RFC 3948), behind the four zero
+# bytes that mark IKE apart from ESP there.
+probe ike-natt udp
+  rarity 8
+  ports 4500
+  send "\x00\x00\x00\x00FeroProb\x00\x00\x00\x00\x00\x00\x00\x00! \x22\x08\x00\x00\x00\x00"
+  send "\x00\x00\x01x\x22\x00\x000\x00\x00\x00,\x01\x01\x00\x04\x03\x00\x00\x0c\x01\x00\x00\x0c"
+  send "\x80\x0e\x00\x80\x03\x00\x00\x08\x02\x00\x00\x02\x03\x00\x00\x08\x03\x00\x00\x02\x00\x00\x00\x08"
+  send "\x04\x00\x00\x0e(\x00\x01\x08\x00\x0e\x00\x00"
+  send "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"
+  send "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"
+  send "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"
+  send "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"
+  send "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"
+  send "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"
+  send "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"
+  send "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"
+  send "\x00\x00\x00\x24FeroProbeIKEv2NonceFeroProbeIKE2"
+
+# L2TP SCCRQ (RFC 2661) from the host "feroprobe", vendor "FeroProbe",
+# assigned tunnel ID 0x4650 ("FP").
+probe l2tp udp
+  rarity 8
+  ports 1701
+  send "\xc8\x02\x00T\x00\x00\x00\x00\x00\x00\x00\x00\x80\x08\x00\x00\x00\x00\x00\x01\x80\x08\x00\x00"
+  send "\x00\x02\x01\x00\x80\x0a\x00\x00\x00\x03\x00\x00\x00\x03\x80\x0f\x00\x00\x00\x07fero"
+  send "probe\x00\x0f\x00\x00\x00\x08FeroProbe\x80\x08\x00\x00"
+  send "\x00\x09FP\x80\x08\x00\x00\x00\x0a\x00\x04"
+
+# IAX2 POKE (RFC 5456), source call number 0x4650 ("FP").
+probe iax2 udp
+  rarity 8
+  ports 4569
+  send "\xc6\x50\x00\x00\x00\x00\x00\x00\x00\x00\x06\x1e"
+
 probe sip-udp udp
   rarity 5
   ports 5060
@@ -1335,6 +1406,52 @@ match dict ^220 (\S+) dictd ([\w./\-]+) on ([^<\r\n]+)
 match auth ^\s*\d+\s*,\s*\d+\s*:\s*ERROR\s*:\s*[A-Z\-]+
 
 # ------------------------------------------------------------------ UDP
+
+# STUN Binding Success (0x0101) or Error (0x0111) carrying our transaction
+# ID, with the SOFTWARE attribute (0x8022) when the server sends one. Its
+# value is UTF-8 of at most 763 bytes, so the 2-byte length starts
+# 0x00-0x02; the capture takes whole UTF-8 characters and stops at padding
+# (0x00) or the next attribute (type 0x00xx/0x80xx, never a character start).
+match stun ^\x01[\x01\x11]..\x21\x12\xa4\x42FeroProbeSTN.*?\x80\x22[\x00-\x02].((?:[\x20-\x7e]|[\xc2-\xdf][\x80-\xbf]|[\xe0-\xef][\x80-\xbf]{2}|[\xf0-\xf4][\x80-\xbf]{3})+)
+  probe stun
+  product ${1}
+
+match stun ^\x01[\x01\x11]..\x21\x12\xa4\x42FeroProbeSTN
+  probe stun
+
+match mdns ^FP\x84\x00
+  probe mdns
+  product DNS-based service discovery
+
+match isakmp ^FeroProb.{8}.\x20\x22[\x20-\x28]
+  probe ike
+  info IKEv2
+
+match nat-t-ike ^\x00\x00\x00\x00FeroProb.{8}.\x20\x22[\x20-\x28]
+  probe ike-natt
+  info IKEv2
+
+match isakmp ^FeroProb.{8}.\x10\x05
+  probe ike
+  info IKEv1
+
+match nat-t-ike ^\x00\x00\x00\x00FeroProb.{8}.\x10\x05
+  probe ike-natt
+  info IKEv1
+
+# An L2TP control message (T, L, S bits, version 2) to our tunnel ID: the
+# SCCRP, with the vendor name AVP (8), or a zero-length acknowledgement.
+match l2tp ^\xc8\x02..FP.*?[\x00\x80][^\x00]\x00\x00\x00\x08([\x20-\x7e]+)
+  probe l2tp
+  product ${1}
+
+match l2tp ^\xc8\x02..FP
+  probe l2tp
+
+# IAX2 PONG (or ACK) to our POKE, addressed to our call number; the top
+# bit of the destination call number is the retransmission flag.
+match iax2 ^[\x80-\xff].[\x46\xc6]P.{6}\x06[\x03\x04]
+  probe iax2
 
 match openvpn ^\x40.{8}
   probe openvpn

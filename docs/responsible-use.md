@@ -135,7 +135,13 @@ can tell FeroProbe traffic apart from other traffic. The marks are:
   the realm `FEROPROBE.INVALID` with nonce `FPRO`, over TCP (9100023) and
   UDP (9100024); the NetBIOS session request comes from the calling name
   `FEROPROBE` (9100025); the .NET Message Framing preamble names the via
-  `net.tcp://feroprobe.invalid/FeroProbe` (9100026). Older probes carry
+  `net.tcp://feroprobe.invalid/FeroProbe` (9100026). Over UDP: the STUN
+  Binding Request has transaction ID `FeroProbeSTN` (9100027); the IKEv2
+  IKE_SA_INIT to 500 and 4500 has initiator SPI `FeroProb` and nonce
+  `FeroProbeIKEv2NonceFeroProbeIKE2` (9100028); the L2TP SCCRQ comes from
+  the host `feroprobe`, vendor `FeroProbe` (9100029); the DNS-SD query to
+  5353 and the IAX2 POKE carry ID `FP` (9100030, 9100031; weak 2-byte
+  marks, as for the NetBIOS query). Older probes carry
   marks too (ONC RPC transaction ID `FPRO`, PPTP host `feroprobe` and vendor
   `FeroProbe`, OpenVPN session ID `FEROPROB`, MQTT client `feroprobe`,
   SIP and XMPP `feroprobe.invalid`) without rules yet; the rest are the
