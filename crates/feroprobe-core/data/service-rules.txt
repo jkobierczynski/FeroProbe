@@ -1238,9 +1238,10 @@ match sieve ^"IMPLEMENTATION" "Dovecot(?: \((Ubuntu|Debian)\))? Pigeonhole"\r\n.
 match sieve ^"IMPLEMENTATION" "([^"\r\n]+)"\r\n
   product ${1}
 
-# Checkmk agent: dumps its report on connect, starting with its version
-# (Checkmk agent documentation).
-match check_mk ^<<<check_mk>>>\r?\nVersion: ([\w.\-]+)\r?\nAgentOS: (\w+)
+# Checkmk agent: dumps its report on connect, starting with its version;
+# the Windows agent puts BuildDate before AgentOS (Checkmk agent
+# documentation).
+match check_mk ^<<<check_mk>>>\r?\nVersion: ([\w.\-]+)\r?\n(?:[^<\r\n][^\r\n]*\r?\n)*?AgentOS: (\w+)
   product Check MK monitoring agent
   version ${1}
   info AgentOS: ${2}

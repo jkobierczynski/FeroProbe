@@ -840,6 +840,11 @@ mod tests {
             line(&i),
             "Check MK monitoring agent 2.2.0p14 (AgentOS: linux)"
         );
+        let win = b"<<<check_mk>>>\r\nVersion: 2.2.0p14\r\nBuildDate: Oct 10 2023\r\nAgentOS: windows\r\n";
+        assert_eq!(
+            line(&m(win)),
+            "Check MK monitoring agent 2.2.0p14 (AgentOS: windows)"
+        );
         let i = m(b"TS3\n\rWelcome to the TeamSpeak 3 ServerQuery interface, type \"help\"");
         assert_eq!(i.name, "teamspeak3");
         assert_eq!(
