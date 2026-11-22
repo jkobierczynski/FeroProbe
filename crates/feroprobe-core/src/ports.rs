@@ -166,6 +166,7 @@ pub fn service_name(protocol: Protocol, port: u16) -> &'static str {
         (Protocol::Tcp, 21) => "ftp",
         (Protocol::Tcp, 22) => "ssh",
         (Protocol::Tcp, 23) => "telnet",
+        (Protocol::Tcp, 24) => "priv-mail",
         (Protocol::Tcp, 25) => "smtp",
         (_, 53) => "domain",
         (Protocol::Udp, 67) => "dhcps",
@@ -198,6 +199,8 @@ pub fn service_name(protocol: Protocol, port: u16) -> &'static str {
         (Protocol::Tcp, 2375) => "docker",
         (Protocol::Tcp, 3306) => "mysql",
         (Protocol::Tcp, 3389) => "ms-wbt-server",
+        (Protocol::Tcp, 4190) => "sieve",
+        (Protocol::Tcp, 4949) => "munin",
         (Protocol::Udp, 4500) => "nat-t-ike",
         (Protocol::Tcp, 5432) => "postgresql",
         (Protocol::Udp, 5353) => "mdns",
@@ -205,6 +208,9 @@ pub fn service_name(protocol: Protocol, port: u16) -> &'static str {
         (Protocol::Tcp, 5900) => "vnc",
         (Protocol::Tcp, 6379) => "redis",
         (Protocol::Tcp, 6443) => "kubernetes",
+        (Protocol::Tcp, 6556) => "checkmk-agent",
+        (Protocol::Tcp, 6600) => "mshvlm",
+        (Protocol::Tcp, 6667) => "irc",
         (Protocol::Tcp, 8080) => "http-proxy",
         (Protocol::Tcp, 8443) => "https-alt",
         (Protocol::Tcp, 9200) => "elasticsearch",
@@ -874,6 +880,9 @@ mod tests {
         assert_eq!(service_name(Protocol::Tcp, 502), "mbap");
         assert_eq!(service_name(Protocol::Udp, 47808), "bacnet");
         assert_eq!(service_name(Protocol::Udp, 502), "unknown");
+        // nmap's names for banner services, so a closed port reads the same.
+        assert_eq!(service_name(Protocol::Tcp, 4949), "munin");
+        assert_eq!(service_name(Protocol::Tcp, 6600), "mshvlm");
         assert_eq!(service_name(Protocol::Ip, 255), "reserved");
         assert_eq!(service_name(Protocol::Sctp, 3868), "diameter");
         assert_eq!(service_name(Protocol::Sctp, 80), "http");

@@ -645,6 +645,7 @@ match smtp ^220[ -](\S+) [^\r\n]*\bE?SMTP\b
 match ftp ^220[ -][^\r\n]*\(vsFTPd ([\w.]+)\)
   product vsftpd
   version ${1}
+  os Unix
   cpe cpe:/a:beasts:vsftpd:${1}
 
 match ftp ^220[ -]ProFTPD ([\d.]+\w*) Server
