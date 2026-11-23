@@ -74,9 +74,12 @@ local function registry_view(reg)
     end
   end
   flushes[#flushes + 1] = function()
+    -- Every name is merged before any live table is synced, so a table
+    -- the script put under two names is written as the script left it,
+    -- not as another name's merged value.
+    for k in pairs(touched) do reg.merge(k, base[k], live[k]) end
     local seen = {}
     for k in pairs(touched) do
-      reg.merge(k, base[k], live[k])
       -- The script now sees the merged value, with what other scripts
       -- added meanwhile, as it would in nmap's shared table: its tables
       -- are updated in place (references it holds stay valid), and the

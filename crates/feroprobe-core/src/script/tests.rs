@@ -6203,12 +6203,25 @@ fn nse_registry_views_merge_and_keep_number_keys() {
     );
     run(&e, "nmap.registry.w.a.n = 5 fero.__nse_flush()");
     run(&d, "fero.__nse_flush()");
+    let both = "return nmap.registry.w.a.n .. ' ' .. nmap.registry.w.b.n";
+    let w: String = d.load(both).eval().unwrap();
+    assert_eq!(w, "5 1");
+    run(&d, "fero.__nse_flush()");
     let (f, _bf) = state();
-    let w: String = f
-        .load("return nmap.registry.w.a.n .. ' ' .. nmap.registry.w.b.n")
+    let w: String = f.load(both).eval().unwrap();
+    assert_eq!(w, "5 1");
+    // A table put under a second name is stored as the script left it,
+    // even when another script changed the first name meanwhile.
+    run(&d, "nmap.registry.x = { n = 1 } fero.__nse_flush()");
+    run(&d, "nmap.registry.y = nmap.registry.x");
+    run(&e, "nmap.registry.x.n = 7 fero.__nse_flush()");
+    run(&d, "fero.__nse_flush()");
+    let (g, _bg) = state();
+    let xy: String = g
+        .load("return nmap.registry.x.n .. ' ' .. nmap.registry.y.n")
         .eval()
         .unwrap();
-    assert_eq!(w, "5 1");
+    assert_eq!(xy, "7 1");
     let (c, _bc) = state();
     let q: String = c
         .load("return table.concat(nmap.registry.q, ',')")
