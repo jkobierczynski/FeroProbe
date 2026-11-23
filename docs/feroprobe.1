@@ -2346,8 +2346,8 @@ T{
 \f[V]fero.output_table()\f[R]
 T}@T{
 A table for output that keeps its names in the order they are first set
-(one removed and set again goes last), as nmap\[aq]s
-\f[V]stdnse.output_table\f[R]; see Output below
+(one removed and set again goes last), and \f[V]#t\f[R] counts its
+entries, as nmap\[aq]s \f[V]stdnse.output_table\f[R]; see Output below
 T}
 T{
 \f[V]fero.registry.get(name)\f[R], \f[V].set(name, value)\f[R],
@@ -3884,15 +3884,20 @@ T}@T{
 \f[V]client_hello\f[R], \f[V]record_read\f[R], \f[V]record_write\f[R],
 \f[V]record_buffer\f[R], \f[V]handshake_parse\f[R],
 \f[V]record_version_ok\f[R], \f[V]cipher_info\f[R],
-\f[V]servername\f[R], \f[V]EXTENSION_HELPERS\f[R], \f[V]PROTOCOLS\f[R],
-\f[V]CIPHERS\f[R], \f[V]COMPRESSORS\f[R], \f[V]ELLIPTIC_CURVES\f[R],
+\f[V]servername\f[R], \f[V]rsa_equiv\f[R], \f[V]KEX_ALGORITHMS\f[R]
+(with \f[V]server_key_exchange\f[R] readers),
+\f[V]EXTENSION_HELPERS\f[R], \f[V]PROTOCOLS\f[R], \f[V]CIPHERS\f[R],
+\f[V]COMPRESSORS\f[R], \f[V]ELLIPTIC_CURVES\f[R],
 \f[V]DEFAULT_ELLIPTIC_CURVES\f[R], \f[V]EXTENSIONS\f[R],
 \f[V]TLS_ALERT_REGISTRY\f[R] and the other registries
 T}
 T{
 \f[V]ssh2\f[R]
 T}@T{
-\f[V]fetch_host_key\f[R]
+\f[V]fetch_host_key\f[R], \f[V]check_packet_length\f[R],
+\f[V]transport\f[R] (\f[V]build\f[R], \f[V]payload\f[R],
+\f[V]receive_packet\f[R], \f[V]kex_init\f[R], \f[V]parse_kex_init\f[R],
+\f[V]kexdh_init\f[R], \f[V]kexdh_gex_init\f[R])
 T}
 T{
 \f[V]smb\f[R]
@@ -3921,7 +3926,7 @@ Any other module (\f[V]io\f[R], \f[V]brute\f[R], \f[V]target\f[R],
 \f[V]packet\f[R], \f[V]msrpc\f[R], \f[V]unpwdb\f[R], ...)
 stops the script from loading with an error that names it; a function
 FeroProbe does not have in a module it offers (\f[V]nmap.new_dnet\f[R],
-\f[V]openssl.encrypt\f[R], \f[V]tls.rsa_equiv\f[R], ...)
+\f[V]openssl.encrypt\f[R], \f[V]openssl.bignum_bin2bn\f[R], ...)
 raises an error naming it when called.
 Of nmap 7.99\[aq]s 612 scripts, 187 load as they are.
 .PP
@@ -4002,8 +4007,14 @@ FeroProbe\[aq]s mark in their random, as \f[V]fero.tls\f[R] hellos do
 (IDS rule 9100019).
 A TLS 1.3 hello gets \f[V]supported_versions\f[R] and an x25519 key
 share unless the script gives them.
-\f[V]tls.KEX_ALGORITHMS\f[R] is empty and \f[V]tls.rsa_equiv\f[R] is not
-available.
+A hello that leaves them out also offers the common curves and point
+formats and, from TLS 1.2 on, signature algorithms, since servers such
+as OpenSSL 3 refuse a hello that gives them no way to sign their key
+exchange.
+\f[V]tls.KEX_ALGORITHMS\f[R] reads the server\[aq]s key exchange
+parameters (DH, elliptic curve, export RSA, and the TLS 1.3 key share),
+and \f[V]tls.rsa_equiv\f[R] maps key sizes with NIST SP 800-57\[aq]s
+table.
 .IP \[bu] 2
 \f[B]No logins over SMB.\f[R] \f[V]smb\f[R] reads what a server says
 before any login (the NEGOTIATE, the OS details, the dialects), as
@@ -4022,7 +4033,13 @@ exchange reply without logging in, sending FeroProbe\[aq]s SSH version
 line (IDS rule 9100007); an RSA key is asked for with the SHA-2
 signature names too, so servers that turned \f[V]ssh-rsa\f[R] off still
 give it.
-The rest of \f[V]ssh2\f[R] (\f[V]transport\f[R]) is not available.
+\f[V]ssh2.transport\f[R] builds and reads unencrypted packets and
+KEXINITs, enough to list what a server offers; nothing goes past the key
+exchange.
+A script that writes its own version line on the socket (nmap\[aq]s
+\f[V]ssh2-enum-algos\f[R] sends \f[V]SSH-2.0-Nmap_SSH2_Enum_Algos\f[R])
+is not marked by FeroProbe, as with a script\[aq]s own
+\f[V]User-Agent\f[R].
 .IP \[bu] 2
 \f[B]FTP data connections\f[R] (\f[V]ftp.pasv\f[R]) go to the scanned
 host, never to the address in the server\[aq]s reply, and only to a port

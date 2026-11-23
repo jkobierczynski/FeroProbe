@@ -354,6 +354,12 @@ fero.output_table = function()
       if v ~= nil and type(k) == "string" then order[#order + 1] = k end
       rawset(t, k, v)
     end,
+    -- How many entries are set, as nmap's: scripts test `#out > 0`.
+    __len = function(t)
+      local n = 0
+      for _ in next, t do n = n + 1 end
+      return n
+    end,
   })
 end
 

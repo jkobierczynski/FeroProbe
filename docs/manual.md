@@ -1332,7 +1332,7 @@ far as `-sV` found them.
 | `fero.tls.parse_certificate(der)` | A certificate as `sock:get_ssl_certificate()` gives it (see [Script TLS and HTTP](#script-tls-and-http)), or `nil` |
 | `fero.tls.sslv2_client_hello()`, `fero.tls.sslv2_read_server_hello(sock [, timeout])` | An SSLv2 CLIENT-HELLO offering every SSLv2 cipher kind, with `FeroProbeTLSScan` as its challenge (IDS rule 9100020), and the SERVER-HELLO read: `version`, `certificate`, `ciphers` (nmap's names, `SSL2_RC4_128_WITH_MD5`...) |
 | `fero.snmp.session(host, port [, opts])` | An SNMP session over UDP with a scanned port: `s:get(oid, ...)` (GetRequest), `s:getnext(oid)` (GetNextRequest), `s:walk(base [, max])` (the variables under `base`, one GetNextRequest at a time, at most 65,536), `s:discover()` (the SNMPv3 engine discovery request: `engine_id`, `boots`, `time`), `s:close()`. Answers are tables (`version`, `community`, `request_id`, `error_status`, `error_index`, `varbinds`, each with `oid`, `tag`, `value` and `exception`); an answer counts only when it carries FeroProbe's request-id `0x4650` ("FP", IDS rule 9100021), the version and community asked with and, for GetRequest, the variables asked for, for GetNextRequest one that comes after the one asked (so a late answer to an earlier step of a walk is skipped). Options from `--script-args`, as nmap's SNMP library takes them: `creds.snmp` (the community, or nmap's `user:pass` form; default `public`), `snmp.version` (`v1`, the default, or `v2c`), `snmp.timeout` (ms, or with a unit such as `5s`; default 5000), `snmp.retries` (default 1). `fero.snmp.parse(msg)`, `fero.snmp.parse_v3(msg)`, `fero.snmp.compare(a, b)` (OID order), `fero.snmp.format_ticks(t)` (TimeTicks as nmap writes an uptime) |
-| `fero.output_table()` | A table for output that keeps its names in the order they are first set (one removed and set again goes last), as nmap's `stdnse.output_table`; see Output below |
+| `fero.output_table()` | A table for output that keeps its names in the order they are first set (one removed and set again goes last), and `#t` counts its entries, as nmap's `stdnse.output_table`; see Output below |
 | `fero.registry.get(name)`, `.set(name, value)`, `.append(name, value)` | Values shared by every script of the run, as nmap's `nmap.registry`; see [The registry](#the-registry) |
 | `fero.host_registry.get(name)`, `.set(...)`, `.append(...)` | The same for the host the script runs against, as nmap's `host.registry`; `nil` in prerule and postrule scripts |
 | `fero.record_skew(remote [, scanner])` | Notes how far a service's clock (`remote`, Unix seconds) is from the scanner's (`scanner`, default `os.time()`) for `clock-skew`, as nmap's `datetime.record_skew` |
@@ -1636,8 +1636,8 @@ the scan probed there.
 | `vulns` | `STATE`, `STATE_MSG`, `Report` (`new`, `add_vulns`, `make_output`); `vulns.showall` lists what is not vulnerable too |
 | `ftp` | `connect`, `read_reply`, `auth`, `pasv`, `close` |
 | `sslcert` | `getCertificate`, `parse_ssl_certificate`, `isPortSupported`, `getPrepareTLSWithoutReconnect`, over FeroProbe's STARTTLS helper (SMTP, LMTP, IMAP, POP3, NNTP, FTP, LDAP, PostgreSQL, XMPP) |
-| `tls` | `client_hello`, `record_read`, `record_write`, `record_buffer`, `handshake_parse`, `record_version_ok`, `cipher_info`, `servername`, `EXTENSION_HELPERS`, `PROTOCOLS`, `CIPHERS`, `COMPRESSORS`, `ELLIPTIC_CURVES`, `DEFAULT_ELLIPTIC_CURVES`, `EXTENSIONS`, `TLS_ALERT_REGISTRY` and the other registries |
-| `ssh2` | `fetch_host_key` |
+| `tls` | `client_hello`, `record_read`, `record_write`, `record_buffer`, `handshake_parse`, `record_version_ok`, `cipher_info`, `servername`, `rsa_equiv`, `KEX_ALGORITHMS` (with `server_key_exchange` readers), `EXTENSION_HELPERS`, `PROTOCOLS`, `CIPHERS`, `COMPRESSORS`, `ELLIPTIC_CURVES`, `DEFAULT_ELLIPTIC_CURVES`, `EXTENSIONS`, `TLS_ALERT_REGISTRY` and the other registries |
+| `ssh2` | `fetch_host_key`, `check_packet_length`, `transport` (`build`, `payload`, `receive_packet`, `kex_init`, `parse_kex_init`, `kexdh_init`, `kexdh_gex_init`) |
 | `smb` | `get_port`, `get_os`, `get_windows_version`, `list_dialects`, `start`, `start_ex`, `negotiate_protocol`, `stop`, `get_uniqueish_name`, `get_overrides` |
 | `snmp` | `Helper` (`new`, `connect`, `get`, `getnext`, `walk`, `close`), `str2oid`, `oid2str` |
 | Lua's own | `string`, `table`, `math`, `coroutine`, `utf8`, `os` (the sandbox's), `_G` |
@@ -1645,7 +1645,7 @@ the scan probed there.
 Any other module (`io`, `brute`, `target`, `packet`, `msrpc`, `unpwdb`,
 ...) stops the script from loading with an error that names it; a
 function FeroProbe does not have in a module it offers (`nmap.new_dnet`,
-`openssl.encrypt`, `tls.rsa_equiv`, ...) raises an error naming it when
+`openssl.encrypt`, `openssl.bignum_bin2bn`, ...) raises an error naming it when
 called. Of nmap 7.99's 612 scripts, 187 load as they are.
 
 What NSE scripts see differently:
@@ -1701,8 +1701,13 @@ What NSE scripts see differently:
 - **TLS hellos** built with `tls.client_hello` carry FeroProbe's mark in
   their random, as `fero.tls` hellos do (IDS rule 9100019). A TLS 1.3
   hello gets `supported_versions` and an x25519 key share unless the
-  script gives them. `tls.KEX_ALGORITHMS` is empty and `tls.rsa_equiv`
-  is not available.
+  script gives them. A hello that leaves them out also offers the common
+  curves and point formats and, from TLS 1.2 on, signature algorithms,
+  since servers such as OpenSSL 3 refuse a hello that gives them no way
+  to sign their key exchange. `tls.KEX_ALGORITHMS` reads the server's
+  key exchange parameters (DH, elliptic curve, export RSA, and the TLS
+  1.3 key share), and `tls.rsa_equiv` maps key sizes with NIST SP 800-57's
+  table.
 - **No logins over SMB.** `smb` reads what a server says before any
   login (the NEGOTIATE, the OS details, the dialects), as FeroProbe's own
   SMB scripts do; `start_session`, trees, files, shares and accounts
@@ -1714,8 +1719,12 @@ What NSE scripts see differently:
 - **SSH.** `ssh2.fetch_host_key` reads the key from the key exchange
   reply without logging in, sending FeroProbe's SSH version line (IDS
   rule 9100007); an RSA key is asked for with the SHA-2 signature names
-  too, so servers that turned `ssh-rsa` off still give it. The rest of
-  `ssh2` (`transport`) is not available.
+  too, so servers that turned `ssh-rsa` off still give it.
+  `ssh2.transport` builds and reads unencrypted packets and KEXINITs,
+  enough to list what a server offers; nothing goes past the key
+  exchange. A script that writes its own version line on the socket
+  (nmap's `ssh2-enum-algos` sends `SSH-2.0-Nmap_SSH2_Enum_Algos`) is not
+  marked by FeroProbe, as with a script's own `User-Agent`.
 - **FTP data connections** (`ftp.pasv`) go to the scanned host, never
   to the address in the server's reply, and only to a port the scan
   probed there; any other port is refused by the scope rule, so they

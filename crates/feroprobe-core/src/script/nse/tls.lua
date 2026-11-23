@@ -88,6 +88,13 @@ local function u16_list(list, map, what)
   return table.concat(t)
 end
 
+-- The signature algorithms a TLS 1.2 or later hello offers when the
+-- script gives none (RFC 8446 4.2.3; the SHA-1 ones for old servers).
+local SIGNATURES = {
+  0x0403, 0x0503, 0x0603, 0x0804, 0x0805, 0x0806, 0x0807, 0x0808,
+  0x0401, 0x0501, 0x0601, 0x0303, 0x0203, 0x0201, 0x0402, 0x0202,
+}
+
 -- Encoders for extension data, by extension name.
 tls.EXTENSION_HELPERS = {
   server_name = function(name)
@@ -143,8 +150,24 @@ end
 -- nmap's block_size for the block).
 function tls.cipher_info(name)
   local info = ftls.cipher_info(name)
-  if not info then return nil end
+  if not info then
+    -- A name it cannot read (TLS_NULL_WITH_NULL_NULL, the RIPEMD and
+    -- double-named suites): what the name gives, with no key size.
+    local kex, rest = tostring(name):match("^TLS_(.-)_WITH_(.+)$")
+    info = { kex = kex or "NULL", cipher = rest or "NULL", mode = "unknown" }
+    if rest == "NULL_NULL" then
+      info.cipher, info.mode, info.size = "NULL", "none", 0
+    end
+    local body = rest and rest:match("^(.-)_RMD$")
+    if body == "3DES_EDE_CBC" then
+      info.cipher, info.mode, info.size, info.block, info.hash = "3DES", "CBC", 112, 64, "RMD"
+    end
+  end
   info.block_size = info.block
+  -- nmap's names for which protocols the suite fits: TLS 1.3 suites are
+  -- TLS 1.3 only, and no earlier suite works in TLS 1.3.
+  info.tls13only = info.tls13 == true
+  info.tls13ok = info.tls13 == true
   return info
 end
 
@@ -186,10 +209,18 @@ function tls.client_hello(t)
   for k, v in pairs(t.extensions or {}) do
     exts[code_of(tls.EXTENSIONS, k, "extension")] = v
   end
+  -- Like nmap's, a hello without them offers the common curves and,
+  -- from TLS 1.2 on, signature algorithms: servers refuse a hello that
+  -- leaves no way to sign their key exchange.
+  if version >= 0x0301 then
+    exts[10] = exts[10] or tls.EXTENSION_HELPERS.elliptic_curves(tls.DEFAULT_ELLIPTIC_CURVES)
+    exts[11] = exts[11] or tls.EXTENSION_HELPERS.ec_point_formats({ "uncompressed" })
+  end
+  if version >= 0x0303 then
+    exts[13] = exts[13] or string.pack(">s2", u16_list(SIGNATURES, {}, "signature"))
+  end
   if tls13 then
     exts[43] = exts[43] or tls.EXTENSION_HELPERS.supported_versions({ protocol })
-    exts[10] = exts[10] or tls.EXTENSION_HELPERS.elliptic_curves(tls.DEFAULT_ELLIPTIC_CURVES)
-    exts[13] = exts[13] or string.pack(">s2", string.pack(">I2I2I2I2", 0x0403, 0x0804, 0x0401, 0x0807))
     exts[45] = exts[45] or "\1\1"
     exts[51] = exts[51] or string.pack(">s2", string.pack(">I2s2", 29, fero.crypto.random_bytes(32)))
   end
@@ -327,11 +358,130 @@ function tls.record_buffer(sock, buffer, i)
   end
 end
 
-for _, name in ipairs({ "rsa_equiv", "html" }) do
-  tls[name] = function()
-    error("tls." .. name .. " is not available in FeroProbe", 2)
+tls.html = function()
+  error("tls.html is not available in FeroProbe", 2)
+end
+
+-- A key's strength as RSA bits (NIST SP 800-57 part 1, table 2): RSA,
+-- DSA and finite-field DH keys count their own bits; elliptic-curve keys
+-- are mapped. nil for a kind it does not know.
+function tls.rsa_equiv(kind, bits)
+  bits = tonumber(bits)
+  if not bits then return nil end
+  if kind == "rsa" or kind == "dh" or kind == "dsa" then return bits end
+  if kind == "ec" then return ftls.ec_strength(bits) end
+  return nil
+end
+
+-- Bits in a big-endian number.
+local function bit_length(n)
+  n = n:gsub("^%z+", "")
+  if #n == 0 then return 0 end
+  local top, b = n:byte(1), 0
+  while top > 0 do b = b + 1; top = top >> 1 end
+  return (#n - 1) * 8 + b
+end
+
+-- The bits of a named curve's key.
+local function curve_bits(name)
+  if name == "ecdh_x25519" then return 256 end
+  if name == "ecdh_x448" then return 448 end
+  return tonumber(tostring(name):match("^%a+(%d+)"))
+end
+
+-- ServerKeyExchange readers (RFC 5246 7.4.3, RFC 8422 5.4, RFC 4279 2):
+-- what the server's parameters are and how strong, as nmap's: `type`,
+-- `strength` (bits: the prime's, the curve's or the modulus's) and
+-- `dhparams` { p, g, y }, `ecdhparams` { curve_params = { ec_curve_type,
+-- curve } } or `rsa` { modulus, exponent }. nil when it cannot be read.
+local function skip_hint(blob, psk)
+  if not psk then return 1 end
+  local ok, _, p = pcall(string.unpack, ">s2", blob)
+  return ok and p or nil
+end
+local function dh_ske(psk)
+  return function(blob)
+    local p = skip_hint(blob, psk)
+    if not p then return nil end
+    local ok, prime, g, y = pcall(string.unpack, ">s2s2s2", blob, p)
+    if not ok then return nil end
+    return { type = "dh", strength = bit_length(prime), dhparams = { p = prime, g = g, y = y } }
   end
 end
-tls.KEX_ALGORITHMS = {}
+local EC_CURVE_TYPE = { [1] = "explicit_prime", [2] = "explicit_char2", [3] = "namedcurve" }
+local function ec_ske(psk)
+  return function(blob)
+    local p = skip_hint(blob, psk)
+    if not p then return nil end
+    local ok, kind = pcall(string.unpack, ">B", blob, p)
+    if not ok then return nil end
+    local params = { ec_curve_type = EC_CURVE_TYPE[kind] or kind }
+    local out = { type = "ec", ecdhparams = { curve_params = params } }
+    if kind == 3 then
+      local okn, code = pcall(string.unpack, ">I2", blob, p + 1)
+      if not okn then return nil end
+      params.curve = ftls.GROUPS[code] or code
+      out.strength = curve_bits(params.curve)
+    end
+    return out
+  end
+end
+local function rsa_ske(blob)
+  local ok, modulus, exponent = pcall(string.unpack, ">s2s2", blob)
+  if not ok then return nil end
+  return { type = "rsa", strength = bit_length(modulus), rsa = { modulus = modulus, exponent = exponent } }
+end
+
+-- What each key exchange (the part of a suite's name before "_WITH_")
+-- is: `type` ("rsa", "dh", "ec", "psk", "srp", "krb5", "gost", "null"),
+-- `pubkey` (the certificate's key kind it needs, if any), `anon`,
+-- `export`, `pfs`, `tls13` and `server_key_exchange(blob, protocol)`
+-- for the ones whose server sends its parameters.
+tls.KEX_ALGORITHMS = {
+  NULL = { type = "null", anon = true },
+  RSA = { type = "rsa", pubkey = "rsa" },
+  RSA_EXPORT = { type = "rsa", pubkey = "rsa", export = true, server_key_exchange = rsa_ske },
+  RSA_EXPORT1024 = { type = "rsa", pubkey = "rsa", export = true, server_key_exchange = rsa_ske },
+  DHE_RSA = { type = "dh", pubkey = "rsa", pfs = true, server_key_exchange = dh_ske() },
+  DHE_RSA_EXPORT = { type = "dh", pubkey = "rsa", pfs = true, export = true, server_key_exchange = dh_ske() },
+  DHE_DSS = { type = "dh", pubkey = "dsa", pfs = true, server_key_exchange = dh_ske() },
+  DHE_DSS_EXPORT = { type = "dh", pubkey = "dsa", pfs = true, export = true, server_key_exchange = dh_ske() },
+  DHE_DSS_EXPORT1024 = { type = "dh", pubkey = "dsa", pfs = true, export = true, server_key_exchange = dh_ske() },
+  DH_RSA = { type = "dh", pubkey = "dh" },
+  DH_RSA_EXPORT = { type = "dh", pubkey = "dh", export = true },
+  DH_DSS = { type = "dh", pubkey = "dh" },
+  DH_DSS_EXPORT = { type = "dh", pubkey = "dh", export = true },
+  DH_anon = { type = "dh", anon = true, server_key_exchange = dh_ske() },
+  DH_anon_EXPORT = { type = "dh", anon = true, export = true, server_key_exchange = dh_ske() },
+  ECDHE_RSA = { type = "ec", pubkey = "rsa", pfs = true, server_key_exchange = ec_ske() },
+  ECDHE_ECDSA = { type = "ec", pubkey = "ec", pfs = true, server_key_exchange = ec_ske() },
+  ECDH_RSA = { type = "ec", pubkey = "ec" },
+  ECDH_ECDSA = { type = "ec", pubkey = "ec" },
+  ECDH_anon = { type = "ec", anon = true, server_key_exchange = ec_ske() },
+  PSK = { type = "psk" },
+  RSA_PSK = { type = "rsa", pubkey = "rsa" },
+  DHE_PSK = { type = "dh", pfs = true, server_key_exchange = dh_ske(true) },
+  ECDHE_PSK = { type = "ec", pfs = true, server_key_exchange = ec_ske(true) },
+  SRP_SHA = { type = "srp" },
+  SRP_SHA_RSA = { type = "srp", pubkey = "rsa" },
+  SRP_SHA_DSS = { type = "srp", pubkey = "dsa" },
+  KRB5 = { type = "krb5" },
+  KRB5_EXPORT = { type = "krb5", export = true },
+  GOSTR341001 = { type = "gost" },
+  GOSTR341094 = { type = "gost" },
+  -- TLS 1.3: the server's key_share (RFC 8446 4.2.8) in place of a
+  -- ServerKeyExchange.
+  AKE = { type = "ec", pfs = true, tls13 = true, server_key_exchange = function(blob)
+    local ok, code = pcall(string.unpack, ">I2", blob or "")
+    if not ok then return nil end
+    local name = ftls.GROUPS[code] or code
+    local ff = tostring(name):match("^ffdhe(%d+)$")
+    if ff then return { type = "dh", strength = tonumber(ff) } end
+    return {
+      type = "ec", strength = curve_bits(name) or ftls.group_strength(tostring(name)),
+      ecdhparams = { curve_params = { ec_curve_type = "namedcurve", curve = name } },
+    }
+  end },
+}
 
 return tls

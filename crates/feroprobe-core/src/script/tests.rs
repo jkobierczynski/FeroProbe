@@ -6067,7 +6067,29 @@ action = function()
   o.smb = smb.get_windows_version("Windows 5.1") .. " | " .. select(2, smb.start_session({{}}))
     .. " | " .. select(2, smb.start_ex({{ ip = "127.0.0.1" }}, true, true))
     .. " | " .. select(2, smb.get_uniqueish_name({{ ip = "127.0.0.1" }}, "txt"))
-  o.ssh2 = tostring(select(2, pcall(ssh2.transport.payload))):match("ssh2.transport.payload is not available in FeroProbe")
+  local kex = ssh2.transport.kex_init({{ kex_algorithms = "curve25519-sha256", cookie = string.rep("C", 16) }})
+  local parsed = ssh2.transport.parse_kex_init(ssh2.transport.payload(ssh2.transport.build(kex)))
+  o.ssh2 = string.format("%s %s %s %s %d %s", parsed.kex_algorithms, parsed.cookie,
+    parsed.server_host_key_algorithms:match("^[^,]+"), tostring(parsed.first_kex_packet_follows),
+    select(2, ssh2.check_packet_length(ssh2.transport.build(kex))) - #ssh2.transport.build(kex),
+    tostring(next(ssh2.transport.parse_kex_init("junk"))))
+  local count = stdnse.output_table()
+  count.a, count.b = 1, 2
+  local dh = string.pack(">s2s2s2", "\128" .. string.rep("\0", 127), "\2", "\5")
+  local ske = tls.KEX_ALGORITHMS.DHE_RSA.server_key_exchange(dh, "TLSv1.2")
+  local ec = tls.KEX_ALGORITHMS.ECDHE_RSA.server_key_exchange(string.pack(">BI2s1", 3, 23, "\4"), "TLSv1.2")
+  local ake = tls.KEX_ALGORITHMS.AKE.server_key_exchange(string.pack(">I2s2", 29, "k"), "TLSv1.3")
+  local nn = tls.cipher_info("TLS_NULL_WITH_NULL_NULL")
+  local _, defaults = tls.record_read(tls.client_hello({{ protocol = "TLSv1.2", ciphers = {{ "TLS_RSA_WITH_AES_128_CBC_SHA" }} }}), 1)
+  local pre12 = tls.client_hello({{ protocol = "TLSv1.0", ciphers = {{ "TLS_RSA_WITH_AES_128_CBC_SHA" }} }})
+  o.tls3 = string.format("%d | %s %d %d | %s %s %d | %s %d | %s %s %d | %d %d %s | %s %s %s", #count,
+    ske.type, ske.strength, #ske.dhparams.p, ec.ecdhparams.curve_params.ec_curve_type,
+    ec.ecdhparams.curve_params.curve, ec.strength, ake.ecdhparams.curve_params.curve, ake.strength,
+    nn.cipher, nn.kex, nn.size, tls.rsa_equiv("ec", 256), tls.rsa_equiv("dh", 2048),
+    tostring(tls.rsa_equiv("x", 1)), tostring(defaults ~= nil),
+    tostring(tls.client_hello({{ protocol = "TLSv1.2" }}):find("\0\13", 1, true) ~= nil),
+    tostring(tls.cipher_info("TLS_AKE_WITH_AES_128_GCM_SHA256").tls13only))
+  o.tls4 = string.format("%s %s", tostring(pre12:find("\0\10", 1, true) ~= nil), tostring(pre12:find("\0\13\0", 1, true) ~= nil))
   o.cert = tostring(sslcert.parse_ssl_certificate("junk"))
   return o
 end"#
@@ -6121,8 +6143,14 @@ end"#
         ),
         (
             "ssh2",
-            "ssh2.transport.payload is not available in FeroProbe",
+            "curve25519-sha256 CCCCCCCCCCCCCCCC ssh-ed25519 false 0 nil",
         ),
+        (
+            "tls3",
+            "2 | dh 1024 128 | namedcurve secp256r1 256 | ecdh_x25519 256 | NULL NULL 0 \
+             | 3072 2048 nil | true true true",
+        ),
+        ("tls4", "true false"),
         ("cert", "nil"),
     ] {
         assert_eq!(text(named(d, k)), want, "{k}");
@@ -6207,9 +6235,20 @@ action = function(host, port)
   elseif svc == "ssh" then
     local k = ssh2.fetch_host_key(host, port, "ssh-rsa")
     local e = ssh2.fetch_host_key(host, port, "ssh-ed25519")
-    return string.format("%s %d %s %d %d %s | %s %d %s %s", k.key_type, k.bits, k.algorithm, #k.fingerprint,
+    -- The transport as ssh2-enum-algos-style scripts use it: banners,
+    -- then the server's KEXINIT read as a packet.
+    local s = nmap.new_socket()
+    s:connect(host, port)
+    local _, banner = s:receive_lines(1)
+    s:send("SSH-2.0-FeroProbe_Scripting_Engine\r\n")
+    s:send(ssh2.transport.build(ssh2.transport.kex_init({{}})))
+    local pok, packet = ssh2.transport.receive_packet(s)
+    s:close()
+    local kexinit = ssh2.transport.parse_kex_init(ssh2.transport.payload(packet))
+    return string.format("%s %d %s %d %d %s | %s %d %s %s | %s %s %s", k.key_type, k.bits, k.algorithm, #k.fingerprint,
       #k.fp_sha256, tostring(k.full_key == "ssh-rsa " .. k.key), e.key_type, e.bits, e.algorithm,
-      tostring(ssh2.fetch_host_key(host, port, "ssh-dss")))
+      tostring(ssh2.fetch_host_key(host, port, "ssh-dss")), banner:match("^SSH%-2%.0"), tostring(pok),
+      kexinit.kex_algorithms)
   elseif svc == "microsoft-ds" then
     local ok, os = smb.get_os(host)
     if not ok then return "error " .. os end
@@ -6256,7 +6295,7 @@ end"#
     );
     assert_eq!(
         get(ssh_port),
-        "ssh-rsa 2048 RSA 16 32 true | ssh-ed25519 256 ED25519 nil"
+        "ssh-rsa 2048 RSA 16 32 true | ssh-ed25519 256 ED25519 nil | SSH-2.0 true curve25519-sha256"
     );
     assert_eq!(
         get(smb_port),
