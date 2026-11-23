@@ -130,7 +130,8 @@ function creds.Credentials:add(username, password, state)
 end
 
 -- The accounts --script-args give for `service`: creds.<service> and
--- creds.global, each "user:pass" or a comma-separated list of them.
+-- creds.global, each "user:pass" (or a user name alone) or a
+-- comma-separated list of them, taken as given (spaces included).
 local function from_args(service)
   local out = {}
   local names = { "creds.global" }
@@ -139,8 +140,11 @@ local function from_args(service)
     local v = stdnse.get_script_args(name)
     if type(v) == "string" then
       for entry in v:gmatch("[^,]+") do
-        local user, pass = entry:match("^%s*(.-):(.-)%s*$")
-        if user then out[#out + 1] = { username = user, password = pass } end
+        -- Split at the first colon, keeping every byte; an entry
+        -- without one is a user name alone.
+        local user, pass = entry:match("^(.-):(.*)$")
+        if not user then user = entry end
+        if user ~= "" then out[#out + 1] = { username = user, password = pass } end
       end
     end
   end

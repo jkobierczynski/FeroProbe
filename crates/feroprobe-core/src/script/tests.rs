@@ -6032,7 +6032,7 @@ action = function()
   local seen = {{}}
   local t2 = creds.Credentials:new({{ "ftp" }}, {{ ip = "10.0.0.2" }}, {{ number = 21, service = "ftp" }})
   for a in t2:getCredentials(creds.State.VALID + creds.State.PARAM) do
-    seen[#seen + 1] = a.user .. "/" .. a.pass .. "/" .. tostring(a.service) .. "/" .. a.state
+    seen[#seen + 1] = a.user .. "/" .. tostring(a.pass) .. "/" .. tostring(a.service) .. "/" .. a.state
   end
   o.creds2 = table.concat(seen, ";")
   local r = vulns.Report:new("s", {{ ip = "10.0.0.1" }})
@@ -6074,7 +6074,7 @@ end"#
     );
     let scan = ScriptScan::new(
         vec![script("part2", &src)],
-        args::parse("creds.ftp=fu:fp,creds.global=admin:pw").unwrap(),
+        args::parse("creds.ftp=solo,creds.global=\"admin:pw \"").unwrap(),
         None,
     )
     .unwrap();
@@ -6092,7 +6092,7 @@ end"#
             "json2",
             "array object object array err err err 0 0.15 0 1 false",
         ),
-        ("creds2", "tag/pw/ftp/2;fu/fp/ftp/16;admin/pw/ftp/16"),
+        ("creds2", "tag/pw/ftp/2;solo/nil/ftp/16;admin/pw /ftp/16"),
         ("tls2", "true true false true 15030300020228 true"),
         (
             "creds",
