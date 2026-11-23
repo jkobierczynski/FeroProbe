@@ -30,6 +30,17 @@ nmap.clock = function() return nmap.clock_ms() / 1000 end
 -- touches it, changed in place, and written back after every rule and
 -- action by fero.__nse_flush, merged with what other scripts did meanwhile.
 local flushes = {}
+
+local function deep_copy(v, seen)
+  if type(v) ~= "table" then return v end
+  seen = seen or {}
+  if seen[v] then return seen[v] end
+  local c = {}
+  seen[v] = c
+  for k, x in pairs(v) do c[deep_copy(k, seen)] = deep_copy(x, seen) end
+  return c
+end
+
 local function registry_view(reg)
   local base, live, touched = {}, {}, {}
   local function touch(k)
@@ -39,14 +50,15 @@ local function registry_view(reg)
     if not touched[k] then
       touched[k] = true
       base[k] = reg.get(k)
-      live[k] = reg.get(k)
+      live[k] = deep_copy(base[k])
     end
   end
   flushes[#flushes + 1] = function()
     for k in pairs(touched) do
       reg.merge(k, base[k], live[k])
-      -- What is now stored becomes the base for the next round.
-      base[k] = reg.get(k)
+      -- The script's own view is the base for the next round, so what
+      -- other scripts added meanwhile is not taken for a removal.
+      base[k] = deep_copy(live[k])
     end
   end
   return setmetatable({}, {

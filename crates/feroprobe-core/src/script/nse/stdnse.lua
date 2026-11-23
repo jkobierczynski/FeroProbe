@@ -180,24 +180,29 @@ stdnse.in_port_range = function(port, range)
   return false
 end
 
--- A line reader over a connected socket: each call gives true and the
--- next piece of data up to (not including) the separator pattern.
+-- A line reader over a connected socket: each call gives the next piece
+-- of data up to (not including) the separator pattern, or nil and a
+-- message.
 stdnse.make_buffer = function(socket, sep)
   sep = sep or "\r?\n"
   return function()
-    return socket:receive_buf(sep, false)
+    local ok, data = socket:receive_buf(sep, false)
+    if ok then return data end
+    return nil, data
   end
 end
 
 -- Threads run to completion when started; the returned coroutine is
 -- already dead, so a wait for it ends at once. Errors in the worker are
--- shown with -d and end only that worker, as in nmap.
+-- shown with -d and end only that worker, as in nmap. The second result
+-- is nmap's status function: "dead" and the worker's error, if any.
 stdnse.new_thread = function(f, ...)
   local ok, err = pcall(f, ...)
   if not ok then fero.debug(1, "thread failed: " .. tostring(err)) end
   local co = coroutine.create(function() end)
   coroutine.resume(co)
-  return co, { error = (not ok) and err or nil }
+  local failure = (not ok) and err or nil
+  return co, function() return "dead", failure end
 end
 stdnse.base = function() return coroutine.running() end
 

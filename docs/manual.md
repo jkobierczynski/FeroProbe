@@ -975,9 +975,10 @@ to the service and returns a result, which the report shows under the port
 or the host.
 
 The scripts are FeroProbe's own, with FeroProbe's own script library
-(`fero`). nmap's scripts do not run unchanged: they are built on nmap's
-libraries (`stdnse`, `shortport`, `nmap.new_socket` and the rest), which
-FeroProbe does not have and cannot ship under their licence. FeroProbe
+(`fero`). nmap's libraries (`stdnse`, `shortport`, `nmap.new_socket` and
+the rest) cannot be shipped under their licence, so nmap's scripts run
+only when they use the parts of those libraries that FeroProbe's own
+[NSE compatibility layer](#nse-compatibility-layer) offers. FeroProbe
 ships its own scripts, written from the protocols' specifications (see
 [Built-in scripts](#built-in-scripts)): `-sC` runs the ones in the
 `default` category, and more come in later releases. You can run your
@@ -2920,7 +2921,7 @@ safeguard calls for a difference. The deliberate differences are:
 | `-sL` with `-P` options | Ignores them silently | Ignores them with a warning per option |
 | `-sL` with `-sV` or `--traceroute` | Silently drops them (and as root still looks up routes, so local targets can get ARP requests) | Refuses the combination; a list scan sends the targets nothing at all |
 | `-PR` | A no-op; says so only with `-v` | A no-op; says so on every run |
-| Script library | nmap's NSE libraries (`stdnse`, `shortport`, `nmap.new_socket`, ...) and its own scripts | FeroProbe's own `fero` library and scripts (nmap's cannot be shipped under their licence); nmap's scripts do not run unchanged |
+| Script library | nmap's NSE libraries (`stdnse`, `shortport`, `nmap.new_socket`, ...) and its own scripts | FeroProbe's own `fero` library and scripts (nmap's cannot be shipped under their licence); nmap's scripts run only when they use the modules of the [NSE compatibility layer](#nse-compatibility-layer) |
 | Script sockets | A script may connect anywhere; prerule scripts may broadcast | Only to the host the script runs against, on ports the scan probed there; prerule and postrule scripts get no network access. A refused connection prints a warning |
 | Script sandbox | Scripts may read and write files and run commands (`io`, `os`) | No files, commands or environment; memory and instruction limits per run |
 | Script output text | Every byte outside printable ASCII shown as `\xHH` | UTF-8 text kept; control characters and invalid bytes shown as `\xHH` |

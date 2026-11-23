@@ -1484,10 +1484,10 @@ the host.
 .PP
 The scripts are FeroProbe\[aq]s own, with FeroProbe\[aq]s own script
 library (\f[V]fero\f[R]).
-nmap\[aq]s scripts do not run unchanged: they are built on nmap\[aq]s
-libraries (\f[V]stdnse\f[R], \f[V]shortport\f[R],
-\f[V]nmap.new_socket\f[R] and the rest), which FeroProbe does not have
-and cannot ship under their licence.
+nmap\[aq]s libraries (\f[V]stdnse\f[R], \f[V]shortport\f[R],
+\f[V]nmap.new_socket\f[R] and the rest) cannot be shipped under their
+licence, so nmap\[aq]s scripts run only when they use the parts of those
+libraries that FeroProbe\[aq]s own NSE compatibility layer offers.
 FeroProbe ships its own scripts, written from the protocols\[aq]
 specifications (see Built-in scripts): \f[V]-sC\f[R] runs the ones in
 the \f[V]default\f[R] category, and more come in later releases.
@@ -5830,8 +5830,8 @@ nmap\[aq]s NSE libraries (\f[V]stdnse\f[R], \f[V]shortport\f[R],
 and its own scripts
 T}@T{
 FeroProbe\[aq]s own \f[V]fero\f[R] library and scripts (nmap\[aq]s
-cannot be shipped under their licence); nmap\[aq]s scripts do not run
-unchanged
+cannot be shipped under their licence); nmap\[aq]s scripts run only when
+they use the modules of the NSE compatibility layer
 T}
 T{
 Script sockets

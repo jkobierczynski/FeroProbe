@@ -6136,3 +6136,62 @@ fn nse_files_are_scripts_too() {
     assert!(e.0.contains("duplicate script ID: 'dup'"), "{e}");
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn nse_registry_views_merge_and_keep_number_keys() {
+    let reg = Arc::new(registry::Registry::default());
+    let state = || {
+        let budget = sandbox::Budget::new();
+        let lua = sandbox::new_state(&budget).unwrap();
+        engine::install_library(
+            &lua,
+            "t",
+            "action",
+            &ArgTable::default(),
+            &Arc::new(socket::Scope::default()),
+            &reg,
+            false,
+        )
+        .unwrap();
+        lua.load("nmap = require 'nmap'").exec().unwrap();
+        (lua, budget)
+    };
+    let (a, _ba) = state();
+    let (b, _bb) = state();
+    let run = |l: &mlua::Lua, code: &str| l.load(code).exec().unwrap();
+    let add = |who: &str| {
+        format!("nmap.registry.l = nmap.registry.l or {{}} table.insert(nmap.registry.l, '{who}')")
+    };
+    run(&a, &add("a"));
+    run(&b, &add("b"));
+    run(&b, "fero.__nse_flush()");
+    run(&a, "fero.__nse_flush()");
+    // A second flush with no further change must not drop b's entry.
+    run(&a, "fero.__nse_flush()");
+    run(
+        &a,
+        "nmap.registry.m = {} nmap.registry.m[443] = 'https' nmap.registry.m[1] = nil fero.__nse_flush()",
+    );
+    let (c, _bc) = state();
+    let got: String = c
+        .load(
+            "local l = nmap.registry.l table.sort(l) \
+             return table.concat(l, ',') .. ' ' .. tostring(nmap.registry.m[443]) .. ' ' .. tostring(nmap.registry.m[1])",
+        )
+        .eval()
+        .unwrap();
+    assert_eq!(got, "a,b https nil");
+    // stdnse.make_buffer gives the data itself; new_thread's second
+    // result is nmap's status function.
+    let got: String = c
+        .load(
+            "local stdnse = require 'stdnse' \
+             local fake = { receive_buf = function() return true, 'line' end } \
+             local co, info = stdnse.new_thread(function() error('x', 0) end) \
+             local st, err = info() \
+             return stdnse.make_buffer(fake)() .. ' ' .. st .. ' ' .. err .. ' ' .. coroutine.status(co)",
+        )
+        .eval()
+        .unwrap();
+    assert_eq!(got, "line dead x dead");
+}

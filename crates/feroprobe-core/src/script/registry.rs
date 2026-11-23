@@ -387,13 +387,29 @@ fn merge(cur: Option<Stored>, base: Option<&Stored>, new: Option<Stored>) -> Opt
         return new;
     };
     let base_last = last_index(&Stored::Table(base.clone()));
+    // Entries the script added right after the end of the list it read
+    // (base_last + 1, + 2, ... without a gap) are list additions; any other
+    // new number key, such as ports[443], is a key like any other.
+    let ints: HashMap<i64, &Stored> = new
+        .iter()
+        .filter_map(|(k, v)| match k {
+            Key::Int(i) => Some((*i, v)),
+            _ => None,
+        })
+        .collect();
     let mut added = Vec::new();
+    let mut next = base_last;
+    while next < i64::MAX
+        && let Some(v) = ints.get(&(next + 1))
+    {
+        next += 1;
+        added.push((next, (*v).clone()));
+    }
     for (k, v) in new.iter() {
         if let Key::Int(i) = k
             && *i > base_last
-            && lookup(base, k).is_none()
+            && *i <= next
         {
-            added.push((*i, v.clone()));
             continue;
         }
         let merged = merge(lookup(&cur, k).cloned(), lookup(base, k), Some(v.clone()));
@@ -411,7 +427,6 @@ fn merge(cur: Option<Stored>, base: Option<&Stored>, new: Option<Stored>) -> Opt
             }
         }
     }
-    added.sort_by_key(|(i, _)| *i);
     let mut last = last_index(&Stored::Table(cur.clone()));
     for (_, v) in added {
         last = last.saturating_add(1);
