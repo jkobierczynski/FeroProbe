@@ -171,6 +171,15 @@ fn store(v: &Value, depth: usize, size: &mut usize) -> Result<Option<Stored>, St
 }
 
 /// Copy a stored value out into `lua`.
+fn key_value(lua: &Lua, k: &Key) -> mlua::Result<Value> {
+    Ok(match k {
+        Key::Int(i) => Value::Integer(*i),
+        Key::Num(n) => Value::Number(*n),
+        Key::Bool(b) => Value::Boolean(*b),
+        Key::Str(b) => Value::String(lua.create_string(b)?),
+    })
+}
+
 fn load(lua: &Lua, s: &Stored) -> mlua::Result<Value> {
     Ok(match s {
         Stored::Bool(b) => Value::Boolean(*b),
@@ -180,13 +189,7 @@ fn load(lua: &Lua, s: &Stored) -> mlua::Result<Value> {
         Stored::Table(entries) => {
             let t = lua.create_table()?;
             for (k, v) in entries {
-                let key = match k {
-                    Key::Int(i) => Value::Integer(*i),
-                    Key::Num(n) => Value::Number(*n),
-                    Key::Bool(b) => Value::Boolean(*b),
-                    Key::Str(b) => Value::String(lua.create_string(b)?),
-                };
-                t.raw_set(key, load(lua, v)?)?;
+                t.raw_set(key_value(lua, k)?, load(lua, v)?)?;
             }
             Value::Table(t)
         }
@@ -244,6 +247,68 @@ impl Registry {
         })
     }
 
+    /// Apply what a script changed in the value under `name` (`new`, made
+    /// from `base`, the copy it read) to the value there now, in one step;
+    /// see [`merge`].
+    /// Merge the script's `new` value, read as `base`, into what is
+    /// stored now. Gives the value now stored and where list additions
+    /// were moved to.
+    fn merge(
+        &self,
+        which: Which,
+        name: &[u8],
+        base: &Value,
+        new: &Value,
+    ) -> Result<(Option<Stored>, Moves), String> {
+        let mut size = 0;
+        let base = store(base, 0, &mut size)?;
+        let mut size = 0;
+        let new = store(new, 0, &mut size)?;
+        self.with(which, |m, bytes| {
+            let (cur, old) = match m.values.remove(name) {
+                Some(e) => (Some(e.value), e.size),
+                None => (None, 0),
+            };
+            let kept = cur.clone();
+            let mut moves = Moves::default();
+            match merge(cur, base.as_ref(), new, &mut moves) {
+                None => {
+                    *bytes -= old;
+                    Ok((None, moves))
+                }
+                Some(s) => {
+                    let size = name.len() + stored_size(&s);
+                    let total = bytes.saturating_sub(old).saturating_add(size);
+                    if total > MAX_BYTES {
+                        if let Some(value) = kept {
+                            let last = last_index(&value);
+                            m.values.insert(
+                                name.to_vec(),
+                                Entry {
+                                    value,
+                                    size: old,
+                                    last,
+                                },
+                            );
+                        }
+                        return Err("the registry is full".to_string());
+                    }
+                    *bytes = total;
+                    let last = last_index(&s);
+                    m.values.insert(
+                        name.to_vec(),
+                        Entry {
+                            value: s.clone(),
+                            size,
+                            last,
+                        },
+                    );
+                    Ok((Some(s), moves))
+                }
+            }
+        })
+    }
+
     /// Add `v` to the end of the list under `name`, making the list when
     /// there is none. One call, so scripts running at once never lose
     /// each other's entries.
@@ -289,7 +354,167 @@ impl Registry {
     }
 }
 
-/// The `get`, `set` and `append` functions of one registry, as a table.
+/// What a stored value counts against [`MAX_BYTES`], as [`store`] counts it.
+fn stored_size(s: &Stored) -> usize {
+    ENTRY_COST
+        + match s {
+            Stored::Str(b) => b.len(),
+            Stored::Table(entries) => entries
+                .iter()
+                .map(|(k, v)| {
+                    stored_size(v)
+                        + match k {
+                            Key::Str(b) => b.len(),
+                            _ => 0,
+                        }
+                })
+                .sum(),
+            _ => 0,
+        }
+}
+
+fn lookup<'a>(entries: &'a [(Key, Stored)], k: &Key) -> Option<&'a Stored> {
+    entries.iter().find(|(x, _)| x == k).map(|(_, v)| v)
+}
+
+/// Three-way merge: `new` is what a script made of `base`, the value it
+/// read; `cur` is the value now, which other scripts may have changed
+/// since. Only the script's own changes are applied to `cur`: entries it
+/// set or removed, and entries it added past the end of a list, which go
+/// after the list's end now (so two scripts adding to one list both
+/// keep their entries, as with `append`).
+/// Where a merge put the script's list additions: `n` entries the script
+/// had at `from`, `from + 1`, ... are stored at `to`, `to + 1`, ... (when
+/// another script added entries first), and the same for nested tables
+/// under `sub`.
+#[derive(Debug, Default)]
+struct Moves {
+    shift: Option<(i64, i64, i64)>,
+    sub: Vec<(Key, Moves)>,
+}
+
+impl Moves {
+    fn is_empty(&self) -> bool {
+        self.shift.is_none() && self.sub.is_empty()
+    }
+
+    /// As a Lua table `{ from =, n =, to =, sub = { [key] = moves } }`.
+    fn to_lua(&self, lua: &Lua) -> mlua::Result<Table> {
+        let t = lua.create_table()?;
+        if let Some((from, n, to)) = self.shift {
+            t.raw_set("from", from)?;
+            t.raw_set("n", n)?;
+            t.raw_set("to", to)?;
+        }
+        let sub = lua.create_table()?;
+        for (k, m) in &self.sub {
+            sub.raw_set(key_value(lua, k)?, m.to_lua(lua)?)?;
+        }
+        t.raw_set("sub", sub)?;
+        Ok(t)
+    }
+}
+
+fn merge(
+    cur: Option<Stored>,
+    base: Option<&Stored>,
+    new: Option<Stored>,
+    moves: &mut Moves,
+) -> Option<Stored> {
+    if new.as_ref() == base {
+        return cur;
+    }
+    // A table the script made where there was none (`t = t or {}`) is
+    // merged as if it had found an empty one, so two scripts that both
+    // start the same list keep both their entries.
+    let empty = Stored::Table(Vec::new());
+    let base = match (base, &cur, &new) {
+        (None, Some(Stored::Table(_)), Some(Stored::Table(_))) => Some(&empty),
+        _ => base,
+    };
+    let (Some(Stored::Table(mut cur)), Some(Stored::Table(base)), Some(Stored::Table(new))) =
+        (cur, base, new.clone())
+    else {
+        return new;
+    };
+    let base_last = last_index(&Stored::Table(base.clone()));
+    // The list's end as stored now, before this script's own keys (such
+    // as ports[443]) are merged in: list additions go after it.
+    let cur_last = last_index(&Stored::Table(cur.clone()));
+    // Entries the script added right after the end of the list it read
+    // (base_last + 1, + 2, ... without a gap) are list additions; any other
+    // new number key, such as ports[443], is a key like any other.
+    let ints: HashMap<i64, &Stored> = new
+        .iter()
+        .filter_map(|(k, v)| match k {
+            Key::Int(i) => Some((*i, v)),
+            _ => None,
+        })
+        .collect();
+    let mut added = Vec::new();
+    let mut next = base_last;
+    while next < i64::MAX
+        && let Some(v) = ints.get(&(next + 1))
+    {
+        next += 1;
+        added.push((next, (*v).clone()));
+    }
+    for (k, v) in new.iter() {
+        if let Key::Int(i) = k
+            && *i > base_last
+            && *i <= next
+        {
+            continue;
+        }
+        let mut m = Moves::default();
+        let merged = merge(
+            lookup(&cur, k).cloned(),
+            lookup(base, k),
+            Some(v.clone()),
+            &mut m,
+        );
+        if !m.is_empty() {
+            moves.sub.push((k.clone(), m));
+        }
+        cur.retain(|(x, _)| x != k);
+        if let Some(m) = merged {
+            cur.push((k.clone(), m));
+        }
+    }
+    for (k, v) in base.iter() {
+        if lookup(&new, k).is_none() {
+            let merged = merge(
+                lookup(&cur, k).cloned(),
+                Some(v),
+                None,
+                &mut Moves::default(),
+            );
+            cur.retain(|(x, _)| x != k);
+            if let Some(m) = merged {
+                cur.push((k.clone(), m));
+            }
+        }
+    }
+    // If one of the script's own number keys took one of those places,
+    // the additions go after the highest key instead, so none is lost.
+    let n = added.len() as i64;
+    let mut last = cur_last;
+    if (1..=n).any(|i| lookup(&cur, &Key::Int(last.saturating_add(i))).is_some()) {
+        last = last_index(&Stored::Table(cur.clone()));
+    }
+    if let Some((first, _)) = added.first()
+        && last + 1 != *first
+    {
+        moves.shift = Some((*first, added.len() as i64, last.saturating_add(1)));
+    }
+    for (_, v) in added {
+        last = last.saturating_add(1);
+        cur.push((Key::Int(last), v));
+    }
+    Some(Stored::Table(cur))
+}
+
+/// The `get`, `set`, `append` and `merge` functions of one registry, as a table.
 fn functions(
     lua: &Lua,
     reg: &Arc<Registry>,
@@ -317,6 +542,22 @@ fn functions(
             r.append(which, &name.as_bytes(), &v)
                 .map_err(|e| mlua::Error::runtime(format!("{label}.append: {e}")))
         })?,
+    )?;
+    let r = reg.clone();
+    t.raw_set(
+        "merge",
+        lua.create_function(
+            move |lua, (name, base, new): (mlua::LuaString, Value, Value)| {
+                let (stored, moves) = r
+                    .merge(which, &name.as_bytes(), &base, &new)
+                    .map_err(|e| mlua::Error::runtime(format!("{label}.merge: {e}")))?;
+                let value = match stored {
+                    Some(s) => load(lua, &s)?,
+                    None => Value::Nil,
+                };
+                Ok((value, moves.to_lua(lua)?))
+            },
+        )?,
     )?;
     Ok(t)
 }
@@ -413,6 +654,35 @@ mod tests {
         assert!(gone.is_nil());
         let g = reg.inner.lock().unwrap();
         assert_eq!(g.bytes, g.hosts[&ip].values[&b"l".to_vec()].size);
+    }
+
+    #[test]
+    fn merge_keeps_number_keys_and_appends_after_the_list() {
+        let reg = Arc::new(Registry::default());
+        let a = Lua::new();
+        let f = a.create_table().unwrap();
+        install(&a, &f, &reg, None).unwrap();
+        a.globals().set("fero", f).unwrap();
+        let got: String = a
+            .load(
+                r#"
+                fero.registry.set("m", {})
+                fero.registry.merge("m", {}, { [1] = "one", [443] = "https" })
+                local m = fero.registry.get("m")
+                -- Another script added "a" first; this one read {} and
+                -- added "x" and set [2], which "x" would otherwise land on.
+                fero.registry.set("n", { "a" })
+                local n, moves = fero.registry.merge("n", {}, { "x", [3] = "three" })
+                fero.registry.set("o", { "a", "b" })
+                local o = fero.registry.merge("o", {}, { "x", [3] = "three" })
+                return table.concat({ m[1], m[443], tostring(m[444]),
+                  n[1], n[2], n[3], moves.from, moves.to,
+                  o[1], o[2], o[3], o[4] }, ",")
+                "#,
+            )
+            .eval()
+            .unwrap();
+        assert_eq!(got, "one,https,nil,a,x,three,1,2,a,b,three,x");
     }
 
     #[test]

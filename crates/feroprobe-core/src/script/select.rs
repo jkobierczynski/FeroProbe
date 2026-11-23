@@ -147,7 +147,7 @@ impl Expr {
                 if w == "all" || categories.iter().any(|c| c == w) {
                     return true;
                 }
-                let hit = glob(w.strip_suffix(".lua").unwrap_or(w), id);
+                let hit = glob(super::script_id(w), id);
                 *by_name |= hit;
                 hit
             }
@@ -227,6 +227,7 @@ mod tests {
     fn names_categories_and_expressions() {
         assert!(m("banner", "banner", &["safe"]));
         assert!(m("banner.lua", "banner", &[]));
+        assert!(m("banner.nse", "banner", &[]));
         assert!(m("http-*", "http-title", &[]));
         assert!(!m("http-*", "ssh-hostkey", &[]));
         assert!(m("safe", "x", &["discovery", "safe"]));
