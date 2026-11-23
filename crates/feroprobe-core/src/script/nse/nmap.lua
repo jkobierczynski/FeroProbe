@@ -41,68 +41,40 @@ local function deep_copy(v, seen)
   return c
 end
 
--- The largest positive integer key of t (0 when none), as the registry
--- counts the end of a list.
-local function last_index(t)
-  local m = 0
-  for k in pairs(t) do
-    if math.type(k) == "integer" and k > m then m = k end
+-- The merge puts entries the script added after the end of a list after
+-- the list's end at the time, which moves them when another script
+-- added entries meanwhile; `moves` (from fero.registry.merge) says where
+-- they went: { from =, n =, to =, sub = { [key] = moves } }. Move the
+-- script's own entries in dst there too, so a table it still holds
+-- stays tied to its own entry, not another script's.
+local function follow_moves(dst, moves)
+  if not moves or not moves.from then return end
+  local from, n, to = moves.from, moves.n, moves.to
+  local held = {}
+  for i = 0, n - 1 do
+    held[i] = dst[from + i]
+    dst[from + i] = nil
   end
-  return m
-end
-
--- Whether a and b hold the same plain data. The registry's values are
--- bounded in depth, so b (a stored value) bounds the recursion.
-local function same(a, b)
-  if type(a) ~= "table" or type(b) ~= "table" then return a == b end
-  for k, v in pairs(b) do
-    if not same(a[k], v) then return false end
-  end
-  for k in pairs(a) do
-    if b[k] == nil then return false end
-  end
-  return true
-end
-
--- The merge puts entries the script added after the end of a list (base's
--- last index + 1, + 2, ... without a gap) after the list's end at the
--- time, which moves them when another script added entries meanwhile.
--- Move the script's own entries in dst to where they are stored, so a
--- table it still holds stays tied to its own entry, not another
--- script's. They are moved only when the stored entries there are the
--- script's values.
-local function follow_moves(dst, src, base)
-  local bl = type(base) == "table" and last_index(base) or 0
-  local n = 0
-  while dst[bl + n + 1] ~= nil do n = n + 1 end
-  if n == 0 then return end
-  local off = last_index(src) - bl - n
-  if off <= 0 then return end
-  for i = bl + 1, bl + n do
-    if not same(dst[i], src[i + off]) then return end
-  end
-  for i = bl + n, bl + 1, -1 do
-    dst[i + off], dst[i] = dst[i], nil
-  end
+  for i = 0, n - 1 do dst[to + i] = held[i] end
 end
 
 -- Make table dst hold what src holds, keeping dst's nested tables where
--- src has a table under the same key. base is what the script read
--- before its changes, to follow its list additions where the merge put
--- them. The registry keeps no shared tables, so a table the script put
+-- src has a table under the same key, after following the merge's
+-- moves. The registry keeps no shared tables, so a table the script put
 -- in two places (already in `seen`) is not synced twice: the second
 -- place gets its own copy, and the view then matches what is stored
 -- entry for entry.
-local function sync(dst, src, base, seen)
+local function sync(dst, src, moves, seen)
   seen[dst] = true
-  follow_moves(dst, src, base)
+  follow_moves(dst, moves)
+  local sub = moves and moves.sub or {}
   for key in pairs(dst) do
     if src[key] == nil then dst[key] = nil end
   end
   for key, v in pairs(src) do
     local d = dst[key]
     if type(v) == "table" and type(d) == "table" and not seen[d] then
-      sync(d, v, type(base) == "table" and base[key] or nil, seen)
+      sync(d, v, sub[key], seen)
     else
       dst[key] = v
     end
@@ -129,11 +101,11 @@ local function registry_view(reg)
     -- others still are, so a merge already stored is never applied twice.
     local stored, first_err = {}, nil
     for k in pairs(touched) do
-      local ok, err = pcall(reg.merge, k, base[k], live[k])
+      local ok, v, moves = pcall(reg.merge, k, base[k], live[k])
       if ok then
-        stored[k] = { reg.get(k) }
+        stored[k] = { v, moves }
       elseif first_err == nil then
-        first_err = err
+        first_err = v
       end
     end
     local seen = {}
@@ -143,9 +115,9 @@ local function registry_view(reg)
       -- are updated in place (references it holds stay valid), and the
       -- next round's changes are measured against that value, so a later
       -- edit or removal hits the entry it names now, not another script's.
-      local v = s[1]
+      local v, moves = s[1], s[2]
       if type(live[k]) == "table" and type(v) == "table" and not seen[live[k]] then
-        sync(live[k], v, base[k], seen)
+        sync(live[k], v, moves, seen)
       else
         live[k] = v
       end

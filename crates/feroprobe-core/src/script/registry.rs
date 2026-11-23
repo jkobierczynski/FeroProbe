@@ -171,6 +171,15 @@ fn store(v: &Value, depth: usize, size: &mut usize) -> Result<Option<Stored>, St
 }
 
 /// Copy a stored value out into `lua`.
+fn key_value(lua: &Lua, k: &Key) -> mlua::Result<Value> {
+    Ok(match k {
+        Key::Int(i) => Value::Integer(*i),
+        Key::Num(n) => Value::Number(*n),
+        Key::Bool(b) => Value::Boolean(*b),
+        Key::Str(b) => Value::String(lua.create_string(b)?),
+    })
+}
+
 fn load(lua: &Lua, s: &Stored) -> mlua::Result<Value> {
     Ok(match s {
         Stored::Bool(b) => Value::Boolean(*b),
@@ -180,13 +189,7 @@ fn load(lua: &Lua, s: &Stored) -> mlua::Result<Value> {
         Stored::Table(entries) => {
             let t = lua.create_table()?;
             for (k, v) in entries {
-                let key = match k {
-                    Key::Int(i) => Value::Integer(*i),
-                    Key::Num(n) => Value::Number(*n),
-                    Key::Bool(b) => Value::Boolean(*b),
-                    Key::Str(b) => Value::String(lua.create_string(b)?),
-                };
-                t.raw_set(key, load(lua, v)?)?;
+                t.raw_set(key_value(lua, k)?, load(lua, v)?)?;
             }
             Value::Table(t)
         }
@@ -247,7 +250,16 @@ impl Registry {
     /// Apply what a script changed in the value under `name` (`new`, made
     /// from `base`, the copy it read) to the value there now, in one step;
     /// see [`merge`].
-    fn merge(&self, which: Which, name: &[u8], base: &Value, new: &Value) -> Result<(), String> {
+    /// Merge the script's `new` value, read as `base`, into what is
+    /// stored now. Gives the value now stored and where list additions
+    /// were moved to.
+    fn merge(
+        &self,
+        which: Which,
+        name: &[u8],
+        base: &Value,
+        new: &Value,
+    ) -> Result<(Option<Stored>, Moves), String> {
         let mut size = 0;
         let base = store(base, 0, &mut size)?;
         let mut size = 0;
@@ -258,9 +270,11 @@ impl Registry {
                 None => (None, 0),
             };
             let kept = cur.clone();
-            match merge(cur, base.as_ref(), new) {
+            let mut moves = Moves::default();
+            match merge(cur, base.as_ref(), new, &mut moves) {
                 None => {
                     *bytes -= old;
+                    Ok((None, moves))
                 }
                 Some(s) => {
                     let size = name.len() + stored_size(&s);
@@ -284,14 +298,14 @@ impl Registry {
                     m.values.insert(
                         name.to_vec(),
                         Entry {
-                            value: s,
+                            value: s.clone(),
                             size,
                             last,
                         },
                     );
+                    Ok((Some(s), moves))
                 }
             }
-            Ok(())
         })
     }
 
@@ -369,7 +383,44 @@ fn lookup<'a>(entries: &'a [(Key, Stored)], k: &Key) -> Option<&'a Stored> {
 /// set or removed, and entries it added past the end of a list, which go
 /// after the list's end now (so two scripts adding to one list both
 /// keep their entries, as with `append`).
-fn merge(cur: Option<Stored>, base: Option<&Stored>, new: Option<Stored>) -> Option<Stored> {
+/// Where a merge put the script's list additions: `n` entries the script
+/// had at `from`, `from + 1`, ... are stored at `to`, `to + 1`, ... (when
+/// another script added entries first), and the same for nested tables
+/// under `sub`.
+#[derive(Debug, Default)]
+struct Moves {
+    shift: Option<(i64, i64, i64)>,
+    sub: Vec<(Key, Moves)>,
+}
+
+impl Moves {
+    fn is_empty(&self) -> bool {
+        self.shift.is_none() && self.sub.is_empty()
+    }
+
+    /// As a Lua table `{ from =, n =, to =, sub = { [key] = moves } }`.
+    fn to_lua(&self, lua: &Lua) -> mlua::Result<Table> {
+        let t = lua.create_table()?;
+        if let Some((from, n, to)) = self.shift {
+            t.raw_set("from", from)?;
+            t.raw_set("n", n)?;
+            t.raw_set("to", to)?;
+        }
+        let sub = lua.create_table()?;
+        for (k, m) in &self.sub {
+            sub.raw_set(key_value(lua, k)?, m.to_lua(lua)?)?;
+        }
+        t.raw_set("sub", sub)?;
+        Ok(t)
+    }
+}
+
+fn merge(
+    cur: Option<Stored>,
+    base: Option<&Stored>,
+    new: Option<Stored>,
+    moves: &mut Moves,
+) -> Option<Stored> {
     if new.as_ref() == base {
         return cur;
     }
@@ -412,7 +463,16 @@ fn merge(cur: Option<Stored>, base: Option<&Stored>, new: Option<Stored>) -> Opt
         {
             continue;
         }
-        let merged = merge(lookup(&cur, k).cloned(), lookup(base, k), Some(v.clone()));
+        let mut m = Moves::default();
+        let merged = merge(
+            lookup(&cur, k).cloned(),
+            lookup(base, k),
+            Some(v.clone()),
+            &mut m,
+        );
+        if !m.is_empty() {
+            moves.sub.push((k.clone(), m));
+        }
         cur.retain(|(x, _)| x != k);
         if let Some(m) = merged {
             cur.push((k.clone(), m));
@@ -420,7 +480,12 @@ fn merge(cur: Option<Stored>, base: Option<&Stored>, new: Option<Stored>) -> Opt
     }
     for (k, v) in base.iter() {
         if lookup(&new, k).is_none() {
-            let merged = merge(lookup(&cur, k).cloned(), Some(v), None);
+            let merged = merge(
+                lookup(&cur, k).cloned(),
+                Some(v),
+                None,
+                &mut Moves::default(),
+            );
             cur.retain(|(x, _)| x != k);
             if let Some(m) = merged {
                 cur.push((k.clone(), m));
@@ -428,6 +493,11 @@ fn merge(cur: Option<Stored>, base: Option<&Stored>, new: Option<Stored>) -> Opt
         }
     }
     let mut last = last_index(&Stored::Table(cur.clone()));
+    if let Some((first, _)) = added.first()
+        && last + 1 != *first
+    {
+        moves.shift = Some((*first, added.len() as i64, last.saturating_add(1)));
+    }
     for (_, v) in added {
         last = last.saturating_add(1);
         cur.push((Key::Int(last), v));
@@ -468,9 +538,15 @@ fn functions(
     t.raw_set(
         "merge",
         lua.create_function(
-            move |_, (name, base, new): (mlua::LuaString, Value, Value)| {
-                r.merge(which, &name.as_bytes(), &base, &new)
-                    .map_err(|e| mlua::Error::runtime(format!("{label}.merge: {e}")))
+            move |lua, (name, base, new): (mlua::LuaString, Value, Value)| {
+                let (stored, moves) = r
+                    .merge(which, &name.as_bytes(), &base, &new)
+                    .map_err(|e| mlua::Error::runtime(format!("{label}.merge: {e}")))?;
+                let value = match stored {
+                    Some(s) => load(lua, &s)?,
+                    None => Value::Nil,
+                };
+                Ok((value, moves.to_lua(lua)?))
             },
         )?,
     )?;

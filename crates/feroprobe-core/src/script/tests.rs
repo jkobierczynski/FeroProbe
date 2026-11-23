@@ -6230,6 +6230,20 @@ fn nse_registry_views_merge_and_keep_number_keys() {
     assert_eq!(r, "e,d2");
     let held: bool = d.load("return nmap.registry.r[2] == mine").eval().unwrap();
     assert!(held);
+    // Nothing moves when nothing was added meanwhile, even with an equal
+    // value further along the list.
+    let (m, _bm) = state();
+    run(
+        &m,
+        "mine = { who = 'd' } nmap.registry.sr = { mine, [100] = { who = 'd' } } \
+         fero.__nse_flush() mine.who = 'd2' fero.__nse_flush()",
+    );
+    let (n, _bn) = state();
+    let sr: String = n
+        .load("return nmap.registry.sr[1].who .. ',' .. nmap.registry.sr[100].who")
+        .eval()
+        .unwrap();
+    assert_eq!(sr, "d2,d");
     // A name that cannot be stored does not make another name's list
     // addition be stored again on every flush.
     let (j, _bj) = state();
