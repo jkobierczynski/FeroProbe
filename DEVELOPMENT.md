@@ -321,7 +321,7 @@ release.
 | 6.6 | Output extras | `--append-output`, `-oS`, `--stylesheet`, `--webxml`, `--no-stylesheet` | **Done** (see [Output](#output)). Append mode for every format; `-oS` for parity; an XML stylesheet of our own (nmap's `nmap.xsl` is not reused), referenced by default, `--webxml` points at a published copy |
 | 6.7 | Small options | `--data-length`, `--data`, `--data-string`, `--ttl`, `--ip-options`, `--badsum`, `--spoof-mac`, `-b`, `--privileged`, `--unprivileged`, `--system-dns`, `--port-ratio`, `--defeat-rst-ratelimit` | **Done** (6.7 in PR #47, `--spoof-mac` in its own pull request) except `--port-ratio` (see [Packet contents](#packet-contents)); the payload replaces the UDP and echo markers (Jurgen, 2026-11-16). `--spoof-mac` followed in its own pull request (IPv4 and ARP). `--port-ratio` dropped (Jurgen, 2026-11-16): it needs nmap-services frequency values, not just its order. Original plan: one pull request per group: payload options; IP header options; `--badsum`; `--spoof-mac` (behind the same private-range / `--allow-public-evasion` gate as the evasion options); FTP bounce `-b` (also behind that gate, since it scans a third party through someone else's server); the rest. Open question for each payload option: whether the probe signature is kept when the user supplies the payload (see `docs/responsible-use.md`) |
 
-### Phase 7: script engine (v0.6.0)
+### Phase 7: script engine (v0.6.0, v0.7.0)
 
 Released as v0.6.0 (2026-11-18) with the script engine: `--script` with
 Lua 5.4 and our own `fero` library (7.1), the first script libraries (TLS
@@ -337,7 +337,9 @@ echo fix. Moved to v0.7.0: the rest of 7.2 (ordered output tables,
 `fero.registry`, `receive_buf`, a STARTTLS helper, raw packets), more scripts
 (7.4) and the NSE compatibility layer (7.6).
 
-v0.7.0 so far: ordered output tables (`fero.output_table`), the registry
+Released as v0.7.0 (2026-11-23) with most of the rest of 7.2 (not raw packets,
+nor STARTTLS for MySQL, VNC and TDS)
+and 28 more scripts (7.4): ordered output tables (`fero.output_table`), the registry
 (`fero.registry`, `fero.host_registry`), `sock:receive_buf`, and the
 `clock-skew` and `http-date` scripts (`clock-skew` in `default`), then the
 STARTTLS helper (`fero.starttls`, also used by `ssl-cert`) and the NTLM-info
@@ -359,6 +361,13 @@ handshake); `http-open-proxy` is excluded (it reaches outside hosts). The
 order planned for the next scripts (2026-11-19, one pull request each): service
 info scripts (`ldap-rootdse`, `ms-sql-info` over TCP only, `mongodb-info`,
 `redis-info`, `memcached-info`); UDP discovery scripts.
+Also in v0.7.0: scripts chosen by name or file raise verbosity by one, as
+in nmap (the first matching `--script` item decides), and the `-sV` protocol
+batches of 5.1 (Windows and Active Directory, banner rules that can be tied to
+ports, Mosquitto/etcd/Varnish/Tomcat/Prometheus, UDP probes for STUN, DNS-SD,
+IKEv2, L2TP and IAX2, and the TCP 9100-9107 printer exclude with
+`--allports`), taking the rules file from 39 probes and about 150 rules to 51
+probes and 190 rules. Moved to v0.8.0: the NSE compatibility layer (7.6).
 
 | Step | Feature | nmap options | Plan |
 | --- | --- | --- | --- |
@@ -367,7 +376,7 @@ info scripts (`ldap-rootdse`, `ms-sql-info` over TCP only, `mongodb-info`,
 | 7.3 | Default scripts | `-sC`, `-A` | **Done** (see [Script scanning](#script-scanning)): `-sC`, `-A` includes it, combined `-s` letters (`-sCV`), and 14 new scripts in `default` beside `http-title` and `ssl-cert`, with `fero.reader`, `fero.crypto` and `fero.hex`. nmap's default category is larger; SMB, RDP NTLM info, DNS NSID, NetBIOS and SSL date scripts are candidates for 7.4 |
 | 7.4 | More scripts | `--script <category>` | **In progress**, one pull request per script or small batch, each with a test against a local service. Added: `http-headers`, `http-server-header`, `smb2-security-mode`, `smb2-time`, `rdp-ntlm-info`, `ssl-date`, `nbstat`, `dns-nsid`; in v0.7.0 `http-date` and `clock-skew`, then the NTLM-info family (`http-`, `smtp-`, `imap-`, `pop3-`, `nntp-`, `telnet-` and `ms-sql-ntlm-info`), then `ssh2-enum-algos`, then the HTTP defaults `http-auth`, `http-cookie-flags`, `http-cors`, `http-favicon`, `http-generator`, `http-git` and `http-webdav-scan`, then SMB1 `smb-os-discovery`, `smb-security-mode`, `smb-protocols` and `smb2-capabilities`, then the TLS scripts `ssl-enum-ciphers`, `tls-alpn`, `tls-nextprotoneg` and `sslv2` on `fero.tls`, then the SNMP scripts `snmp-sysdescr`, `snmp-info` and `snmp-interfaces` on `fero.snmp`. nmap-diff cases `script-*` (`-sC`, the HTTP scripts, `dns-nsid` over TCP and UDP, `nbstat`) against a DNS server on TCP 53 and a NetBIOS responder on UDP 137 in the lab, and in v0.7.0 `script-date` (`http-date` and `clock-skew` on port 80) and `script-ntlm` (the NTLM-info scripts against the lab's NTLM responders on TCP 23, 25, 80, 110, 119, 143 and 1433) and `script-ssh` (`ssh2-enum-algos` against the lab's SSH server on TCP 22, which now answers a client's version line with a KEXINIT) and `script-http-defaults` (the new HTTP scripts against port 80, which now also serves a `.git` directory, a favicon, a 401 page, a page setting a session cookie, a generator tag, WebDAV under `/dav/` and CORS preflights) and `script-smb` (the SMB scripts against the lab's SMB server on TCP 445: NT LM 0.12 and SMB 2.0.2 to 3.1.1, an NTLM challenge and Windows Server 2003 OS strings) and `script-tls` (the TLS scripts against the lab's TLS 1.2/1.3 server on TCP 995 and an SSLv2-only stand-in on TCP 993) and `script-snmp` (the SNMP scripts against the lab's SNMP agent on UDP 161; the lab's filtered UDP port moved to 162 for it); they compare which scripts gave output, not its text |
 | 7.5 | Script tracing and updates | `--script-trace`, `--script-updatedb` | **Done** (see [Script scanning](#script-scanning)): nmap's script-trace lines for every script connection (sockets and the HTTP library), also with `--packet-trace`; a user scripts directory with nmap's `script.db` index, so your own scripts are chosen by category and by `-sC` |
-| 7.6 | NSE compatibility layer | | Requested by the maintainer 2026-11-17. Our own Lua module offering the common NSE calls under nmap's names (`nmap.new_socket`, `stdnse.get_script_args`, `stdnse.debug`, `shortport.port_or_service`, ...) mapped onto `fero.*`, plus `require` of those names only, so simple NSE scripts run with few or no changes. Written from nmap's public API documentation, never from nselib (NPSL); same sandbox and scope rules. Needs 7.2 for the protocol helpers most real scripts use |
+| 7.6 | NSE compatibility layer | | Planned for v0.8.0 (moved from v0.7.0, 2026-11-23). Requested by the maintainer 2026-11-17. Our own Lua module offering the common NSE calls under nmap's names (`nmap.new_socket`, `stdnse.get_script_args`, `stdnse.debug`, `shortport.port_or_service`, ...) mapped onto `fero.*`, plus `require` of those names only, so simple NSE scripts run with few or no changes. Written from nmap's public API documentation, never from nselib (NPSL); same sandbox and scope rules. Needs 7.2 for the protocol helpers most real scripts use |
 
 ### Script engine design
 
