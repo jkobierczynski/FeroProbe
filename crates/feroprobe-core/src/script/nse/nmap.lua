@@ -42,14 +42,19 @@ local function deep_copy(v, seen)
 end
 
 -- Make table dst hold what src holds, keeping dst's nested tables where
--- src has a table under the same key.
-local function sync(dst, src)
+-- src has a table under the same key. The registry keeps no shared
+-- tables, so a table the script put in two places (already in `seen`)
+-- is not synced twice: the second place gets its own copy, and the view
+-- then matches what is stored entry for entry.
+local function sync(dst, src, seen)
+  seen[dst] = true
   for key in pairs(dst) do
     if src[key] == nil then dst[key] = nil end
   end
   for key, v in pairs(src) do
-    if type(v) == "table" and type(dst[key]) == "table" then
-      sync(dst[key], v)
+    local d = dst[key]
+    if type(v) == "table" and type(d) == "table" and not seen[d] then
+      sync(d, v, seen)
     else
       dst[key] = v
     end
@@ -69,6 +74,7 @@ local function registry_view(reg)
     end
   end
   flushes[#flushes + 1] = function()
+    local seen = {}
     for k in pairs(touched) do
       reg.merge(k, base[k], live[k])
       -- The script now sees the merged value, with what other scripts
@@ -77,8 +83,8 @@ local function registry_view(reg)
       -- next round's changes are measured against that value, so a later
       -- edit or removal hits the entry it names now, not another script's.
       local stored = reg.get(k)
-      if type(live[k]) == "table" and type(stored) == "table" then
-        sync(live[k], stored)
+      if type(live[k]) == "table" and type(stored) == "table" and not seen[live[k]] then
+        sync(live[k], stored, seen)
       else
         live[k] = stored
       end

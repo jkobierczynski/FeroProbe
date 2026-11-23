@@ -6194,6 +6194,21 @@ fn nse_registry_views_merge_and_keep_number_keys() {
     assert_eq!(seen, "e1,d1");
     run(&d, "nmap.registry.q[2] = 'd2' fero.__nse_flush()");
     run(&d, "table.remove(nmap.registry.q, 2) fero.__nse_flush()");
+    // One table under two names: after a flush each name has its own
+    // copy, and a second flush without changes keeps another script's
+    // update.
+    run(
+        &d,
+        "local t = { n = 1 } nmap.registry.w = { a = t, b = t } fero.__nse_flush()",
+    );
+    run(&e, "nmap.registry.w.a.n = 5 fero.__nse_flush()");
+    run(&d, "fero.__nse_flush()");
+    let (f, _bf) = state();
+    let w: String = f
+        .load("return nmap.registry.w.a.n .. ' ' .. nmap.registry.w.b.n")
+        .eval()
+        .unwrap();
+    assert_eq!(w, "5 1");
     let (c, _bc) = state();
     let q: String = c
         .load("return table.concat(nmap.registry.q, ',')")
