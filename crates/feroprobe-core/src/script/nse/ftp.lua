@@ -27,6 +27,7 @@ function ftp.read_reply(buffer)
         break
       end
       lines[#lines + 1] = line
+      if #lines > 1000 then return nil, "reply too long" end
     end
   end
   return tonumber(code), table.concat(lines, "\n")
@@ -39,7 +40,7 @@ function ftp.connect(host, port, opts)
   opts = opts or {}
   local sock = nmap.new_socket()
   sock:set_timeout(tonumber(opts.request_timeout) or 10000)
-  local ok, err = sock:connect(host, port, "tcp")
+  local ok, err = sock:connect(host, port, opts.proto or "tcp")
   if not ok then return nil, err end
   local buffer = stdnse.make_buffer(sock, "\r?\n")
   local code, message = ftp.read_reply(buffer)
@@ -50,8 +51,9 @@ function ftp.connect(host, port, opts)
   return sock, code, message, buffer
 end
 
--- Log in with USER, PASS and, if asked for, ACCT: true or false, then the
--- last reply's code and text (nil and a message when the connection fails).
+-- Log in with USER, PASS and, if asked for, ACCT (`acct`, else the user
+-- name): true or false, then the last reply's code and text (false, nil
+-- and a message when the connection fails).
 function ftp.auth(socket, buffer, username, password, acct)
   local function cmd(line)
     local ok, err = socket:send(line .. "\r\n")
@@ -60,8 +62,8 @@ function ftp.auth(socket, buffer, username, password, acct)
   end
   local code, message = cmd("USER " .. tostring(username))
   if code == 331 then code, message = cmd("PASS " .. tostring(password or "")) end
-  if code == 332 and acct then code, message = cmd("ACCT " .. tostring(acct)) end
-  if not code then return nil, message end
+  if code == 332 then code, message = cmd("ACCT " .. tostring(acct or username)) end
+  if not code then return false, nil, message end
   return code == 230 or code == 202, code, message
 end
 

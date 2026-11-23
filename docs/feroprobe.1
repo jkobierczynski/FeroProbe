@@ -3839,18 +3839,23 @@ T}
 T{
 \f[V]strbuf\f[R], \f[V]json\f[R]
 T}@T{
-\f[V]new\f[R], \f[V]dump\f[R], \f[V]clear\f[R] and \f[V]..\f[R] on
-buffers; \f[V]parse\f[R] (to \f[V]true\f[R] and the value, or
-\f[V]false\f[R] and a message), \f[V]generate\f[R], \f[V]NULL\f[R],
-\f[V]make_array\f[R], \f[V]make_object\f[R], \f[V]typeof\f[R]
+\f[V]new\f[R], \f[V]dump\f[R], \f[V]clear\f[R], \f[V]concatbuf\f[R],
+\f[V]eqbuf\f[R], \f[V]tostring\f[R] (one piece per line) and
+\f[V]..\f[R], \f[V]==\f[R] on buffers; \f[V]parse\f[R] (to
+\f[V]true\f[R] and the value, or \f[V]false\f[R] and a message),
+\f[V]generate\f[R], \f[V]NULL\f[R], \f[V]make_array\f[R],
+\f[V]make_object\f[R], \f[V]typeof\f[R]
 T}
 T{
 \f[V]creds\f[R]
 T}@T{
 \f[V]State\f[R], \f[V]StateMsg\f[R], \f[V]ALL_DATA\f[R],
-\f[V]Account\f[R], \f[V]Credentials\f[R] (\f[V]new\f[R], \f[V]add\f[R],
-\f[V]getCredentials\f[R], \f[V]getTable\f[R]); kept in
-\f[V]nmap.registry.creds\f[R] for the run
+\f[V]Account\f[R], \f[V]Credentials\f[R] (\f[V]new\f[R] with a script
+name or a list of tags, \f[V]add\f[R], \f[V]getCredentials\f[R],
+\f[V]getTable\f[R]); kept in \f[V]nmap.registry.creds\f[R] for the run;
+asking for \f[V]State.PARAM\f[R] also gives the accounts in
+\f[V]creds.<service>\f[R] and \f[V]creds.global\f[R]
+(\f[V]user:pass\f[R])
 T}
 T{
 \f[V]vulns\f[R]

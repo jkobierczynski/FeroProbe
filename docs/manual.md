@@ -1631,8 +1631,8 @@ the scan probed there.
 | `datetime` | `format_timestamp`, `format_time`, `format_difftime`, `date_to_timestamp`, `record_skew` (feeds `clock-skew`) |
 | `openssl` | `md5`, `sha1`, `digest` (MD5, SHA-1, SHA-256, SHA-384, SHA-512), `hmac`, `rand_bytes`, `rand_pseudo_bytes`, `supported_digests`; no ciphers or big numbers |
 | `base64`, `rand`, `match`, `outlib` | `enc`, `dec`; `random_string`, `random_alpha`, `charset`; `numbytes`, `pattern_limit`, `dontmatch`; `sorted_by_key`, `list_sep` |
-| `strbuf`, `json` | `new`, `dump`, `clear` and `..` on buffers; `parse` (to `true` and the value, or `false` and a message), `generate`, `NULL`, `make_array`, `make_object`, `typeof` |
-| `creds` | `State`, `StateMsg`, `ALL_DATA`, `Account`, `Credentials` (`new`, `add`, `getCredentials`, `getTable`); kept in `nmap.registry.creds` for the run |
+| `strbuf`, `json` | `new`, `dump`, `clear`, `concatbuf`, `eqbuf`, `tostring` (one piece per line) and `..`, `==` on buffers; `parse` (to `true` and the value, or `false` and a message), `generate`, `NULL`, `make_array`, `make_object`, `typeof` |
+| `creds` | `State`, `StateMsg`, `ALL_DATA`, `Account`, `Credentials` (`new` with a script name or a list of tags, `add`, `getCredentials`, `getTable`); kept in `nmap.registry.creds` for the run; asking for `State.PARAM` also gives the accounts in `creds.<service>` and `creds.global` (`user:pass`) |
 | `vulns` | `STATE`, `STATE_MSG`, `Report` (`new`, `add_vulns`, `make_output`); `vulns.showall` lists what is not vulnerable too |
 | `ftp` | `connect`, `read_reply`, `auth`, `pasv`, `close` |
 | `sslcert` | `getCertificate`, `parse_ssl_certificate`, `isPortSupported`, `getPrepareTLSWithoutReconnect`, over FeroProbe's STARTTLS helper (SMTP, LMTP, IMAP, POP3, NNTP, FTP, LDAP, PostgreSQL, XMPP) |

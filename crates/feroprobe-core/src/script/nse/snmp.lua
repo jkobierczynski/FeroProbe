@@ -63,10 +63,17 @@ function Helper:get(_, ...)
   return answer(self.session:get(table.unpack(oids)))
 end
 
--- GetNextRequest for one OID, answered as Helper:get.
-function Helper:getnext(_, o)
+-- GetNextRequest for each OID in turn, answered as Helper:get (one
+-- binding per OID, in order).
+function Helper:getnext(_, ...)
   if not self.session and not self:connect() then return false, "not connected" end
-  return answer(self.session:getnext(oid_text(o)))
+  local out = {}
+  for _, o in ipairs({ ... }) do
+    local ok, r = answer(self.session:getnext(oid_text(o)))
+    if not ok then return false, r end
+    out[#out + 1] = r[1]
+  end
+  return true, out
 end
 
 -- The variables under `base`, in order: true and { { oid, value }, ... },

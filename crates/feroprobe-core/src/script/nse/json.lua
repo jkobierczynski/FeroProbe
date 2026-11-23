@@ -13,11 +13,13 @@ local OBJECT = { __jsontype = "object" }
 function json.make_array(t) return setmetatable(t or {}, ARRAY) end
 function json.make_object(t) return setmetatable(t or {}, OBJECT) end
 
--- "array", "object", "null", or Lua's type name.
+local is_array
+
+-- "array", "object", "null", or Lua's type name: a table is an array or
+-- an object as json.generate writes it.
 function json.typeof(v)
   if v == json.NULL then return "null" end
-  local mt = type(v) == "table" and getmetatable(v)
-  if mt == ARRAY or mt == OBJECT then return mt.__jsontype end
+  if type(v) == "table" then return is_array(v) and "array" or "object" end
   return type(v)
 end
 
@@ -44,7 +46,7 @@ function Parser:string()
   local s, out = self.text, {}
   local i = self.pos + 1
   while true do
-    local j = s:find('["\\%c]', i)
+    local j = s:find('["\\\0-\31]', i)
     if not j then self:fail("unterminated string") end
     out[#out + 1] = s:sub(i, j - 1)
     local c = s:sub(j, j)
@@ -125,8 +127,22 @@ function Parser:value(depth)
   elseif s:sub(i, i + 3) == "null" then
     self.pos = i + 4 return json.NULL
   else
-    local num = s:match("^-?%d+%.?%d*[eE]?[-+]?%d*", i)
-    if not num or num == "" or num == "-" then self:fail("unexpected input") end
+    -- RFC 8259 6: no leading zeros, digits after a point and in an
+    -- exponent.
+    local int = s:match("^-?%d+", i)
+    if not int then self:fail("unexpected input") end
+    if int:match("^-?0%d") then self:fail("bad number") end
+    local num = int
+    local frac = s:match("^%.%d*", i + #num)
+    if frac then
+      if frac == "." then self:fail("bad number") end
+      num = num .. frac
+    end
+    local exp = s:match("^[eE][-+]?%d*", i + #num)
+    if exp then
+      if not exp:match("%d$") then self:fail("bad number") end
+      num = num .. exp
+    end
     local n = math.tointeger(tonumber(num)) or tonumber(num)
     if not n then self:fail("bad number") end
     self.pos = i + #num
@@ -157,7 +173,7 @@ local function quote(s)
   end) .. '"'
 end
 
-local function is_array(t)
+function is_array(t)
   local mt = getmetatable(t)
   if mt == ARRAY then return true end
   if mt == OBJECT then return false end

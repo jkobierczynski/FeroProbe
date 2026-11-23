@@ -19,6 +19,10 @@ local function date_table(s)
   }
 end
 
+local function tunnelled(port)
+  return type(port.version) == "table" and port.version.service_tunnel == "ssl"
+end
+
 local Cert = {}
 Cert.__index = Cert
 
@@ -66,16 +70,12 @@ function sslcert.parse_ssl_certificate(der)
   }, Cert)
 end
 
-local function tunnelled(port)
-  return type(port.version) == "table" and port.version.service_tunnel == "ssl"
-end
-
 -- A function(host, port) that connects and asks the server to switch to
 -- TLS, returning true and an nmap socket still in plain text (the caller
 -- sends its own hello), or false and a message; nil when the port has no
 -- such protocol.
 function sslcert.getPrepareTLSWithoutReconnect(port)
-  if not fero.starttls.protocol(port) then return nil end
+  if tunnelled(port) or not fero.starttls.protocol(port) then return nil end
   return function(host, p)
     local raw, err = fero.starttls.connect(host, p, { plain = true })
     if not raw then return false, err end
@@ -90,7 +90,7 @@ end
 -- true and an nmap socket speaking TLS, or false and a message; nil when
 -- the port has no such protocol.
 function sslcert.isPortSupported(port)
-  if not fero.starttls.protocol(port) then return nil end
+  if tunnelled(port) or not fero.starttls.protocol(port) then return nil end
   return function(host, p)
     local raw, err = fero.starttls.connect(host, p)
     if not raw then return false, err end

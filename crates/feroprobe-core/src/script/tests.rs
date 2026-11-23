@@ -6004,6 +6004,18 @@ action = function()
   b = b .. "c"
   b = b .. strbuf.new("d")
   o.strbuf = strbuf.dump(b, ",") .. " " .. tostring(b == strbuf.new("a", "b", "c", "d"))
+  local twice = strbuf.new("x", "y")
+  twice = twice .. twice
+  o.strbuf2 = strbuf.dump(twice) .. " " .. tostring(strbuf.new("a", "b")):gsub("\n", "/")
+    .. " " .. strbuf.tostring(strbuf.concatbuf(strbuf.new("p"), "q")) .. " " .. tostring(strbuf.eqbuf(twice, twice))
+  local function jp(t)
+    local ok, v = json.parse(t)
+    return ok and tostring(v) or "err"
+  end
+  o.json2 = json.typeof({{ 1, 2 }}) .. " " .. json.typeof({{}}) .. " " .. json.typeof({{ a = 1 }}) .. " "
+    .. json.typeof(json.make_array({{}})) .. " " .. jp("01") .. " " .. jp("1.") .. " " .. jp("1e") .. " "
+    .. jp("-0") .. " " .. jp("1.5e-1") .. " " .. jp("0") .. " " .. #select(2, json.parse('"\127"')) .. " "
+    .. tostring((json.parse('"a\1"')))
   local ok, v = json.parse('{{"a":[1,2.5,"x\\u00e9\\ud83d\\ude00"],"b":null,"c":true,"d":{{}}}}')
   o.json = tostring(ok) .. " " .. v.a[1] .. " " .. v.a[2] .. " " .. v.a[3] .. " "
     .. tostring(v.b == json.NULL) .. " " .. tostring(v.c) .. " " .. json.typeof(v.d) .. " "
@@ -6015,6 +6027,14 @@ action = function()
   local valid = {{}}
   for a in c:getCredentials(creds.State.VALID) do valid[#valid + 1] = tostring(a) end
   o.creds = table.concat(valid, ";") .. " | " .. table.concat(c:getTable(), ";")
+  local t1 = creds.Credentials:new({{ "ftp", "brute" }}, {{ ip = "10.0.0.2" }}, {{ number = 21, service = "ftp" }})
+  t1:add("tag", "pw", creds.State.VALID)
+  local seen = {{}}
+  local t2 = creds.Credentials:new({{ "ftp" }}, {{ ip = "10.0.0.2" }}, {{ number = 21, service = "ftp" }})
+  for a in t2:getCredentials(creds.State.VALID + creds.State.PARAM) do
+    seen[#seen + 1] = a.user .. "/" .. a.pass .. "/" .. tostring(a.service) .. "/" .. a.state
+  end
+  o.creds2 = table.concat(seen, ";")
   local r = vulns.Report:new("s", {{ ip = "10.0.0.1" }})
   o.novuln = tostring(r:make_output({{ title = "Safe", state = vulns.STATE.NOT_VULN }}))
   o.vuln = r:make_output({{ title = "Bad thing", state = vulns.STATE.VULN,
@@ -6035,6 +6055,10 @@ action = function()
   local m = s1.body[1]
   o.server = string.format("%s %s %s %s %s %s/%s", m.type, m.protocol, m.cipher, m.compressor,
     tostring(m.extensions.renegotiation_info ~= nil), s2.body[1].level, s2.body[1].description)
+  local _, _, more = tls.record_read("", 1)
+  o.tls2 = string.format("%s %s %s %s %s %s", tostring(tls.record_version_ok("TLSv1.2", "TLSv1.2")),
+    tostring(tls.record_version_ok("TLSv1.2", "TLSv1.3")), tostring(tls.record_version_ok("TLSv1.0", "TLSv1.2")),
+    tostring(tls.record_version_ok(0x0303)), stdnse.tohex(tls.record_write("alert", "TLSv1.3", "\2\40")), tostring(more))
   o.tls = string.format("%d %d %s %s %s", tls.PROTOCOLS["TLSv1.2"], tls.CIPHERS["TLS_RSA_WITH_AES_128_CBC_SHA"],
     tls.cipher_info("TLS_RSA_WITH_AES_128_CBC_SHA").cipher, tostring(tls.servername({{ ip = "1.2.3.4", targetname = "1.2.3.4" }})),
     tls.servername({{ ip = "1.2.3.4", name = "lab.example" }}))
@@ -6048,7 +6072,12 @@ action = function()
   return o
 end"#
     );
-    let scan = ScriptScan::new(vec![script("part2", &src)], ArgTable::default(), None).unwrap();
+    let scan = ScriptScan::new(
+        vec![script("part2", &src)],
+        args::parse("creds.ftp=fu:fp,creds.global=admin:pw").unwrap(),
+        None,
+    )
+    .unwrap();
     let r = scan.pre_scan().await;
     let d = r[0].data.as_ref().unwrap_or_else(|| panic!("{r:?}"));
     for (k, want) in [
@@ -6058,6 +6087,13 @@ end"#
             "true 1 2.5 x\u{e9}\u{1F600} true true object {\"a\":\"q\\\"\\n\",\"e\":[],\"n\":null,\"z\":[1,2]}",
         ),
         ("json_bad", "false"),
+        ("strbuf2", "xyxy a/b p\nq true"),
+        (
+            "json2",
+            "array object object array err err err 0 0.15 0 1 false",
+        ),
+        ("creds2", "tag/pw/ftp/2;fu/fp/ftp/16;admin/pw/ftp/16"),
+        ("tls2", "true true false true 15030300020228 true"),
         (
             "creds",
             "root:<empty> - Valid credentials | root:<empty> - Valid credentials;bob:pw - Account locked",

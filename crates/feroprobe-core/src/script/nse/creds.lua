@@ -4,6 +4,7 @@
 -- Credentials are kept in the run's registry (nmap.registry.creds), so a
 -- later script can use what an earlier one found, on any host.
 local nmap = require "nmap"
+local stdnse = require "stdnse"
 local creds = {}
 
 -- Account states, as bit flags that can be added: getCredentials takes
@@ -72,8 +73,9 @@ creds.Account.__lt = function(a, b)
   return tostring(a.username) < tostring(b.username)
 end
 
--- The credentials of a script on a host and port (or, with
--- creds.ALL_DATA, of every script, and of every host when none is given).
+-- The credentials of a script (a name or a list of tags) on a host and
+-- port, or, with creds.ALL_DATA, of every script (and of every host and
+-- port when none is given).
 creds.Credentials = {}
 creds.Credentials.__index = creds.Credentials
 
@@ -85,6 +87,17 @@ end
 local function port_of(port)
   if type(port) == "table" then return port.number end
   return tonumber(port)
+end
+
+-- A script name or a list of tags as a list of strings.
+local function tags_of(t)
+  local out = {}
+  if type(t) == "table" then
+    for _, v in ipairs(t) do out[#out + 1] = tostring(v) end
+  elseif t ~= nil then
+    out[1] = tostring(t)
+  end
+  return out
 end
 
 function creds.Credentials:new(scriptname, host, port)
@@ -105,7 +118,7 @@ function creds.Credentials:add(username, password, state)
   local list = store()
   local port = type(self.port) == "table" and self.port or {}
   list[#list + 1] = {
-    scriptname = self.scriptname,
+    tags = tags_of(self.scriptname),
     ip = ip_of(self.host),
     port = port_of(self.port),
     service = port.service,
@@ -116,26 +129,75 @@ function creds.Credentials:add(username, password, state)
   return true
 end
 
--- Iterate over the matching accounts as creds.Account objects. `state`
--- is a sum of creds.State flags (all states when not given).
+-- The accounts --script-args give for `service`: creds.<service> and
+-- creds.global, each "user:pass" or a comma-separated list of them.
+local function from_args(service)
+  local out = {}
+  local names = { "creds.global" }
+  if service then table.insert(names, 1, "creds." .. service) end
+  for _, name in ipairs(names) do
+    local v = stdnse.get_script_args(name)
+    if type(v) == "string" then
+      for entry in v:gmatch("[^,]+") do
+        local user, pass = entry:match("^%s*(.-):(.-)%s*$")
+        if user then out[#out + 1] = { username = user, password = pass } end
+      end
+    end
+  end
+  return out
+end
+
+local function account(e, state)
+  local a = creds.Account:new(e.username, e.password, state or e.state)
+  -- The record's fields, under nmap's names too.
+  a.user, a.pass = e.username, e.password
+  a.host, a.port, a.service, a.tags = e.ip, e.port, e.service, e.tags
+  return a
+end
+
+-- Iterate over the matching accounts as creds.Account objects (with
+-- user, pass, host, port, service and tags too). `state` is a sum of
+-- creds.State flags (all states when not given); a `state` with PARAM
+-- also gives the accounts from the creds.<service> and creds.global
+-- arguments, after the stored ones.
 function creds.Credentials:getCredentials(state)
-  state = tonumber(state) or ALL_STATES
+  local asked = tonumber(state)
+  state = asked or ALL_STATES
   local list = nmap.registry.creds or {}
   local all_scripts = self.scriptname == creds.ALL_DATA
+  local want = {}
+  for _, t in ipairs(tags_of(self.scriptname)) do want[t] = true end
   local ip, port = ip_of(self.host), port_of(self.port)
-  local i = 0
+  local service = type(self.port) == "table" and self.port.service or nil
+  local params = {}
+  if asked and asked & creds.State.PARAM ~= 0 then params = from_args(service) end
+  local function tagged(e)
+    if all_scripts then return true end
+    for _, t in ipairs(e.tags or {}) do
+      if want[t] then return true end
+    end
+    return false
+  end
+  local i, j = 0, 0
   return function()
     while true do
       i = i + 1
       local e = list[i]
-      if e == nil then return nil end
-      if (all_scripts or e.scriptname == self.scriptname)
+      if e == nil then break end
+      if tagged(e)
         and (ip == nil or e.ip == ip)
         and (port == nil or e.port == port)
         and (state & (e.state or 0)) ~= 0 then
-        return creds.Account:new(e.username, e.password, e.state)
+        return account(e)
       end
     end
+    j = j + 1
+    local p = params[j]
+    if p then
+      p.ip, p.port, p.service = ip, port, service
+      return account(p, creds.State.PARAM)
+    end
+    return nil
   end
 end
 

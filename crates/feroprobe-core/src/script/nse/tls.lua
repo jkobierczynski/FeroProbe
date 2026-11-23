@@ -149,10 +149,13 @@ function tls.cipher_info(name)
 end
 
 -- A record of content type `type` (name or number) and `protocol` (name
--- or number) holding `body`.
+-- or number) holding `body`. TLS 1.3 records carry TLS 1.2's version
+-- (RFC 8446 5.1).
 function tls.record_write(kind, protocol, body)
+  local version = code_of(tls.PROTOCOLS, protocol, "protocol")
+  if version > 0x0303 then version = 0x0303 end
   return string.pack(">BI2s2", code_of(tls.TLS_CONTENTTYPE_REGISTRY, kind, "content type"),
-    code_of(tls.PROTOCOLS, protocol, "protocol"), body)
+    version, body)
 end
 
 -- A ClientHello record. `t`: protocol (default "TLSv1.2"),
@@ -208,9 +211,20 @@ function tls.client_hello(t)
   return string.pack(">BI2s2", 22, record_version, hs)
 end
 
--- Whether `version` is a TLS record version this module reads.
-function tls.record_version_ok(version)
-  return PROTOCOL_NAME[version] ~= nil
+-- Whether a record's protocol `received` (name or number) fits the
+-- protocol `requested`: the same one, or TLS 1.2 for TLS 1.3 (whose
+-- records carry TLS 1.2's version). Without `requested`, whether
+-- `received` is a known version.
+function tls.record_version_ok(received, requested)
+  local function name(v)
+    if type(v) == "number" then return PROTOCOL_NAME[v] end
+    if tls.PROTOCOLS[v] then return v end
+    return nil
+  end
+  local got = name(received)
+  if requested == nil then return got ~= nil end
+  local want = name(requested)
+  return got ~= nil and (got == want or (want == "TLSv1.3" and got == "TLSv1.2"))
 end
 
 -- One handshake message's body, read by its type.
@@ -261,15 +275,15 @@ function tls.handshake_parse(data)
   return list, data:sub(p)
 end
 
--- The record at position `i` of `buffer`: the position after it and the
--- record { type, protocol, length, body, fragment }; `i` and nil when
--- the record is not all there. `fragment` is the start of a handshake
+-- The record at position `i` of `buffer`: the position after it, the
+-- record { type, protocol, length, body, fragment } and true; `i`, nil
+-- and true (read more and try again) when the record is not all there. `fragment` is the start of a handshake
 -- message an earlier record cut, from that record's `fragment`.
 function tls.record_read(buffer, i, fragment)
   i = i or 1
-  if #buffer - i + 1 < 5 then return i, nil end
+  if #buffer - i + 1 < 5 then return i, nil, true end
   local typ, version, len = string.unpack(">BI2I2", buffer, i)
-  if #buffer - i + 1 < 5 + len then return i, nil end
+  if #buffer - i + 1 < 5 + len then return i, nil, true end
   local data = buffer:sub(i + 5, i + 4 + len)
   local r = {
     type = CONTENT_NAME[typ] or typ,
@@ -293,11 +307,12 @@ function tls.record_read(buffer, i, fragment)
   else
     r.body = data
   end
-  return i + 5 + len, r
+  return i + 5 + len, r, true
 end
 
 -- Read from `sock` until `buffer` holds a whole record from position `i`
--- (at most 64 KiB): true and the buffer, or false and a message.
+-- (at most 64 KiB): true and the buffer, or false, what was read and a
+-- message.
 function tls.record_buffer(sock, buffer, i)
   buffer, i = buffer or "", i or 1
   while true do
@@ -305,9 +320,9 @@ function tls.record_buffer(sock, buffer, i)
       local _, _, len = string.unpack(">BI2I2", buffer, i)
       if #buffer - i + 1 >= 5 + len then return true, buffer end
     end
-    if #buffer > 65536 then return false, "record too long" end
+    if #buffer > 65536 then return false, buffer, "record too long" end
     local ok, data = sock:receive()
-    if not ok then return false, data end
+    if not ok then return false, buffer, data end
     buffer = buffer .. data
   end
 end
