@@ -1651,7 +1651,9 @@ What NSE scripts see differently:
   and entries it added at the end of a list go after that list's end as
   it is now, so scripts that run at once and add to the same list (or
   start it with `nmap.registry.x = nmap.registry.x or {}`) all keep their
-  entries. A plain value two scripts set at once keeps the last write. Only
+  entries. After each write-back the script sees the merged value, other
+  scripts' additions included, in the same tables it already holds. A
+  plain value two scripts set at once keeps the last write. Only
   plain data is kept (see [The registry](#the-registry)); top-level names
   must be strings, and `pairs(nmap.registry)` lists only the entries the
   script has touched. A script stopped by its timeout leaves no changes.

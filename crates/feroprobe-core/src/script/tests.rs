@@ -6172,7 +6172,34 @@ fn nse_registry_views_merge_and_keep_number_keys() {
         &a,
         "nmap.registry.m = {} nmap.registry.m[443] = 'https' nmap.registry.m[1] = nil fero.__nse_flush()",
     );
+    // After a flush the script sees the merged list, so editing and
+    // removing an entry by the index it sees now leaves other scripts'
+    // entries alone.
+    let (d, _bd) = state();
+    let (e, _be) = state();
+    run(
+        &d,
+        "nmap.registry.q = nmap.registry.q or {} table.insert(nmap.registry.q, 'd1')",
+    );
+    run(
+        &e,
+        "nmap.registry.q = nmap.registry.q or {} table.insert(nmap.registry.q, 'e1')",
+    );
+    run(&e, "fero.__nse_flush()");
+    run(&d, "fero.__nse_flush()");
+    let seen: String = d
+        .load("return table.concat(nmap.registry.q, ',')")
+        .eval()
+        .unwrap();
+    assert_eq!(seen, "e1,d1");
+    run(&d, "nmap.registry.q[2] = 'd2' fero.__nse_flush()");
+    run(&d, "table.remove(nmap.registry.q, 2) fero.__nse_flush()");
     let (c, _bc) = state();
+    let q: String = c
+        .load("return table.concat(nmap.registry.q, ',')")
+        .eval()
+        .unwrap();
+    assert_eq!(q, "e1");
     let got: String = c
         .load(
             "local l = nmap.registry.l table.sort(l) \

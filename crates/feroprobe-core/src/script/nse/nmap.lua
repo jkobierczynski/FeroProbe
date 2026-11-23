@@ -41,6 +41,21 @@ local function deep_copy(v, seen)
   return c
 end
 
+-- Make table dst hold what src holds, keeping dst's nested tables where
+-- src has a table under the same key.
+local function sync(dst, src)
+  for key in pairs(dst) do
+    if src[key] == nil then dst[key] = nil end
+  end
+  for key, v in pairs(src) do
+    if type(v) == "table" and type(dst[key]) == "table" then
+      sync(dst[key], v)
+    else
+      dst[key] = v
+    end
+  end
+end
+
 local function registry_view(reg)
   local base, live, touched = {}, {}, {}
   local function touch(k)
@@ -56,9 +71,18 @@ local function registry_view(reg)
   flushes[#flushes + 1] = function()
     for k in pairs(touched) do
       reg.merge(k, base[k], live[k])
-      -- The script's own view is the base for the next round, so what
-      -- other scripts added meanwhile is not taken for a removal.
-      base[k] = deep_copy(live[k])
+      -- The script now sees the merged value, with what other scripts
+      -- added meanwhile, as it would in nmap's shared table: its tables
+      -- are updated in place (references it holds stay valid), and the
+      -- next round's changes are measured against that value, so a later
+      -- edit or removal hits the entry it names now, not another script's.
+      local stored = reg.get(k)
+      if type(live[k]) == "table" and type(stored) == "table" then
+        sync(live[k], stored)
+      else
+        live[k] = stored
+      end
+      base[k] = deep_copy(stored)
     end
   end
   return setmetatable({}, {

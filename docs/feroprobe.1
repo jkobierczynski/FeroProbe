@@ -3856,6 +3856,8 @@ the end of a list go after that list\[aq]s end as it is now, so scripts
 that run at once and add to the same list (or start it with
 \f[V]nmap.registry.x = nmap.registry.x or {}\f[R]) all keep their
 entries.
+After each write-back the script sees the merged value, other
+scripts\[aq] additions included, in the same tables it already holds.
 A plain value two scripts set at once keeps the last write.
 Only plain data is kept (see The registry); top-level names must be
 strings, and \f[V]pairs(nmap.registry)\f[R] lists only the entries the
