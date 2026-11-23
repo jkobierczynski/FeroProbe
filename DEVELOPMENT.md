@@ -471,8 +471,8 @@ from, and what was used only to decide what to build:
   `stringaux` 64, `brute` 64, `vulns` 63, `io` 60, `comm` 58. Part 1 has the
   modules listed in the Script scanning table; with them 108 of the 612
   scripts load (the rest name a module not built yet, such as `smb`, `ftp`,
-  `sslcert` or `strbuf`). The same local copies were used to check that
-  scripts load and that `http-title` runs.
+  `sslcert` or `strbuf`). The same local copies were used to check which
+  scripts load.
 - **Constants**: the `shortport` port lists (`LIKELY_HTTP_PORTS`,
   `LIKELY_SSL_PORTS`) are lists of commonly used well-known ports, written
   from the documented behaviour; they may match nmap's, as any list of the
