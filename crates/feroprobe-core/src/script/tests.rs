@@ -5861,19 +5861,29 @@ fn nse_modules_load_and_unknown_ones_are_named() {
     for m in [
         "base64",
         "comm",
+        "creds",
         "datetime",
+        "ftp",
         "http",
         "ipOps",
+        "json",
         "match",
         "nmap",
         "openssl",
         "outlib",
         "rand",
         "shortport",
+        "smb",
+        "snmp",
+        "ssh2",
+        "sslcert",
         "stdnse",
+        "strbuf",
         "stringaux",
         "tableaux",
+        "tls",
         "url",
+        "vulns",
         "_G",
         "string",
     ] {
@@ -5972,6 +5982,361 @@ end"#
     ] {
         assert_eq!(text(named(d, k)), want, "{k}");
     }
+}
+
+#[tokio::test]
+async fn nse_part_two_modules_offline() {
+    let src = format!(
+        r#"{NSE_HEAD}
+local strbuf = require "strbuf"
+local json = require "json"
+local creds = require "creds"
+local vulns = require "vulns"
+local tls = require "tls"
+local snmp = require "snmp"
+local smb = require "smb"
+local ssh2 = require "ssh2"
+local sslcert = require "sslcert"
+prerule = function() return true end
+action = function()
+  local o = stdnse.output_table()
+  local b = strbuf.new("a", "b")
+  b = b .. "c"
+  b = b .. strbuf.new("d")
+  o.strbuf = strbuf.dump(b, ",") .. " " .. tostring(b == strbuf.new("a", "b", "c", "d"))
+  local twice = strbuf.new("x", "y")
+  twice = twice .. twice
+  o.strbuf2 = strbuf.dump(twice) .. " " .. tostring(strbuf.new("a", "b")):gsub("\n", "/")
+    .. " " .. strbuf.tostring(strbuf.concatbuf(strbuf.new("p"), "q")) .. " " .. tostring(strbuf.eqbuf(twice, twice))
+  local function jp(t)
+    local ok, v = json.parse(t)
+    return ok and tostring(v) or "err"
+  end
+  o.json2 = json.typeof({{ 1, 2 }}) .. " " .. json.typeof({{}}) .. " " .. json.typeof({{ a = 1 }}) .. " "
+    .. json.typeof(json.make_array({{}})) .. " " .. jp("01") .. " " .. jp("1.") .. " " .. jp("1e") .. " "
+    .. jp("-0") .. " " .. jp("1.5e-1") .. " " .. jp("0") .. " " .. #select(2, json.parse('"\127"')) .. " "
+    .. tostring((json.parse('"a\1"')))
+  local ok, v = json.parse('{{"a":[1,2.5,"x\\u00e9\\ud83d\\ude00"],"b":null,"c":true,"d":{{}}}}')
+  o.json = tostring(ok) .. " " .. v.a[1] .. " " .. v.a[2] .. " " .. v.a[3] .. " "
+    .. tostring(v.b == json.NULL) .. " " .. tostring(v.c) .. " " .. json.typeof(v.d) .. " "
+    .. json.generate({{ z = {{ 1, 2 }}, a = "q\"\n", n = json.NULL, e = json.make_array({{}}) }})
+  o.json_bad = tostring((json.parse("[1,")))
+  local c = creds.Credentials:new("s", {{ ip = "10.0.0.1" }}, {{ number = 21, service = "ftp" }})
+  c:add("root", "", creds.State.VALID)
+  c:add("bob", "pw", creds.State.LOCKED)
+  local valid = {{}}
+  for a in c:getCredentials(creds.State.VALID) do valid[#valid + 1] = tostring(a) end
+  o.creds = table.concat(valid, ";") .. " | " .. table.concat(c:getTable(), ";")
+  local t1 = creds.Credentials:new({{ "ftp", "brute" }}, {{ ip = "10.0.0.2" }}, {{ number = 21, service = "ftp" }})
+  t1:add("tag", "pw", creds.State.VALID)
+  local seen = {{}}
+  local t2 = creds.Credentials:new({{ "ftp" }}, {{ ip = "10.0.0.2" }}, {{ number = 21, service = "ftp" }})
+  for a in t2:getCredentials(creds.State.VALID + creds.State.PARAM) do
+    seen[#seen + 1] = a.user .. "/" .. tostring(a.pass) .. "/" .. tostring(a.service) .. "/" .. a.state
+  end
+  o.creds2 = table.concat(seen, ";")
+  local r = vulns.Report:new("s", {{ ip = "10.0.0.1" }})
+  o.novuln = tostring(r:make_output({{ title = "Safe", state = vulns.STATE.NOT_VULN }}))
+  o.vuln = r:make_output({{ title = "Bad thing", state = vulns.STATE.VULN,
+    IDS = {{ CVE = "CVE-2000-0001" }}, description = "  It is bad.\n  Really. ",
+    dates = {{ disclosure = {{ year = 2000, month = 1, day = 2 }} }} }})
+  local hello = tls.client_hello({{ protocol = "TLSv1.2", ciphers = {{ "TLS_RSA_WITH_AES_128_CBC_SHA" }},
+    extensions = {{ server_name = tls.EXTENSION_HELPERS.server_name("lab"),
+      ec_point_formats = tls.EXTENSION_HELPERS.ec_point_formats({{ "uncompressed" }}) }} }})
+  local i, rec = tls.record_read(hello, 1)
+  o.hello = string.format("%d %s %s %s %s %s", i, rec.type, rec.protocol, rec.body[1].type,
+    tostring(hello:find("FeroProbeTLSScan", 1, true) ~= nil), tostring((tls.record_read(hello:sub(1, 20), 1))))
+  local sh = "\3\3" .. string.rep("\0", 4) .. string.rep("R", 28) .. "\0" .. "\0\47" .. "\0"
+    .. string.pack(">s2", string.pack(">I2s2", 0xff01, "\0"))
+  local recs = tls.record_write("handshake", "TLSv1.2", "\2" .. string.pack(">I3", #sh) .. sh)
+    .. tls.record_write("alert", "TLSv1.2", "\2\40")
+  local j, s1 = tls.record_read(recs, 1)
+  local _, s2 = tls.record_read(recs, j)
+  local m = s1.body[1]
+  o.server = string.format("%s %s %s %s %s %s/%s", m.type, m.protocol, m.cipher, m.compressor,
+    tostring(m.extensions.renegotiation_info ~= nil), s2.body[1].level, s2.body[1].description)
+  local _, _, more = tls.record_read("", 1)
+  o.tls2 = string.format("%s %s %s %s %s %s", tostring(tls.record_version_ok("TLSv1.2", "TLSv1.2")),
+    tostring(tls.record_version_ok("TLSv1.2", "TLSv1.3")), tostring(tls.record_version_ok("TLSv1.0", "TLSv1.2")),
+    tostring(tls.record_version_ok(0x0303)), stdnse.tohex(tls.record_write("alert", "TLSv1.3", "\2\40")), tostring(more))
+  o.tls = string.format("%d %d %s %s %s", tls.PROTOCOLS["TLSv1.2"], tls.CIPHERS["TLS_RSA_WITH_AES_128_CBC_SHA"],
+    tls.cipher_info("TLS_RSA_WITH_AES_128_CBC_SHA").cipher, tostring(tls.servername({{ ip = "1.2.3.4", targetname = "1.2.3.4" }})),
+    tls.servername({{ ip = "1.2.3.4", name = "lab.example" }}))
+  o.snmp = table.concat(snmp.str2oid(".1.3.6.1"), "-") .. " " .. snmp.oid2str({{ 1, 3, 6 }})
+    .. " " .. select(2, snmp.Helper:new({{ ip = "127.0.0.1" }}, 161):set())
+  o.smb = smb.get_windows_version("Windows 5.1") .. " | " .. select(2, smb.start_session({{}}))
+    .. " | " .. select(2, smb.start_ex({{ ip = "127.0.0.1" }}, true, true))
+    .. " | " .. select(2, smb.get_uniqueish_name({{ ip = "127.0.0.1" }}, "txt"))
+  local kex = ssh2.transport.kex_init({{ kex_algorithms = "curve25519-sha256", cookie = string.rep("C", 16) }})
+  local parsed = ssh2.transport.parse_kex_init(ssh2.transport.payload(ssh2.transport.build(kex)))
+  o.ssh2 = string.format("%s %s %s %s %d %s", parsed.kex_algorithms, parsed.cookie,
+    parsed.server_host_key_algorithms:match("^[^,]+"), tostring(parsed.first_kex_packet_follows),
+    select(2, ssh2.check_packet_length(ssh2.transport.build(kex))) - #ssh2.transport.build(kex),
+    tostring(next(ssh2.transport.parse_kex_init("junk"))))
+  local count = stdnse.output_table()
+  count.a, count.b = 1, 2
+  local dh = string.pack(">s2s2s2", "\128" .. string.rep("\0", 127), "\2", "\5")
+  local ske = tls.KEX_ALGORITHMS.DHE_RSA.server_key_exchange(dh, "TLSv1.2")
+  local ec = tls.KEX_ALGORITHMS.ECDHE_RSA.server_key_exchange(string.pack(">BI2s1", 3, 23, "\4"), "TLSv1.2")
+  local ake = tls.KEX_ALGORITHMS.AKE.server_key_exchange(string.pack(">I2s2", 29, "k"), "TLSv1.3")
+  local nn = tls.cipher_info("TLS_NULL_WITH_NULL_NULL")
+  local _, defaults = tls.record_read(tls.client_hello({{ protocol = "TLSv1.2", ciphers = {{ "TLS_RSA_WITH_AES_128_CBC_SHA" }} }}), 1)
+  local pre12 = tls.client_hello({{ protocol = "TLSv1.0", ciphers = {{ "TLS_RSA_WITH_AES_128_CBC_SHA" }} }})
+  o.tls3 = string.format("%d | %s %d %d | %s %s %d | %s %d | %s %s %d | %d %d %s | %s %s %s", #count,
+    ske.type, ske.strength, #ske.dhparams.p, ec.ecdhparams.curve_params.ec_curve_type,
+    ec.ecdhparams.curve_params.curve, ec.strength, ake.ecdhparams.curve_params.curve, ake.strength,
+    nn.cipher, nn.kex, nn.size, tls.rsa_equiv("ec", 256), tls.rsa_equiv("dh", 2048),
+    tostring(tls.rsa_equiv("x", 1)), tostring(defaults ~= nil),
+    tostring(tls.client_hello({{ protocol = "TLSv1.2" }}):find("\0\13", 1, true) ~= nil),
+    tostring(tls.cipher_info("TLS_AKE_WITH_AES_128_GCM_SHA256").tls13only))
+  o.tls4 = string.format("%s %s", tostring(pre12:find("\0\10", 1, true) ~= nil), tostring(pre12:find("\0\13\0", 1, true) ~= nil))
+  o.cert = tostring(sslcert.parse_ssl_certificate("junk"))
+  return o
+end"#
+    );
+    let scan = ScriptScan::new(
+        vec![script("part2", &src)],
+        args::parse("creds.ftp=solo,creds.global=\"admin:pw \"").unwrap(),
+        None,
+    )
+    .unwrap();
+    let r = scan.pre_scan().await;
+    let d = r[0].data.as_ref().unwrap_or_else(|| panic!("{r:?}"));
+    for (k, want) in [
+        ("strbuf", "a,b,c,d true"),
+        (
+            "json",
+            "true 1 2.5 x\u{e9}\u{1F600} true true object {\"a\":\"q\\\"\\n\",\"e\":[],\"n\":null,\"z\":[1,2]}",
+        ),
+        ("json_bad", "false"),
+        ("strbuf2", "xyxy a/b p\nq true"),
+        (
+            "json2",
+            "array object object array err err err 0 0.15 0 1 false",
+        ),
+        ("creds2", "tag/pw/ftp/2;solo/nil/ftp/16;admin/pw /ftp/16"),
+        ("tls2", "true true false true 15030300020228 true"),
+        (
+            "creds",
+            "root:<empty> - Valid credentials | root:<empty> - Valid credentials;bob:pw - Account locked",
+        ),
+        ("novuln", "nil"),
+        (
+            "vuln",
+            "\n  VULNERABLE:\n    Bad thing\n      State: VULNERABLE\n      IDs:  CVE:CVE-2000-0001\
+             \n        It is bad.\n        Really.\n      Disclosure date: 2000-01-02\n      References:\
+             \n        https://cve.mitre.org/cgi-bin/cvename.cgi?name=CVE-2000-0001",
+        ),
+        (
+            "server",
+            "server_hello TLSv1.2 TLS_RSA_WITH_AES_128_CBC_SHA NULL true fatal/handshake_failure",
+        ),
+        ("tls", "771 47 AES nil lab.example"),
+        (
+            "snmp",
+            "1-3-6-1 1.3.6 FeroProbe does not write to devices (SNMP SetRequest refused)",
+        ),
+        (
+            "smb",
+            "Windows XP | smb.start_session: FeroProbe does not log in to SMB servers \
+             | FeroProbe does not log in to SMB servers | xcvnvgvr.txt",
+        ),
+        (
+            "ssh2",
+            "curve25519-sha256 CCCCCCCCCCCCCCCC ssh-ed25519 false 0 nil",
+        ),
+        (
+            "tls3",
+            "2 | dh 1024 128 | namedcurve secp256r1 256 | ecdh_x25519 256 | NULL NULL 0 \
+             | 3072 2048 nil | true true true",
+        ),
+        ("tls4", "true false"),
+        ("cert", "nil"),
+    ] {
+        assert_eq!(text(named(d, k)), want, "{k}");
+    }
+    let hello = text(named(d, "hello"));
+    assert!(
+        hello.ends_with(" handshake TLSv1.0 client_hello true 1"),
+        "{hello}"
+    );
+}
+
+/// Run the NSE script `src` (a portrule for every open port) on a host
+/// with `ports` (number and service name); each port's output.
+async fn nse_outputs(src: &str, ports: &[(u16, &str)], args: &str) -> Vec<(u16, String)> {
+    let scan = ScriptScan::new(vec![script("nse", src)], args::parse(args).unwrap(), None).unwrap();
+    let mut hosts = vec![host_with_services(ports)];
+    scan.scan_hosts(&mut hosts).await;
+    hosts[0]
+        .ports
+        .iter()
+        .map(|p| {
+            (
+                p.port,
+                p.scripts
+                    .first()
+                    .map(|s| s.output.clone())
+                    .unwrap_or_default(),
+            )
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn nse_part_two_modules_on_lab_servers() {
+    let (tls_port, _) = tls_web(false).await;
+    let (smtp_port, _) = starttls_server(SMTP_STARTTLS, mail_answer).await;
+    let (ssh_port, _) = ssh_lab(b"curve25519-sha256").await;
+    let (smb_port, _) = smb1_server(SmbLab::default()).await;
+    let (ftp_port, ftp_seen) = line_server("220-Lab FTP\r\n220 ready\r\n", |line| {
+        Some(
+            match line.split(' ').next().unwrap() {
+                "USER" => "331 Password please\r\n",
+                "PASS" => "230 Welcome\r\n",
+                "PASV" => "227 Entering Passive Mode (10,9,8,7,0,1)\r\n",
+                "QUIT" => return None,
+                _ => "500 ?\r\n",
+            }
+            .to_string(),
+        )
+    })
+    .await;
+    let src = format!(
+        r#"{NSE_HEAD}
+local sslcert = require "sslcert"
+local ssh2 = require "ssh2"
+local smb = require "smb"
+local ftp = require "ftp"
+portrule = function(host, port) return port.state == "open" end
+action = function(host, port)
+  local svc = port.service
+  if svc == "https" or svc == "smtp" then
+    local ok, cert = sslcert.getCertificate(host, port)
+    if not ok then return "error " .. cert end
+    local ok2, again = sslcert.getCertificate(host, port)
+    local nb = cert.validity.notBefore
+    local out = string.format("%s %s %s %d %s %s %d", cert.subject.commonName, cert.subject.organizationName,
+      cert.pubkey.type, #cert:digest("sha256"), tostring(again == cert), cert.extensions[1].value,
+      type(nb) == "table" and nb.year or 0)
+    if svc == "https" then
+      local s = nmap.new_socket()
+      s:connect(host, port, "ssl")
+      local c = s:get_ssl_certificate()
+      s:close()
+      out = out .. " " .. tostring(c.pem == cert.pem)
+    else
+      local prep = sslcert.getPrepareTLSWithoutReconnect(port)
+      local pok, s = prep(host, port)
+      out = out .. " " .. tostring(pok) .. " " .. tostring(sslcert.isPortSupported({{ number = 1, service = "x", protocol = "tcp" }}))
+      s:close()
+    end
+    return out
+  elseif svc == "ssh" then
+    local k = ssh2.fetch_host_key(host, port, "ssh-rsa")
+    local e = ssh2.fetch_host_key(host, port, "ssh-ed25519")
+    -- The transport as ssh2-enum-algos-style scripts use it: banners,
+    -- then the server's KEXINIT read as a packet.
+    local s = nmap.new_socket()
+    s:connect(host, port)
+    local _, banner = s:receive_lines(1)
+    s:send("SSH-2.0-FeroProbe_Scripting_Engine\r\n")
+    s:send(ssh2.transport.build(ssh2.transport.kex_init({{}})))
+    local pok, packet = ssh2.transport.receive_packet(s)
+    s:close()
+    local kexinit = ssh2.transport.parse_kex_init(ssh2.transport.payload(packet))
+    return string.format("%s %d %s %d %d %s | %s %d %s %s | %s %s %s", k.key_type, k.bits, k.algorithm, #k.fingerprint,
+      #k.fp_sha256, tostring(k.full_key == "ssh-rsa " .. k.key), e.key_type, e.bits, e.algorithm,
+      tostring(ssh2.fetch_host_key(host, port, "ssh-dss")), banner:match("^SSH%-2%.0"), tostring(pok),
+      kexinit.kex_algorithms)
+  elseif svc == "microsoft-ds" then
+    local ok, os = smb.get_os(host)
+    if not ok then return "error " .. os end
+    local _, dialects = smb.list_dialects(host)
+    local sok, state = smb.start_ex(host, true, false)
+    smb.stop(state)
+    return string.format("%s|%s|%s|%s|%s|%d|%s|%s %s %d", os.os, os.server, os.domain, os.fqdn,
+      tostring(os.timezone), os.port, table.concat(dialects, ","), tostring(sok), state.dialect,
+      state.security_mode)
+  elseif svc == "ftp" then
+    local s, code, msg, buffer = ftp.connect(host, port)
+    local ok, acode = ftp.auth(s, buffer, "anonymous", "x@")
+    local data, derr = ftp.pasv(s, buffer)
+    ftp.close(s)
+    return string.format("%d %s %s %d %s", code, msg:gsub("\n", "/"), tostring(ok), acode,
+      tostring(data) .. " " .. tostring(derr ~= nil))
+  end
+end"#
+    );
+    let out = nse_outputs(
+        &src,
+        &[
+            (tls_port, "https"),
+            (smtp_port, "smtp"),
+            (ssh_port, "ssh"),
+            (smb_port, "microsoft-ds"),
+            (ftp_port, "ftp"),
+        ],
+        &format!("smbport={smb_port}"),
+    )
+    .await;
+    let get = |p: u16| out.iter().find(|(n, _)| *n == p).unwrap().1.clone();
+    let https = get(tls_port);
+    assert!(
+        https.starts_with("localhost FeroProbe Lab ec 32 true DNS:localhost ")
+            && https.ends_with(" true"),
+        "{https}"
+    );
+    let smtp = get(smtp_port);
+    assert!(
+        smtp.starts_with("localhost FeroProbe Lab ec 32 true DNS:localhost ")
+            && smtp.ends_with(" true nil"),
+        "{smtp}"
+    );
+    assert_eq!(
+        get(ssh_port),
+        "ssh-rsa 2048 RSA 16 32 true | ssh-ed25519 256 ED25519 nil | SSH-2.0 true curve25519-sha256"
+    );
+    assert_eq!(
+        get(smb_port),
+        "Windows Server 2003 3790 Service Pack 2|SRV01|LAB|srv01.lab.local|1|".to_string()
+            + &smb_port.to_string()
+            + "|NT LM 0.12,2:0:2,2:1:0,3:0:0,3:0:2,3:1:1|true NT LM 0.12 3"
+    );
+    assert_eq!(get(ftp_port), "220 Lab FTP/ready true 230 nil true");
+    let seen = ftp_seen.lock().unwrap();
+    assert_eq!(&seen[..], ["USER anonymous", "PASS x@", "PASV", "QUIT"]);
+}
+
+#[tokio::test]
+async fn nse_snmp_helper() {
+    let (port, _) = snmp_agent(false).await;
+    let src = format!(
+        r#"{NSE_HEAD}
+local snmp = require "snmp"
+portrule = function(host, port) return true end
+action = function(host, port)
+  local h = snmp.Helper:new(host, port)
+  assert(h:connect())
+  local ok, r = h:get({{ reqId = 1 }}, "1.3.6.1.2.1.1.5.0", "1.3.6.1.2.1.1.3.0")
+  local nok, n = h:getnext({{}}, "1.3.6.1.2.1.1.1.0")
+  local wok, w = h:walk("1.3.6.1.2.1.1")
+  local sok, serr = h:set({{}}, "1.3.6.1.2.1.1.5.0", "x")
+  h:close()
+  return string.format("%s %s %s %d | %s %s | %s %d %s=%s | %s", tostring(ok), r[1][1], r[1][2], r[2][1],
+    tostring(nok), n[1][2], tostring(wok), #w, w[1].oid, tostring(w[3].value), tostring(sok))
+end"#
+    );
+    let scan = ScriptScan::new(vec![script("nse-snmp", &src)], ArgTable::default(), None).unwrap();
+    let mut host = host_with_services(&[(port, "snmp")]);
+    host.ports[0].protocol = Protocol::Udp;
+    host.ports[0].state = PortState::OpenFiltered;
+    let mut hosts = vec![host];
+    scan.scan_hosts(&mut hosts).await;
+    assert_eq!(
+        hosts[0].ports[0].scripts[0].output,
+        "true lab 1.3.6.1.2.1.1.5.0 248153900 | true 1.3.6.1.2.1.1.3.0 | true 3 1.3.6.1.2.1.1.1.0=lab | false"
+    );
 }
 
 #[tokio::test]
