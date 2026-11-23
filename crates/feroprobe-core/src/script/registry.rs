@@ -438,6 +438,9 @@ fn merge(
         return new;
     };
     let base_last = last_index(&Stored::Table(base.clone()));
+    // The list's end as stored now, before this script's own keys (such
+    // as ports[443]) are merged in: list additions go after it.
+    let cur_last = last_index(&Stored::Table(cur.clone()));
     // Entries the script added right after the end of the list it read
     // (base_last + 1, + 2, ... without a gap) are list additions; any other
     // new number key, such as ports[443], is a key like any other.
@@ -492,7 +495,13 @@ fn merge(
             }
         }
     }
-    let mut last = last_index(&Stored::Table(cur.clone()));
+    // If one of the script's own number keys took one of those places,
+    // the additions go after the highest key instead, so none is lost.
+    let n = added.len() as i64;
+    let mut last = cur_last;
+    if (1..=n).any(|i| lookup(&cur, &Key::Int(last.saturating_add(i))).is_some()) {
+        last = last_index(&Stored::Table(cur.clone()));
+    }
     if let Some((first, _)) = added.first()
         && last + 1 != *first
     {
@@ -645,6 +654,35 @@ mod tests {
         assert!(gone.is_nil());
         let g = reg.inner.lock().unwrap();
         assert_eq!(g.bytes, g.hosts[&ip].values[&b"l".to_vec()].size);
+    }
+
+    #[test]
+    fn merge_keeps_number_keys_and_appends_after_the_list() {
+        let reg = Arc::new(Registry::default());
+        let a = Lua::new();
+        let f = a.create_table().unwrap();
+        install(&a, &f, &reg, None).unwrap();
+        a.globals().set("fero", f).unwrap();
+        let got: String = a
+            .load(
+                r#"
+                fero.registry.set("m", {})
+                fero.registry.merge("m", {}, { [1] = "one", [443] = "https" })
+                local m = fero.registry.get("m")
+                -- Another script added "a" first; this one read {} and
+                -- added "x" and set [2], which "x" would otherwise land on.
+                fero.registry.set("n", { "a" })
+                local n, moves = fero.registry.merge("n", {}, { "x", [3] = "three" })
+                fero.registry.set("o", { "a", "b" })
+                local o = fero.registry.merge("o", {}, { "x", [3] = "three" })
+                return table.concat({ m[1], m[443], tostring(m[444]),
+                  n[1], n[2], n[3], moves.from, moves.to,
+                  o[1], o[2], o[3], o[4] }, ",")
+                "#,
+            )
+            .eval()
+            .unwrap();
+        assert_eq!(got, "one,https,nil,a,x,three,1,2,a,b,three,x");
     }
 
     #[test]
