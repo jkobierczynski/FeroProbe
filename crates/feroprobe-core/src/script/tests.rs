@@ -6210,6 +6210,26 @@ fn nse_registry_views_merge_and_keep_number_keys() {
     let (f, _bf) = state();
     let w: String = f.load(both).eval().unwrap();
     assert_eq!(w, "5 1");
+    // A table the script added and still holds stays tied to its own
+    // entry after another script's addition moved it along the list.
+    run(
+        &d,
+        "nmap.registry.r = nmap.registry.r or {} mine = { who = 'd' } table.insert(nmap.registry.r, mine)",
+    );
+    run(
+        &e,
+        "nmap.registry.r = nmap.registry.r or {} table.insert(nmap.registry.r, { who = 'e' })",
+    );
+    run(&e, "fero.__nse_flush()");
+    run(&d, "fero.__nse_flush() mine.who = 'd2' fero.__nse_flush()");
+    let (h, _bh) = state();
+    let r: String = h
+        .load("return nmap.registry.r[1].who .. ',' .. nmap.registry.r[2].who")
+        .eval()
+        .unwrap();
+    assert_eq!(r, "e,d2");
+    let held: bool = d.load("return nmap.registry.r[2] == mine").eval().unwrap();
+    assert!(held);
     // A table put under a second name is stored as the script left it,
     // even when another script changed the first name meanwhile.
     run(&d, "nmap.registry.x = { n = 1 } fero.__nse_flush()");
