@@ -452,6 +452,36 @@ structured results in JSON.
   FeroProbe does not fetch or bundle third-party scripts.
 - Lua and `mlua` are MIT, compatible with GPL-3.0.
 
+### Sources of the NSE compatibility layer
+
+What the layer (7.6, `crates/feroprobe-core/src/script/nse/`) was written
+from, and what was used only to decide what to build:
+
+- **Function names, arguments and return values**: nmap's public API
+  documentation (the NSEDoc pages, such as `http.get(host, port, path,
+  options)`). An API's names and calling convention are what a script needs
+  to run; the code behind them is our own, on top of `fero.*`.
+- **nselib was not used.** Its source was not unpacked, read or searched.
+  None of its code, tables, constants or comments is in the layer.
+- **Usage survey of nmap 7.99's scripts** (`scripts/*.nse` only, from the
+  Ubuntu source tarball, kept outside the repository and never committed):
+  counted which modules the 612 scripts `require` and which functions they
+  call, to choose what to build first. Modules most required: `stdnse` 544,
+  `shortport` 431, `nmap` 364, `http` 154, `creds` 79, `ipOps` 69,
+  `stringaux` 64, `brute` 64, `vulns` 63, `io` 60, `comm` 58. Part 1 has the
+  modules listed in the Script scanning table; with them 108 of the 612
+  scripts load (the rest name a module not built yet, such as `smb`, `ftp`,
+  `sslcert` or `strbuf`). The same local copies were used to check that
+  scripts load and that `http-title` runs.
+- **Constants**: the `shortport` port lists (`LIKELY_HTTP_PORTS`,
+  `LIKELY_SSL_PORTS`) are lists of commonly used well-known ports, written
+  from the documented behaviour; they may match nmap's, as any list of the
+  same common ports would.
+- **No binary layouts in part 1**: the layer has no protocol parsers. Part 2
+  (`sslcert`, `smb`, `snmp`, ...) maps onto FeroProbe's own protocol code,
+  which is written from the protocol specifications (RFCs, Microsoft's
+  MS-SMB2 and MS-NLMP, ...), not from nmap's.
+
 ### Not planned
 
 | Feature | Why |
