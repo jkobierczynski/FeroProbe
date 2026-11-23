@@ -124,23 +124,34 @@ local function registry_view(reg)
   flushes[#flushes + 1] = function()
     -- Every name is merged before any live table is synced, so a table
     -- the script put under two names is written as the script left it,
-    -- not as another name's merged value.
-    for k in pairs(touched) do reg.merge(k, base[k], live[k]) end
-    local seen = {}
+    -- not as another name's merged value. A name whose merge fails (its
+    -- value cannot be stored) keeps its old base and is not synced; the
+    -- others still are, so a merge already stored is never applied twice.
+    local stored, first_err = {}, nil
     for k in pairs(touched) do
+      local ok, err = pcall(reg.merge, k, base[k], live[k])
+      if ok then
+        stored[k] = { reg.get(k) }
+      elseif first_err == nil then
+        first_err = err
+      end
+    end
+    local seen = {}
+    for k, s in pairs(stored) do
       -- The script now sees the merged value, with what other scripts
       -- added meanwhile, as it would in nmap's shared table: its tables
       -- are updated in place (references it holds stay valid), and the
       -- next round's changes are measured against that value, so a later
       -- edit or removal hits the entry it names now, not another script's.
-      local stored = reg.get(k)
-      if type(live[k]) == "table" and type(stored) == "table" and not seen[live[k]] then
-        sync(live[k], stored, base[k], seen)
+      local v = s[1]
+      if type(live[k]) == "table" and type(v) == "table" and not seen[live[k]] then
+        sync(live[k], v, base[k], seen)
       else
-        live[k] = stored
+        live[k] = v
       end
-      base[k] = deep_copy(stored)
+      base[k] = deep_copy(v)
     end
+    if first_err ~= nil then error(first_err, 0) end
   end
   return setmetatable({}, {
     __index = function(_, k)

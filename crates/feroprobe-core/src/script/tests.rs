@@ -6230,6 +6230,17 @@ fn nse_registry_views_merge_and_keep_number_keys() {
     assert_eq!(r, "e,d2");
     let held: bool = d.load("return nmap.registry.r[2] == mine").eval().unwrap();
     assert!(held);
+    // A name that cannot be stored does not make another name's list
+    // addition be stored again on every flush.
+    let (j, _bj) = state();
+    run(
+        &j,
+        "nmap.registry.p = {} table.insert(nmap.registry.p, 'once') nmap.registry.bad = print \
+         assert(not pcall(fero.__nse_flush)) assert(not pcall(fero.__nse_flush))",
+    );
+    let (k, _bk) = state();
+    let p: i64 = k.load("return #nmap.registry.p").eval().unwrap();
+    assert_eq!(p, 1);
     // A table put under a second name is stored as the script left it,
     // even when another script changed the first name meanwhile.
     run(&d, "nmap.registry.x = { n = 1 } fero.__nse_flush()");
