@@ -92,7 +92,11 @@ function transport.receive_packet(socket)
       return false, "packet too long"
     end
     local ok, data = socket:receive_bytes(1)
-    if not ok then return false, data end
+    if not ok then
+      -- Keep what came, so a later call goes on from the same packet.
+      if buf ~= "" then leftover[socket] = buf end
+      return false, data
+    end
     buf = buf .. data
   end
 end
