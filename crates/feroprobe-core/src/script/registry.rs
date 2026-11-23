@@ -244,6 +244,57 @@ impl Registry {
         })
     }
 
+    /// Apply what a script changed in the value under `name` (`new`, made
+    /// from `base`, the copy it read) to the value there now, in one step;
+    /// see [`merge`].
+    fn merge(&self, which: Which, name: &[u8], base: &Value, new: &Value) -> Result<(), String> {
+        let mut size = 0;
+        let base = store(base, 0, &mut size)?;
+        let mut size = 0;
+        let new = store(new, 0, &mut size)?;
+        self.with(which, |m, bytes| {
+            let (cur, old) = match m.values.remove(name) {
+                Some(e) => (Some(e.value), e.size),
+                None => (None, 0),
+            };
+            let kept = cur.clone();
+            match merge(cur, base.as_ref(), new) {
+                None => {
+                    *bytes -= old;
+                }
+                Some(s) => {
+                    let size = name.len() + stored_size(&s);
+                    let total = bytes.saturating_sub(old).saturating_add(size);
+                    if total > MAX_BYTES {
+                        if let Some(value) = kept {
+                            let last = last_index(&value);
+                            m.values.insert(
+                                name.to_vec(),
+                                Entry {
+                                    value,
+                                    size: old,
+                                    last,
+                                },
+                            );
+                        }
+                        return Err("the registry is full".to_string());
+                    }
+                    *bytes = total;
+                    let last = last_index(&s);
+                    m.values.insert(
+                        name.to_vec(),
+                        Entry {
+                            value: s,
+                            size,
+                            last,
+                        },
+                    );
+                }
+            }
+            Ok(())
+        })
+    }
+
     /// Add `v` to the end of the list under `name`, making the list when
     /// there is none. One call, so scripts running at once never lose
     /// each other's entries.
@@ -289,7 +340,87 @@ impl Registry {
     }
 }
 
-/// The `get`, `set` and `append` functions of one registry, as a table.
+/// What a stored value counts against [`MAX_BYTES`], as [`store`] counts it.
+fn stored_size(s: &Stored) -> usize {
+    ENTRY_COST
+        + match s {
+            Stored::Str(b) => b.len(),
+            Stored::Table(entries) => entries
+                .iter()
+                .map(|(k, v)| {
+                    stored_size(v)
+                        + match k {
+                            Key::Str(b) => b.len(),
+                            _ => 0,
+                        }
+                })
+                .sum(),
+            _ => 0,
+        }
+}
+
+fn lookup<'a>(entries: &'a [(Key, Stored)], k: &Key) -> Option<&'a Stored> {
+    entries.iter().find(|(x, _)| x == k).map(|(_, v)| v)
+}
+
+/// Three-way merge: `new` is what a script made of `base`, the value it
+/// read; `cur` is the value now, which other scripts may have changed
+/// since. Only the script's own changes are applied to `cur`: entries it
+/// set or removed, and entries it added past the end of a list, which go
+/// after the list's end now (so two scripts adding to one list both
+/// keep their entries, as with `append`).
+fn merge(cur: Option<Stored>, base: Option<&Stored>, new: Option<Stored>) -> Option<Stored> {
+    if new.as_ref() == base {
+        return cur;
+    }
+    // A table the script made where there was none (`t = t or {}`) is
+    // merged as if it had found an empty one, so two scripts that both
+    // start the same list keep both their entries.
+    let empty = Stored::Table(Vec::new());
+    let base = match (base, &cur, &new) {
+        (None, Some(Stored::Table(_)), Some(Stored::Table(_))) => Some(&empty),
+        _ => base,
+    };
+    let (Some(Stored::Table(mut cur)), Some(Stored::Table(base)), Some(Stored::Table(new))) =
+        (cur, base, new.clone())
+    else {
+        return new;
+    };
+    let base_last = last_index(&Stored::Table(base.clone()));
+    let mut added = Vec::new();
+    for (k, v) in new.iter() {
+        if let Key::Int(i) = k
+            && *i > base_last
+            && lookup(base, k).is_none()
+        {
+            added.push((*i, v.clone()));
+            continue;
+        }
+        let merged = merge(lookup(&cur, k).cloned(), lookup(base, k), Some(v.clone()));
+        cur.retain(|(x, _)| x != k);
+        if let Some(m) = merged {
+            cur.push((k.clone(), m));
+        }
+    }
+    for (k, v) in base.iter() {
+        if lookup(&new, k).is_none() {
+            let merged = merge(lookup(&cur, k).cloned(), Some(v), None);
+            cur.retain(|(x, _)| x != k);
+            if let Some(m) = merged {
+                cur.push((k.clone(), m));
+            }
+        }
+    }
+    added.sort_by_key(|(i, _)| *i);
+    let mut last = last_index(&Stored::Table(cur.clone()));
+    for (_, v) in added {
+        last = last.saturating_add(1);
+        cur.push((Key::Int(last), v));
+    }
+    Some(Stored::Table(cur))
+}
+
+/// The `get`, `set`, `append` and `merge` functions of one registry, as a table.
 fn functions(
     lua: &Lua,
     reg: &Arc<Registry>,
@@ -317,6 +448,16 @@ fn functions(
             r.append(which, &name.as_bytes(), &v)
                 .map_err(|e| mlua::Error::runtime(format!("{label}.append: {e}")))
         })?,
+    )?;
+    let r = reg.clone();
+    t.raw_set(
+        "merge",
+        lua.create_function(
+            move |_, (name, base, new): (mlua::LuaString, Value, Value)| {
+                r.merge(which, &name.as_bytes(), &base, &new)
+                    .map_err(|e| mlua::Error::runtime(format!("{label}.merge: {e}")))
+            },
+        )?,
     )?;
     Ok(t)
 }

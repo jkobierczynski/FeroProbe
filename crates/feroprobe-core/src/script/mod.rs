@@ -202,6 +202,24 @@ const BUILT_IN: &[(&str, &str)] = &[
 /// The file name extension of scripts.
 pub const EXTENSION: &str = "lua";
 
+/// The extension of scripts written for nmap, which the NSE compatibility
+/// layer runs too.
+pub const NSE_EXTENSION: &str = "nse";
+
+/// Whether `path` names a script file by its extension.
+pub(crate) fn is_script_file(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|x| x == EXTENSION || x == NSE_EXTENSION)
+}
+
+/// A script's name from its file name: without `.lua` or `.nse`.
+pub(crate) fn script_id(file_name: &str) -> &str {
+    file_name
+        .strip_suffix(&format!(".{EXTENSION}"))
+        .or_else(|| file_name.strip_suffix(&format!(".{NSE_EXTENSION}")))
+        .unwrap_or(file_name)
+}
+
 /// The rule functions a script defines.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Rules {
@@ -387,10 +405,7 @@ impl Script {
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default();
-        let id = id
-            .strip_suffix(&format!(".{EXTENSION}"))
-            .unwrap_or(&id)
-            .to_string();
+        let id = script_id(&id).to_string();
         Script::load(&id, Some(path.to_path_buf()), &source)
     }
 }
@@ -495,7 +510,10 @@ fn choose_in(
         }
         let text = &rule.text;
         let path = Path::new(text);
-        let with_ext = PathBuf::from(format!("{text}.{EXTENSION}"));
+        let with_ext = [EXTENSION, NSE_EXTENSION]
+            .iter()
+            .map(|x| PathBuf::from(format!("{text}.{x}")))
+            .find(|p| p.is_file());
         let mut found = Vec::new();
         if path.is_dir() {
             if !text.ends_with('/') && !text.ends_with(std::path::MAIN_SEPARATOR) {
@@ -506,7 +524,7 @@ fn choose_in(
             let mut files: Vec<PathBuf> = std::fs::read_dir(path)
                 .map_err(|e| ScriptError(format!("cannot read directory {text}: {e}")))?
                 .filter_map(|e| e.ok().map(|e| e.path()))
-                .filter(|p| p.is_file() && p.extension().is_some_and(|x| x == EXTENSION))
+                .filter(|p| p.is_file() && is_script_file(p))
                 .collect();
             files.sort();
             for f in files {
@@ -514,8 +532,8 @@ fn choose_in(
             }
         } else if path.is_file() {
             found.push((Script::from_file(path)?, Selection::File));
-        } else if with_ext.is_file() {
-            found.push((Script::from_file(&with_ext)?, Selection::File));
+        } else if let Some(f) = with_ext {
+            found.push((Script::from_file(&f)?, Selection::File));
         } else if let Some(f) = installed.and_then(|dir| in_dir(dir, text)) {
             // A script in the scripts directory, by name, as nmap finds
             // one there without its index.
@@ -552,20 +570,22 @@ fn choose_in(
     Ok(chosen)
 }
 
-/// The file of the script named `name` (with or without `.lua`) in the
+/// The file of the script named `name` (with or without `.lua` or `.nse`;
+/// `.lua` first) in the
 /// scripts directory `dir`, if there is one. Only a plain name is looked
 /// up, never a path.
 fn in_dir(dir: &Path, name: &str) -> Option<PathBuf> {
     if name.is_empty() || name.contains(['/', '\\']) || name.starts_with('.') {
         return None;
     }
-    let file = if name.ends_with(&format!(".{EXTENSION}")) {
-        name.to_string()
-    } else {
-        format!("{name}.{EXTENSION}")
-    };
-    let path = dir.join(file);
-    path.is_file().then_some(path)
+    if is_script_file(Path::new(name)) {
+        let path = dir.join(name);
+        return path.is_file().then_some(path);
+    }
+    [EXTENSION, NSE_EXTENSION]
+        .iter()
+        .map(|x| dir.join(format!("{name}.{x}")))
+        .find(|p| p.is_file())
 }
 
 /// `--script-help`: each script's name, categories and description, in

@@ -73,17 +73,15 @@ pub fn user_dir() -> Option<PathBuf> {
 /// One script in the index.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
-    /// The file name in the scripts directory, with `.lua`.
+    /// The file name in the scripts directory, with `.lua` or `.nse`.
     pub filename: String,
     pub categories: Vec<String>,
 }
 
 impl Entry {
-    /// The script's name: its file name without `.lua`.
+    /// The script's name: its file name without `.lua` or `.nse`.
     pub fn id(&self) -> &str {
-        self.filename
-            .strip_suffix(&format!(".{EXTENSION}"))
-            .unwrap_or(&self.filename)
+        super::script_id(&self.filename)
     }
 }
 
@@ -135,7 +133,7 @@ pub fn parse(text: &str) -> Result<Vec<Entry>, String> {
             categories.push(c.to_string());
             rest = r.strip_prefix(", ").ok_or_else(bad)?;
         }
-        if rest != "} }" || !plain(filename) || !filename.ends_with(&format!(".{EXTENSION}")) {
+        if rest != "} }" || !plain(filename) || !super::is_script_file(Path::new(filename)) {
             return Err(bad());
         }
         entries.push(Entry {
@@ -188,7 +186,7 @@ pub fn update(dir: &Path, built_in: &[&str]) -> Result<Update, ScriptError> {
     let mut files: Vec<PathBuf> = Vec::new();
     for entry in std::fs::read_dir(dir).map_err(cannot_read)? {
         let path = entry.map_err(cannot_read)?.path();
-        if path.extension().is_none_or(|x| x != EXTENSION) {
+        if !super::is_script_file(&path) {
             continue;
         }
         // Follows links, as reading the script does.
@@ -221,6 +219,14 @@ pub fn update(dir: &Path, built_in: &[&str]) -> Result<Update, ScriptError> {
         if built_in.contains(&script.id.as_str()) {
             out.skipped.push(format!(
                 "{name}: a built-in script has this name (give the file's path to --script to run it)"
+            ));
+            continue;
+        }
+        // Files are sorted, so name.lua comes before name.nse and wins.
+        if let Some(e) = out.entries.iter().find(|e| e.id() == script.id) {
+            out.skipped.push(format!(
+                "{name}: {} has the same name and is used instead",
+                e.filename
             ));
             continue;
         }
@@ -333,7 +339,7 @@ mod tests {
     fn index_refuses_other_text() {
         for bad in [
             "Entry { filename = \"../x.lua\", categories = { } }",
-            "Entry { filename = \"x.nse\", categories = { } }",
+            "Entry { filename = \"x.txt\", categories = { } }",
             "Entry { filename = \"x.lua\", categories = { \"a\" } }",
             "Entry { filename = \"x.lua\", categories = { } } os.exit()",
             "os.execute('x')",

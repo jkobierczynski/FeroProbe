@@ -1564,8 +1564,8 @@ With ICS protection on, \f[V]-sC\f[R] is refused like
 Choose the scripts to run: a comma-separated list where each item is
 .IP \[bu] 2
 a script name, such as \f[V]banner\f[R], with \f[V]*\f[R] matching any
-run of characters (\f[V]http-*\f[R]); a trailing \f[V].lua\f[R] is
-allowed;
+run of characters (\f[V]http-*\f[R]); a trailing \f[V].lua\f[R] or
+\f[V].nse\f[R] is allowed;
 .IP \[bu] 2
 a category, such as \f[V]safe\f[R] or \f[V]discovery\f[R], or
 \f[V]all\f[R] for every script;
@@ -1577,10 +1577,12 @@ As in nmap, \f[V]and\f[R] and \f[V]or\f[R] bind equally and group from
 the right (\f[V]a and b or c\f[R] is \f[V]a and (b or c)\f[R]), so use
 parentheses when mixing them;
 .IP \[bu] 2
-a script file, given by its path, with or without \f[V].lua\f[R];
+a script file, given by its path, with or without \f[V].lua\f[R] (or
+\f[V].nse\f[R], for scripts written for nmap: see NSE compatibility
+layer);
 .IP \[bu] 2
 a directory, given by its path with a trailing \f[V]/\f[R], for every
-\f[V].lua\f[R] file in it.
+\f[V].lua\f[R] and \f[V].nse\f[R] file in it.
 Without the slash it is refused, as in nmap, so that a directory named
 like a category is never picked by mistake.
 .PP
@@ -1704,7 +1706,8 @@ The scripts directory is \f[V]$XDG_DATA_HOME/feroprobe/scripts\f[R],
 which is \f[V]\[ti]/.local/share/feroprobe/scripts\f[R] when
 \f[V]XDG_DATA_HOME\f[R] is not set (on Windows,
 \f[V]%APPDATA%\[rs]feroprobe\[rs]scripts\f[R]).
-Put your own \f[V].lua\f[R] scripts there, then run:
+Put your own \f[V].lua\f[R] scripts (and \f[V].nse\f[R] scripts written
+for nmap) there, then run:
 .IP
 .nf
 \f[C]
@@ -1765,10 +1768,13 @@ Lua\[aq]s \f[V]string\f[R], \f[V]table\f[R], \f[V]math\f[R],
 \f[V]os.difftime\f[R], and FeroProbe\[aq]s \f[V]fero\f[R] library;
 .IP \[bu] 2
 no \f[V]io\f[R], no other \f[V]os\f[R] functions (no commands,
-environment, files or exit), no \f[V]require\f[R], \f[V]package\f[R],
-\f[V]debug\f[R], \f[V]dofile\f[R], \f[V]loadfile\f[R] or
-\f[V]collectgarbage\f[R], no \f[V]string.dump\f[R], and \f[V]load\f[R]
-for source text only, never precompiled bytecode;
+environment, files or exit), no \f[V]package\f[R], \f[V]debug\f[R],
+\f[V]dofile\f[R], \f[V]loadfile\f[R] or \f[V]collectgarbage\f[R], no
+\f[V]string.dump\f[R], and \f[V]load\f[R] for source text only, never
+precompiled bytecode;
+.IP \[bu] 2
+\f[V]require\f[R] only for the modules of the NSE compatibility layer
+and Lua\[aq]s own libraries by name;
 .IP \[bu] 2
 64 MB of memory, and about a billion Lua instructions (some seconds of
 pure computation; time spent waiting on the network does not count);
@@ -2475,7 +2481,7 @@ A script that reads what another one leaves names it in
 In nmap the registry is a plain table that scripts change in place;
 FeroProbe\[aq]s is called through these functions, as values are copied
 between states.
-The NSE compatibility layer (planned) can offer nmap\[aq]s form on top.
+The NSE compatibility layer offers nmap\[aq]s form on top.
 .SS Script TLS and HTTP
 .PP
 \f[B]TLS.\f[R] Script TLS (\f[V]\[dq]ssl\[dq]\f[R] sockets,
@@ -3683,6 +3689,224 @@ PORT       STATE          SERVICE        VERSION
 |_SHA-256: 9a07...
 \f[R]
 .fi
+.SS NSE compatibility layer
+.PP
+Scripts written for nmap\[aq]s scripting engine (NSE) can run in
+FeroProbe when they use only the parts of nmap\[aq]s libraries that
+FeroProbe offers.
+\f[V]--script\f[R] takes \f[V].nse\f[R] files as it takes \f[V].lua\f[R]
+ones: by path, by name in the scripts directory (\f[V]name.lua\f[R]
+first, then \f[V]name.nse\f[R]), from a directory, and in the index
+\f[V]--script-updatedb\f[R] writes.
+A script becomes an NSE script the moment it calls \f[V]require\f[R];
+FeroProbe\[aq]s own scripts do not.
+.PP
+\f[V]require\f[R] gives these modules, written for FeroProbe on top of
+\f[V]fero\f[R] from nmap\[aq]s public API documentation (nmap\[aq]s own
+libraries are under the NPSL and are not used or shipped).
+The same sandbox and scope rules apply: every connection still goes only
+to the scanned host and to ports the scan probed there.
+.PP
+.TS
+tab(@);
+l l.
+T{
+Module
+T}@T{
+What it has
+T}
+_
+T{
+\f[V]nmap\f[R]
+T}@T{
+\f[V]new_socket\f[R] (\f[V]connect\f[R], \f[V]send\f[R],
+\f[V]sendto\f[R], \f[V]receive\f[R], \f[V]receive_bytes\f[R],
+\f[V]receive_lines\f[R], \f[V]receive_buf\f[R], \f[V]set_timeout\f[R],
+\f[V]close\f[R], \f[V]get_info\f[R], \f[V]reconnect_ssl\f[R],
+\f[V]get_ssl_certificate\f[R]), \f[V]new_try\f[R], \f[V]registry\f[R],
+\f[V]verbosity\f[R], \f[V]debugging\f[R], \f[V]clock_ms\f[R],
+\f[V]clock\f[R], \f[V]address_family\f[R], \f[V]get_port_state\f[R],
+\f[V]have_ssl\f[R], \f[V]is_privileged\f[R], \f[V]timing_level\f[R],
+\f[V]version_intensity\f[R], \f[V]mutex\f[R], \f[V]condvar\f[R],
+\f[V]log_write\f[R]; \f[V]set_port_state\f[R] and
+\f[V]set_port_version\f[R] are accepted and do nothing
+T}
+T{
+\f[V]stdnse\f[R]
+T}@T{
+\f[V]debug\f[R], \f[V]debug0\f[R]-\f[V]debug9\f[R],
+\f[V]print_debug\f[R], \f[V]verbose\f[R],
+\f[V]verbose0\f[R]-\f[V]verbose9\f[R], \f[V]get_script_args\f[R],
+\f[V]format_output\f[R], \f[V]output_table\f[R], \f[V]tohex\f[R],
+\f[V]fromhex\f[R], \f[V]parse_timespec\f[R], \f[V]sleep\f[R],
+\f[V]clock_ms\f[R], \f[V]get_hostname\f[R], \f[V]format_mac\f[R],
+\f[V]get_timeout\f[R], \f[V]new_thread\f[R], \f[V]string_or_blank\f[R],
+\f[V]make_buffer\f[R], \f[V]registry_get\f[R],
+\f[V]registry_add_table\f[R], \f[V]registry_add_array\f[R],
+\f[V]in_port_range\f[R], \f[V]generate_random_string\f[R],
+\f[V]silent_require\f[R], and the old names \f[V]strsplit\f[R],
+\f[V]keys\f[R], \f[V]contains\f[R], \f[V]format_time\f[R],
+\f[V]format_timestamp\f[R]
+T}
+T{
+\f[V]shortport\f[R]
+T}@T{
+\f[V]portnumber\f[R], \f[V]service\f[R], \f[V]port_or_service\f[R],
+\f[V]version_port_or_service\f[R], \f[V]port_range\f[R], \f[V]http\f[R],
+\f[V]ssl\f[R], \f[V]ssh\f[R], \f[V]LIKELY_HTTP_PORTS\f[R],
+\f[V]LIKELY_HTTP_SERVICES\f[R] (\f[V]http\f[R] and \f[V]ssl\f[R] are
+FeroProbe\[aq]s own port rules)
+T}
+T{
+\f[V]comm\f[R]
+T}@T{
+\f[V]opencon\f[R], \f[V]get_banner\f[R], \f[V]exchange\f[R],
+\f[V]tryssl\f[R]
+T}
+T{
+\f[V]http\f[R]
+T}@T{
+\f[V]get\f[R], \f[V]head\f[R], \f[V]post\f[R], \f[V]put\f[R],
+\f[V]generic_request\f[R], \f[V]get_url\f[R], \f[V]pipeline_add\f[R],
+\f[V]pipeline_go\f[R], \f[V]response_contains\f[R],
+\f[V]parse_www_authenticate\f[R], \f[V]identify_404\f[R],
+\f[V]page_exists\f[R], \f[V]can_use_head\f[R],
+\f[V]get_status_string\f[R], \f[V]USER_AGENT\f[R]; on top of
+FeroProbe\[aq]s HTTP library, so its redirect rule, signature User-Agent
+and limits apply
+T}
+T{
+\f[V]url\f[R]
+T}@T{
+\f[V]parse\f[R], \f[V]build\f[R], \f[V]absolute\f[R], \f[V]escape\f[R],
+\f[V]unescape\f[R], \f[V]parse_query\f[R], \f[V]build_query\f[R],
+\f[V]parse_path\f[R], \f[V]build_path\f[R], \f[V]get_default_port\f[R]
+T}
+T{
+\f[V]ipOps\f[R]
+T}@T{
+\f[V]ip_to_str\f[R], \f[V]str_to_ip\f[R], \f[V]compare_ip\f[R],
+\f[V]isPrivate\f[R], \f[V]todword\f[R], \f[V]fromdword\f[R],
+\f[V]ip_to_bin\f[R], \f[V]bin_to_ip\f[R], \f[V]hex_to_bin\f[R],
+\f[V]expand_ip\f[R], \f[V]ip_in_range\f[R],
+\f[V]get_ips_from_range\f[R], \f[V]get_last_ip\f[R], \f[V]ip_sort\f[R],
+\f[V]subnet_to_cidr\f[R]
+T}
+T{
+\f[V]stringaux\f[R], \f[V]tableaux\f[R]
+T}@T{
+\f[V]strsplit\f[R], \f[V]filename_escape\f[R], \f[V]ipattern\f[R];
+\f[V]tcopy\f[R], \f[V]shallow_tcopy\f[R], \f[V]keys\f[R],
+\f[V]contains\f[R], \f[V]invert\f[R]
+T}
+T{
+\f[V]datetime\f[R]
+T}@T{
+\f[V]format_timestamp\f[R], \f[V]format_time\f[R],
+\f[V]format_difftime\f[R], \f[V]date_to_timestamp\f[R],
+\f[V]record_skew\f[R] (feeds \f[V]clock-skew\f[R])
+T}
+T{
+\f[V]openssl\f[R]
+T}@T{
+\f[V]md5\f[R], \f[V]sha1\f[R], \f[V]digest\f[R] (MD5, SHA-1, SHA-256,
+SHA-384, SHA-512), \f[V]hmac\f[R], \f[V]rand_bytes\f[R],
+\f[V]rand_pseudo_bytes\f[R], \f[V]supported_digests\f[R]; no ciphers or
+big numbers
+T}
+T{
+\f[V]base64\f[R], \f[V]rand\f[R], \f[V]match\f[R], \f[V]outlib\f[R]
+T}@T{
+\f[V]enc\f[R], \f[V]dec\f[R]; \f[V]random_string\f[R],
+\f[V]random_alpha\f[R], \f[V]charset\f[R]; \f[V]numbytes\f[R],
+\f[V]pattern_limit\f[R], \f[V]dontmatch\f[R]; \f[V]sorted_by_key\f[R],
+\f[V]list_sep\f[R]
+T}
+T{
+Lua\[aq]s own
+T}@T{
+\f[V]string\f[R], \f[V]table\f[R], \f[V]math\f[R], \f[V]coroutine\f[R],
+\f[V]utf8\f[R], \f[V]os\f[R] (the sandbox\[aq]s), \f[V]_G\f[R]
+T}
+.TE
+.PP
+Any other module (\f[V]io\f[R], \f[V]brute\f[R], \f[V]vulns\f[R],
+\f[V]smb\f[R], \f[V]packet\f[R], \f[V]creds\f[R], \f[V]json\f[R],
+\f[V]sslcert\f[R], ...)
+stops the script from loading with an error that names it; a function
+FeroProbe does not have in a module it offers (\f[V]nmap.new_dnet\f[R],
+\f[V]openssl.encrypt\f[R], ...)
+raises an error naming it when called.
+Of nmap 7.99\[aq]s 612 scripts, 108 load as they are; more modules are
+planned.
+.PP
+What NSE scripts see differently:
+.IP \[bu] 2
+\f[B]The host table\f[R] has nmap\[aq]s form for them: \f[V]bin_ip\f[R],
+\f[V]mac_addr\f[R] as six bytes, \f[V]os\f[R] as a list of
+\f[V]{ name = ... }\f[R] tables, and \f[V]registry\f[R].
+.IP \[bu] 2
+\f[B]The registries.\f[R] \f[V]nmap.registry\f[R] and
+\f[V]host.registry\f[R] look like plain tables changed in place.
+Each top-level entry is copied out of FeroProbe\[aq]s registry the first
+time the script touches it, and what the script changed is written back
+after each rule and action, merged with what other scripts did
+meanwhile: values it set or removed are applied, and entries it added at
+the end of a list go after that list\[aq]s end as it is now, so scripts
+that run at once and add to the same list (or start it with
+\f[V]nmap.registry.x = nmap.registry.x or {}\f[R]) all keep their
+entries.
+A plain value two scripts set at once keeps the last write.
+Only plain data is kept (see The registry); top-level names must be
+strings, and \f[V]pairs(nmap.registry)\f[R] lists only the entries the
+script has touched.
+A script stopped by its timeout leaves no changes.
+.IP \[bu] 2
+\f[B]Threads.\f[R] \f[V]stdnse.new_thread\f[R] runs the function to
+completion before it returns (FeroProbe already runs many scripts at
+once), and returns a finished coroutine, so the usual wait loops end at
+once; \f[V]nmap.mutex\f[R] and \f[V]nmap.condvar\f[R] never wait.
+.IP \[bu] 2
+\f[B]No raw packets or privileges.\f[R] \f[V]nmap.is_privileged()\f[R]
+is \f[V]false\f[R], so scripts take their unprivileged path;
+\f[V]new_dnet\f[R], \f[V]pcap_open\f[R] and the interface functions are
+not available.
+.IP \[bu] 2
+\f[B]Scripts do not change results.\f[R] \f[V]nmap.set_port_state\f[R]
+and \f[V]nmap.set_port_version\f[R] are accepted and ignored (shown with
+\f[V]-d2\f[R]).
+.IP \[bu] 2
+\f[B]No data files or name lookups.\f[R] \f[V]nmap.fetchfile\f[R]
+returns \f[V]nil\f[R]; \f[V]nmap.resolve\f[R] fails.
+.IP \[bu] 2
+\f[B]Fixed values.\f[R] \f[V]nmap.timing_level()\f[R] is 3 and
+\f[V]nmap.version_intensity()\f[R] 7 whatever the scan\[aq]s options;
+\f[V]stdnse.get_timeout\f[R] is 5 seconds within the range asked for, as
+FeroProbe gives scripts no round-trip times.
+.IP \[bu] 2
+\f[B]Errors.\f[R] \f[V]stdnse.format_output(false, msg)\f[R] gives
+\f[V]ERROR: msg\f[R] only with \f[V]-d\f[R], as in nmap; a failed
+\f[V]nmap.new_try\f[R] ends the script without output, as any script
+error does in FeroProbe.
+.IP \[bu] 2
+\f[B]Messages\f[R] from \f[V]stdnse.debug\f[R], \f[V]verbose\f[R] and
+\f[V]nmap.log_write\f[R] go to standard error, as FeroProbe\[aq]s other
+messages do.
+.IP \[bu] 2
+\f[B]HTTP.\f[R] \f[V]redirect_ok\f[R] functions cannot run inside
+FeroProbe\[aq]s HTTP client: \f[V]false\f[R] and numbers are honoured, a
+function means FeroProbe\[aq]s own rule.
+Pipelined requests go one after another.
+A failure gives nmap\[aq]s form, a response with \f[V]status\f[R]
+\f[V]nil\f[R] and the reason in \f[V]status-line\f[R].
+.IP \[bu] 2
+\f[B]The signature.\f[R] The HTTP library sends FeroProbe\[aq]s
+User-Agent unless the script sets one, as for FeroProbe\[aq]s own
+scripts; what a script sends on its own sockets is its own and carries
+no FeroProbe mark.
+.PP
+A script written for FeroProbe should use \f[V]fero\f[R] directly; the
+compatibility layer is for running scripts written for nmap.
 .SH TIMING AND PERFORMANCE
 .SS Timing templates (\f[V]-T<0-5>\f[R])
 .PP
@@ -5436,6 +5660,17 @@ With \f[V]--keep-root\f[R] or without \f[V]sudo\f[R]: a link is refused
 unless root owns it and its directory and no other user can write there
 (\f[V]/dev/stdout\f[R] works); a new file under \f[V]sudo\f[R] belongs
 to the invoking user (see \f[V]-oA\f[R] under Output options)
+T}
+T{
+NSE scripts
+T}@T{
+nmap\[aq]s libraries
+T}@T{
+The NSE compatibility layer: FeroProbe\[aq]s own modules under
+nmap\[aq]s names, a subset of nmap\[aq]s (see NSE compatibility layer);
+registries copied and merged rather than shared in place, threads run to
+completion when started, no raw packets, scripts cannot change port
+results
 T}
 T{
 Service and OS signatures

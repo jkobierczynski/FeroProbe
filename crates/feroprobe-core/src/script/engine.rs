@@ -78,6 +78,111 @@ const TLS_LIBRARY: &str = include_str!("tls.lua");
 /// `fero.snmp`: SNMP requests, walks and SNMPv3 engine discovery.
 const SNMP_LIBRARY: &str = include_str!("snmp.lua");
 
+/// The NSE compatibility layer (roadmap 7.6): modules under nmap's
+/// library names, written for FeroProbe on top of `fero` from nmap's
+/// public API documentation (never from nselib). `require` loads one the
+/// first time a script asks for it, so scripts that never ask pay nothing.
+const NSE_MODULES: &[(&str, &str)] = &[
+    ("base64", include_str!("nse/base64.lua")),
+    ("comm", include_str!("nse/comm.lua")),
+    ("datetime", include_str!("nse/datetime.lua")),
+    ("http", include_str!("nse/http.lua")),
+    ("ipOps", include_str!("nse/ipOps.lua")),
+    ("match", include_str!("nse/match.lua")),
+    ("nmap", include_str!("nse/nmap.lua")),
+    ("openssl", include_str!("nse/openssl.lua")),
+    ("outlib", include_str!("nse/outlib.lua")),
+    ("rand", include_str!("nse/rand.lua")),
+    ("shortport", include_str!("nse/shortport.lua")),
+    ("stdnse", include_str!("nse/stdnse.lua")),
+    ("stringaux", include_str!("nse/stringaux.lua")),
+    ("tableaux", include_str!("nse/tableaux.lua")),
+    ("url", include_str!("nse/url.lua")),
+];
+
+/// Lua's own libraries a script may `require` by name, as NSE scripts do
+/// (`local string = require "string"`).
+const STANDARD_MODULES: &[&str] = &["string", "table", "math", "coroutine", "utf8", "os"];
+
+/// Where the loaded modules of a state are kept.
+const NSE_LOADED: &str = "feroprobe.nse.loaded";
+
+/// Set in a state once its script used `require`: it is an NSE script, and
+/// gets the host table and registry in nmap's form.
+pub(crate) struct NseScript;
+
+/// `require(name)`: one of [`NSE_MODULES`] or [`STANDARD_MODULES`], loaded
+/// once per state; anything else is an error naming the module.
+fn install_require(lua: &Lua, fero: &Table) -> mlua::Result<()> {
+    lua.set_named_registry_value(NSE_LOADED, lua.create_table()?)?;
+    let fero = fero.clone();
+    let require = lua.create_function(move |lua, name: String| {
+        // The first `require` makes this an NSE script: `nmap` is loaded
+        // with it, as it sets up the host table and registries.
+        let first = lua.app_data_ref::<NseScript>().is_none();
+        lua.set_app_data(NseScript);
+        if first && name != "nmap" {
+            lua.globals().raw_get::<Function>("require")?.call::<Value>("nmap")?;
+        }
+        let loaded: Table = lua.named_registry_value(NSE_LOADED)?;
+        let have: Value = loaded.raw_get(name.as_str())?;
+        if !have.is_nil() {
+            return Ok(have);
+        }
+        let g = lua.globals();
+        let module: Value = if name == "_G" {
+            Value::Table(g)
+        } else if STANDARD_MODULES.contains(&name.as_str()) {
+            g.raw_get(name.as_str())?
+        } else if let Some((_, src)) = NSE_MODULES.iter().find(|(n, _)| *n == name) {
+            // Marked loaded before it runs, so modules that need each
+            // other do not loop.
+            loaded.raw_set(name.as_str(), true)?;
+            let v: Value = lua
+                .load(*src)
+                .set_name(format!("=nse.{name}"))
+                .call(fero.clone())?;
+            if v.is_nil() { Value::Boolean(true) } else { v }
+        } else {
+            return Err(mlua::Error::runtime(format!(
+                "module '{name}' is not available in FeroProbe (its NSE compatibility layer has: {})",
+                NSE_MODULES
+                    .iter()
+                    .map(|(n, _)| *n)
+                    .chain(STANDARD_MODULES.iter().copied())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )));
+        };
+        loaded.raw_set(name.as_str(), module.clone())?;
+        Ok(module)
+    })?;
+    lua.globals().raw_set("require", require)
+}
+
+/// After a rule or action of an NSE script: write what it changed in
+/// `nmap.registry` and `host.registry` back to the run's registries. A
+/// value the registry cannot keep (a function, say) is left out, as
+/// `-d` says.
+fn nse_flush(lua: &Lua, script: &str) {
+    if lua.app_data_ref::<NseScript>().is_none() {
+        return;
+    }
+    let Ok(fero) = lua.globals().raw_get::<Table>("fero") else {
+        return;
+    };
+    if let Ok(f) = fero.raw_get::<Function>("__nse_flush")
+        && let Err(e) = f.call::<()>(())
+    {
+        crate::debug::debug(1, || {
+            format!(
+                "Script {script}: registry not saved: {}",
+                e.to_string().lines().next().unwrap_or("")
+            )
+        });
+    }
+}
+
 /// The library every script gets, written for FeroProbe, on top of the
 /// `fero` table the engine fills in.
 const LIBRARY: &str = r##"
@@ -574,7 +679,16 @@ pub(crate) fn install_library(
             Ok(())
         })?,
     )?;
+    fero.raw_set(
+        "address_family",
+        if scope.addr.is_some_and(|a| a.is_ipv6()) {
+            "inet6"
+        } else {
+            "inet"
+        },
+    )?;
     g.raw_set("fero", fero.clone())?;
+    install_require(lua, &fero)?;
     lua.load(LIBRARY)
         .set_name("=fero")
         .call::<()>((fero.clone(), args_to_lua(lua, args)?))?;
@@ -618,6 +732,14 @@ fn host_table(lua: &Lua, h: &HostResult) -> mlua::Result<Table> {
             list.raw_set(i + 1, m.name.as_str())?;
         }
         t.raw_set("os", list)?;
+    }
+    if lua.app_data_ref::<NseScript>().is_some()
+        && let Ok(f) = lua
+            .globals()
+            .raw_get::<Table>("fero")
+            .and_then(|f| f.raw_get::<Function>("__nse_host"))
+    {
+        f.call::<()>(t.clone())?;
     }
     Ok(t)
 }
@@ -995,6 +1117,7 @@ impl ScriptScan {
             Against::Port(h, p) => host_table(lua, h)
                 .and_then(|ht| port_table(lua, p).and_then(|pt| f.call::<Value>((ht, pt)))),
         };
+        nse_flush(lua, &script.id);
         match r {
             Ok(v) => truthy(&v),
             Err(e) => {
@@ -1031,10 +1154,9 @@ impl ScriptScan {
                     Value::Table(port_table(&lua, p).map_err(|e| e.to_string())?),
                 ]),
             };
-            let ret = action
-                .call_async::<MultiValue>(args)
-                .await
-                .map_err(|e| sandbox::error_text(&e, &budget))?;
+            let ret = action.call_async::<MultiValue>(args).await;
+            nse_flush(&lua, &script.id);
+            let ret = ret.map_err(|e| sandbox::error_text(&e, &budget))?;
             Ok::<_, String>(to_result(&lua, &script.id, ret))
         };
         let outcome = match self.timeout {

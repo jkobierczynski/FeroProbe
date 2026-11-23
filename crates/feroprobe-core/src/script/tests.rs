@@ -5824,3 +5824,315 @@ end
     );
     assert_eq!(seen.lock().unwrap().len(), 2);
 }
+
+// ---- NSE compatibility layer (roadmap 7.6) ----
+
+/// An NSE-style script's head: the modules most scripts ask for.
+const NSE_HEAD: &str = r#"
+local nmap = require "nmap"
+local stdnse = require "stdnse"
+local shortport = require "shortport"
+local string = require "string"
+local table = require "table"
+description = "test"
+categories = { "safe" }
+"#;
+
+#[test]
+fn nse_modules_load_and_unknown_ones_are_named() {
+    let s = script(
+        "n",
+        &format!(
+            "{NSE_HEAD}portrule = shortport.port_or_service(22, \"ssh\")\naction = function() end"
+        ),
+    );
+    assert!(s.rules.portrule);
+    let e = Script::load(
+        "n",
+        None,
+        "local io = require \"io\"\ncategories = {}\nprerule = function() end\naction = function() end",
+    )
+    .unwrap_err();
+    assert!(
+        e.0.contains("module 'io' is not available in FeroProbe"),
+        "{e}"
+    );
+    // Every module loads on its own.
+    for m in [
+        "base64",
+        "comm",
+        "datetime",
+        "http",
+        "ipOps",
+        "match",
+        "nmap",
+        "openssl",
+        "outlib",
+        "rand",
+        "shortport",
+        "stdnse",
+        "stringaux",
+        "tableaux",
+        "url",
+        "_G",
+        "string",
+    ] {
+        let src = format!(
+            "local m = require \"{m}\"\nassert(type(m) == \"table\")\nassert(require \"{m}\" == m)\ncategories = {{}}\nprerule = function() end\naction = function() end"
+        );
+        Script::load("n", None, &src).unwrap_or_else(|e| panic!("{m}: {e}"));
+    }
+}
+
+#[tokio::test]
+async fn nse_helper_modules() {
+    let src = format!(
+        r#"{NSE_HEAD}
+local ipOps = require "ipOps"
+local url = require "url"
+local stringaux = require "stringaux"
+local tableaux = require "tableaux"
+local datetime = require "datetime"
+local openssl = require "openssl"
+local base64 = require "base64"
+local rand = require "rand"
+local match = require "match"
+prerule = function() return true end
+action = function()
+  local o = stdnse.output_table()
+  o.hex = stdnse.tohex("\1\2\171") .. " " .. stdnse.tohex("\1\2\3\4", {{ separator = ":", group = 4 }})
+    .. " " .. stdnse.fromhex("41 42:43")
+  o.fmt = stdnse.format_output(true, {{ "a", {{ name = "b", "c", {{ "d" }} }}, "e\nf" }})
+  o.err = tostring(stdnse.format_output(false, "boom"))
+  o.timespec = string.format("%s %s %s %s", stdnse.parse_timespec("1500ms"),
+    stdnse.parse_timespec("2m"), stdnse.parse_timespec("3"), stdnse.parse_timespec("x"))
+  o.ip = ipOps.str_to_ip(ipOps.ip_to_str("2001:db8:0:0:0:0:0:1")) .. " "
+    .. ipOps.str_to_ip(ipOps.ip_to_str("::")) .. " " .. ipOps.str_to_ip(ipOps.ip_to_str("1::"))
+    .. " " .. ipOps.expand_ip("::ffff:1.2.3.4") .. " " .. ipOps.todword("1.2.3.4")
+    .. " " .. ipOps.fromdword(16909060)
+  local first, last = ipOps.get_ips_from_range("192.168.7.9/22")
+  o.range = first .. "-" .. last .. " " .. tostring(ipOps.ip_in_range("10.1.2.3", "10.0.0.0/8"))
+    .. " " .. tostring(ipOps.isPrivate("172.20.1.1")) .. " " .. tostring(ipOps.isPrivate("8.8.8.8"))
+    .. " " .. tostring(ipOps.compare_ip("1.2.3.4", "lt", "::1")) .. " " .. ipOps.subnet_to_cidr("255.255.240.0")
+  local u = url.parse("https://u:p@[2001:db8::1]:8443/a/b;x?q=1#f")
+  o.url = string.format("%s %s %s %s %d %s %s %s %s", u.scheme, u.user, u.password, u.host, u.port,
+    u.path, u.params, u.query, u.fragment)
+  o.abs = url.absolute("http://h/a/b/c?x", "../d") .. " " .. url.absolute("http://h/a/b", "//o/p")
+    .. " " .. url.absolute("http://h/a/b?x", "?y") .. " " .. url.escape("a b/&")
+  o.split = table.concat(stringaux.strsplit(",%s*", "a, b,c"), "|") .. " "
+    .. ("HeLLo"):match(stringaux.ipattern("hello"))
+  local ok, key = tableaux.contains({{ x = 1, y = 2 }}, 2)
+  o.tab = tostring(ok) .. " " .. key .. " " .. #tableaux.keys({{ a = 1, b = 2 }})
+  o.date = datetime.format_timestamp(0) .. " " .. datetime.format_timestamp(3600, 3600)
+    .. " " .. datetime.date_to_timestamp({{ year = 2000, month = 3, day = 1, hour = 0 }})
+    .. " " .. datetime.format_time(90000, 1000)
+  o.hmac = stdnse.tohex(openssl.hmac("sha256", "Jefe", "what do ya want for nothing?")) .. " "
+    .. stdnse.tohex(openssl.hmac("MD5", "Jefe", "what do ya want for nothing?")) .. " "
+    .. stdnse.tohex(openssl.md5("abc"))
+  o.b64 = base64.enc("foobar") .. " " .. base64.dec("Zm9vYmFy")
+  o.rand = #rand.random_alpha(12) .. " " .. tostring(not rand.random_alpha(30):find("[^%a]"))
+  o.match = tostring(match.numbytes(3)("abcd")) .. " " .. tostring(match.pattern_limit("x", 2)("aaax"))
+  o.mac = stdnse.format_mac("\0\12\41\1\2\3") .. " " .. stdnse.get_hostname({{ ip = "1.2.3.4", name = "" }})
+  local try = nmap.new_try()
+  o.try = try(true, "v") .. " " .. tostring(select(2, pcall(try, false, "failed")))
+  return o
+end"#
+    );
+    let scan = ScriptScan::new(vec![script("helpers", &src)], ArgTable::default(), None).unwrap();
+    let r = scan.pre_scan().await;
+    let d = r[0].data.as_ref().unwrap_or_else(|| panic!("{r:?}"));
+    for (k, want) in [
+        ("hex", "0102ab 0102:0304 ABC"),
+        ("fmt", "\n  a\n  b\n    c\n      d\n  e\n  f"),
+        ("err", "nil"),
+        ("timespec", "1.5 120 3 nil"),
+        (
+            "ip",
+            "2001:db8::1 :: 1:: 0000:0000:0000:0000:0000:ffff:0102:0304 16909060 1.2.3.4",
+        ),
+        ("range", "192.168.4.0-192.168.7.255 true true false true 20"),
+        ("url", "https u p 2001:db8::1 8443 /a/b x q=1 f"),
+        ("abs", "http://h/a/d http://o/p http://h/a/b?y a%20b%2F%26"),
+        ("split", "a|b|c HeLLo"),
+        ("tab", "true y 2"),
+        (
+            "date",
+            "1970-01-01T00:00:00 1970-01-01T02:00:00+01:00 951868800 1m30s",
+        ),
+        (
+            "hmac",
+            "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843 \
+             750c783e6ab0b503eaa86e310a5db738 900150983cd24fb0d6963f7d28e17f72",
+        ),
+        ("b64", "Zm9vYmFy foobar"),
+        ("rand", "12 true"),
+        ("match", "3 2"),
+        ("mac", "00:0c:29:01:02:03 1.2.3.4"),
+        ("try", "v failed"),
+    ] {
+        assert_eq!(text(named(d, k)), want, "{k}");
+    }
+}
+
+#[tokio::test]
+async fn nse_sockets_comm_and_http() {
+    let port = greeter(b"220 hello\r\n").await;
+    let (web_port, seen) = web(|req| {
+        if req.starts_with("GET /missing") {
+            b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".to_vec()
+        } else {
+            b"HTTP/1.1 200 OK\r\nWWW-Authenticate: Basic realm=\"x y\", Digest realm=\"r\", nonce=\"n\"\r\nContent-Length: 11\r\n\r\n<b>hello</b".to_vec()
+        }
+    })
+    .await;
+    let src = format!(
+        r#"{NSE_HEAD}
+local comm = require "comm"
+local http = require "http"
+portrule = function(host, port) return port.state == "open" end
+action = function(host, port)
+  if port.number == {web_port} then
+    local r = http.get(host, port, "/")
+    local miss = http.get(host, port, "/missing")
+    local out = http.get(host, 1, "/")
+    local auth = http.parse_www_authenticate(r.header["www-authenticate"])
+    local found, word = http.response_contains(r, "<B>(%a+)")
+    local post = http.post(host, port, "/p", nil, nil, {{ a = "b c" }})
+    return string.format("%d %s %d %s %s %s %s %s %s %s %s", r.status, r.body, miss.status,
+      tostring(out.status), out["status-line"]:match("outside") or out["status-line"],
+      auth[1].scheme, auth[1].params.realm, auth[2].scheme, auth[2].params.nonce,
+      tostring(found) .. "/" .. tostring(word), tostring(post.status))
+  end
+  local status, banner = comm.get_banner(host, port, {{ lines = 1 }})
+  local ok, echo = comm.exchange(host, port, "ping\n")
+  local s = nmap.new_socket()
+  local try = nmap.new_try(function() s:close() end)
+  try(s:connect(host, port))
+  local greeting = try(s:receive_buf("\r\n", false))
+  try(s:send("x\n"))
+  local back = try(s:receive_buf((require "match").numbytes(1), true))
+  s:close()
+  return string.format("%s %s|%s %s|%s|%s|%s", tostring(status), banner:gsub("\r\n", ""),
+    tostring(ok), echo:gsub("[\r\n]", ""), greeting, back, host.bin_ip == "\127\0\0\1" and "bin" or "?")
+end"#
+    );
+    let scan = ScriptScan::new(vec![script("nse-net", &src)], ArgTable::default(), None).unwrap();
+    let mut hosts = vec![host_with(&[
+        (port, PortState::Open),
+        (web_port, PortState::Open),
+    ])];
+    scan.scan_hosts(&mut hosts).await;
+    let out = |p: u16| {
+        let port = hosts[0].ports.iter().find(|x| x.port == p).unwrap();
+        port.scripts
+            .first()
+            .map(|s| s.output.clone())
+            .unwrap_or_default()
+    };
+    assert_eq!(
+        out(port),
+        "true 220 hello|true 220 helloping|220 hello|x|bin"
+    );
+    assert_eq!(
+        out(web_port),
+        "200 <b>hello</b 404 nil outside Basic x y Digest n true/hello 200"
+    );
+    let seen = seen.lock().unwrap();
+    // The signature User-Agent, as for FeroProbe's own scripts.
+    assert!(seen[0].contains(USER_AGENT), "{}", seen[0]);
+    let post = seen.iter().find(|r| r.starts_with("POST")).unwrap();
+    assert!(post.ends_with("\r\n\r\na=b%20c"), "{post}");
+}
+
+#[tokio::test]
+async fn nse_registries_are_shared_like_nmaps() {
+    // Every host's run adds itself to a list and a count in the run's
+    // registry; the postrule reads them all. host.registry carries a
+    // value from one script to the next on the same host.
+    let writer = format!(
+        r#"{NSE_HEAD}
+hostrule = function() return true end
+postrule = function() return true end
+action = function(host)
+  if SCRIPT_TYPE == "postrule" then
+    local seen = nmap.registry.seen or {{}}
+    table.sort(seen)
+    return #seen .. " " .. table.concat(seen, ",") .. " " .. tostring(nmap.registry.info.count)
+  end
+  nmap.registry.seen = nmap.registry.seen or {{}}
+  table.insert(nmap.registry.seen, host.ip)
+  -- Not a list: the last writer wins, as each run sets it.
+  nmap.registry.info = nmap.registry.info or {{}}
+  nmap.registry.info.count = (nmap.registry.info.count or 0) + 1
+  host.registry.mark = {{ from = SCRIPT_NAME }}
+  stdnse.sleep(0.05)
+end"#
+    );
+    let reader = format!(
+        r#"{NSE_HEAD}
+dependencies = {{ "writer" }}
+hostrule = function() return true end
+action = function(host) return host.registry.mark and host.registry.mark.from end"#
+    );
+    let scan = ScriptScan::new(
+        vec![script("writer", &writer), script("reader", &reader)],
+        ArgTable::default(),
+        None,
+    )
+    .unwrap();
+    let mut hosts: Vec<HostResult> = (1..=3)
+        .map(|i| {
+            let mut h = host_with(&[]);
+            h.addr = IpAddr::V4(Ipv4Addr::new(127, 0, 0, i));
+            h
+        })
+        .collect();
+    scan.scan_hosts(&mut hosts).await;
+    for h in &hosts {
+        let r = h.scripts.iter().find(|s| s.id == "reader").unwrap();
+        assert_eq!(r.output, "writer");
+    }
+    let post = scan.post_scan().await;
+    let out = &post.iter().find(|s| s.id == "writer").unwrap().output;
+    // All three list entries survive the concurrent runs; the count is
+    // a plain value, so at least one write is kept.
+    assert!(out.starts_with("3 127.0.0.1,127.0.0.2,127.0.0.3 "), "{out}");
+}
+
+#[test]
+fn nse_files_are_scripts_too() {
+    let dir = std::env::temp_dir().join(format!("feroprobe-nse-files-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let nse = format!("{NSE_HEAD}portrule = shortport.http\naction = function() return 'x' end");
+    std::fs::write(dir.join("web.nse"), &nse).unwrap();
+    std::fs::write(dir.join("dup.lua"), &nse).unwrap();
+    std::fs::write(dir.join("dup.nse"), &nse).unwrap();
+    let ids = |spec: &str| -> Vec<String> {
+        choose_in(spec, Vec::new(), Some(&dir))
+            .unwrap_or_else(|e| panic!("{spec}: {e}"))
+            .into_iter()
+            .map(|s| s.id)
+            .collect()
+    };
+    assert_eq!(ids("web"), ["web"]);
+    assert_eq!(ids("web.nse"), ["web"]);
+    let path = dir.join("web").display().to_string();
+    assert_eq!(ids(&path), ["web"]);
+    let chosen = choose_in("dup", Vec::new(), Some(&dir)).unwrap();
+    assert_eq!(chosen[0].path, Some(dir.join("dup.lua")));
+    let done = db::update(&dir, &[]).unwrap();
+    let names: Vec<&str> = done.entries.iter().map(|e| e.filename.as_str()).collect();
+    assert_eq!(names, ["dup.lua", "web.nse"]);
+    assert!(
+        done.skipped[0].starts_with("dup.nse: dup.lua has the same name"),
+        "{:?}",
+        done.skipped
+    );
+    assert_eq!(ids("safe"), ["dup", "web"]);
+    // A directory with both files has the name twice, which is an error.
+    let dirspec = format!("{}/", dir.display());
+    let e = choose_in(&dirspec, Vec::new(), Some(&dir)).unwrap_err();
+    assert!(e.0.contains("duplicate script ID: 'dup'"), "{e}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}

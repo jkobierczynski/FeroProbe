@@ -1046,15 +1046,17 @@ With ICS protection on, `-sC` is refused like `--script`.
 Choose the scripts to run: a comma-separated list where each item is
 
 - a script name, such as `banner`, with `*` matching any run of characters
-  (`http-*`); a trailing `.lua` is allowed;
+  (`http-*`); a trailing `.lua` or `.nse` is allowed;
 - a category, such as `safe` or `discovery`, or `all` for every script;
 - a boolean expression of names and categories with `and`, `or`, `not` and
   parentheses, such as `"safe and not intrusive"`. As in nmap, `and` and
   `or` bind equally and group from the right (`a and b or c` is
   `a and (b or c)`), so use parentheses when mixing them;
-- a script file, given by its path, with or without `.lua`;
+- a script file, given by its path, with or without `.lua` (or `.nse`,
+  for scripts written for nmap: see [NSE compatibility
+  layer](#nse-compatibility-layer));
 - a directory, given by its path with a trailing `/`, for every `.lua`
-  file in it. Without the slash it is refused, as in nmap, so that a
+  and `.nse` file in it. Without the slash it is refused, as in nmap, so that a
   directory named like a category is never picked by mistake.
 
 Names, categories and expressions choose among the scripts built into
@@ -1160,7 +1162,7 @@ needs no target and sends nothing.
 The scripts directory is `$XDG_DATA_HOME/feroprobe/scripts`, which is
 `~/.local/share/feroprobe/scripts` when `XDG_DATA_HOME` is not set (on
 Windows, `%APPDATA%\feroprobe\scripts`). Put your own `.lua` scripts
-there, then run:
+(and `.nse` scripts written for nmap) there, then run:
 
 ```
 $ feroprobe --script-updatedb
@@ -1209,9 +1211,11 @@ Every script runs in its own Lua state with:
   basic functions, `os.time`, `os.clock`, `os.date` and `os.difftime`, and
   FeroProbe's `fero` library;
 - no `io`, no other `os` functions (no commands, environment, files or
-  exit), no `require`, `package`, `debug`, `dofile`, `loadfile` or
+  exit), no `package`, `debug`, `dofile`, `loadfile` or
   `collectgarbage`, no `string.dump`, and `load` for source text only,
   never precompiled bytecode;
+- `require` only for the modules of the [NSE compatibility
+  layer](#nse-compatibility-layer) and Lua's own libraries by name;
 - 64 MB of memory, and about a billion Lua instructions (some seconds of
   pure computation; time spent waiting on the network does not count);
 - for rules, ten seconds (or `--script-timeout`, if shorter); for loading a
@@ -1388,8 +1392,8 @@ scripts that run against that host. A script that reads what another one
 leaves names it in `dependencies`, so that it runs after it when both are
 chosen. In nmap the registry is a plain table that scripts change in
 place; FeroProbe's is called through these functions, as values are
-copied between states. The NSE compatibility layer (planned) can offer
-nmap's form on top.
+copied between states. The [NSE compatibility
+layer](#nse-compatibility-layer) offers nmap's form on top.
 
 ### Script TLS and HTTP
 
@@ -1595,6 +1599,93 @@ PORT       STATE          SERVICE        VERSION
 | SHA-1:   3c1f...
 |_SHA-256: 9a07...
 ```
+
+### NSE compatibility layer
+
+Scripts written for nmap's scripting engine (NSE) can run in FeroProbe
+when they use only the parts of nmap's libraries that FeroProbe offers.
+`--script` takes `.nse` files as it takes `.lua` ones: by path, by name
+in the scripts directory (`name.lua` first, then `name.nse`), from a
+directory, and in the index `--script-updatedb` writes. A script becomes
+an NSE script the moment it calls `require`; FeroProbe's own scripts do
+not.
+
+`require` gives these modules, written for FeroProbe on top of `fero`
+from nmap's public API documentation (nmap's own libraries are under the
+NPSL and are not used or shipped). The same sandbox and scope rules
+apply: every connection still goes only to the scanned host and to ports
+the scan probed there.
+
+| Module | What it has |
+| --- | --- |
+| `nmap` | `new_socket` (`connect`, `send`, `sendto`, `receive`, `receive_bytes`, `receive_lines`, `receive_buf`, `set_timeout`, `close`, `get_info`, `reconnect_ssl`, `get_ssl_certificate`), `new_try`, `registry`, `verbosity`, `debugging`, `clock_ms`, `clock`, `address_family`, `get_port_state`, `have_ssl`, `is_privileged`, `timing_level`, `version_intensity`, `mutex`, `condvar`, `log_write`; `set_port_state` and `set_port_version` are accepted and do nothing |
+| `stdnse` | `debug`, `debug0`-`debug9`, `print_debug`, `verbose`, `verbose0`-`verbose9`, `get_script_args`, `format_output`, `output_table`, `tohex`, `fromhex`, `parse_timespec`, `sleep`, `clock_ms`, `get_hostname`, `format_mac`, `get_timeout`, `new_thread`, `string_or_blank`, `make_buffer`, `registry_get`, `registry_add_table`, `registry_add_array`, `in_port_range`, `generate_random_string`, `silent_require`, and the old names `strsplit`, `keys`, `contains`, `format_time`, `format_timestamp` |
+| `shortport` | `portnumber`, `service`, `port_or_service`, `version_port_or_service`, `port_range`, `http`, `ssl`, `ssh`, `LIKELY_HTTP_PORTS`, `LIKELY_HTTP_SERVICES` (`http` and `ssl` are FeroProbe's own port rules) |
+| `comm` | `opencon`, `get_banner`, `exchange`, `tryssl` |
+| `http` | `get`, `head`, `post`, `put`, `generic_request`, `get_url`, `pipeline_add`, `pipeline_go`, `response_contains`, `parse_www_authenticate`, `identify_404`, `page_exists`, `can_use_head`, `get_status_string`, `USER_AGENT`; on top of FeroProbe's HTTP library, so its redirect rule, signature User-Agent and limits apply |
+| `url` | `parse`, `build`, `absolute`, `escape`, `unescape`, `parse_query`, `build_query`, `parse_path`, `build_path`, `get_default_port` |
+| `ipOps` | `ip_to_str`, `str_to_ip`, `compare_ip`, `isPrivate`, `todword`, `fromdword`, `ip_to_bin`, `bin_to_ip`, `hex_to_bin`, `expand_ip`, `ip_in_range`, `get_ips_from_range`, `get_last_ip`, `ip_sort`, `subnet_to_cidr` |
+| `stringaux`, `tableaux` | `strsplit`, `filename_escape`, `ipattern`; `tcopy`, `shallow_tcopy`, `keys`, `contains`, `invert` |
+| `datetime` | `format_timestamp`, `format_time`, `format_difftime`, `date_to_timestamp`, `record_skew` (feeds `clock-skew`) |
+| `openssl` | `md5`, `sha1`, `digest` (MD5, SHA-1, SHA-256, SHA-384, SHA-512), `hmac`, `rand_bytes`, `rand_pseudo_bytes`, `supported_digests`; no ciphers or big numbers |
+| `base64`, `rand`, `match`, `outlib` | `enc`, `dec`; `random_string`, `random_alpha`, `charset`; `numbytes`, `pattern_limit`, `dontmatch`; `sorted_by_key`, `list_sep` |
+| Lua's own | `string`, `table`, `math`, `coroutine`, `utf8`, `os` (the sandbox's), `_G` |
+
+Any other module (`io`, `brute`, `vulns`, `smb`, `packet`, `creds`,
+`json`, `sslcert`, ...) stops the script from loading with an error that
+names it; a function FeroProbe does not have in a module it offers
+(`nmap.new_dnet`, `openssl.encrypt`, ...) raises an error naming it when
+called. Of nmap 7.99's 612 scripts, 108 load as they are; more modules
+are planned.
+
+What NSE scripts see differently:
+
+- **The host table** has nmap's form for them: `bin_ip`, `mac_addr` as
+  six bytes, `os` as a list of `{ name = ... }` tables, and `registry`.
+- **The registries.** `nmap.registry` and `host.registry` look like plain
+  tables changed in place. Each top-level entry is copied out of
+  FeroProbe's registry the first time the script touches it, and what the
+  script changed is written back after each rule and action, merged with
+  what other scripts did meanwhile: values it set or removed are applied,
+  and entries it added at the end of a list go after that list's end as
+  it is now, so scripts that run at once and add to the same list (or
+  start it with `nmap.registry.x = nmap.registry.x or {}`) all keep their
+  entries. A plain value two scripts set at once keeps the last write. Only
+  plain data is kept (see [The registry](#the-registry)); top-level names
+  must be strings, and `pairs(nmap.registry)` lists only the entries the
+  script has touched. A script stopped by its timeout leaves no changes.
+- **Threads.** `stdnse.new_thread` runs the function to completion
+  before it returns (FeroProbe already runs many scripts at once), and
+  returns a finished coroutine, so the usual wait loops end at once;
+  `nmap.mutex` and `nmap.condvar` never wait.
+- **No raw packets or privileges.** `nmap.is_privileged()` is `false`, so
+  scripts take their unprivileged path; `new_dnet`, `pcap_open` and the
+  interface functions are not available.
+- **Scripts do not change results.** `nmap.set_port_state` and
+  `nmap.set_port_version` are accepted and ignored (shown with `-d2`).
+- **No data files or name lookups.** `nmap.fetchfile` returns `nil`;
+  `nmap.resolve` fails.
+- **Fixed values.** `nmap.timing_level()` is 3 and
+  `nmap.version_intensity()` 7 whatever the scan's options;
+  `stdnse.get_timeout` is 5 seconds within the range asked for, as
+  FeroProbe gives scripts no round-trip times.
+- **Errors.** `stdnse.format_output(false, msg)` gives `ERROR: msg` only
+  with `-d`, as in nmap; a failed `nmap.new_try` ends the script without
+  output, as any script error does in FeroProbe.
+- **Messages** from `stdnse.debug`, `verbose` and `nmap.log_write` go to
+  standard error, as FeroProbe's other messages do.
+- **HTTP.** `redirect_ok` functions cannot run inside FeroProbe's HTTP
+  client: `false` and numbers are honoured, a function means FeroProbe's
+  own rule. Pipelined requests go one after another. A failure gives
+  nmap's form, a response with `status` `nil` and the reason in
+  `status-line`.
+- **The signature.** The HTTP library sends FeroProbe's User-Agent
+  unless the script sets one, as for FeroProbe's own scripts; what a
+  script sends on its own sockets is its own and carries no FeroProbe
+  mark.
+
+A script written for FeroProbe should use `fero` directly; the
+compatibility layer is for running scripts written for nmap.
 
 ## Timing and performance
 
@@ -2813,6 +2904,7 @@ safeguard calls for a difference. The deliberate differences are:
 | XML stylesheet | Links `nmap.xsl`; `--webxml` links nmap.org's copy | Links FeroProbe's own `feroprobe.xsl`; `--webxml` links FeroProbe's published copy |
 | Privileges under `sudo` | Stays root for the whole run | Becomes the user who ran `sudo` once the settings files are read, keeping only the network capabilities on Linux, so reports, `-iL` and other files are read and written as that user; `--keep-root` stays root (see [Giving up root under sudo](#giving-up-root-under-sudo)) |
 | Report files as root | Written through any symbolic link | With `--keep-root` or without `sudo`: a link is refused unless root owns it and its directory and no other user can write there (`/dev/stdout` works); a new file under `sudo` belongs to the invoking user (see `-oA` under Output options) |
+| NSE scripts | nmap's libraries | The NSE compatibility layer: FeroProbe's own modules under nmap's names, a subset of nmap's (see [NSE compatibility layer](#nse-compatibility-layer)); registries copied and merged rather than shared in place, threads run to completion when started, no raw packets, scripts cannot change port results |
 | Service and OS signatures | nmap's databases | FeroProbe's own (nmap's cannot be redistributed); the OS database is much smaller than nmap's, so fewer hosts get a perfect match |
 | UDP service payloads (`-sU`) | nmap's payload database: several probes per port (two DNS queries to 53, two NTP versions to 123, SNMPv1 and v3 to 161, three NetBIOS queries to 137), up to dozens with `-sV` | FeroProbe's own, one per port: DNS (53, 5353), NetBIOS NODE STATUS (137, transaction ID `0x4650` "FP", the request `nbstat` sends), NTP (123), SNMP (161) and SSDP (1900); every other port gets `FeroProbeScan/1\n`. nmap's payloads cannot be redistributed; one payload per service is enough to make it answer |
 | OS detection probes (`-O`) | About 16 probes per try (6 SYNs with varied options, ECN, T2-T7 to open and closed ports, 2 ICMP echoes, a UDP probe to a closed port), with closed ports picked at random outside the scan when none was found, and hosts without an open port probed too | At most 9 probes per try (4 SYNs, ECN and an ACK to the open port; a SYN and an ACK to a closed port the scan found; an ICMP echo only if discovery sends echo requests). No UDP probe, no T3/T5-T7-style odd flag combinations, no random ports, and hosts without an open TCP port are not probed. The price: fewer tests, so some systems nmap tells apart look alike |
