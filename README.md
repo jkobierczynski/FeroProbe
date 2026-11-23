@@ -159,7 +159,7 @@ the same command without `--dry-run`, ideally with a gentle timing template
 Example output:
 
 ```
-Starting FeroProbe 0.6.0
+Starting FeroProbe 0.7.0
 
 Scan report for 127.0.0.1
 Host is up, localhost-response.
@@ -583,7 +583,7 @@ connect scan takes about 18 ms (about 55,000 ports per second).
 
 ## Releases
 
-Pushing a tag such as `v0.6.0` runs `.github/workflows/release.yml`, which
+Pushing a tag such as `v0.7.0` runs `.github/workflows/release.yml`, which
 builds the binaries above, smoke-tests each one (the Intel macOS build, which
 is cross-compiled, gets an architecture check instead), and publishes them with
 SHA-256 checksums as a GitHub release.
