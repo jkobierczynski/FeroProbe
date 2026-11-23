@@ -136,4 +136,129 @@ function ssh.read_kexinit(r)
   return nil, "no KEXINIT"
 end
 
+-- Reading a host key: key exchange up to the server's reply (RFC 4253
+-- section 8, RFC 5656, RFC 8731), as ssh-hostkey does.
+local KEX = {
+  "curve25519-sha256", "curve25519-sha256@libssh.org",
+  "diffie-hellman-group14-sha256", "diffie-hellman-group16-sha512",
+  "diffie-hellman-group18-sha512", "diffie-hellman-group14-sha1",
+  "diffie-hellman-group1-sha1",
+}
+local CIPHERS = "aes128-ctr,aes192-ctr,aes256-ctr,aes128-gcm@openssh.com,"
+  .. "aes256-gcm@openssh.com,chacha20-poly1305@openssh.com,aes128-cbc,3des-cbc"
+local MACS = "hmac-sha2-256,hmac-sha2-512,hmac-sha1,hmac-sha2-256-etm@openssh.com,"
+  .. "hmac-sha2-512-etm@openssh.com,umac-64@openssh.com"
+
+local str = ssh.string
+local packet = ssh.packet
+local read_packet = ssh.read_packet
+
+local function first_common(mine, theirs)
+  local set = {}
+  for _, v in ipairs(theirs) do set[v] = true end
+  for _, v in ipairs(mine) do
+    if set[v] then return v end
+  end
+  return nil
+end
+
+-- The size in bits of an SSH mpint's value.
+local function mpint_bits(m)
+  local i = 1
+  while i <= #m and m:byte(i) == 0 do i = i + 1 end
+  if i > #m then return 0 end
+  local bits = (#m - i + 1) * 8
+  local top = m:byte(i)
+  while top < 0x80 do
+    bits = bits - 1
+    top = top << 1
+  end
+  return bits
+end
+
+local CURVE_BITS = { nistp256 = 256, nistp384 = 384, nistp521 = 521 }
+
+-- The size in bits and the type of an SSH public key blob.
+function ssh.key_bits(blob)
+  local ok, kind, pos = pcall(string.unpack, ">s4", blob)
+  if not ok then return nil end
+  if kind == "ssh-rsa" then
+    local ok2, _, n = pcall(string.unpack, ">s4s4", blob, pos)
+    return ok2 and mpint_bits(n) or nil, kind
+  elseif kind == "ssh-dss" then
+    local ok2, p = pcall(string.unpack, ">s4", blob, pos)
+    return ok2 and mpint_bits(p) or nil, kind
+  elseif kind:match("^ecdsa%-sha2%-") then
+    local ok2, curve = pcall(string.unpack, ">s4", blob, pos)
+    return ok2 and CURVE_BITS[curve] or nil, kind
+  elseif kind == "ssh-ed25519" then
+    return 256, kind
+  end
+  return nil, kind
+end
+
+-- Connect and read the server's host key for one of the host key
+-- algorithms `algs` (in order of preference), from its key exchange
+-- reply; nothing logs in. Returns the key blob; or nil and the server's
+-- host key algorithms when it offers none of `algs` (so a caller can skip
+-- other families without connecting); or nil, nil and a message.
+function ssh.host_key(host, port, algs, timeout)
+  local sock, r = ssh.connect(host, port, timeout)
+  if not sock then return nil, nil, r end
+  local kexinit = ssh.kexinit({
+    kex_algorithms = KEX, server_host_key_algorithms = algs,
+    encryption_algorithms_client_to_server = CIPHERS,
+    encryption_algorithms_server_to_client = CIPHERS,
+    mac_algorithms_client_to_server = MACS, mac_algorithms_server_to_client = MACS,
+    compression_algorithms_client_to_server = "none",
+    compression_algorithms_server_to_client = "none",
+  })
+  sock:send(packet(kexinit))
+  local kex
+  for _ = 1, 50 do
+    local p, perr = read_packet(r)
+    if not p then
+      sock:close()
+      return nil, nil, perr
+    end
+    local msg = p:byte(1)
+    if msg == 20 and not kex then
+      local theirs = ssh.parse_kexinit(p)
+      if not theirs then break end
+      local their_kex, their_keys = theirs.kex_algorithms, theirs.server_host_key_algorithms
+      if not first_common(algs, their_keys) then
+        sock:close()
+        return nil, their_keys
+      end
+      kex = first_common(KEX, their_kex)
+      if not kex then
+        sock:close()
+        return nil, nil, "no key exchange method in common"
+      end
+      if kex:match("^curve25519") then
+        sock:send(packet(string.char(30) .. str(fero.crypto.random_bytes(32))))
+      else
+        -- A random 512-bit public value: below every group's prime, with
+        -- the top bit clear (a positive mpint) and plenty of bits set, as
+        -- servers check (OpenSSH wants 1 < e < p-1 and at least 4 bits).
+        -- No shared secret is computed, so it need not come from a
+        -- private exponent.
+        local e = fero.crypto.random_bytes(64)
+        e = string.char(e:byte(1) & 0x3f | 0x40) .. e:sub(2, 63)
+          .. string.char(e:byte(64) | 0x0f)
+        sock:send(packet(string.char(30) .. str(e)))
+      end
+    elseif msg == 31 and kex then
+      sock:close()
+      local okb, blob = pcall(string.unpack, ">s4", p, 2)
+      if okb then return blob end
+      return nil, nil, "bad key exchange reply"
+    elseif msg == 1 then
+      break -- SSH_MSG_DISCONNECT
+    end
+  end
+  sock:close()
+  return nil, nil, "no host key"
+end
+
 fero.ssh = ssh

@@ -259,7 +259,11 @@ function Socket:set_timeout(ms) return self.s:set_timeout(math.max(0, math.floor
 function Socket:close() return self.s:close() end
 function Socket:get_info() return self.s:get_info() end
 function Socket:reconnect_ssl() return self.s:reconnect_ssl() end
-function Socket:get_ssl_certificate() return self.s:get_ssl_certificate() end
+function Socket:get_ssl_certificate()
+  local raw, err = self.s:get_ssl_certificate()
+  if not raw then return nil, err end
+  return require("sslcert").parse_ssl_certificate(raw.der)
+end
 function Socket:bind() return false, "bind is not available in FeroProbe" end
 function Socket:pcap_open() return false, "raw packets are not available in FeroProbe" end
 
