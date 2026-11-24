@@ -163,6 +163,24 @@ impl Expr {
             }
         }
     }
+
+    /// Whether this rule may run a brute-force script (one in the `brute`
+    /// category): only when it names the script exactly (`ftp-brute`) or
+    /// uses the `brute` category word (`brute`, `brute and safe`), never
+    /// through `all`, another category such as `intrusive`, or a name
+    /// pattern such as `*-brute`. Checked only on a rule that already
+    /// matched the script, so the `brute` word or exact name is why, or
+    /// part of why, it matched.
+    pub(crate) fn authorizes_brute(&self, id: &str) -> bool {
+        match self {
+            // `id` never holds `*`, so an equal word is an exact name, not
+            // a pattern.
+            Expr::Word(w) => w == "brute" || w == id,
+            Expr::Not(e) => e.authorizes_brute(id),
+            Expr::And(a, b) | Expr::Or(a, b) => a.authorizes_brute(id) || b.authorizes_brute(id),
+            Expr::Const(_) => false,
+        }
+    }
 }
 
 /// Whether `name` matches `pattern`, where `*` stands for any run of
@@ -249,6 +267,24 @@ mod tests {
         assert!(parse("(a").is_none());
         assert!(parse("a and").is_none());
         assert!(parse("./dir/").is_some());
+    }
+
+    #[test]
+    fn brute_is_authorized_only_by_name_or_the_word() {
+        let ok = |rule: &str, id: &str| parse(rule).unwrap().authorizes_brute(id);
+        // The exact name or the `brute` word authorizes it.
+        assert!(ok("ftp-brute", "ftp-brute"));
+        assert!(ok("brute", "ftp-brute"));
+        assert!(ok("brute and safe", "ftp-brute"));
+        assert!(ok("ftp-brute or http-title", "ftp-brute"));
+        // A category, `all`, or a name pattern does not.
+        assert!(!ok("all", "ftp-brute"));
+        assert!(!ok("intrusive", "ftp-brute"));
+        assert!(!ok("*-brute", "ftp-brute"));
+        assert!(!ok("safe", "ftp-brute"));
+        assert!(!ok("default or intrusive", "ftp-brute"));
+        // A different exact name does not authorize this one.
+        assert!(!ok("ssh-brute", "ftp-brute"));
     }
 
     #[test]

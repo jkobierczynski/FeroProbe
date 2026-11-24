@@ -158,6 +158,68 @@ fn choosing_scripts() {
 }
 
 #[test]
+fn brute_scripts_run_only_when_chosen_deliberately() {
+    let built = || {
+        vec![
+            script("alpha", &format!("{PORT_SCRIPT} action = function() end")),
+            Script::load(
+                "ftp-brute",
+                None,
+                "categories = {'intrusive','brute'} \
+                 portrule = function(host, port) return true end \
+                 action = function() end",
+            )
+            .unwrap(),
+        ]
+    };
+    let chosen = |spec: &str| choose_from(spec, built()).unwrap();
+    let ids = |spec: &str| -> Vec<String> { chosen(spec).into_iter().map(|s| s.id).collect() };
+    let skipped =
+        |spec: &str| -> Vec<String> { choose_in(spec, built(), None).unwrap().brute_skipped };
+    // Deliberate: the exact name or the `brute` word runs it.
+    assert_eq!(ids("ftp-brute"), ["ftp-brute"]);
+    assert_eq!(ids("brute"), ["ftp-brute"]);
+    assert_eq!(ids("brute and intrusive"), ["ftp-brute"]);
+    assert!(skipped("ftp-brute").is_empty());
+    // Swept up by a category, `all`, or a wildcard: left out, with a note.
+    assert_eq!(ids("all"), ["alpha"]);
+    assert_eq!(skipped("all"), ["ftp-brute"]);
+    assert_eq!(ids("intrusive"), Vec::<String>::new());
+    assert_eq!(skipped("intrusive"), ["ftp-brute"]);
+    assert_eq!(skipped("*-brute"), ["ftp-brute"]);
+    assert_eq!(skipped("ftp-*"), ["ftp-brute"]);
+    // A forced `all` still does not authorize brute (it only overrides
+    // the host and port rules, not the selection).
+    assert_eq!(ids("+all"), ["alpha"]);
+    assert_eq!(skipped("+all"), ["ftp-brute"]);
+
+    // A brute script by file path or name in the scripts directory runs;
+    // swept from a whole directory it does not.
+    let dir = std::env::temp_dir().join(format!("feroprobe-brute-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let brute = "description = 'b' categories = {'brute'} \
+                 portrule = function(host, port) return true end \
+                 action = function() end";
+    std::fs::write(dir.join("ssh-brute.lua"), brute).unwrap();
+    let path = dir.join("ssh-brute.lua").display().to_string();
+    let by_path = choose_in(&path, Vec::new(), Some(&dir)).unwrap();
+    assert_eq!(
+        by_path
+            .scripts
+            .iter()
+            .map(|s| s.id.as_str())
+            .collect::<Vec<_>>(),
+        ["ssh-brute"]
+    );
+    assert!(by_path.brute_skipped.is_empty());
+    let by_dir = choose_in(&format!("{}/", dir.display()), Vec::new(), Some(&dir)).unwrap();
+    assert!(by_dir.scripts.is_empty());
+    assert_eq!(by_dir.brute_skipped, ["ssh-brute"]);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
 fn installed_scripts_and_their_index() {
     let built = || {
         vec![script(
@@ -170,7 +232,13 @@ fn installed_scripts_and_their_index() {
     // No directory: --script-updatedb says so; choosing still works.
     let e = db::update(&dir, &["alpha"]).unwrap_err();
     assert!(e.0.contains("no scripts directory"), "{e}");
-    assert_eq!(choose_in("alpha", built(), Some(&dir)).unwrap().len(), 1);
+    assert_eq!(
+        choose_in("alpha", built(), Some(&dir))
+            .unwrap()
+            .scripts
+            .len(),
+        1
+    );
     std::fs::create_dir_all(&dir).unwrap();
     let mine = "description = 'mine' categories = {'default', 'safe'} \
                 hostrule = function() return true end action = function() return 'x' end";
@@ -181,6 +249,7 @@ fn installed_scripts_and_their_index() {
     let ids = |spec: &str| -> Vec<String> {
         choose_in(spec, built(), Some(&dir))
             .unwrap()
+            .scripts
             .into_iter()
             .map(|s| s.id)
             .collect()
@@ -205,7 +274,7 @@ fn installed_scripts_and_their_index() {
     // Now by category and expression too; the built-in alpha keeps its name.
     assert_eq!(ids("safe"), ["alpha", "mine"]);
     assert_eq!(ids("default and not alpha"), ["mine"]);
-    let chosen = choose_in("default", built(), Some(&dir)).unwrap();
+    let chosen = choose_in("default", built(), Some(&dir)).unwrap().scripts;
     assert_eq!(chosen[0].selection, Selection::Category);
     assert_eq!(chosen[0].path, Some(dir.join("mine.lua")));
     assert!(help_text(&chosen).contains("File: "));
@@ -213,7 +282,9 @@ fn installed_scripts_and_their_index() {
     let path = dir.join("mine.lua").display().to_string();
     assert_eq!(ids(&format!("safe,{path}")), ["alpha", "mine"]);
     // ...and a + on the path still forces it.
-    let chosen = choose_in(&format!("safe,+{path}"), built(), Some(&dir)).unwrap();
+    let chosen = choose_in(&format!("safe,+{path}"), built(), Some(&dir))
+        .unwrap()
+        .scripts;
     assert!(chosen.iter().any(|s| s.id == "mine" && s.forced));
     // A script the index lists but that is gone names the fix.
     std::fs::remove_file(dir.join("mine.lua")).unwrap();
@@ -2122,6 +2193,7 @@ async fn http_headers_and_server_header() {
 fn the_default_category() {
     let defaults: Vec<String> = choose("default")
         .unwrap()
+        .scripts
         .into_iter()
         .map(|s| s.id)
         .collect();
@@ -2176,7 +2248,7 @@ fn the_default_category() {
         ]
     );
     // Every default script is also safe, as in nmap.
-    for s in choose("default").unwrap() {
+    for s in choose("default").unwrap().scripts {
         assert!(s.categories.iter().any(|c| c == "safe"), "{}", s.id);
     }
 }
@@ -5860,6 +5932,7 @@ fn nse_modules_load_and_unknown_ones_are_named() {
     // Every module loads on its own.
     for m in [
         "base64",
+        "brute",
         "comm",
         "creds",
         "datetime",
@@ -5883,6 +5956,7 @@ fn nse_modules_load_and_unknown_ones_are_named() {
         "stringaux",
         "tableaux",
         "tls",
+        "unpwdb",
         "url",
         "vulns",
         "_G",
@@ -6301,6 +6375,57 @@ async fn nse_outputs(src: &str, ports: &[(u16, &str)], args: &str) -> Vec<(u16, 
 }
 
 #[tokio::test]
+async fn nse_brute_framework_runs_its_driver() {
+    // User and password lists from files named in --script-args (userdb,
+    // passdb), so no shipped word list is needed. The script's Driver
+    // accepts one pair; the engine must find it and store it.
+    let dir = std::env::temp_dir().join(format!("feroprobe-brute-run-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let users = dir.join("users.txt");
+    let passes = dir.join("pass.txt");
+    std::fs::write(&users, "admin\nroot\n").unwrap();
+    std::fs::write(&passes, "x\nsecret\n").unwrap();
+    let src = format!(
+        r#"{NSE_HEAD}
+categories = {{ "brute" }}
+local brute = require "brute"
+local creds = require "creds"
+Driver = {{}}
+Driver.__index = Driver
+function Driver:new(host, port, options)
+  return setmetatable({{ host = host, port = port }}, Driver)
+end
+function Driver:connect() return true end
+function Driver:disconnect() return true end
+function Driver:login(user, pass)
+  if user == "root" and pass == "secret" then
+    return true, creds.Account:new(user, pass, creds.State.VALID)
+  end
+  local err = brute.Error:new("bad credentials")
+  err:setRetry(false)
+  return false, err
+end
+portrule = function(host, port) return true end
+action = function(host, port)
+  local engine = brute.Engine:new(Driver, host, port)
+  engine.options.useraspass = false
+  engine.options.emptypass = false
+  local ok, result = engine:start()
+  return result
+end"#
+    );
+    let args = format!("userdb={},passdb={}", users.display(), passes.display());
+    let out = nse_outputs(&src, &[(80, "http")], &args).await;
+    let text = &out[0].1;
+    assert!(text.contains("root:secret"), "found account: {text}");
+    assert!(text.contains("Valid credentials"), "{text}");
+    assert!(!text.contains("admin:"), "no invalid pair stored: {text}");
+    // The found account is in the run's creds registry too.
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[tokio::test]
 async fn nse_part_two_modules_on_lab_servers() {
     let (tls_port, _) = tls_web(false).await;
     let (smtp_port, _) = starttls_server(SMTP_STARTTLS, mail_answer).await;
@@ -6593,6 +6718,7 @@ fn nse_files_are_scripts_too() {
     let ids = |spec: &str| -> Vec<String> {
         choose_in(spec, Vec::new(), Some(&dir))
             .unwrap_or_else(|e| panic!("{spec}: {e}"))
+            .scripts
             .into_iter()
             .map(|s| s.id)
             .collect()
@@ -6601,7 +6727,7 @@ fn nse_files_are_scripts_too() {
     assert_eq!(ids("web.nse"), ["web"]);
     let path = dir.join("web").display().to_string();
     assert_eq!(ids(&path), ["web"]);
-    let chosen = choose_in("dup", Vec::new(), Some(&dir)).unwrap();
+    let chosen = choose_in("dup", Vec::new(), Some(&dir)).unwrap().scripts;
     assert_eq!(chosen[0].path, Some(dir.join("dup.lua")));
     let done = db::update(&dir, &[]).unwrap();
     let names: Vec<&str> = done.entries.iter().map(|e| e.filename.as_str()).collect();
