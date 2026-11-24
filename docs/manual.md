@@ -2686,6 +2686,41 @@ where the ports came from, the timing settings, and what runs after the
 port scan. The scan then runs as usual. Combined with `--dry-run` it
 explains the plan and lists the probes without sending anything.
 
+With `--script`, `-sC` or `-A` the plan ends with a **Script scan** step
+that says where scripts may run, before anything is sent:
+
+- the **scope**: the hosts and ports every script connection is held to.
+  A script may connect only to the host it runs against, and only on the
+  TCP and UDP ports this scan probes there; FeroProbe refuses anything
+  else. This is a hard ceiling, whatever the script is.
+- the chosen scripts **by phase**: prerule (before the scan) and postrule
+  (after it) scripts are named, and send nothing to the targets, as they
+  get no network access; hostrule and portrule scripts are listed with
+  what their rule keys on. For FeroProbe's built-in scripts that is the
+  ports and service names the rule wants (`ssh-hostkey: TCP 22, or a TCP
+  port named ssh`), scripts with the same rule on one line. A script from
+  a file, an nmap `.nse` script above all, is named only: its rule is its
+  own Lua code and declares no ports, so FeroProbe does not guess which
+  ports it will pick. It runs inside the scope above. Scripts forced with
+  `+` are named as running on every host or port.
+
+The connections scripts actually make show up afterwards with
+[`--script-trace`](#--script-trace), and `-d2` logs each script run with
+the host and port it ran against.
+
+```
+6. Script scan
+   - 3 scripts: the scripts chosen by --script ssh-hostkey,clock-skew,/x/mine.nse
+   - scope: a script may connect only to the host it runs against, on the ports this scan probes there; FeroProbe refuses any other connection. Here that is whichever of the 2 targets are found up, on 1 TCP port: 22
+   - once per host that is up (hostrule), when the rule says yes:
+     * clock-skew: a host other scripts noted a clock for; it sends nothing itself
+   - once per port found open, open|filtered or unfiltered (portrule), when the rule says yes:
+     * ssh-hostkey: TCP 22, or a TCP port named ssh
+     * mine: the portrule is the script's own code and names no ports; it is asked about each port, inside the scope above
+   - after the scan (postrule), sending nothing to the targets: clock-skew
+   - to see the connections scripts actually make: --script-trace, or -d2 for each script run and the host and port it ran against
+```
+
 #### `--packet-trace`
 
 Print every probe sent and every answer received on standard output, as

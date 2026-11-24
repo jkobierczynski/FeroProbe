@@ -181,7 +181,7 @@ the SCTP, IP protocol, IPv6 OS detection and probe-signature work).
 | Port state reasons | `--reason` | |
 | Open ports only | `--open` | Keeps `open`, `open\|filtered` and `unfiltered` ports, like nmap |
 | Packet trace | `--packet-trace` | `SENT`/`RCVD`/`CONN` lines like nmap's; with `-f`/`--mtu` it shows each fragment actually sent (see [Deliberate differences](#deliberate-differences-from-nmap)) |
-| Plan explanation | `--explain` | FeroProbe's own: the plan with a reason for each step |
+| Plan explanation | `--explain` | FeroProbe's own: the plan with a reason for each step. With scripts, a Script scan step (`explain::script_lines`): the scope envelope (hosts found up x probed TCP/UDP ports, the hard limit `socket::Scope` enforces), then the scripts by phase; built-in hostrule/portrule scripts show what their rule keys on (`script::rule_keys`, `keys.rs`, a test keeps it in step with each `fero.portrule.match` list and the http/ssl/smb rules), scripts from files (`.nse` above all) are named only, never a guessed port list; points to `--script-trace`/`-d2` for the real targets |
 | Dry run | `--dry-run` | FeroProbe's own: prints every probe the scan would send (discovery and port scan, with `-f`/`--mtu`, `-D`, `-S` expanded) as `NOT SENT (dry run)` lines in the `--packet-trace` layout, then stops. Sends nothing, needs no root, writes no report (`dryrun.rs`) |
 | Compare two reports | `feroprobe-diff [-v] [--text\|--xml] FILE1 FILE2` | nmap's `ndiff` as a separate program (`src/bin/feroprobe-diff/`), as nmap ships it: reads FeroProbe's or nmap's `-oX` reports and shows host, address and name, port state, "Not shown", service and version, OS match and script output changes, in ndiff's text and XML layouts, with its exit status (0 same, 1 different, 2 error). Own code, not ndiff's. A few deliberate differences (see [Deliberate differences](#deliberate-differences-from-nmap)) |
 | nmap-style help and warnings | `-h`, `--help` | Help page laid out like nmap's; nmap's warnings for names, down hosts, option values |
@@ -416,6 +416,9 @@ categories and boolean expressions (`"default and safe"`, `"not intrusive"`),
 like nmap. `-sC` means `--script default`. Users can load their own scripts
 from a path; FeroProbe's own live in `crates/feroprobe-core/lua-scripts/`
 (inside the crate, so it can be published) and are compiled into the binary.
+A new built-in script also needs an entry in `script/keys.rs` (`rule_keys`,
+what its hostrule or portrule keys on, shown by `--explain`); a test fails
+without one.
 
 **Sandbox.** Scripts get Lua's `string`, `table`, `math`, `utf8` and coroutine
 libraries, and FeroProbe's libraries. No `io`, `os.execute`, `package.loadlib`
