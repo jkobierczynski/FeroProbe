@@ -3,8 +3,10 @@
 
 use std::collections::BTreeMap;
 use std::net::IpAddr;
+use std::sync::Arc;
 use std::time::Duration;
 
+use feroprobe_core::script::Script;
 use feroprobe_core::{PingProbes, ScanConfig, Target};
 
 use crate::{Args, Plan, ScanType};
@@ -36,6 +38,9 @@ pub(crate) struct Facts<'a> {
     pub cfg: &'a ScanConfig,
     pub os: bool,
     pub trace: bool,
+    /// The scripts `--script`, `-sC` or `-A` chose, loaded; empty when
+    /// none run.
+    pub scripts: &'a [Arc<Script>],
 }
 
 fn ports(list: &[u16]) -> String {
@@ -506,29 +511,165 @@ pub(crate) fn explain(args: &Args, f: &Facts) -> Vec<String> {
     if f.trace {
         extras.push("traceroute to each host that is up (--traceroute)".to_string());
     }
-    let selection = crate::script_selection(args);
-    if !selection.is_empty() {
-        let how = match (args.script.is_empty(), crate::default_scripts(args)) {
-            (true, _) if args.aggressive => "the default scripts (-sC, part of -A)".to_string(),
-            (true, _) => "the default scripts (-sC)".to_string(),
-            (false, true) => format!(
-                "the scripts chosen by --script {} and the default scripts (-sC{})",
-                args.script.join(","),
-                if args.aggressive { ", part of -A" } else { "" }
-            ),
-            (false, false) => format!("the scripts chosen by --script {}", args.script.join(",")),
-        };
-        extras.push(format!(
-            "{how}, on the hosts and ports their rules pick; each may connect only to the host \
-             it runs against, on ports this scan probes there"
-        ));
-    }
     if !extras.is_empty() {
         head(&mut out, "After the port scan");
         for e in extras {
             say(&mut out, e);
         }
     }
+
+    // 7. Scripts.
+    if !f.scripts.is_empty() {
+        head(&mut out, "Script scan");
+        for line in script_lines(args, f) {
+            say(&mut out, line);
+        }
+    }
+    out
+}
+
+/// Where and when the chosen scripts run: the scope every script's
+/// connections are held to, then the scripts by phase, with what the
+/// built-in scripts' rules key on. A script from a file gets its name
+/// only: its rule is its own Lua code, which says nothing about its
+/// targets before it runs.
+fn script_lines(args: &Args, f: &Facts) -> Vec<String> {
+    let mut out = Vec::new();
+    let how = match (args.script.is_empty(), crate::default_scripts(args)) {
+        (true, _) if args.aggressive => "the default scripts (-sC, part of -A)".to_string(),
+        (true, _) => "the default scripts (-sC)".to_string(),
+        (false, true) => format!(
+            "the scripts chosen by --script {} and the default scripts (-sC{})",
+            args.script.join(","),
+            if args.aggressive { ", part of -A" } else { "" }
+        ),
+        (false, false) => format!("the scripts chosen by --script {}", args.script.join(",")),
+    };
+    out.push(format!("{}: {how}", plural(f.scripts.len(), "script")));
+
+    // The scope envelope: the hard limit on every script connection.
+    let hosts = if f.plan.list {
+        "no host (-sL scans nothing)".to_string()
+    } else {
+        match f.targets.len() {
+            n if !f.plan.discovery => format!("every target (-Pn), {}", plural(n, "host")),
+            1 => "the target, if it is found up".to_string(),
+            n => format!("whichever of the {n} targets are found up"),
+        }
+    };
+    let tcp = f.tcp_ports;
+    let udp = f.udp_ports;
+    let ports = match (tcp.is_empty(), udp.is_empty()) {
+        (true, true) => "no ports, since this scan probes none".to_string(),
+        (false, true) => format!("{}: {}", plural(tcp.len(), "TCP port"), ports(tcp)),
+        (true, false) => format!("{}: {}", plural(udp.len(), "UDP port"), ports(udp)),
+        (false, false) => format!(
+            "{}: {}, and {}: {}",
+            plural(tcp.len(), "TCP port"),
+            ports(tcp),
+            plural(udp.len(), "UDP port"),
+            ports(udp)
+        ),
+    };
+    out.push(format!(
+        "scope: a script may connect only to the host it runs against, on the ports this scan \
+         probes there; FeroProbe refuses any other connection. Here that is {hosts}, on {ports}"
+    ));
+    if !f.sctp_ports.is_empty() || !f.protocols.is_empty() {
+        out.push("scripts cannot open SCTP or raw IP sockets, whatever the scan probes".into());
+    }
+
+    // The scripts by phase. A script with several rules shows under each.
+    let built_in = |s: &Script| s.path.is_none();
+    let names = |pick: &dyn Fn(&Script) -> bool| -> Vec<String> {
+        f.scripts
+            .iter()
+            .filter(|s| pick(s))
+            .map(|s| s.id.clone())
+            .collect()
+    };
+    let pre = names(&|s| s.rules.prerule);
+    if !pre.is_empty() {
+        out.push(format!(
+            "before the scan (prerule), sending nothing to the targets: {}",
+            pre.join(", ")
+        ));
+    }
+    for (phase, title, pick) in [
+        (
+            "hostrule",
+            "once per host that is up (hostrule), when the rule says yes",
+            (&|s: &Script| s.rules.hostrule) as &dyn Fn(&Script) -> bool,
+        ),
+        (
+            "portrule",
+            "once per port found open, open|filtered or unfiltered (portrule), when the rule \
+             says yes",
+            &|s: &Script| s.rules.portrule,
+        ),
+    ] {
+        let chosen: Vec<&Arc<Script>> = f.scripts.iter().filter(|s| pick(s)).collect();
+        if chosen.is_empty() {
+            continue;
+        }
+        out.push(format!("{title}:"));
+        // Built-in scripts that key on the same ports share a line.
+        let mut groups: Vec<(&str, Vec<&str>)> = Vec::new();
+        let mut own_code = Vec::new();
+        for s in &chosen {
+            let keys = built_in(s)
+                .then(|| feroprobe_core::script::rule_keys(&s.id))
+                .flatten();
+            match keys {
+                Some(k) => match groups.iter_mut().find(|(g, _)| *g == k) {
+                    Some((_, ids)) => ids.push(&s.id),
+                    None => groups.push((k, vec![&s.id])),
+                },
+                None => own_code.push(s.id.as_str()),
+            }
+        }
+        for (keys, ids) in groups {
+            out.push(format!("  {}: {keys}", ids.join(", ")));
+        }
+        if !own_code.is_empty() {
+            out.push(format!(
+                "  {}: the {phase} is the script's own code and names no ports; it is asked \
+                 about each {}, inside the scope above",
+                own_code.join(", "),
+                if phase == "hostrule" { "host" } else { "port" }
+            ));
+        }
+        if chosen.iter().any(|s| s.forced) {
+            let forced: Vec<&str> = chosen
+                .iter()
+                .filter(|s| s.forced)
+                .map(|s| s.id.as_str())
+                .collect();
+            out.push(format!(
+                "  {}: forced with + in --script, so {} on every {} whatever {} rule says",
+                forced.join(", "),
+                if forced.len() == 1 {
+                    "it runs"
+                } else {
+                    "they run"
+                },
+                if phase == "hostrule" { "host" } else { "port" },
+                if forced.len() == 1 { "its" } else { "their" }
+            ));
+        }
+    }
+    let post = names(&|s| s.rules.postrule);
+    if !post.is_empty() {
+        out.push(format!(
+            "after the scan (postrule), sending nothing to the targets: {}",
+            post.join(", ")
+        ));
+    }
+    out.push(
+        "to see the connections scripts actually make: --script-trace, or -d2 for each script \
+         run and the host and port it ran against"
+            .into(),
+    );
     out
 }
 
@@ -593,6 +734,7 @@ mod tests {
             cfg: &cfg,
             os: false,
             trace: false,
+            scripts: &[],
         };
         let text = explain(&args, &facts).join("\n");
         for want in [
@@ -609,5 +751,75 @@ mod tests {
         ] {
             assert!(text.contains(want), "missing {want:?} in:\n{text}");
         }
+    }
+
+    #[test]
+    fn script_scan_shows_scope_and_phases() {
+        let args = Args::try_parse_from([
+            "feroprobe",
+            "--script",
+            "ssh-hostkey,clock-skew,/x/mine.nse",
+            "-p",
+            "22",
+            "10.0.0.1",
+            "10.0.0.2",
+        ])
+        .unwrap();
+        let plan = crate::plan(&args.scan, false, false, false).unwrap();
+        let targets = [
+            Target::new("10.0.0.1".parse().unwrap()),
+            Target::new("10.0.0.2".parse().unwrap()),
+        ];
+        let cfg = ScanConfig::default();
+        let probes = PingProbes::default();
+        let mut scripts: Vec<Arc<Script>> = Script::built_in()
+            .unwrap()
+            .into_iter()
+            .filter(|s| s.id == "ssh-hostkey" || s.id == "clock-skew")
+            .map(Arc::new)
+            .collect();
+        let mine = Script::load(
+            "mine",
+            Some("/x/mine.nse".into()),
+            "categories = {'safe'}\nportrule = function() return true end\n\
+             action = function() end\n",
+        )
+        .unwrap();
+        scripts.push(Arc::new(mine));
+        let facts = Facts {
+            targets: &targets,
+            excluded: 0,
+            plan: &plan,
+            probes: &probes,
+            privileged: false,
+            icmp: true,
+            raw_pings: false,
+            localhost: 0,
+            local: BTreeMap::new(),
+            tcp_ports: &[22],
+            bounce: None,
+            udp_ports: &[],
+            sctp_ports: &[],
+            protocols: &[],
+            cfg: &cfg,
+            os: false,
+            trace: false,
+            scripts: &scripts,
+        };
+        let text = explain(&args, &facts).join("\n");
+        for want in [
+            "Script scan",
+            "3 scripts: the scripts chosen by --script ssh-hostkey,clock-skew,/x/mine.nse",
+            "Here that is whichever of the 2 targets are found up, on 1 TCP port: 22",
+            "once per host that is up (hostrule), when the rule says yes:\n     * clock-skew: ",
+            "* ssh-hostkey: TCP 22, or a TCP port named ssh",
+            "* mine: the portrule is the script's own code and names no ports",
+            "after the scan (postrule), sending nothing to the targets: clock-skew",
+            "--script-trace, or -d2",
+        ] {
+            assert!(text.contains(want), "missing {want:?} in:\n{text}");
+        }
+        // An external script never gets a port list of its own.
+        assert!(!text.contains("mine: TCP"), "{text}");
     }
 }

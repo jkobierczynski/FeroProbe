@@ -4041,6 +4041,7 @@ async fn run(
             cfg: &cfg,
             os,
             trace,
+            scripts: scripts.as_ref().map_or(&[], |e| e.scripts()),
         };
         for line in explain::explain(&args, &facts) {
             eprintln!("{line}");
