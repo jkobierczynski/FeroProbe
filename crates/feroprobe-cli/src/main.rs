@@ -1324,7 +1324,7 @@ fn open_report_as_root(path: &str, mode: OpenMode) -> Result<std::fs::File> {
         let name = cstr(&part)?;
         let last = queue.is_empty();
         let shown = String::from_utf8_lossy(&part).into_owned();
-        if let Some(st) = stat_at(&dir, &name).filter(&is_link) {
+        if let Some(st) = stat_at(&dir, &name).filter(is_link) {
             check_link(&dir, &st, &format!("{path} (at {shown})"))?;
             // Links in /proc (/dev/stdout leads to /proc/self/fd/1) are the
             // kernel's own and may name no path at all: let it follow them.
