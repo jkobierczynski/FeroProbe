@@ -418,13 +418,28 @@ impl Script {
 /// directories the other rules name, and last a script of that name in
 /// the scripts directory. A rule that matches nothing is an error, as in
 /// nmap.
-pub fn choose(spec: &str) -> Result<Vec<Script>, ScriptError> {
+pub fn choose(spec: &str) -> Result<Chosen, ScriptError> {
     choose_in(spec, Script::built_in()?, db::user_dir().as_deref())
+}
+
+/// The outcome of [`choose`]: the scripts to run, and the brute-force
+/// scripts left out because they were not chosen the way a brute script
+/// must be (by name, a file, or the `brute` category word).
+#[derive(Debug)]
+pub struct Chosen {
+    pub scripts: Vec<Script>,
+    /// Names of brute-force scripts a rule matched but did not authorize.
+    pub brute_skipped: Vec<String>,
 }
 
 #[cfg(test)]
 fn choose_from(spec: &str, built_in: Vec<Script>) -> Result<Vec<Script>, ScriptError> {
-    choose_in(spec, built_in, None)
+    choose_in(spec, built_in, None).map(|c| c.scripts)
+}
+
+/// Whether `categories` marks a brute-force script.
+fn is_brute(categories: &[String]) -> bool {
+    categories.iter().any(|c| c == "brute")
 }
 
 /// [`choose`] with these built-in scripts and this scripts directory.
@@ -432,7 +447,7 @@ fn choose_in(
     spec: &str,
     built_in: Vec<Script>,
     installed: Option<&Path>,
-) -> Result<Vec<Script>, ScriptError> {
+) -> Result<Chosen, ScriptError> {
     let rules = select::split_rules(spec);
     if rules.is_empty() {
         return err("--script needs at least one script, category or path");
@@ -440,14 +455,17 @@ fn choose_in(
     let parsed: Vec<Option<select::Expr>> = rules.iter().map(|r| select::parse(&r.text)).collect();
     let mut used = vec![false; rules.len()];
     let mut chosen: Vec<Script> = Vec::new();
+    let mut brute_skipped: Vec<String> = Vec::new();
     let built_in_ids: Vec<String> = built_in.iter().map(|s| s.id.clone()).collect();
     for script in built_in {
         let mut pick: Option<(bool, Selection)> = None;
+        let mut brute_ok = false;
         for (i, rule) in rules.iter().enumerate() {
             let Some(e) = &parsed[i] else { continue };
             let mut by_name = false;
             if e.matches(&script.id, &script.categories, &mut by_name) {
                 used[i] = true;
+                brute_ok |= e.authorizes_brute(&script.id);
                 let sel = if by_name {
                     Selection::Name
                 } else {
@@ -458,6 +476,13 @@ fn choose_in(
             }
         }
         if let Some((forced, selection)) = pick {
+            // A brute-force script runs only when a rule chose it by name
+            // or the `brute` word, never through `all`, `intrusive` or a
+            // name pattern; it is left out otherwise, with a warning.
+            if is_brute(&script.categories) && !brute_ok {
+                brute_skipped.push(script.id);
+                continue;
+            }
             chosen.push(Script {
                 forced,
                 selection,
@@ -476,11 +501,13 @@ fn choose_in(
             continue;
         }
         let mut pick: Option<(bool, Selection)> = None;
+        let mut brute_ok = false;
         for (i, rule) in rules.iter().enumerate() {
             let Some(e) = &parsed[i] else { continue };
             let mut by_name = false;
             if e.matches(entry.id(), &entry.categories, &mut by_name) {
                 used[i] = true;
+                brute_ok |= e.authorizes_brute(entry.id());
                 let sel = if by_name {
                     Selection::Name
                 } else {
@@ -489,6 +516,10 @@ fn choose_in(
                 let forced = rule.forced || pick.is_some_and(|(f, _)| f);
                 pick = Some((forced, pick.map_or(sel, |(_, s)| s)));
             }
+        }
+        if pick.is_some() && is_brute(&entry.categories) && !brute_ok {
+            brute_skipped.push(entry.id().to_string());
+            continue;
         }
         if let Some((forced, selection)) = pick
             && let Some(dir) = installed
@@ -557,6 +588,14 @@ fn choose_in(
                 c.forced |= rule.forced;
                 continue;
             }
+            // A direct file path or a name in the scripts directory chooses
+            // a brute-force script deliberately, but a whole directory does
+            // not: a brute script swept up from a directory is left out,
+            // like one matched by `all`.
+            if is_brute(&s.categories) && selection == Selection::Directory {
+                brute_skipped.push(s.id);
+                continue;
+            }
             chosen.push(Script {
                 forced: rule.forced,
                 selection,
@@ -569,7 +608,12 @@ fn choose_in(
     if let Some(w) = ids.windows(2).find(|w| w[0] == w[1]) {
         return err(format!("duplicate script ID: '{}'", w[0]));
     }
-    Ok(chosen)
+    brute_skipped.sort_unstable();
+    brute_skipped.dedup();
+    Ok(Chosen {
+        scripts: chosen,
+        brute_skipped,
+    })
 }
 
 /// The file of the script named `name` (with or without `.lua` or `.nse`;

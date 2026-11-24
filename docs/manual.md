@@ -1087,6 +1087,47 @@ hostrule and the portrules of that host's ports), and its action runs in
 a fresh sandbox for every host or port, so actions share nothing with
 each other, with the rules or between runs.
 
+#### Brute-force scripts
+
+A script in the `brute` category tries to log in to a service by guessing
+user names and passwords, so running one sends real login attempts to the
+target. FeroProbe runs a brute-force script only when you choose it
+deliberately:
+
+- by its exact name, such as `--script ftp-brute`;
+- by a file path, such as `--script ./ftp-brute.lua`; or
+- by the `brute` category word, such as `--script brute` or
+  `--script "brute and safe"`.
+
+It is never run when it is only swept up by `all`, by another category
+such as `intrusive`, by a name pattern such as `*-brute`, by a whole
+directory, or by `-sC` or `-A`. A brute-force script left out this way is
+named in a warning, so you know it was skipped and how to run it. This is
+a FeroProbe safeguard; nmap runs brute-force scripts from any matching
+selection. (With [ICS protection](#settings-files-and-ics-protection) on,
+`--script` is refused altogether unless you pass
+`--override-ics-protection`.)
+
+Brute-force scripts take their user names and passwords from word lists.
+FeroProbe ships none of nmap's lists, so a list is read only from a file
+you name in `--script-args` or from an installed nmap's own lists:
+
+- `userdb=<file>` and `passdb=<file>` give the user-name and password
+  files (one entry per line; `#` comments and blank lines are skipped);
+- `brute.credfile=<file>` gives a file of `user:pass` pairs, one per line;
+- without any of these, FeroProbe looks for nmap's `usernames.lst` and
+  `passwords.lst` in its data directories (`$NMAPDIR` and the usual
+  installed-nmap locations). If none is found the list is empty and the
+  script finds nothing.
+
+Other `brute.*` and `unpwdb.*` arguments nmap takes are accepted too, for
+example `brute.mode` (`user`, `pass` or `creds`), `brute.firstonly`,
+`brute.useraspass`, `brute.emptypass`, `brute.guesses`, `brute.delay`,
+`unpwdb.userlimit`, `unpwdb.passlimit` and `unpwdb.timelimit`. FeroProbe
+makes its guesses one at a time, so `brute.threads` and the scripts'
+thread settings are accepted but have no effect — another documented
+difference from nmap, which guesses in parallel.
+
 #### `--script-args <args>`
 
 Arguments for the scripts, in nmap's syntax: comma-separated `name=value`
@@ -1644,13 +1685,17 @@ the scan probed there.
 | `ssh2` | `fetch_host_key`, `check_packet_length`, `transport` (`build`, `payload`, `receive_packet`, `kex_init`, `parse_kex_init`, `kexdh_init`, `kexdh_gex_init`) |
 | `smb` | `get_port`, `get_os`, `get_windows_version`, `list_dialects`, `start`, `start_ex`, `negotiate_protocol`, `stop`, `get_uniqueish_name`, `get_overrides` |
 | `snmp` | `Helper` (`new`, `connect`, `get`, `getnext`, `walk`, `close`), `str2oid`, `oid2str` |
+| `unpwdb` | `usernames`, `passwords`, `timelimit`, `concat_iterators`, `filter_iterator`, `limited_iterator`; reads only a file named in `--script-args` (`userdb`/`passdb`) or an installed nmap's `usernames.lst`/`passwords.lst` found by `nmap.fetchfile`, since FeroProbe ships no word lists |
+| `brute` | `Engine` (`new`, `start`, `setMaxThreads`, `setUsernameIterator`, `setPasswordIterator`, `setMode`, `setOption`, `setTitle`), `Driver` interface (`new`, `connect`, `login`, `disconnect`), `Error` (`new`, `getMessage`, `setRetry`/`isRetry`, `setAbort`/`isAbort`, `setReduce`/`isReduce`, `setDone`/`isDone`, `setInvalidAccount`/`isInvalidAccount`), `Options`, `Account`, `account_iterator`, `credential_iterator`, `pw_same_as_user_iterator`, `pw_ucase_iterator`, `checkBoolArg`, `new_socket`; guesses one at a time, so `setMaxThreads` and `brute.threads` have no effect |
 | Lua's own | `string`, `table`, `math`, `coroutine`, `utf8`, `os` (the sandbox's), `_G` |
 
-Any other module (`brute`, `target`, `packet`, `msrpc`, `unpwdb`, ...)
+Any other module (`target`, `packet`, `msrpc`, `httpspider`, `dns`, ...)
 stops the script from loading with an error that names it; a function
 FeroProbe does not have in a module it offers (`nmap.new_dnet`,
 `openssl.encrypt`, ...) raises an error naming it when called. Of nmap
-7.99's 612 scripts, 205 load as they are.
+7.99's 612 scripts, 230 load as they are. See
+[Brute-force scripts](#brute-force-scripts) for how a `brute` script must
+be chosen before it will run.
 
 What NSE scripts see differently:
 
