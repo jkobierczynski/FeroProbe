@@ -31,6 +31,11 @@ jobs:
       - name: feroprobe-diff test script
         if: runner.os != 'Windows'
         run: ./scripts/test-feroprobe-diff.sh -v
+      # Brute-force opt-in gating and the brute framework (bash and python3,
+      # no root; self-contained, needs no installed nmap).
+      - name: brute test script
+        if: runner.os != 'Windows'
+        run: ./scripts/test-brute.sh -v
 
   # The SYN scan and ICMP discovery need raw sockets, so run the whole test
   # suite again as root on Linux. FEROPROBE_REQUIRE_RAW makes the raw-socket

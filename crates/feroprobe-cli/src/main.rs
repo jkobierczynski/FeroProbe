@@ -2590,6 +2590,17 @@ fn script_scan(args: &Args) -> Result<Option<feroprobe_core::script::ScriptScan>
     }
     let chosen =
         script::choose(&selection.join(",")).map_err(|e| anyhow::anyhow!("--script: {e}"))?;
+    if !chosen.brute_skipped.is_empty() {
+        eprintln!(
+            "Warning: left out {} brute-force script(s): {}. Brute-force scripts send login \
+             attempts, so they run only when chosen by name, a file, or the \"brute\" category \
+             (for example --script brute); never through \"all\", another category such as \
+             \"intrusive\", a name pattern such as \"*-brute\", -sC or -A.",
+            chosen.brute_skipped.len(),
+            chosen.brute_skipped.join(", ")
+        );
+    }
+    let chosen = chosen.scripts;
     let file = args
         .script_args_file
         .as_ref()
@@ -3601,7 +3612,7 @@ async fn run(
     if !args.script_help.is_empty() {
         let chosen = feroprobe_core::script::choose(&args.script_help.join(","))
             .map_err(|e| anyhow::anyhow!("--script-help: {e}"))?;
-        print!("{}", feroprobe_core::script::help_text(&chosen));
+        print!("{}", feroprobe_core::script::help_text(&chosen.scripts));
         return Ok(());
     }
     for w in gate_ics(&settings.settings, &args)? {

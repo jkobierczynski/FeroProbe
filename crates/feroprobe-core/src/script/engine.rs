@@ -84,6 +84,7 @@ const SNMP_LIBRARY: &str = include_str!("snmp.lua");
 /// first time a script asks for it, so scripts that never ask pay nothing.
 const NSE_MODULES: &[(&str, &str)] = &[
     ("base64", include_str!("nse/base64.lua")),
+    ("brute", include_str!("nse/brute.lua")),
     ("comm", include_str!("nse/comm.lua")),
     ("creds", include_str!("nse/creds.lua")),
     ("datetime", include_str!("nse/datetime.lua")),
@@ -107,6 +108,7 @@ const NSE_MODULES: &[(&str, &str)] = &[
     ("stringaux", include_str!("nse/stringaux.lua")),
     ("tableaux", include_str!("nse/tableaux.lua")),
     ("tls", include_str!("nse/tls.lua")),
+    ("unpwdb", include_str!("nse/unpwdb.lua")),
     ("url", include_str!("nse/url.lua")),
     ("vulns", include_str!("nse/vulns.lua")),
 ];
