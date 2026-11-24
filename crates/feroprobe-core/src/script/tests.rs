@@ -6040,7 +6040,8 @@ action = function()
   o.big = tostring(pcall(openssl.bignum_rand, 1000000))
   return o
 end"#,
-        other = other.display()
+        // Escaped for a Lua string literal: a Windows path has backslashes.
+        other = other.display().to_string().replace('\\', "\\\\").replace('"', "\\\"")
     );
     let args = args::parse(&format!("userdb={}", users.display())).unwrap();
     let scan = ScriptScan::new(vec![script("io", &src)], args, None).unwrap();
