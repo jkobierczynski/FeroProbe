@@ -40,7 +40,7 @@ use std::time::{Duration, Instant};
 pub use args::{ArgTable, ArgValue, ArgsError};
 pub use engine::ScriptScan;
 pub use http::USER_AGENT;
-pub use keys::rule_keys;
+pub use keys::{Needs, rule_keys, rule_needs};
 pub use output::{ScriptResult, ScriptTable, ScriptValue};
 pub use sandbox::{INSTRUCTION_LIMIT, MEMORY_LIMIT};
 pub use socket::Scope;

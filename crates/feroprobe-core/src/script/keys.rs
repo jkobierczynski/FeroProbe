@@ -77,6 +77,29 @@ pub fn rule_keys(id: &str) -> Option<&'static str> {
     })
 }
 
+/// The protocols a built-in script's sockets use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Needs {
+    /// It connects nowhere.
+    Nothing,
+    Tcp,
+    Udp,
+    /// Either serves: it uses whichever the port it runs on speaks.
+    TcpOrUdp,
+}
+
+/// What the built-in script `id` connects over, or `None` for a script
+/// that is not built in (its sockets are its own code).
+pub fn rule_needs(id: &str) -> Option<Needs> {
+    rule_keys(id)?;
+    Some(match id {
+        "clock-skew" => Needs::Nothing,
+        "dns-nsid" | "rpcinfo" => Needs::TcpOrUdp,
+        "nbstat" | "ntp-info" | "snmp-info" | "snmp-interfaces" | "snmp-sysdescr" => Needs::Udp,
+        _ => Needs::Tcp,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -112,5 +135,22 @@ mod tests {
             }
         }
         assert_eq!(rule_keys("nsecompat-ftp-brute"), None);
+    }
+
+    /// What a script connects over agrees with what its rule keys on.
+    #[test]
+    fn needs_match_the_rule_keys() {
+        for (id, _) in super::super::BUILT_IN {
+            let keys = rule_keys(id).unwrap();
+            let (tcp, udp) = (keys.contains("TCP"), keys.contains("UDP"));
+            let want = match (tcp, udp) {
+                _ if *id == "clock-skew" => Needs::Nothing,
+                (true, true) => Needs::TcpOrUdp,
+                (false, true) => Needs::Udp,
+                _ => Needs::Tcp,
+            };
+            assert_eq!(rule_needs(id), Some(want), "{id}: {keys}");
+        }
+        assert_eq!(rule_needs("nsecompat-ftp-brute"), None);
     }
 }

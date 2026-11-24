@@ -578,6 +578,7 @@ fn script_lines(args: &Args, f: &Facts) -> Vec<String> {
     if !f.sctp_ports.is_empty() || !f.protocols.is_empty() {
         out.push("scripts cannot open SCTP or raw IP sockets, whatever the scan probes".into());
     }
+    out.extend(forced_out_of_scope(f));
 
     // The scripts by phase. A script with several rules shows under each.
     let built_in = |s: &Script| s.path.is_none();
@@ -670,6 +671,43 @@ fn script_lines(args: &Args, f: &Facts) -> Vec<String> {
          run and the host and port it ran against"
             .into(),
     );
+    out
+}
+
+/// A note for each protocol that forced built-in scripts need and this
+/// scan does not probe: forced with +, they run on every host or port
+/// anyway, and every connection they try is refused.
+fn forced_out_of_scope(f: &Facts) -> Vec<String> {
+    use feroprobe_core::script::{Needs, rule_needs};
+    let mut out = Vec::new();
+    for (proto, need, probed, how) in [
+        ("UDP", Needs::Udp, f.udp_ports, "-sU to scan UDP"),
+        ("TCP", Needs::Tcp, f.tcp_ports, "-sS or -sT to scan TCP"),
+    ] {
+        if !probed.is_empty() {
+            continue;
+        }
+        let ids: Vec<&str> = f
+            .scripts
+            .iter()
+            .filter(|s| s.forced && s.path.is_none() && rule_needs(&s.id) == Some(need))
+            .map(|s| s.id.as_str())
+            .collect();
+        if ids.is_empty() {
+            continue;
+        }
+        let one = ids.len() == 1;
+        out.push(format!(
+            "note: {} {} only over {proto}, and this scan probes no {proto} ports. Forced \
+             with +, {} still {}, but FeroProbe refuses every connection {}: expect one \
+             warning per script, or add {how}",
+            ids.join(", "),
+            if one { "connects" } else { "connect" },
+            if one { "it" } else { "they" },
+            if one { "runs" } else { "run" },
+            if one { "it tries" } else { "they try" },
+        ));
+    }
     out
 }
 
@@ -821,5 +859,68 @@ mod tests {
         }
         // An external script never gets a port list of its own.
         assert!(!text.contains("mine: TCP"), "{text}");
+        assert!(!text.contains("note:"), "{text}");
+    }
+
+    #[test]
+    fn forced_scripts_on_a_protocol_not_scanned() {
+        let args = Args::try_parse_from(["feroprobe", "-p", "80", "10.0.0.1"]).unwrap();
+        let plan = crate::plan(&args.scan, false, false, false).unwrap();
+        let targets = [Target::new("10.0.0.1".parse().unwrap())];
+        let cfg = ScanConfig::default();
+        let probes = PingProbes::default();
+        let pick = |ids: &[&str], forced: bool| -> Vec<Arc<Script>> {
+            Script::built_in()
+                .unwrap()
+                .into_iter()
+                .filter(|s| ids.contains(&s.id.as_str()))
+                .map(|mut s| {
+                    s.forced = forced;
+                    Arc::new(s)
+                })
+                .collect()
+        };
+        let facts = |scripts, tcp, udp| Facts {
+            targets: &targets,
+            excluded: 0,
+            plan: &plan,
+            probes: &probes,
+            privileged: false,
+            icmp: true,
+            raw_pings: false,
+            localhost: 0,
+            local: BTreeMap::new(),
+            tcp_ports: tcp,
+            bounce: None,
+            udp_ports: udp,
+            sctp_ports: &[],
+            protocols: &[],
+            cfg: &cfg,
+            os: false,
+            trace: false,
+            scripts,
+        };
+        let both = pick(&["ntp-info", "snmp-info", "dns-nsid", "http-title"], true);
+        let lines = forced_out_of_scope(&facts(&both, &[80], &[]));
+        assert_eq!(
+            lines,
+            [
+                "note: ntp-info, snmp-info connect only over UDP, and this scan probes no UDP \
+              ports. Forced with +, they still run, but FeroProbe refuses every connection \
+              they try: expect one warning per script, or add -sU to scan UDP"
+            ]
+        );
+        // UDP scanned: nothing to say.
+        assert!(forced_out_of_scope(&facts(&both, &[80], &[161])).is_empty());
+        // Only -sU: the TCP-only scripts are named.
+        let lines = forced_out_of_scope(&facts(&both, &[], &[161]));
+        assert_eq!(lines.len(), 1);
+        assert!(
+            lines[0].starts_with("note: http-title connects only over TCP"),
+            "{lines:?}"
+        );
+        // Not forced: the rule keeps them off, so no note.
+        let plain = pick(&["ntp-info"], false);
+        assert!(forced_out_of_scope(&facts(&plain, &[80], &[])).is_empty());
     }
 }

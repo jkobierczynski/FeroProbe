@@ -1290,9 +1290,20 @@ and follows a redirect only when it points inside the scope; one that
 points elsewhere is not followed and is returned to the script as it
 came. Scripts with a `prerule` or `postrule`, which run without a host,
 have no network access at all, so nothing broadcasts. A connection the
-script asks for outside the scope fails, and FeroProbe prints a warning
-naming the script and the address. A wider scope may come later as an
-explicit option.
+script asks for outside the scope fails. FeroProbe counts the refusals and,
+when the scripts of a phase are done, prints one warning per script and
+reason, with how many connections were refused, on which host and which
+ports the script tried:
+
+```
+Warning: script ntp-info: 28 connections refused on 192.168.1.159, UDP not scanned (it tried 14 udp ports: 21, 22, 110, 143, 465, 587, 993, 995, 6 more); -v shows each
+```
+
+This matters most for scripts forced with `+`, which run on every port
+whatever their rule says: a UDP script forced onto a TCP-only scan tries
+(and is refused) on each open TCP port. With `-v` or `-d` each refusal is
+also printed as it happens, naming the address and port. A wider scope may
+come later as an explicit option.
 
 ### Writing scripts
 
@@ -2703,6 +2714,11 @@ that says where scripts may run, before anything is sent:
   own Lua code and declares no ports, so FeroProbe does not guess which
   ports it will pick. It runs inside the scope above. Scripts forced with
   `+` are named as running on every host or port.
+- a **note** when a built-in script forced with `+` connects only over a
+  protocol the scan does not probe, such as `ntp-info` or the `snmp-*`
+  scripts (UDP) on a TCP-only scan: forced, they still run, but every
+  connection they try is refused, so the note says so before the scan
+  and names the option that would scan that protocol (`-sU`).
 
 The connections scripts actually make show up afterwards with
 [`--script-trace`](#--script-trace), and `-d2` logs each script run with
