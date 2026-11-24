@@ -5,10 +5,12 @@
 //! connection outside the scope is refused. Only the telling changes. A
 //! forced script (`+name`) run on every port can try a connection the scan
 //! never allowed on each of them, and nmap-style scripts often retry, so a
-//! warning per attempt floods the output. Each refusal is counted here and
-//! printed at once only with `-v` or `-d`; when the scripts of a phase are
-//! done, [`Refusals::warnings`] gives one summary line per script and
-//! reason.
+//! warning per attempt floods the output. Each refusal is counted here.
+//! Without `-v` nothing is printed (Jurgen, 2026-11-24): the refusal is the
+//! guard working as meant, and the script's own output shows what it got.
+//! With `-v`, when the scripts of a phase are done, [`Refusals::warnings`]
+//! gives one summary line per script and reason; with `-vv` or `-d` each
+//! refusal is also printed as it happens.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::IpAddr;
@@ -63,14 +65,19 @@ pub(crate) struct Refusals {
     seen: Mutex<BTreeMap<(String, Reason), Tally>>,
 }
 
+/// Whether each refusal is printed as it happens: `-vv` or `-d`.
+fn each_shown() -> bool {
+    crate::debug::verbosity() >= 2 || crate::debug::debugging() >= 1
+}
+
 /// How many items a summary names before it says how many more.
 const SHOWN: usize = 8;
 
 impl Refusals {
-    /// Count `r`, refused for `script`. With `-v` or `-d` it is also
-    /// printed at once, as each refusal was before the summary existed.
+    /// Count `r`, refused for `script`. With `-vv` or `-d` it is also
+    /// printed at once.
     pub(crate) fn record(&self, script: &str, r: Refusal) {
-        if crate::debug::verbosity() >= 1 || crate::debug::debugging() >= 1 {
+        if each_shown() {
             eprintln!(
                 "Warning: script {script}: connection refused: {}",
                 r.message
@@ -89,9 +96,14 @@ impl Refusals {
     }
 
     /// One summary line for each script and reason seen since the last
-    /// call, and forget them.
+    /// call, and forget them. None without `-v` (or `-d`).
     pub(crate) fn warnings(&self) -> Vec<String> {
-        self.take(crate::debug::verbosity() >= 1 || crate::debug::debugging() >= 1)
+        let lines = self.take(each_shown());
+        if crate::debug::verbosity() >= 1 || crate::debug::debugging() >= 1 {
+            lines
+        } else {
+            Vec::new()
+        }
     }
 
     /// [`Refusals::warnings`], `detailed` when each refusal was already
@@ -152,7 +164,7 @@ fn summary(script: &str, reason: Reason, t: &Tally, detailed: bool) -> String {
         }
         Reason::Unsupported(proto) => format!("scripts cannot open {proto} sockets"),
     };
-    let hint = if detailed { "" } else { "; -v shows each" };
+    let hint = if detailed { "" } else { "; -vv shows each" };
     format!("Warning: script {script}: {count} refused{on}, {what}{hint}")
 }
 
@@ -183,9 +195,9 @@ mod tests {
             w,
             [
                 "Warning: script ntp-info: 6 connections refused on 192.0.2.7, UDP not \
-                 scanned (it tried 3 udp ports: 21, 22, 110); -v shows each",
+                 scanned (it tried 3 udp ports: 21, 22, 110); -vv shows each",
                 "Warning: script snmp-info: 1 connection refused on 192.0.2.7, UDP not \
-                 scanned (it tried 1 udp port: 21); -v shows each",
+                 scanned (it tried 1 udp port: 21); -vv shows each",
             ]
         );
         // Told once: the next phase starts afresh.
@@ -204,7 +216,7 @@ mod tests {
             [
                 "Warning: script x: 10 connections refused on 192.0.2.7, outside the udp \
                  ports the scan probed (it tried 10 udp ports: 1, 2, 3, 4, 5, 6, 7, 8, 2 \
-                 more); -v shows each"
+                 more); -vv shows each"
             ]
         );
     }
@@ -238,9 +250,9 @@ mod tests {
             r.take(false),
             [
                 "Warning: script x: 1 connection refused on 192.0.2.7, only the host it \
-                 runs against is in scope (it tried other.example); -v shows each",
+                 runs against is in scope (it tried other.example); -vv shows each",
                 "Warning: script y: 1 connection refused, scripts that run before or after \
-                 the scan have no network access; -v shows each",
+                 the scan have no network access; -vv shows each",
             ]
         );
     }

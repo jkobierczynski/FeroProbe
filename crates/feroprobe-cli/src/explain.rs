@@ -699,8 +699,8 @@ fn forced_out_of_scope(f: &Facts) -> Vec<String> {
         let one = ids.len() == 1;
         out.push(format!(
             "note: {} {} only over {proto}, and this scan probes no {proto} ports. Forced \
-             with +, {} still {}, but FeroProbe refuses every connection {}: expect one \
-             warning per script, or add {how}",
+             with +, {} still {}, but FeroProbe refuses every connection {} (-v counts \
+             them); add {how}",
             ids.join(", "),
             if one { "connects" } else { "connect" },
             if one { "it" } else { "they" },
@@ -907,7 +907,7 @@ mod tests {
             [
                 "note: ntp-info, snmp-info connect only over UDP, and this scan probes no UDP \
               ports. Forced with +, they still run, but FeroProbe refuses every connection \
-              they try: expect one warning per script, or add -sU to scan UDP"
+              they try (-v counts them); add -sU to scan UDP"
             ]
         );
         // UDP scanned: nothing to say.
