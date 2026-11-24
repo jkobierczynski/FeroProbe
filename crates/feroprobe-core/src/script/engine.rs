@@ -10,6 +10,7 @@ use mlua::{Function, Lua, MultiValue, Table, Value};
 
 use super::args::{ArgTable, ArgValue};
 use super::output::{ScriptResult, ScriptTable, ScriptValue, bytes_to_text_max, name_to_text_max};
+use super::refused::Refusals;
 use super::registry::Registry;
 use super::sandbox::{self, Budget};
 use super::socket::{Scope, ScriptSocket};
@@ -881,10 +882,11 @@ fn rule_port(p: &PortResult) -> bool {
 
 /// Where a script run's sockets may go: the host and the ports the scan
 /// probed on it.
-fn scope_of(id: &str, h: Option<&HostResult>) -> Scope {
+fn scope_of(id: &str, h: Option<&HostResult>, refusals: &Arc<Refusals>) -> Scope {
     let Some(h) = h else {
         return Scope {
             script: id.to_string(),
+            refusals: refusals.clone(),
             ..Scope::default()
         };
     };
@@ -892,6 +894,7 @@ fn scope_of(id: &str, h: Option<&HostResult>) -> Scope {
         addr: Some(h.addr),
         names: h.hostname.iter().chain(h.rdns.iter()).cloned().collect(),
         script: id.to_string(),
+        refusals: refusals.clone(),
         ..Scope::default()
     };
     for p in &h.ports {
@@ -1099,6 +1102,9 @@ pub struct ScriptScan {
     pub timeout: Option<Duration>,
     /// Script runs at once.
     pub parallel: usize,
+    /// Connections the scopes refused, told once per script at the end
+    /// of each phase.
+    refusals: Arc<Refusals>,
 }
 
 impl ScriptScan {
@@ -1117,6 +1123,7 @@ impl ScriptScan {
             registry: Arc::new(Registry::default()),
             timeout,
             parallel: DEFAULT_PARALLEL,
+            refusals: Arc::default(),
         })
     }
 
@@ -1127,7 +1134,7 @@ impl ScriptScan {
     /// A fresh state with `script` loaded, for its rules or action.
     fn state(&self, script: &Script, on: Against<'_>, budget: &Arc<Budget>) -> Result<Lua, String> {
         let lua = sandbox::new_state(budget).map_err(|e| e.to_string())?;
-        let scope = Arc::new(scope_of(&script.id, on.host()));
+        let scope = Arc::new(scope_of(&script.id, on.host(), &self.refusals));
         install_library(
             &lua,
             &script.id,
@@ -1278,7 +1285,16 @@ impl ScriptScan {
             }
         }
         results.sort_by(|a, b| a.id.cmp(&b.id));
+        self.warn_refused();
         results
+    }
+
+    /// One warning per script for the connections its scope refused in
+    /// the phase just done.
+    fn warn_refused(&self) {
+        for w in self.refusals.warnings() {
+            eprintln!("{w}");
+        }
     }
 
     /// Run the prerule scripts (before the scan).
@@ -1367,5 +1383,6 @@ impl ScriptScan {
                 p.scripts.sort_by(|a, b| a.id.cmp(&b.id));
             }
         }
+        self.warn_refused();
     }
 }

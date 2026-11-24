@@ -23,6 +23,7 @@ use tokio::sync::Mutex;
 use tokio::net::TcpStream;
 use tokio_rustls::client::TlsStream;
 
+use super::refused::{Reason, Refusal, Refusals};
 use super::trace::{Dir, Ends};
 use crate::model::Protocol;
 
@@ -39,6 +40,9 @@ pub struct Scope {
     pub udp: BTreeSet<u16>,
     /// The script, for messages.
     pub script: String,
+    /// Where refused connections are counted, for one summary line per
+    /// script.
+    pub(crate) refusals: Arc<Refusals>,
 }
 
 impl Scope {
@@ -48,33 +52,71 @@ impl Scope {
         host: &str,
         port: u16,
         proto: Protocol,
-    ) -> Result<SocketAddr, String> {
+    ) -> Result<SocketAddr, Refusal> {
+        let refusal = |reason, none_probed, message| Refusal {
+            reason,
+            host: host.to_string(),
+            port,
+            against: self.addr,
+            none_probed,
+            message,
+        };
         let Some(addr) = self.addr else {
-            return Err(format!(
-                "{host}:{port} is outside this script's scope: scripts that run before or \
-                 after the scan have no network access"
+            return Err(refusal(
+                Reason::NoNetwork,
+                false,
+                format!(
+                    "{host}:{port} is outside this script's scope: scripts that run before or \
+                     after the scan have no network access"
+                ),
             ));
         };
         let same = host.parse::<IpAddr>().is_ok_and(|a| a == addr)
             || self.names.iter().any(|n| n.eq_ignore_ascii_case(host));
         if !same {
-            return Err(format!(
-                "{host} is outside this script's scope: it may only connect to {addr}, the \
-                 host it runs against"
+            return Err(refusal(
+                Reason::OtherHost,
+                false,
+                format!(
+                    "{host} is outside this script's scope: it may only connect to {addr}, the \
+                     host it runs against"
+                ),
             ));
         }
         let probed = match proto {
             Protocol::Tcp => &self.tcp,
             Protocol::Udp => &self.udp,
-            _ => return Err(format!("scripts cannot open {proto} sockets")),
+            _ => {
+                return Err(refusal(
+                    Reason::Unsupported(proto),
+                    false,
+                    format!("scripts cannot open {proto} sockets"),
+                ));
+            }
         };
         if !probed.contains(&port) {
-            return Err(format!(
-                "{proto} port {port} is outside this script's scope: it may only connect to \
-                 the {proto} ports the scan probed on {addr}"
-            ));
+            let message = if probed.is_empty() {
+                format!(
+                    "{proto} port {port} is outside this script's scope: the scan probed no \
+                     {proto} ports on {addr}"
+                )
+            } else {
+                format!(
+                    "{proto} port {port} is outside this script's scope: it may only connect \
+                     to the {proto} ports the scan probed on {addr}"
+                )
+            };
+            return Err(refusal(Reason::Port(proto), probed.is_empty(), message));
         }
         Ok(crate::target::socket_addr(addr, port))
+    }
+
+    /// Count `r` for the summary (and print it with `-v` or `-d`), and
+    /// give the message the script gets back.
+    pub(crate) fn refuse(&self, r: Refusal) -> String {
+        let why = r.message.clone();
+        self.refusals.record(&self.script, r);
+        why
     }
 }
 
@@ -512,11 +554,8 @@ impl UserData for ScriptSocket {
                     };
                     let addr = match scope.check(&host, port, proto) {
                         Ok(a) => a,
-                        Err(why) => {
-                            eprintln!(
-                                "Warning: script {}: connection refused: {why}",
-                                scope.script
-                            );
+                        Err(r) => {
+                            let why = scope.refuse(r);
                             return fail(&lua, why);
                         }
                     };
@@ -766,6 +805,7 @@ mod tests {
             tcp: [22, 80].into(),
             udp: [53].into(),
             script: "t".into(),
+            ..Scope::default()
         }
     }
 
