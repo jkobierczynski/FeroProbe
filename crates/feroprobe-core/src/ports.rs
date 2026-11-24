@@ -686,19 +686,19 @@ pub fn parse_port_lists(spec: &str, ip_proto: bool, port_scan: bool) -> Result<P
     for (proto, parts) in groups {
         let joined = parts.join(",");
         match proto {
-            Proto::Tcp => lists.tcp.extend(parse_ports(&joined).map_err(&note)?),
-            Proto::Udp => lists.udp.extend(parse_ports(&joined).map_err(&note)?),
-            Proto::Sctp => lists.sctp.extend(parse_ports(&joined).map_err(&note)?),
+            Proto::Tcp => lists.tcp.extend(parse_ports(&joined).map_err(note)?),
+            Proto::Udp => lists.udp.extend(parse_ports(&joined).map_err(note)?),
+            Proto::Sctp => lists.sctp.extend(parse_ports(&joined).map_err(note)?),
             // `P:` is always IP protocol numbers: 0 is valid, "-" is 0-255.
             Proto::Ip => lists
                 .protocols
-                .extend(parse_protocols(&joined).map_err(&note)?),
+                .extend(parse_protocols(&joined).map_err(note)?),
             Proto::All => {
                 // Unprefixed values go to each active scan family in its own
                 // range. Parse as ports for TCP/UDP/SCTP (and when no scan
                 // family is known, to preserve the old port semantics)...
                 if port_scan || !ip_proto {
-                    let ports = parse_ports(&joined).map_err(&note)?;
+                    let ports = parse_ports(&joined).map_err(note)?;
                     lists.tcp.extend(&ports);
                     lists.udp.extend(&ports);
                     lists.sctp.extend(&ports);
@@ -707,7 +707,7 @@ pub fn parse_port_lists(spec: &str, ip_proto: bool, port_scan: bool) -> Result<P
                 if ip_proto {
                     lists
                         .protocols
-                        .extend(parse_protocols(&joined).map_err(&note)?);
+                        .extend(parse_protocols(&joined).map_err(note)?);
                 }
             }
         }
