@@ -222,8 +222,12 @@ nmap.set_port_version = function(_, port)
 end
 
 nmap.port_is_excluded = function() return false end
--- No data files are shipped for NSE scripts.
-nmap.fetchfile = function() return nil end
+-- No data files are shipped for NSE scripts: this finds the user's own,
+-- in FeroProbe's data directory or an installed nmap's (files.rs).
+nmap.fetchfile = function(name)
+  if type(name) ~= "string" then return nil end
+  return fero.__fetchfile(name)
+end
 nmap.resolve = function(name)
   return false, "scripts do no name lookups in FeroProbe"
 end

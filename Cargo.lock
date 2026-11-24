@@ -380,6 +380,8 @@ dependencies = [
  "ipnet",
  "libc",
  "mlua",
+ "num-bigint",
+ "num-traits",
  "rcgen",
  "regex",
  "ring",

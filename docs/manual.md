@@ -1216,7 +1216,9 @@ Every script runs in its own Lua state with:
   `collectgarbage`, no `string.dump`, and `load` for source text only,
   never precompiled bytecode;
 - `require` only for the modules of the [NSE compatibility
-  layer](#nse-compatibility-layer) and Lua's own libraries by name;
+  layer](#nse-compatibility-layer) and Lua's own libraries by name (an
+  NSE script also gets the layer's read-only `io`, which reads only
+  data files and files named in `--script-args`);
 - 64 MB of memory, and about a billion Lua instructions (some seconds of
   pure computation; time spent waiting on the network does not count);
 - for rules, ten seconds (or `--script-timeout`, if shorter); for loading a
@@ -1610,7 +1612,8 @@ when they use only the parts of nmap's libraries that FeroProbe offers.
 in the scripts directory (`name.lua` first, then `name.nse`), from a
 directory, and in the index `--script-updatedb` writes. A script becomes
 an NSE script the moment it calls `require`; FeroProbe's own scripts do
-not.
+not. As in nmap, such a script also has `nmap` and Lua's `io` (FeroProbe's
+read-only one) available as globals, without requiring them.
 
 `require` gives these modules, written for FeroProbe on top of `fero`
 from nmap's public API documentation (nmap's own libraries are under the
@@ -1629,7 +1632,8 @@ the scan probed there.
 | `ipOps` | `ip_to_str`, `str_to_ip`, `compare_ip`, `isPrivate`, `todword`, `fromdword`, `ip_to_bin`, `bin_to_ip`, `hex_to_bin`, `expand_ip`, `ip_in_range`, `get_ips_from_range`, `get_last_ip`, `ip_sort`, `subnet_to_cidr` |
 | `stringaux`, `tableaux` | `strsplit`, `filename_escape`, `ipattern`; `tcopy`, `shallow_tcopy`, `keys`, `contains`, `invert` |
 | `datetime` | `format_timestamp`, `format_time`, `format_difftime`, `date_to_timestamp`, `record_skew` (feeds `clock-skew`) |
-| `openssl` | `md5`, `sha1`, `digest` (MD5, SHA-1, SHA-256, SHA-384, SHA-512), `hmac`, `rand_bytes`, `rand_pseudo_bytes`, `supported_digests`; no ciphers or big numbers |
+| `openssl` | `md5`, `sha1`, `digest` (MD5, SHA-1, SHA-256, SHA-384, SHA-512), `hmac`, `rand_bytes`, `rand_pseudo_bytes`, `supported_digests`; big numbers: `bignum_bin2bn`, `bignum_dec2bn`, `bignum_hex2bn`, `bignum_bn2bin`, `bignum_bn2dec`, `bignum_bn2hex`, `bignum_add`, `bignum_div`, `bignum_mod_exp`, `bignum_num_bits`, `bignum_num_bytes`, `bignum_is_bit_set`, `bignum_set_bit`, `bignum_clear_bit`, `bignum_is_prime`, `bignum_is_safe_prime`, `bignum_rand`, `bignum_pseudo_rand`; no ciphers |
+| `io` | Lua's `io`, read-only: `open` (read modes), `lines`, `close`, `type`, `read`, `input`, and files' `read` (`l`, `L`, `n`, `a`, byte counts), `lines`, `seek`, `close`; `write` and `io.stdout:write` go to the debugging output, as `print` does |
 | `base64`, `rand`, `match`, `outlib` | `enc`, `dec`; `random_string`, `random_alpha`, `charset`; `numbytes`, `pattern_limit`, `dontmatch`; `sorted_by_key`, `list_sep` |
 | `strbuf`, `json` | `new`, `dump`, `clear`, `concatbuf`, `eqbuf`, `tostring` (one piece per line) and `..`, `==` on buffers; `parse` (to `true` and the value, or `false` and a message), `generate`, `NULL`, `make_array`, `make_object`, `typeof` |
 | `creds` | `State`, `StateMsg`, `ALL_DATA`, `Account`, `Credentials` (`new` with a script name or a list of tags, `add`, `getCredentials`, `getTable`); kept in `nmap.registry.creds` for the run; asking for `State.PARAM` also gives the accounts in `creds.<service>` and `creds.global` (`user:pass`) |
@@ -1642,11 +1646,11 @@ the scan probed there.
 | `snmp` | `Helper` (`new`, `connect`, `get`, `getnext`, `walk`, `close`), `str2oid`, `oid2str` |
 | Lua's own | `string`, `table`, `math`, `coroutine`, `utf8`, `os` (the sandbox's), `_G` |
 
-Any other module (`io`, `brute`, `target`, `packet`, `msrpc`, `unpwdb`,
-...) stops the script from loading with an error that names it; a
-function FeroProbe does not have in a module it offers (`nmap.new_dnet`,
-`openssl.encrypt`, `openssl.bignum_bin2bn`, ...) raises an error naming it when
-called. Of nmap 7.99's 612 scripts, 187 load as they are.
+Any other module (`brute`, `target`, `packet`, `msrpc`, `unpwdb`, ...)
+stops the script from loading with an error that names it; a function
+FeroProbe does not have in a module it offers (`nmap.new_dnet`,
+`openssl.encrypt`, ...) raises an error naming it when called. Of nmap
+7.99's 612 scripts, 205 load as they are.
 
 What NSE scripts see differently:
 
@@ -1675,8 +1679,24 @@ What NSE scripts see differently:
   interface functions are not available.
 - **Scripts do not change results.** `nmap.set_port_state` and
   `nmap.set_port_version` are accepted and ignored (shown with `-d2`).
-- **No data files or name lookups.** `nmap.fetchfile` returns `nil`;
-  `nmap.resolve` fails.
+- **Files are read-only, and only some.** FeroProbe ships none of nmap's
+  data files. `nmap.fetchfile(name)` looks for `name` (a relative path
+  without `..`) in FeroProbe's data directory (the folder above the
+  scripts directory, such as `~/.local/share/feroprobe/`), then in
+  `$NMAPDIR`, `/usr/local/share/nmap`, `/usr/share/nmap`,
+  `/opt/homebrew/share/nmap` and `/opt/local/share/nmap`, so the word
+  lists and data files of an nmap you installed are found as nmap finds
+  them. `io.open` reads only a file inside those directories (after
+  following links) or a path you gave in `--script-args` exactly as
+  written (such as `userdb=users.txt`); any other path, and every write
+  mode, gives `nil` and a message. Files are read whole, at most 16 MiB.
+  `io.popen` and `io.tmpfile` raise an error. nmap's scripts can read and
+  write any file the user can.
+- **No name lookups.** `nmap.resolve` fails.
+- **Big numbers** (`openssl.bignum_*`) are FeroProbe's own, with limits
+  so one call stays short: numbers up to 65,536 bits; `bignum_mod_exp`
+  and the prime tests up to 16,384 bits. Prime tests use Miller-Rabin with
+  random bases, false positives below 2^-80 as documented for nmap's.
 - **Fixed values.** `nmap.timing_level()` is 3 and
   `nmap.version_intensity()` 7 whatever the scan's options;
   `stdnse.get_timeout` is 5 seconds within the range asked for, as
@@ -1695,7 +1715,7 @@ What NSE scripts see differently:
   `subject`, `issuer`, `pubkey` (`type`, `bits`, and for an EC key its
   curve, also as `ecdhparams`), `validity` (date tables), `sig_algorithm`,
   `version`, `serial`, `pem`, `der` and `digest`, but no key modulus or
-  exponent (FeroProbe has no big numbers), and of the extensions only the
+  exponent, and of the extensions only the
   subject alternative names. TLS is 1.2 and 1.3, as for every FeroProbe
   connection.
 - **TLS hellos** built with `tls.client_hello` carry FeroProbe's mark in

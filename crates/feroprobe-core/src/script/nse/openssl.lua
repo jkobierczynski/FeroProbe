@@ -1,5 +1,5 @@
--- NSE compatibility layer: the `openssl` module, the digests, HMAC and
--- random bytes FeroProbe has (no OpenSSL, no ciphers or big numbers).
+-- NSE compatibility layer: the `openssl` module, the digests, HMAC,
+-- random bytes and big numbers FeroProbe has (no OpenSSL, no ciphers).
 -- Written for FeroProbe from nmap's public API documentation (not from
 -- nselib); GPL-3.0-or-later, like FeroProbe.
 local fero = ...
@@ -36,11 +36,10 @@ end
 openssl.rand_bytes = function(n) return fero.crypto.random_bytes(n) end
 openssl.rand_pseudo_bytes = openssl.rand_bytes
 
-for _, name in ipairs({ "encrypt", "decrypt", "bignum_bin2bn", "bignum_dec2bn",
-  "bignum_hex2bn", "bignum_bn2bin", "bignum_bn2dec", "bignum_bn2hex", "bignum_mod_exp",
-  "bignum_div", "bignum_add", "bignum_num_bits", "bignum_num_bytes", "bignum_is_bit_set",
-  "bignum_is_safe_prime", "bignum_is_prime", "bignum_set_bit", "bignum_clear_bit",
-  "bignum_rand", "bignum_pseudo_rand", "DES_string_to_key", "md4", "ripemd160",
+-- bignum_*: big numbers in Rust (bignum.rs), with size limits.
+for name, f in pairs(fero.__bignum) do openssl[name] = f end
+
+for _, name in ipairs({ "encrypt", "decrypt", "DES_string_to_key", "md4", "ripemd160",
   "supported_ciphers" }) do
   openssl[name] = function()
     error("openssl." .. name .. " is not available in FeroProbe", 2)
