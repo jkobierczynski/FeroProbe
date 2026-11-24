@@ -134,11 +134,14 @@ fn install_require(lua: &Lua, fero: &Table) -> mlua::Result<()> {
         lua.set_app_data(NseScript);
         if first {
             let require: Function = lua.globals().raw_get("require")?;
-            if name != "nmap" {
-                require.call::<Value>("nmap")?;
-            }
-            // NSE scripts have `io` as a global too: FeroProbe's
-            // read-only one.
+            // nmap preloads `nmap` and Lua's `io` as globals, so NSE
+            // scripts use `nmap.registry`, `nmap.new_socket`, `io.open`,
+            // ... without requiring them (239 of nmap 7.99's scripts use
+            // the `nmap` global without a require). FeroProbe loads both
+            // on the first require (which is what makes this an NSE
+            // script) and sets them as globals too.
+            let nmap: Value = require.call("nmap")?;
+            lua.globals().raw_set("nmap", nmap)?;
             let io: Value = require.call("io")?;
             lua.globals().raw_set("io", io)?;
         }

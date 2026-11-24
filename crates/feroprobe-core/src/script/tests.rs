@@ -5986,6 +5986,28 @@ end"#
 }
 
 #[tokio::test]
+async fn nse_nmap_and_io_are_globals_without_require() {
+    // nmap preloads `nmap` and `io` as globals; 239 of nmap 7.99's scripts
+    // use the `nmap` global without requiring it. A script becomes NSE on
+    // its first require (here `stdnse`); `nmap` and `io` must then be there
+    // as globals even though the script never required them.
+    let src = r#"
+local stdnse = require "stdnse"
+description = "test"
+categories = { "safe" }
+prerule = function() return true end
+action = function()
+  nmap.registry.seen = (nmap.registry.seen or 0) + 1
+  return string.format("%s %s %s %d", type(nmap), type(io),
+    type(nmap.new_socket), nmap.registry.seen)
+end
+"#;
+    let scan = ScriptScan::new(vec![script("globals", src)], ArgTable::default(), None).unwrap();
+    let r = scan.pre_scan().await;
+    assert_eq!(r[0].output, "table table function 1", "{r:?}");
+}
+
+#[tokio::test]
 async fn nse_io_reads_only_named_files_and_bignums() {
     let dir = std::env::temp_dir().join(format!("feroprobe-nse-io-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();

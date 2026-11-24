@@ -1612,7 +1612,8 @@ when they use only the parts of nmap's libraries that FeroProbe offers.
 in the scripts directory (`name.lua` first, then `name.nse`), from a
 directory, and in the index `--script-updatedb` writes. A script becomes
 an NSE script the moment it calls `require`; FeroProbe's own scripts do
-not.
+not. As in nmap, such a script also has `nmap` and Lua's `io` (FeroProbe's
+read-only one) available as globals, without requiring them.
 
 `require` gives these modules, written for FeroProbe on top of `fero`
 from nmap's public API documentation (nmap's own libraries are under the
