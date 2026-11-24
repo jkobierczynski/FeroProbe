@@ -614,13 +614,14 @@ pub(crate) async fn request(
     loop {
         let addr = match scope.check(&host_s, port_n, Protocol::Tcp) {
             Ok(a) => a,
-            Err(why) => {
-                if followed.is_empty() {
-                    eprintln!(
-                        "Warning: script {}: connection refused: {why}",
-                        scope.script
-                    );
-                }
+            Err(r) => {
+                // A redirect out of scope is not followed, silently; see
+                // below. Only the request the script made is counted.
+                let why = if followed.is_empty() {
+                    scope.refuse(r)
+                } else {
+                    r.message
+                };
                 return nil_err(&lua, why);
             }
         };

@@ -23,6 +23,7 @@ mod files;
 mod http;
 pub mod output;
 mod pattern;
+mod refused;
 mod registry;
 mod sandbox;
 pub mod select;
