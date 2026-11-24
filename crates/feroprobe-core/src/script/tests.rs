@@ -6041,7 +6041,11 @@ action = function()
   return o
 end"#,
         // Escaped for a Lua string literal: a Windows path has backslashes.
-        other = other.display().to_string().replace('\\', "\\\\").replace('"', "\\\"")
+        other = other
+            .display()
+            .to_string()
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
     );
     let args = args::parse(&format!("userdb={}", users.display())).unwrap();
     let scan = ScriptScan::new(vec![script("io", &src)], args, None).unwrap();
