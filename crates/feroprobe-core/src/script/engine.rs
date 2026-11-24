@@ -89,6 +89,7 @@ const NSE_MODULES: &[(&str, &str)] = &[
     ("datetime", include_str!("nse/datetime.lua")),
     ("ftp", include_str!("nse/ftp.lua")),
     ("http", include_str!("nse/http.lua")),
+    ("io", include_str!("nse/io.lua")),
     ("ipOps", include_str!("nse/ipOps.lua")),
     ("json", include_str!("nse/json.lua")),
     ("match", include_str!("nse/match.lua")),
@@ -131,8 +132,15 @@ fn install_require(lua: &Lua, fero: &Table) -> mlua::Result<()> {
         // with it, as it sets up the host table and registries.
         let first = lua.app_data_ref::<NseScript>().is_none();
         lua.set_app_data(NseScript);
-        if first && name != "nmap" {
-            lua.globals().raw_get::<Function>("require")?.call::<Value>("nmap")?;
+        if first {
+            let require: Function = lua.globals().raw_get("require")?;
+            if name != "nmap" {
+                require.call::<Value>("nmap")?;
+            }
+            // NSE scripts have `io` as a global too: FeroProbe's
+            // read-only one.
+            let io: Value = require.call("io")?;
+            lua.globals().raw_set("io", io)?;
         }
         let loaded: Table = lua.named_registry_value(NSE_LOADED)?;
         let have: Value = loaded.raw_get(name.as_str())?;
@@ -607,6 +615,37 @@ pub(crate) fn install_library(
         })?,
     )?;
     fero.raw_set("crypto", crypto)?;
+    // For the NSE layer's `openssl` module: the bignum_* calls.
+    let bignum = lua.create_table()?;
+    super::bignum::install(lua, &bignum)?;
+    fero.raw_set("__bignum", bignum)?;
+    // For the NSE layer's `nmap.fetchfile` and `io`: read-only access to
+    // the data directories and the files named in --script-args.
+    fero.raw_set(
+        "__fetchfile",
+        lua.create_function(|_, name: String| {
+            Ok(super::files::fetch(super::files::data_roots(), &name))
+        })?,
+    )?;
+    {
+        let named = super::files::arg_paths(args);
+        fero.raw_set(
+            "__read_file",
+            lua.create_function(move |lua, path: String| {
+                match super::files::read(super::files::data_roots(), &named, &path) {
+                    Ok(b) => Ok((Value::String(lua.create_string(b)?), Value::Nil, Value::Nil)),
+                    Err(e) => {
+                        let (msg, code) = e.describe(&path);
+                        Ok((
+                            Value::Nil,
+                            Value::String(lua.create_string(msg)?),
+                            Value::Integer(code.into()),
+                        ))
+                    }
+                }
+            })?,
+        )?;
+    }
     // fero.tls.parse_certificate(der): a certificate read from a TLS
     // handshake, as sock:get_ssl_certificate() gives it; the rest of
     // fero.tls is in tls.lua.

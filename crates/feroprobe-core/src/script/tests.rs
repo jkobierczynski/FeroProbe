@@ -5850,11 +5850,11 @@ fn nse_modules_load_and_unknown_ones_are_named() {
     let e = Script::load(
         "n",
         None,
-        "local io = require \"io\"\ncategories = {}\nprerule = function() end\naction = function() end",
+        "local packet = require \"packet\"\ncategories = {}\nprerule = function() end\naction = function() end",
     )
     .unwrap_err();
     assert!(
-        e.0.contains("module 'io' is not available in FeroProbe"),
+        e.0.contains("module 'packet' is not available in FeroProbe"),
         "{e}"
     );
     // Every module loads on its own.
@@ -5865,6 +5865,7 @@ fn nse_modules_load_and_unknown_ones_are_named() {
         "datetime",
         "ftp",
         "http",
+        "io",
         "ipOps",
         "json",
         "match",
@@ -5982,6 +5983,95 @@ end"#
     ] {
         assert_eq!(text(named(d, k)), want, "{k}");
     }
+}
+
+#[tokio::test]
+async fn nse_io_reads_only_named_files_and_bignums() {
+    let dir = std::env::temp_dir().join(format!("feroprobe-nse-io-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let users = dir.join("users.txt");
+    std::fs::write(&users, "root\nadmin\r\n\n42 0x10 rest").unwrap();
+    let other = dir.join("other.txt");
+    std::fs::write(&other, "secret").unwrap();
+    let src = format!(
+        r#"{NSE_HEAD}
+local openssl = require "openssl"
+prerule = function() return true end
+action = function()
+  local o = stdnse.output_table()
+  local path = stdnse.get_script_args("userdb")
+  local f = assert(io.open(path, "rb"))
+  o.io_type = io.type(f)
+  local l1, l2, l3 = f:read("l", "L", "*l")
+  o.lines = l1 .. "|" .. l2:gsub("\r", "CR"):gsub("\n", "LF") .. "|" .. l3 .. "|"
+  local n1, n2 = f:read("n", "n")
+  o.nums = tostring(n1) .. " " .. tostring(n2) .. " " .. f:read("a") .. " " .. tostring(f:read("l"))
+  o.seek = tostring(f:seek("set", 5)) .. " " .. f:read(5) .. " " .. tostring(f:seek("end"))
+  o.write = tostring(select(2, f:write("x")))
+  f:close()
+  o.closed = io.type(f) .. " " .. tostring(pcall(f.read, f))
+  local count = 0
+  for line in io.lines(path) do count = count + 1 end
+  o.count = count
+  o.denied = tostring(select(2, io.open("{other}")))
+  o.nowrite = tostring(select(2, io.open(path, "w")))
+  o.fetch = tostring(nmap.fetchfile("../../etc/passwd")) .. " " .. tostring(nmap.fetchfile("/etc/passwd"))
+  o.global = tostring(io == require "io")
+  o.popen = tostring(pcall(io.popen, "id"))
+
+  local bn = openssl.bignum_dec2bn("123456789012345678901234567890")
+  local q, r = openssl.bignum_div(bn, openssl.bignum_hex2bn("FF"))
+  o.bn = openssl.bignum_bn2hex(bn) .. " " .. openssl.bignum_bn2dec(q) .. " " .. openssl.bignum_bn2dec(r)
+    .. " " .. openssl.bignum_num_bits(bn) .. " " .. openssl.bignum_num_bytes(bn)
+  o.modexp = openssl.bignum_bn2dec(openssl.bignum_mod_exp(openssl.bignum_dec2bn("4"),
+    openssl.bignum_dec2bn("13"), openssl.bignum_dec2bn("497")))
+  local x = openssl.bignum_bin2bn("\1\0")
+  openssl.bignum_set_bit(x, 0)
+  openssl.bignum_clear_bit(x, 8)
+  o.bits = openssl.bignum_bn2dec(x) .. " " .. tostring(openssl.bignum_is_bit_set(x, 0)) .. " "
+    .. tostring(openssl.bignum_is_bit_set(x, 8)) .. " " .. stdnse.tohex(openssl.bignum_bn2bin(
+    openssl.bignum_add(x, openssl.bignum_dec2bn("254"))))
+  o.prime = tostring(openssl.bignum_is_prime(openssl.bignum_dec2bn("1000000007"))) .. " "
+    .. tostring(openssl.bignum_is_prime(openssl.bignum_dec2bn("561"))) .. " "
+    .. string.format("%s %s", openssl.bignum_is_safe_prime(openssl.bignum_dec2bn("23")))
+    .. " " .. string.format("%s %s", openssl.bignum_is_safe_prime(openssl.bignum_dec2bn("13")))
+  o.rand = openssl.bignum_num_bits(openssl.bignum_rand(77)) .. " "
+    .. openssl.bignum_num_bits(openssl.bignum_pseudo_rand(8))
+  o.big = tostring(pcall(openssl.bignum_rand, 1000000))
+  return o
+end"#,
+        other = other.display()
+    );
+    let args = args::parse(&format!("userdb={}", users.display())).unwrap();
+    let scan = ScriptScan::new(vec![script("io", &src)], args, None).unwrap();
+    let r = scan.pre_scan().await;
+    let d = r[0].data.as_ref().unwrap_or_else(|| panic!("{r:?}"));
+    for (k, want) in [
+        ("io_type", "file"),
+        ("lines", "root|adminCRLF||"),
+        ("nums", "42 16  rest nil"),
+        ("seek", "5 admin 25"),
+        ("count", "4"),
+        ("closed", "closed file false"),
+        ("write", "FeroProbe scripts cannot write files"),
+        ("global", "true"),
+        ("popen", "false"),
+        ("fetch", "nil nil"),
+        (
+            "bn",
+            "18EE90FF6C373E0EE4E3F0AD2 484144270636649721181312030 240 97 13",
+        ),
+        ("modexp", "445"),
+        ("bits", "1 true false ff"),
+        ("prime", "true false true true false true"),
+        ("rand", "77 8"),
+        ("big", "false"),
+    ] {
+        assert_eq!(text(named(d, k)), want, "{k}");
+    }
+    assert!(text(named(d, "denied")).contains("read only files named in --script-args"));
+    assert!(text(named(d, "nowrite")).contains("cannot write files"));
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[tokio::test]
