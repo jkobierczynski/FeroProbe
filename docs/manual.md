@@ -1699,13 +1699,19 @@ the scan probed there.
 | `snmp` | `Helper` (`new`, `connect`, `get`, `getnext`, `walk`, `close`), `str2oid`, `oid2str` |
 | `unpwdb` | `usernames`, `passwords`, `timelimit`, `concat_iterators`, `filter_iterator`, `limited_iterator`; reads only a file named in `--script-args` (`userdb`/`passdb`) or an installed nmap's `usernames.lst`/`passwords.lst` found by `nmap.fetchfile`, since FeroProbe ships no word lists |
 | `brute` | `Engine` (`new`, `start`, `setMaxThreads`, `setUsernameIterator`, `setPasswordIterator`, `setMode`, `setOption`, `setTitle`), `Driver` interface (`new`, `connect`, `login`, `disconnect`), `Error` (`new`, `getMessage`, `setRetry`/`isRetry`, `setAbort`/`isAbort`, `setReduce`/`isReduce`, `setDone`/`isDone`, `setInvalidAccount`/`isInvalidAccount`), `Options`, `Account`, `account_iterator`, `credential_iterator`, `pw_same_as_user_iterator`, `pw_ucase_iterator`, `checkBoolArg`, `new_socket`; guesses one at a time, so `setMaxThreads` and `brute.threads` have no effect |
+| `tab`, `listop`, `bits` | `new`, `add`, `addrow`, `nextrow`, `dump`; `map`, `filter`, `apply`, `append`, `cons`, `car`, `cdr`, `ncar`, `ncdr`, `reverse`, `flatten`, `is_empty`, `is_list`; `arshift`, `reverse` |
+| `oops`, `formulas` | `err`, `raise`, `output` (an error shows only with `-d`, as with `stdnse.format_output`); `mean_stddev`, `median`, `quickselect`, `calcPwdEntropy`, `looksRandom` |
+| `geoip` | `add`, `empty`, `get_all_by_ip`, `get_all_by_gps`; kept in `nmap.registry` for the run |
+| `irc`, `knx` | `portrule`; `parseHeader`, `parseKnxAddress`, `query`, and the KNXnet/IP service family, medium and DIB type tables |
+| `lfs` | `get_path_separator`; `mkdir`, `rmdir` and `link` return false and a message, and `dir` raises an error, since scripts cannot touch the file system |
+| `target` | `ALLOW_NEW_TARGETS` (always false) and `add`, which refuses every host: FeroProbe never scans hosts a script discovers, even with `newtargets`, so a scan stays within the targets you gave. The scripts still report what they found |
 | Lua's own | `string`, `table`, `math`, `coroutine`, `utf8`, `os` (the sandbox's), `_G` |
 
-Any other module (`target`, `packet`, `msrpc`, `httpspider`, `dns`, ...)
+Any other module (`packet`, `msrpc`, `httpspider`, `dns`, ...)
 stops the script from loading with an error that names it; a function
 FeroProbe does not have in a module it offers (`nmap.new_dnet`,
 `openssl.encrypt`, ...) raises an error naming it when called. Of nmap
-7.99's 612 scripts, 230 load as they are. See
+7.94's 606 scripts, 277 load as they are. See
 [Brute-force scripts](#brute-force-scripts) for how a `brute` script must
 be chosen before it will run.
 

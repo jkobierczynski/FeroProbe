@@ -5959,6 +5959,16 @@ fn nse_modules_load_and_unknown_ones_are_named() {
         "unpwdb",
         "url",
         "vulns",
+        "bits",
+        "formulas",
+        "geoip",
+        "irc",
+        "knx",
+        "lfs",
+        "listop",
+        "oops",
+        "tab",
+        "target",
         "_G",
         "string",
     ] {
@@ -6054,6 +6064,95 @@ end"#
         ("match", "3 2"),
         ("mac", "00:0c:29:01:02:03 1.2.3.4"),
         ("try", "v failed"),
+    ] {
+        assert_eq!(text(named(d, k)), want, "{k}");
+    }
+}
+
+#[tokio::test]
+async fn nse_small_modules() {
+    let src = format!(
+        r#"{NSE_HEAD}
+local tab = require "tab"
+local bits = require "bits"
+local listop = require "listop"
+local oops = require "oops"
+local formulas = require "formulas"
+local geoip = require "geoip"
+local lfs = require "lfs"
+local irc = require "irc"
+local knx = require "knx"
+local target = require "target"
+prerule = function() return true end
+action = function()
+  local o = stdnse.output_table()
+  local t = tab.new()
+  tab.addrow(t, "PORT", "STATE")
+  tab.add(t, 1, "22")
+  tab.add(t, 2, "open")
+  tab.nextrow(t)
+  tab.addrow(t, "8080", "x")
+  o.tab = tab.dump(t)
+  o.bits = bits.arshift(-16, 2) .. " " .. bits.arshift(16, 2) .. " " .. bits.reverse(1) .. " " .. bits.reverse(6, 4)
+  o.listop = table.concat(listop.flatten({{ 1, {{ 2, {{ 3 }} }}, "a" }}), ",") .. " "
+    .. table.concat(listop.reverse(listop.cons(0, {{ 1, 2 }})), ",") .. " "
+    .. table.concat(listop.map(tostring, listop.filter(function(v) return v > 1 end, {{ 1, 2, 3 }})), ",")
+    .. " " .. listop.apply(math.max, {{ 1, 9, 3 }}) .. " " .. table.concat(listop.ncdr({{ 1, 2, 3 }}, 2), ",")
+    .. " " .. tostring(listop.is_empty({{}}))
+  local st, err = oops.raise("outer failed", oops.raise("inner failed", false, "cause"))
+  local ok, v = oops.raise("never", true, "value")
+  o.oops = tostring(st) .. " " .. tostring(err) .. " " .. v .. " " .. oops.output(true, "fine")
+    .. " " .. tostring(oops.output(false, err))
+  local mean, sd = formulas.mean_stddev({{ 2, 4, 4, 4, 5, 5, 7, 9 }})
+  o.formulas = string.format("%.1f %.3f %s %s %s %.1f %s %s", mean, sd, formulas.median({{ 3, 1, 2 }}),
+    formulas.median({{ 4, 1, 2, 3 }}), formulas.quickselect({{ 5, 1, 9, 3 }}, 2),
+    formulas.calcPwdEntropy("aB3!"), tostring(formulas.looksRandom(string.rep("A", 16))),
+    tostring(formulas.looksRandom("\x8f\x12\xd4\x3a\x77\xe1\x05\xbc\x69\x40\xf3\x2e\x9d\x58\xa6\x1b")))
+  local before = geoip.empty()
+  geoip.add("1.2.3.4", 50.5, 4.25)
+  geoip.add("5.6.7.8", 50.5, 4.25)
+  o.geoip = tostring(before) .. " " .. tostring(geoip.empty()) .. " "
+    .. table.concat(geoip.get_all_by_gps()["50.5,4.25"], ",") .. " " .. geoip.get_all_by_ip()["1.2.3.4"].lon
+  local made, why = lfs.mkdir("/tmp/x")
+  o.lfs = tostring(made) .. " " .. why .. " " .. tostring(pcall(lfs.dir, "/")) .. " " .. #lfs.get_path_separator()
+  o.irc = tostring(irc.portrule({{}}, {{ number = 6667, protocol = "tcp", state = "open" }})) .. " "
+    .. tostring(irc.portrule({{}}, {{ number = 80, protocol = "tcp", state = "open", service = "http" }}))
+  local q = knx.query(0x0201, "192.168.1.5", 3671)
+  local hl, ver, svc, total, pos = knx.parseHeader(q)
+  o.knx = stdnse.tohex(q) .. " " .. hl .. " " .. ver .. " " .. svc .. " " .. total .. " " .. pos .. " "
+    .. knx.parseKnxAddress(0x1103) .. " " .. tostring(knx.parseHeader("\6"))
+  local none, n = target.add()
+  local added, msg = target.add("10.0.0.1")
+  o.target = tostring(target.ALLOW_NEW_TARGETS) .. " " .. tostring(none) .. " " .. n .. " " .. tostring(added) .. " " .. msg
+  return o
+end"#
+    );
+    let scan = ScriptScan::new(vec![script("small", &src)], ArgTable::default(), None).unwrap();
+    let r = scan.pre_scan().await;
+    let d = r[0].data.as_ref().unwrap_or_else(|| panic!("{r:?}"));
+    for (k, want) in [
+        ("tab", "PORT  STATE\n22    open\n8080  x\n"),
+        ("bits", "-4 4 128 6"),
+        ("listop", "1,2,3,a 2,1,0 2,3 9 3 true"),
+        (
+            "oops",
+            "false outer failed: inner failed: cause value fine nil",
+        ),
+        ("formulas", "5.0 2.138 2 2.5 5 26.2 false true"),
+        ("geoip", "true false 1.2.3.4,5.6.7.8 4.25"),
+        (
+            "lfs",
+            "false FeroProbe scripts cannot change the file system false 1",
+        ),
+        ("irc", "true false"),
+        (
+            "knx",
+            "06100201000e0801c0a801050e57 6 16 513 14 7 1.1.3 nil",
+        ),
+        (
+            "target",
+            "false true 0 false FeroProbe does not scan hosts that scripts add",
+        ),
     ] {
         assert_eq!(text(named(d, k)), want, "{k}");
     }

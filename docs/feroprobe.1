@@ -1618,6 +1618,60 @@ Its rules are checked in one sandbox per host (the hostrule and the
 portrules of that host\[aq]s ports), and its action runs in a fresh
 sandbox for every host or port, so actions share nothing with each
 other, with the rules or between runs.
+.SS Brute-force scripts
+.PP
+A script in the \f[V]brute\f[R] category tries to log in to a service by
+guessing user names and passwords, so running one sends real login
+attempts to the target.
+FeroProbe runs a brute-force script only when you choose it
+deliberately:
+.IP \[bu] 2
+by its exact name, such as \f[V]--script ftp-brute\f[R];
+.IP \[bu] 2
+by a file path, such as \f[V]--script ./ftp-brute.lua\f[R]; or
+.IP \[bu] 2
+by the \f[V]brute\f[R] category word, such as \f[V]--script brute\f[R]
+or \f[V]--script \[dq]brute and safe\[dq]\f[R].
+.PP
+It is never run when it is only swept up by \f[V]all\f[R], by another
+category such as \f[V]intrusive\f[R], by a name pattern such as
+\f[V]*-brute\f[R], by a whole directory, or by \f[V]-sC\f[R] or
+\f[V]-A\f[R].
+A brute-force script left out this way is named in a warning, so you
+know it was skipped and how to run it.
+This is a FeroProbe safeguard; nmap runs brute-force scripts from any
+matching selection.
+(With ICS protection on, \f[V]--script\f[R] is refused altogether unless
+you pass \f[V]--override-ics-protection\f[R].)
+.PP
+Brute-force scripts take their user names and passwords from word lists.
+FeroProbe ships none of nmap\[aq]s lists, so a list is read only from a
+file you name in \f[V]--script-args\f[R] or from an installed nmap\[aq]s
+own lists:
+.IP \[bu] 2
+\f[V]userdb=<file>\f[R] and \f[V]passdb=<file>\f[R] give the user-name
+and password files (one entry per line; \f[V]#\f[R] comments and blank
+lines are skipped);
+.IP \[bu] 2
+\f[V]brute.credfile=<file>\f[R] gives a file of \f[V]user:pass\f[R]
+pairs, one per line;
+.IP \[bu] 2
+without any of these, FeroProbe looks for nmap\[aq]s
+\f[V]usernames.lst\f[R] and \f[V]passwords.lst\f[R] in its data
+directories (\f[V]$NMAPDIR\f[R] and the usual installed-nmap locations).
+If none is found the list is empty and the script finds nothing.
+.PP
+Other \f[V]brute.*\f[R] and \f[V]unpwdb.*\f[R] arguments nmap takes are
+accepted too, for example \f[V]brute.mode\f[R] (\f[V]user\f[R],
+\f[V]pass\f[R] or \f[V]creds\f[R]), \f[V]brute.firstonly\f[R],
+\f[V]brute.useraspass\f[R], \f[V]brute.emptypass\f[R],
+\f[V]brute.guesses\f[R], \f[V]brute.delay\f[R],
+\f[V]unpwdb.userlimit\f[R], \f[V]unpwdb.passlimit\f[R] and
+\f[V]unpwdb.timelimit\f[R].
+FeroProbe makes its guesses one at a time, so \f[V]brute.threads\f[R]
+and the scripts\[aq] thread settings are accepted but have no effect
+\[em] another documented difference from nmap, which guesses in
+parallel.
 .SS \f[V]--script-args <args>\f[R]
 .PP
 Arguments for the scripts, in nmap\[aq]s syntax: comma-separated
@@ -1774,7 +1828,9 @@ environment, files or exit), no \f[V]package\f[R], \f[V]debug\f[R],
 precompiled bytecode;
 .IP \[bu] 2
 \f[V]require\f[R] only for the modules of the NSE compatibility layer
-and Lua\[aq]s own libraries by name;
+and Lua\[aq]s own libraries by name (an NSE script also gets the
+layer\[aq]s read-only \f[V]io\f[R], which reads only data files and
+files named in \f[V]--script-args\f[R]);
 .IP \[bu] 2
 64 MB of memory, and about a billion Lua instructions (some seconds of
 pure computation; time spent waiting on the network does not count);
@@ -1813,8 +1869,24 @@ only when it points inside the scope; one that points elsewhere is not
 followed and is returned to the script as it came.
 Scripts with a \f[V]prerule\f[R] or \f[V]postrule\f[R], which run
 without a host, have no network access at all, so nothing broadcasts.
-A connection the script asks for outside the scope fails, and FeroProbe
-prints a warning naming the script and the address.
+A connection the script asks for outside the scope fails, quietly by
+default: the refusal is the scope working as meant.
+With \f[V]-v\f[R], FeroProbe counts the refusals and, when the scripts
+of a phase are done, prints one warning per script and reason, with how
+many connections were refused, on which host and which ports the script
+tried:
+.IP
+.nf
+\f[C]
+Warning: script ntp-info: 28 connections refused on 192.168.1.159, UDP not scanned (it tried 14 udp ports: 21, 22, 110, 143, 465, 587, 993, 995, 6 more); -vv shows each
+\f[R]
+.fi
+.PP
+This matters most for scripts forced with \f[V]+\f[R], which run on
+every port whatever their rule says: a UDP script forced onto a TCP-only
+scan tries (and is refused) on each open TCP port.
+With \f[V]-vv\f[R] or \f[V]-d\f[R] each refusal is also printed as it
+happens, naming the address and port.
 A wider scope may come later as an explicit option.
 .SS Writing scripts
 .PP
@@ -3714,6 +3786,9 @@ first, then \f[V]name.nse\f[R]), from a directory, and in the index
 \f[V]--script-updatedb\f[R] writes.
 A script becomes an NSE script the moment it calls \f[V]require\f[R];
 FeroProbe\[aq]s own scripts do not.
+As in nmap, such a script also has \f[V]nmap\f[R] and Lua\[aq]s
+\f[V]io\f[R] (FeroProbe\[aq]s read-only one) available as globals,
+without requiring them.
 .PP
 \f[V]require\f[R] gives these modules, written for FeroProbe on top of
 \f[V]fero\f[R] from nmap\[aq]s public API documentation (nmap\[aq]s own
@@ -3825,8 +3900,27 @@ T{
 T}@T{
 \f[V]md5\f[R], \f[V]sha1\f[R], \f[V]digest\f[R] (MD5, SHA-1, SHA-256,
 SHA-384, SHA-512), \f[V]hmac\f[R], \f[V]rand_bytes\f[R],
-\f[V]rand_pseudo_bytes\f[R], \f[V]supported_digests\f[R]; no ciphers or
-big numbers
+\f[V]rand_pseudo_bytes\f[R], \f[V]supported_digests\f[R]; big numbers:
+\f[V]bignum_bin2bn\f[R], \f[V]bignum_dec2bn\f[R],
+\f[V]bignum_hex2bn\f[R], \f[V]bignum_bn2bin\f[R],
+\f[V]bignum_bn2dec\f[R], \f[V]bignum_bn2hex\f[R], \f[V]bignum_add\f[R],
+\f[V]bignum_div\f[R], \f[V]bignum_mod_exp\f[R],
+\f[V]bignum_num_bits\f[R], \f[V]bignum_num_bytes\f[R],
+\f[V]bignum_is_bit_set\f[R], \f[V]bignum_set_bit\f[R],
+\f[V]bignum_clear_bit\f[R], \f[V]bignum_is_prime\f[R],
+\f[V]bignum_is_safe_prime\f[R], \f[V]bignum_rand\f[R],
+\f[V]bignum_pseudo_rand\f[R]; no ciphers
+T}
+T{
+\f[V]io\f[R]
+T}@T{
+Lua\[aq]s \f[V]io\f[R], read-only: \f[V]open\f[R] (read modes),
+\f[V]lines\f[R], \f[V]close\f[R], \f[V]type\f[R], \f[V]read\f[R],
+\f[V]input\f[R], and files\[aq] \f[V]read\f[R] (\f[V]l\f[R],
+\f[V]L\f[R], \f[V]n\f[R], \f[V]a\f[R], byte counts), \f[V]lines\f[R],
+\f[V]seek\f[R], \f[V]close\f[R]; \f[V]write\f[R] and
+\f[V]io.stdout:write\f[R] go to the debugging output, as \f[V]print\f[R]
+does
 T}
 T{
 \f[V]base64\f[R], \f[V]rand\f[R], \f[V]match\f[R], \f[V]outlib\f[R]
@@ -3915,6 +4009,82 @@ T}@T{
 \f[V]oid2str\f[R]
 T}
 T{
+\f[V]unpwdb\f[R]
+T}@T{
+\f[V]usernames\f[R], \f[V]passwords\f[R], \f[V]timelimit\f[R],
+\f[V]concat_iterators\f[R], \f[V]filter_iterator\f[R],
+\f[V]limited_iterator\f[R]; reads only a file named in
+\f[V]--script-args\f[R] (\f[V]userdb\f[R]/\f[V]passdb\f[R]) or an
+installed nmap\[aq]s \f[V]usernames.lst\f[R]/\f[V]passwords.lst\f[R]
+found by \f[V]nmap.fetchfile\f[R], since FeroProbe ships no word lists
+T}
+T{
+\f[V]brute\f[R]
+T}@T{
+\f[V]Engine\f[R] (\f[V]new\f[R], \f[V]start\f[R],
+\f[V]setMaxThreads\f[R], \f[V]setUsernameIterator\f[R],
+\f[V]setPasswordIterator\f[R], \f[V]setMode\f[R], \f[V]setOption\f[R],
+\f[V]setTitle\f[R]), \f[V]Driver\f[R] interface (\f[V]new\f[R],
+\f[V]connect\f[R], \f[V]login\f[R], \f[V]disconnect\f[R]),
+\f[V]Error\f[R] (\f[V]new\f[R], \f[V]getMessage\f[R],
+\f[V]setRetry\f[R]/\f[V]isRetry\f[R],
+\f[V]setAbort\f[R]/\f[V]isAbort\f[R],
+\f[V]setReduce\f[R]/\f[V]isReduce\f[R],
+\f[V]setDone\f[R]/\f[V]isDone\f[R],
+\f[V]setInvalidAccount\f[R]/\f[V]isInvalidAccount\f[R]),
+\f[V]Options\f[R], \f[V]Account\f[R], \f[V]account_iterator\f[R],
+\f[V]credential_iterator\f[R], \f[V]pw_same_as_user_iterator\f[R],
+\f[V]pw_ucase_iterator\f[R], \f[V]checkBoolArg\f[R],
+\f[V]new_socket\f[R]; guesses one at a time, so \f[V]setMaxThreads\f[R]
+and \f[V]brute.threads\f[R] have no effect
+T}
+T{
+\f[V]tab\f[R], \f[V]listop\f[R], \f[V]bits\f[R]
+T}@T{
+\f[V]new\f[R], \f[V]add\f[R], \f[V]addrow\f[R], \f[V]nextrow\f[R],
+\f[V]dump\f[R]; \f[V]map\f[R], \f[V]filter\f[R], \f[V]apply\f[R],
+\f[V]append\f[R], \f[V]cons\f[R], \f[V]car\f[R], \f[V]cdr\f[R],
+\f[V]ncar\f[R], \f[V]ncdr\f[R], \f[V]reverse\f[R], \f[V]flatten\f[R],
+\f[V]is_empty\f[R], \f[V]is_list\f[R]; \f[V]arshift\f[R],
+\f[V]reverse\f[R]
+T}
+T{
+\f[V]oops\f[R], \f[V]formulas\f[R]
+T}@T{
+\f[V]err\f[R], \f[V]raise\f[R], \f[V]output\f[R] (an error shows only
+with \f[V]-d\f[R], as with \f[V]stdnse.format_output\f[R]);
+\f[V]mean_stddev\f[R], \f[V]median\f[R], \f[V]quickselect\f[R],
+\f[V]calcPwdEntropy\f[R], \f[V]looksRandom\f[R]
+T}
+T{
+\f[V]geoip\f[R]
+T}@T{
+\f[V]add\f[R], \f[V]empty\f[R], \f[V]get_all_by_ip\f[R],
+\f[V]get_all_by_gps\f[R]; kept in \f[V]nmap.registry\f[R] for the run
+T}
+T{
+\f[V]irc\f[R], \f[V]knx\f[R]
+T}@T{
+\f[V]portrule\f[R]; \f[V]parseHeader\f[R], \f[V]parseKnxAddress\f[R],
+\f[V]query\f[R], and the KNXnet/IP service family, medium and DIB type
+tables
+T}
+T{
+\f[V]lfs\f[R]
+T}@T{
+\f[V]get_path_separator\f[R]; \f[V]mkdir\f[R], \f[V]rmdir\f[R] and
+\f[V]link\f[R] return false and a message, and \f[V]dir\f[R] raises an
+error, since scripts cannot touch the file system
+T}
+T{
+\f[V]target\f[R]
+T}@T{
+\f[V]ALLOW_NEW_TARGETS\f[R] (always false) and \f[V]add\f[R], which
+refuses every host: FeroProbe never scans hosts a script discovers, even
+with \f[V]newtargets\f[R], so a scan stays within the targets you gave.
+The scripts still report what they found
+T}
+T{
 Lua\[aq]s own
 T}@T{
 \f[V]string\f[R], \f[V]table\f[R], \f[V]math\f[R], \f[V]coroutine\f[R],
@@ -3922,13 +4092,15 @@ T}@T{
 T}
 .TE
 .PP
-Any other module (\f[V]io\f[R], \f[V]brute\f[R], \f[V]target\f[R],
-\f[V]packet\f[R], \f[V]msrpc\f[R], \f[V]unpwdb\f[R], ...)
+Any other module (\f[V]packet\f[R], \f[V]msrpc\f[R],
+\f[V]httpspider\f[R], \f[V]dns\f[R], ...)
 stops the script from loading with an error that names it; a function
 FeroProbe does not have in a module it offers (\f[V]nmap.new_dnet\f[R],
-\f[V]openssl.encrypt\f[R], \f[V]openssl.bignum_bin2bn\f[R], ...)
+\f[V]openssl.encrypt\f[R], ...)
 raises an error naming it when called.
-Of nmap 7.99\[aq]s 612 scripts, 187 load as they are.
+Of nmap 7.94\[aq]s 606 scripts, 277 load as they are.
+See Brute-force scripts for how a \f[V]brute\f[R] script must be chosen
+before it will run.
 .PP
 What NSE scripts see differently:
 .IP \[bu] 2
@@ -3968,8 +4140,31 @@ not available.
 and \f[V]nmap.set_port_version\f[R] are accepted and ignored (shown with
 \f[V]-d2\f[R]).
 .IP \[bu] 2
-\f[B]No data files or name lookups.\f[R] \f[V]nmap.fetchfile\f[R]
-returns \f[V]nil\f[R]; \f[V]nmap.resolve\f[R] fails.
+\f[B]Files are read-only, and only some.\f[R] FeroProbe ships none of
+nmap\[aq]s data files.
+\f[V]nmap.fetchfile(name)\f[R] looks for \f[V]name\f[R] (a relative path
+without \f[V]..\f[R]) in FeroProbe\[aq]s data directory (the folder
+above the scripts directory, such as
+\f[V]\[ti]/.local/share/feroprobe/\f[R]), then in \f[V]$NMAPDIR\f[R],
+\f[V]/usr/local/share/nmap\f[R], \f[V]/usr/share/nmap\f[R],
+\f[V]/opt/homebrew/share/nmap\f[R] and \f[V]/opt/local/share/nmap\f[R],
+so the word lists and data files of an nmap you installed are found as
+nmap finds them.
+\f[V]io.open\f[R] reads only a file inside those directories (after
+following links) or a path you gave in \f[V]--script-args\f[R] exactly
+as written (such as \f[V]userdb=users.txt\f[R]); any other path, and
+every write mode, gives \f[V]nil\f[R] and a message.
+Files are read whole, at most 16 MiB.
+\f[V]io.popen\f[R] and \f[V]io.tmpfile\f[R] raise an error.
+nmap\[aq]s scripts can read and write any file the user can.
+.IP \[bu] 2
+\f[B]No name lookups.\f[R] \f[V]nmap.resolve\f[R] fails.
+.IP \[bu] 2
+\f[B]Big numbers\f[R] (\f[V]openssl.bignum_*\f[R]) are FeroProbe\[aq]s
+own, with limits so one call stays short: numbers up to 65,536 bits;
+\f[V]bignum_mod_exp\f[R] and the prime tests up to 16,384 bits.
+Prime tests use Miller-Rabin with random bases, false positives below
+2\[ha]-80 as documented for nmap\[aq]s.
 .IP \[bu] 2
 \f[B]Fixed values.\f[R] \f[V]nmap.timing_level()\f[R] is 3 and
 \f[V]nmap.version_intensity()\f[R] 7 whatever the scan\[aq]s options;
@@ -3998,8 +4193,7 @@ A failure gives nmap\[aq]s form, a response with \f[V]status\f[R]
 curve, also as \f[V]ecdhparams\f[R]), \f[V]validity\f[R] (date tables),
 \f[V]sig_algorithm\f[R], \f[V]version\f[R], \f[V]serial\f[R],
 \f[V]pem\f[R], \f[V]der\f[R] and \f[V]digest\f[R], but no key modulus or
-exponent (FeroProbe has no big numbers), and of the extensions only the
-subject alternative names.
+exponent, and of the extensions only the subject alternative names.
 TLS is 1.2 and 1.3, as for every FeroProbe connection.
 .IP \[bu] 2
 \f[B]TLS hellos\f[R] built with \f[V]tls.client_hello\f[R] carry
@@ -5187,6 +5381,57 @@ the port scan.
 The scan then runs as usual.
 Combined with \f[V]--dry-run\f[R] it explains the plan and lists the
 probes without sending anything.
+.PP
+With \f[V]--script\f[R], \f[V]-sC\f[R] or \f[V]-A\f[R] the plan ends
+with a \f[B]Script scan\f[R] step that says where scripts may run,
+before anything is sent:
+.IP \[bu] 2
+the \f[B]scope\f[R]: the hosts and ports every script connection is held
+to.
+A script may connect only to the host it runs against, and only on the
+TCP and UDP ports this scan probes there; FeroProbe refuses anything
+else.
+This is a hard ceiling, whatever the script is.
+.IP \[bu] 2
+the chosen scripts \f[B]by phase\f[R]: prerule (before the scan) and
+postrule (after it) scripts are named, and send nothing to the targets,
+as they get no network access; hostrule and portrule scripts are listed
+with what their rule keys on.
+For FeroProbe\[aq]s built-in scripts that is the ports and service names
+the rule wants (\f[V]ssh-hostkey: TCP 22, or a TCP port named ssh\f[R]),
+scripts with the same rule on one line.
+A script from a file, an nmap \f[V].nse\f[R] script above all, is named
+only: its rule is its own Lua code and declares no ports, so FeroProbe
+does not guess which ports it will pick.
+It runs inside the scope above.
+Scripts forced with \f[V]+\f[R] are named as running on every host or
+port.
+.IP \[bu] 2
+a \f[B]note\f[R] when a built-in script forced with \f[V]+\f[R] connects
+only over a protocol the scan does not probe, such as \f[V]ntp-info\f[R]
+or the \f[V]snmp-*\f[R] scripts (UDP) on a TCP-only scan: forced, they
+still run, but every connection they try is refused (quietly unless
+\f[V]-v\f[R]), so the note says so before the scan and names the option
+that would scan that protocol (\f[V]-sU\f[R]).
+.PP
+The connections scripts actually make show up afterwards with
+\f[V]--script-trace\f[R], and \f[V]-d2\f[R] logs each script run with
+the host and port it ran against.
+.IP
+.nf
+\f[C]
+6. Script scan
+   - 3 scripts: the scripts chosen by --script ssh-hostkey,clock-skew,/x/mine.nse
+   - scope: a script may connect only to the host it runs against, on the ports this scan probes there; FeroProbe refuses any other connection. Here that is whichever of the 2 targets are found up, on 1 TCP port: 22
+   - once per host that is up (hostrule), when the rule says yes:
+     * clock-skew: a host other scripts noted a clock for; it sends nothing itself
+   - once per port found open, open|filtered or unfiltered (portrule), when the rule says yes:
+     * ssh-hostkey: TCP 22, or a TCP port named ssh
+     * mine: the portrule is the script\[aq]s own code and names no ports; it is asked about each port, inside the scope above
+   - after the scan (postrule), sending nothing to the targets: clock-skew
+   - to see the connections scripts actually make: --script-trace, or -d2 for each script run and the host and port it ran against
+\f[R]
+.fi
 .SS \f[V]--packet-trace\f[R]
 .PP
 Print every probe sent and every answer received on standard output, as

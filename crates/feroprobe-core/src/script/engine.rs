@@ -85,17 +85,25 @@ const SNMP_LIBRARY: &str = include_str!("snmp.lua");
 /// first time a script asks for it, so scripts that never ask pay nothing.
 const NSE_MODULES: &[(&str, &str)] = &[
     ("base64", include_str!("nse/base64.lua")),
+    ("bits", include_str!("nse/bits.lua")),
     ("brute", include_str!("nse/brute.lua")),
     ("comm", include_str!("nse/comm.lua")),
     ("creds", include_str!("nse/creds.lua")),
     ("datetime", include_str!("nse/datetime.lua")),
+    ("formulas", include_str!("nse/formulas.lua")),
     ("ftp", include_str!("nse/ftp.lua")),
+    ("geoip", include_str!("nse/geoip.lua")),
     ("http", include_str!("nse/http.lua")),
     ("io", include_str!("nse/io.lua")),
     ("ipOps", include_str!("nse/ipOps.lua")),
+    ("irc", include_str!("nse/irc.lua")),
     ("json", include_str!("nse/json.lua")),
+    ("knx", include_str!("nse/knx.lua")),
+    ("lfs", include_str!("nse/lfs.lua")),
+    ("listop", include_str!("nse/listop.lua")),
     ("match", include_str!("nse/match.lua")),
     ("nmap", include_str!("nse/nmap.lua")),
+    ("oops", include_str!("nse/oops.lua")),
     ("openssl", include_str!("nse/openssl.lua")),
     ("outlib", include_str!("nse/outlib.lua")),
     ("rand", include_str!("nse/rand.lua")),
@@ -107,7 +115,9 @@ const NSE_MODULES: &[(&str, &str)] = &[
     ("stdnse", include_str!("nse/stdnse.lua")),
     ("strbuf", include_str!("nse/strbuf.lua")),
     ("stringaux", include_str!("nse/stringaux.lua")),
+    ("tab", include_str!("nse/tab.lua")),
     ("tableaux", include_str!("nse/tableaux.lua")),
+    ("target", include_str!("nse/target.lua")),
     ("tls", include_str!("nse/tls.lua")),
     ("unpwdb", include_str!("nse/unpwdb.lua")),
     ("url", include_str!("nse/url.lua")),
@@ -740,6 +750,8 @@ pub(crate) fn install_library(
             Ok(())
         })?,
     )?;
+    // The platform's path separator, for the NSE layer's `lfs`.
+    fero.raw_set("path_separator", std::path::MAIN_SEPARATOR_STR)?;
     fero.raw_set(
         "address_family",
         if scope.addr.is_some_and(|a| a.is_ipv6()) {
