@@ -228,8 +228,22 @@ nmap.fetchfile = function(name)
   if type(name) ~= "string" then return nil end
   return fero.__fetchfile(name)
 end
-nmap.resolve = function(name)
-  return false, "scripts do no name lookups in FeroProbe"
+-- nmap.resolve(name [, family]): true and every address of name ("inet"
+-- or "inet6" for one family), or false and "Failed to resolve".
+nmap.resolve = function(name, family)
+  if not fero.resolve then return false, "Failed to resolve" end
+  return fero.resolve(name, family)
+end
+-- nmap.add_targets(t1, ...): queues hosts for the scan (see the target
+-- module, which checks newtargets first, as nmap's does); the count
+-- added, or 0 and a message. With no arguments, the targets waiting.
+nmap.add_targets = function(...)
+  if not fero.add_targets then return 0, "failed to add new targets." end
+  return fero.add_targets(...)
+end
+nmap.new_targets_num = function()
+  if not fero.new_targets_num then return 0 end
+  return fero.new_targets_num()
 end
 nmap.log_write = function(_, msg)
   fero.debug(0, tostring(msg))
@@ -237,7 +251,7 @@ end
 nmap.get_payload_length = function() return 0 end
 
 for _, name in ipairs({ "new_dnet", "pcap_open", "get_interface_info", "list_interfaces",
-  "get_interface", "get_ports", "get_ttl", "add_targets" }) do
+  "get_interface", "get_ports", "get_ttl" }) do
   nmap[name] = unsupported(name)
 end
 

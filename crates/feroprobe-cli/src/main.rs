@@ -2572,6 +2572,49 @@ fn update_script_db() -> Result<()> {
 
 /// The scripts `--script`, `-sC` or `-A` choose, loaded with their
 /// `--script-args`, or `None` when no script was asked for.
+/// The hosts scripts added to the scan (`target.add` with `newtargets`),
+/// as targets: each string is a target expression like the command line's,
+/// resolved the same way. Expressions that do not parse or resolve are
+/// skipped with a warning, as are `--exclude`d hosts and hosts of an
+/// address family the scan was not planned for (`families`: IPv4, IPv6).
+async fn script_targets(
+    added: &[String],
+    version: IpVersion,
+    exclusions: &Exclusions,
+    families: (bool, bool),
+    progress: Progress,
+) -> Vec<Target> {
+    let mut out = Vec::new();
+    for spec in added {
+        let resolved = match resolve_targets_lenient(std::slice::from_ref(spec), version).await {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("Warning: skipping the target a script added, {spec:?}: {e}");
+                continue;
+            }
+        };
+        for w in &resolved.warnings {
+            eprintln!("{}", nmap_warning(w));
+        }
+        for t in resolved.targets {
+            if exclusions.excludes(&t) {
+                progress.say(1, || format!("Excluded {} (added by a script)", t.addr));
+                continue;
+            }
+            if (t.addr.is_ipv4() && !families.0) || (t.addr.is_ipv6() && !families.1) {
+                eprintln!(
+                    "Warning: skipping {}, which a script added: the scan was planned for {} targets only",
+                    t.addr,
+                    if families.0 { "IPv4" } else { "IPv6" }
+                );
+                continue;
+            }
+            out.push(t);
+        }
+    }
+    out
+}
+
 fn script_scan(args: &Args) -> Result<Option<feroprobe_core::script::ScriptScan>> {
     use feroprobe_core::script;
     let selection = script_selection(args);
@@ -2627,8 +2670,9 @@ fn script_scan(args: &Args) -> Result<Option<feroprobe_core::script::ScriptScan>
         Some(d) => Some(d).filter(|d| !d.is_zero()),
         None => Some(DEFAULT_SCRIPT_TIMEOUT),
     };
-    let engine = script::ScriptScan::new(chosen, table, timeout)
+    let mut engine = script::ScriptScan::new(chosen, table, timeout)
         .map_err(|e| anyhow::anyhow!("--script: {e}"))?;
+    engine.ipv6 = args.ipv6;
     Ok(Some(engine))
 }
 
@@ -4208,67 +4252,94 @@ async fn run(
     let ping_group = groups::PING_GROUP.max(group_limits.0);
     let mut done_hosts = 0;
     let mut untraced = 0;
-    for batch in targets.chunks(ping_group) {
-        let mut hosts: Vec<HostResult> = if plan.list {
-            // -sL: nothing goes to the targets, not even ARP.
-            batch
-                .iter()
-                .map(|t| HostResult::new(t.addr, t.hostname.clone()))
-                .collect()
-        } else if plan.discovery {
-            let done = progress.phase("host discovery", batch.len());
-            let hosts = discover(batch, &cfg, &probes)
-                .await
-                .context("host discovery failed")?;
-            done(&progress);
-            let up = hosts.iter().filter(|h| h.is_up()).count();
-            progress.say(1, || {
-                format!("{up} of {} host{} up", hosts.len(), plural(hosts.len()))
-            });
-            hosts
-        } else {
-            // -Pn: every target is scanned, but those on a local network are
-            // still asked for their MAC address, as in nmap.
-            feroprobe_core::discovery::neighbours_only(batch, &cfg)
-                .await
-                .context("ARP or neighbour discovery failed")?
-        };
-        let mut from = 0;
-        while from < batch.len() {
-            // The group: the next `size` hosts to scan, with the hosts
-            // found down among them.
-            let size = groups::scan_group_size(done_hosts, &group_facts);
-            let (mut to, mut n) = (from, 0);
-            while to < batch.len() && n < size {
-                if !plan.discovery || hosts[to].is_up() {
-                    n += 1;
+    // The address families the scan was planned for: hosts that scripts
+    // add (newtargets) must fit them, as nmap scans one family a run.
+    let families = (
+        targets.iter().any(|t| t.addr.is_ipv4()),
+        targets.iter().any(|t| t.addr.is_ipv6()),
+    );
+    loop {
+        for batch in targets.chunks(ping_group) {
+            let mut hosts: Vec<HostResult> = if plan.list {
+                // -sL: nothing goes to the targets, not even ARP.
+                batch
+                    .iter()
+                    .map(|t| HostResult::new(t.addr, t.hostname.clone()))
+                    .collect()
+            } else if plan.discovery {
+                let done = progress.phase("host discovery", batch.len());
+                let hosts = discover(batch, &cfg, &probes)
+                    .await
+                    .context("host discovery failed")?;
+                done(&progress);
+                let up = hosts.iter().filter(|h| h.is_up()).count();
+                progress.say(1, || {
+                    format!("{up} of {} host{} up", hosts.len(), plural(hosts.len()))
+                });
+                hosts
+            } else {
+                // -Pn: every target is scanned, but those on a local network are
+                // still asked for their MAC address, as in nmap.
+                feroprobe_core::discovery::neighbours_only(batch, &cfg)
+                    .await
+                    .context("ARP or neighbour discovery failed")?
+            };
+            let mut from = 0;
+            while from < batch.len() {
+                // The group: the next `size` hosts to scan, with the hosts
+                // found down among them.
+                let size = groups::scan_group_size(done_hosts, &group_facts);
+                let (mut to, mut n) = (from, 0);
+                while to < batch.len() && n < size {
+                    if !plan.discovery || hosts[to].is_up() {
+                        n += 1;
+                    }
+                    to += 1;
                 }
-                to += 1;
+                let group_start = SystemTime::now();
+                untraced += scan_group(
+                    &batch[from..to],
+                    &mut hosts[from..to],
+                    &GroupRun {
+                        args: &args,
+                        plan: &plan,
+                        cfg: &cfg,
+                        job: &job,
+                        trace,
+                        trace_fallback,
+                        progress,
+                        scripts: scripts.as_ref(),
+                    },
+                )
+                .await?;
+                info.elapsed = started.elapsed();
+                // The keys (v/V, d/D) may have changed the levels meanwhile.
+                info.verbosity = feroprobe_core::debug::verbosity();
+                info.show_reason = args.reason || feroprobe_core::debug::debugging() > 0;
+                reports.group(&hosts[from..to], &info, group_start, SystemTime::now())?;
+                done_hosts += to - from;
+                from = to;
             }
-            let group_start = SystemTime::now();
-            untraced += scan_group(
-                &batch[from..to],
-                &mut hosts[from..to],
-                &GroupRun {
-                    args: &args,
-                    plan: &plan,
-                    cfg: &cfg,
-                    job: &job,
-                    trace,
-                    trace_fallback,
-                    progress,
-                    scripts: scripts.as_ref(),
-                },
-            )
-            .await?;
-            info.elapsed = started.elapsed();
-            // The keys (v/V, d/D) may have changed the levels meanwhile.
-            info.verbosity = feroprobe_core::debug::verbosity();
-            info.show_reason = args.reason || feroprobe_core::debug::debugging() > 0;
-            reports.group(&hosts[from..to], &info, group_start, SystemTime::now())?;
-            done_hosts += to - from;
-            from = to;
         }
+        // Like nmap: hosts that scripts added (target.add with newtargets)
+        // are scanned after the command line's, and so on while scripts on
+        // those hosts add more.
+        let Some(engine) = &scripts else { break };
+        let added = engine.new_targets().take();
+        if added.is_empty() {
+            break;
+        }
+        targets = script_targets(&added, version, &exclusions, families, progress).await;
+        if targets.is_empty() {
+            break;
+        }
+        progress.say(1, || {
+            format!(
+                "Scanning {} host{} added by scripts",
+                targets.len(),
+                plural(targets.len())
+            )
+        });
     }
     if untraced > 0 {
         // A directly connected host needs no port (it gets no probes),
