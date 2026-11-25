@@ -4015,6 +4015,30 @@ T}@T{
 \f[V]close\f[R]
 T}
 T{
+\f[V]httpspider\f[R]
+T}@T{
+\f[V]Crawler\f[R] (\f[V]new\f[R], \f[V]crawl\f[R],
+\f[V]set_timeout\f[R], \f[V]stop\f[R], \f[V]iswithinhost\f[R],
+\f[V]iswithindomain\f[R], \f[V]isresource\f[R],
+\f[V]getLimitations\f[R]), \f[V]URL\f[R], \f[V]LinkExtractor\f[R],
+\f[V]UrlQueue\f[R], \f[V]Options\f[R].
+Crawls breadth-first from \f[V]httpspider.url\f[R] (default
+\f[V]/\f[R]): at most \f[V]httpspider.maxpagecount\f[R] pages (20) and
+\f[V]httpspider.maxdepth\f[R] directories below the start (3), negative
+for no limit; links from \f[V]href\f[R], \f[V]src\f[R], \f[V]action\f[R]
+and CSS \f[V]url()\f[R].
+Images, media, archives, documents and fonts are skipped unless
+\f[V]httpspider.noblacklist\f[R];
+\f[V]httpspider.useheadfornonwebfiles\f[R] asks for files that are not
+web pages with HEAD.
+\f[V]httpspider.withinhost=false\f[R] or
+\f[V]httpspider.withindomain\f[R] widen the crawl\[aq]s own scope, but
+every page is still fetched only from the scanned host and its scanned
+ports.
+Each argument can also be given under the script\[aq]s name
+(\f[V]http-grep.maxpagecount=50\f[R])
+T}
+T{
 \f[V]sslcert\f[R]
 T}@T{
 \f[V]getCertificate\f[R], \f[V]parse_ssl_certificate\f[R],
@@ -4142,13 +4166,12 @@ T}@T{
 T}
 .TE
 .PP
-Any other module (\f[V]packet\f[R], \f[V]msrpc\f[R],
-\f[V]httpspider\f[R], \f[V]dns\f[R], ...)
+Any other module (\f[V]packet\f[R], \f[V]msrpc\f[R], \f[V]dns\f[R], ...)
 stops the script from loading with an error that names it; a function
 FeroProbe does not have in a module it offers (\f[V]nmap.new_dnet\f[R],
 \f[V]openssl.encrypt\f[R], ...)
 raises an error naming it when called.
-Of nmap 7.94\[aq]s 606 scripts, 277 load as they are.
+Of nmap 7.94\[aq]s 606 scripts, 302 load as they are.
 See Brute-force scripts for how a \f[V]brute\f[R] script must be chosen
 before it will run.
 .PP

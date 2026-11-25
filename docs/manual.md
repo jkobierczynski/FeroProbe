@@ -1714,6 +1714,7 @@ the scan probed there.
 | `creds` | `State`, `StateMsg`, `ALL_DATA`, `Account`, `Credentials` (`new` with a script name or a list of tags, `add`, `getCredentials`, `getTable`); kept in `nmap.registry.creds` for the run; asking for `State.PARAM` also gives the accounts in `creds.<service>` and `creds.global` (`user:pass`) |
 | `vulns` | `STATE`, `STATE_MSG`, `Report` (`new`, `add_vulns`, `make_output`); `vulns.showall` lists what is not vulnerable too |
 | `ftp` | `connect`, `read_reply`, `auth`, `pasv`, `close` |
+| `httpspider` | `Crawler` (`new`, `crawl`, `set_timeout`, `stop`, `iswithinhost`, `iswithindomain`, `isresource`, `getLimitations`), `URL`, `LinkExtractor`, `UrlQueue`, `Options`. Crawls breadth-first from `httpspider.url` (default `/`): at most `httpspider.maxpagecount` pages (20) and `httpspider.maxdepth` directories below the start (3), negative for no limit; links from `href`, `src`, `action` and CSS `url()`. Images, media, archives, documents and fonts are skipped unless `httpspider.noblacklist`; `httpspider.useheadfornonwebfiles` asks for files that are not web pages with HEAD. `httpspider.withinhost=false` or `httpspider.withindomain` widen the crawl's own scope, but every page is still fetched only from the scanned host and its scanned ports. Each argument can also be given under the script's name (`http-grep.maxpagecount=50`) |
 | `sslcert` | `getCertificate`, `parse_ssl_certificate`, `isPortSupported`, `getPrepareTLSWithoutReconnect`, over FeroProbe's STARTTLS helper (SMTP, LMTP, IMAP, POP3, NNTP, FTP, LDAP, PostgreSQL, XMPP) |
 | `tls` | `client_hello`, `record_read`, `record_write`, `record_buffer`, `handshake_parse`, `record_version_ok`, `cipher_info`, `servername`, `rsa_equiv`, `KEX_ALGORITHMS` (with `server_key_exchange` readers), `EXTENSION_HELPERS`, `PROTOCOLS`, `CIPHERS`, `COMPRESSORS`, `ELLIPTIC_CURVES`, `DEFAULT_ELLIPTIC_CURVES`, `EXTENSIONS`, `TLS_ALERT_REGISTRY` and the other registries |
 | `ssh2` | `fetch_host_key`, `check_packet_length`, `transport` (`build`, `payload`, `receive_packet`, `kex_init`, `parse_kex_init`, `kexdh_init`, `kexdh_gex_init`) |
@@ -1729,11 +1730,11 @@ the scan probed there.
 | `target` | `ALLOW_NEW_TARGETS`, `add`: as in nmap, a script adds hosts to the scan only when you pass the `newtargets` script argument, and at most `max-newtargets` of them (0, the default, for no limit); see [Hosts that scripts add](#hosts-that-scripts-add) |
 | Lua's own | `string`, `table`, `math`, `coroutine`, `utf8`, `os` (the sandbox's), `_G` |
 
-Any other module (`packet`, `msrpc`, `httpspider`, `dns`, ...)
+Any other module (`packet`, `msrpc`, `dns`, ...)
 stops the script from loading with an error that names it; a function
 FeroProbe does not have in a module it offers (`nmap.new_dnet`,
 `openssl.encrypt`, ...) raises an error naming it when called. Of nmap
-7.94's 606 scripts, 277 load as they are. See
+7.94's 606 scripts, 302 load as they are. See
 [Brute-force scripts](#brute-force-scripts) for how a `brute` script must
 be chosen before it will run.
 
