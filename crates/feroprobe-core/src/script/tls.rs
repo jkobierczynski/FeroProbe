@@ -42,6 +42,8 @@ pub(crate) fn cert_table(lua: &Lua, der: &[u8]) -> mlua::Result<Option<Table>> {
         Ok(x509_parser::public_key::PublicKey::RSA(rsa)) => {
             pubkey.raw_set("type", "rsa")?;
             pubkey.raw_set("bits", int_bits(rsa.modulus))?;
+            pubkey.raw_set("modulus", lua.create_string(rsa.modulus)?)?;
+            pubkey.raw_set("exponent", lua.create_string(rsa.exponent)?)?;
         }
         Ok(x509_parser::public_key::PublicKey::EC(_)) => {
             pubkey.raw_set("type", "ec")?;
