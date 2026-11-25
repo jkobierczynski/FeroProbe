@@ -1,6 +1,7 @@
 //! Running scripts: their rules decide where they run, then their
 //! actions run, many at once, each in its own sandbox.
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::time::{Duration, Instant};
@@ -84,12 +85,14 @@ const SNMP_LIBRARY: &str = include_str!("snmp.lua");
 /// public API documentation (never from nselib). `require` loads one the
 /// first time a script asks for it, so scripts that never ask pay nothing.
 const NSE_MODULES: &[(&str, &str)] = &[
+    ("base32", include_str!("nse/base32.lua")),
     ("base64", include_str!("nse/base64.lua")),
     ("bits", include_str!("nse/bits.lua")),
     ("brute", include_str!("nse/brute.lua")),
     ("comm", include_str!("nse/comm.lua")),
     ("creds", include_str!("nse/creds.lua")),
     ("datetime", include_str!("nse/datetime.lua")),
+    ("dns", include_str!("nse/dns.lua")),
     ("formulas", include_str!("nse/formulas.lua")),
     ("ftp", include_str!("nse/ftp.lua")),
     ("geoip", include_str!("nse/geoip.lua")),
@@ -895,11 +898,17 @@ fn rule_port(p: &PortResult) -> bool {
 
 /// Where a script run's sockets may go: the host and the ports the scan
 /// probed on it.
-fn scope_of(id: &str, h: Option<&HostResult>, refusals: &Arc<Refusals>) -> Scope {
+fn scope_of(
+    id: &str,
+    h: Option<&HostResult>,
+    refusals: &Arc<Refusals>,
+    resolvers: &Arc<Vec<SocketAddr>>,
+) -> Scope {
     let Some(h) = h else {
         return Scope {
             script: id.to_string(),
             refusals: refusals.clone(),
+            resolvers: resolvers.clone(),
             ..Scope::default()
         };
     };
@@ -908,6 +917,7 @@ fn scope_of(id: &str, h: Option<&HostResult>, refusals: &Arc<Refusals>) -> Scope
         names: h.hostname.iter().chain(h.rdns.iter()).cloned().collect(),
         script: id.to_string(),
         refusals: refusals.clone(),
+        resolvers: resolvers.clone(),
         ..Scope::default()
     };
     for p in &h.ports {
@@ -922,6 +932,26 @@ fn scope_of(id: &str, h: Option<&HostResult>, refusals: &Arc<Refusals>) -> Scope
         }
     }
     s
+}
+
+/// `fero.dns_servers()`: the DNS servers scripts may query, in order, as
+/// `{ ip =, port = }` (nmap's `get_dns_servers` gives the addresses).
+fn install_dns_servers(lua: &Lua, servers: &Arc<Vec<SocketAddr>>) -> mlua::Result<()> {
+    let fero: Table = lua.globals().raw_get("fero")?;
+    let servers = servers.clone();
+    fero.raw_set(
+        "dns_servers",
+        lua.create_function(move |lua, ()| {
+            let list = lua.create_table()?;
+            for s in servers.iter() {
+                let t = lua.create_table()?;
+                t.raw_set("ip", s.ip().to_string())?;
+                t.raw_set("port", s.port())?;
+                list.raw_push(t)?;
+            }
+            Ok(list)
+        })?,
+    )
 }
 
 fn truthy(v: &Value) -> bool {
@@ -1123,6 +1153,9 @@ pub struct ScriptScan {
     /// `-6`: prerule and postrule scripts see `inet6` as the address
     /// family (host scripts see their host's).
     pub ipv6: bool,
+    /// The DNS servers scripts may query (`nmap.get_dns_servers`, the
+    /// `dns` module): `--dns-servers`, or the system's.
+    dns_servers: Arc<Vec<SocketAddr>>,
 }
 
 impl ScriptScan {
@@ -1144,6 +1177,7 @@ impl ScriptScan {
             refusals: Arc::default(),
             new_targets: Arc::default(),
             ipv6: false,
+            dns_servers: Arc::new(crate::dns::system_servers()),
         })
     }
 
@@ -1157,10 +1191,26 @@ impl ScriptScan {
         &self.new_targets
     }
 
+    /// Use `servers` (`--dns-servers`) as the scripts' DNS servers instead
+    /// of the system's.
+    pub fn set_dns_servers(&mut self, servers: Vec<SocketAddr>) {
+        self.dns_servers = Arc::new(servers);
+    }
+
+    /// The DNS servers scripts may query.
+    pub fn dns_servers(&self) -> &[SocketAddr] {
+        &self.dns_servers
+    }
+
     /// A fresh state with `script` loaded, for its rules or action.
     fn state(&self, script: &Script, on: Against<'_>, budget: &Arc<Budget>) -> Result<Lua, String> {
         let lua = sandbox::new_state(budget).map_err(|e| e.to_string())?;
-        let scope = Arc::new(scope_of(&script.id, on.host(), &self.refusals));
+        let scope = Arc::new(scope_of(
+            &script.id,
+            on.host(),
+            &self.refusals,
+            &self.dns_servers,
+        ));
         install_library(
             &lua,
             &script.id,
@@ -1173,6 +1223,7 @@ impl ScriptScan {
         .map_err(|e| e.to_string())?;
         super::newtargets::install(&lua, &self.new_targets, on.kind(), self.ipv6)
             .map_err(|e| e.to_string())?;
+        install_dns_servers(&lua, &self.dns_servers).map_err(|e| e.to_string())?;
         if let Some(h) = on.host() {
             install_port_state(&lua, h).map_err(|e| e.to_string())?;
         }

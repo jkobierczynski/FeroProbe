@@ -3,17 +3,18 @@
 -- nselib); GPL-3.0-or-later, like FeroProbe.
 local tab = {}
 
--- A new, empty table; row 1 is the current row.
+-- A new, empty table; row 1 is the current row. Rows are kept in the
+-- table's own list part, so #t is the number of rows, which scripts use.
 tab.new = function()
-  return { rows = {}, current = 1 }
+  return { current = 1 }
 end
 
 -- v (made a string) at column c of the current row.
 tab.add = function(t, c, v)
-  local row = t.rows[t.current]
+  local row = t[t.current]
   if not row then
     row = {}
-    t.rows[t.current] = row
+    t[t.current] = row
   end
   row[c] = tostring(v)
 end
@@ -36,7 +37,7 @@ end
 tab.dump = function(t)
   local widths, last = {}, 0
   for r = 1, t.current do
-    local row = t.rows[r]
+    local row = t[r]
     if row then
       for c, v in pairs(row) do
         if #v > (widths[c] or 0) then widths[c] = #v end
@@ -46,7 +47,7 @@ tab.dump = function(t)
   end
   local out = {}
   for r = 1, t.current do
-    local row = t.rows[r]
+    local row = t[r]
     if row then
       local cells = {}
       for c = 1, last do

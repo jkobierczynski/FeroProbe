@@ -2673,6 +2673,11 @@ fn script_scan(args: &Args) -> Result<Option<feroprobe_core::script::ScriptScan>
     let mut engine = script::ScriptScan::new(chosen, table, timeout)
         .map_err(|e| anyhow::anyhow!("--script: {e}"))?;
     engine.ipv6 = args.ipv6;
+    // The dns module's servers: --dns-servers (unless --system-dns), else
+    // the system's, as nmap's.
+    if !args.system_dns && !args.dns_servers.is_empty() {
+        engine.set_dns_servers(args.dns_servers.clone());
+    }
     Ok(Some(engine))
 }
 

@@ -245,6 +245,15 @@ nmap.new_targets_num = function()
   if not fero.new_targets_num then return 0 end
   return fero.new_targets_num()
 end
+-- nmap.get_dns_servers(): the addresses of the run's DNS servers
+-- (--dns-servers, or the system's), which scripts may query.
+nmap.get_dns_servers = function()
+  local out = {}
+  for _, s in ipairs(fero.dns_servers and fero.dns_servers() or {}) do
+    out[#out + 1] = s.ip
+  end
+  return out
+end
 nmap.log_write = function(_, msg)
   fero.debug(0, tostring(msg))
 end

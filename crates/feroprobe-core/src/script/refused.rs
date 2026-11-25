@@ -139,7 +139,8 @@ fn summary(script: &str, reason: Reason, t: &Tally, detailed: bool) -> String {
     };
     let what = match reason {
         Reason::NoNetwork => {
-            "scripts that run before or after the scan have no network access".to_string()
+            "scripts that run before or after the scan may only reach the run's DNS servers"
+                .to_string()
         }
         Reason::OtherHost => format!(
             "only the host it runs against is in scope (it tried {})",
@@ -252,7 +253,7 @@ mod tests {
                 "Warning: script x: 1 connection refused on 192.0.2.7, only the host it \
                  runs against is in scope (it tried other.example); -vv shows each",
                 "Warning: script y: 1 connection refused, scripts that run before or after \
-                 the scan have no network access; -vv shows each",
+                 the scan may only reach the run's DNS servers; -vv shows each",
             ]
         );
     }

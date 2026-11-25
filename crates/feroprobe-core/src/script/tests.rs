@@ -1,4 +1,4 @@
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -6093,7 +6093,7 @@ action = function()
   tab.add(t, 2, "open")
   tab.nextrow(t)
   tab.addrow(t, "8080", "x")
-  o.tab = tab.dump(t)
+  o.tab = tab.dump(t) .. #t
   o.bits = bits.arshift(-16, 2) .. " " .. bits.arshift(16, 2) .. " " .. bits.reverse(1) .. " " .. bits.reverse(6, 4)
   o.listop = table.concat(listop.flatten({{ 1, {{ 2, {{ 3 }} }}, "a" }}), ",") .. " "
     .. table.concat(listop.reverse(listop.cons(0, {{ 1, 2 }})), ",") .. " "
@@ -6132,7 +6132,7 @@ end"#
     let r = scan.pre_scan().await;
     let d = r[0].data.as_ref().unwrap_or_else(|| panic!("{r:?}"));
     for (k, want) in [
-        ("tab", "PORT  STATE\n22    open\n8080  x\n"),
+        ("tab", "PORT  STATE\n22    open\n8080  x\n3"),
         ("bits", "-4 4 128 6"),
         ("listop", "1,2,3,a 2,1,0 2,3 9 3 true"),
         (
@@ -7166,4 +7166,160 @@ fn nse_registry_views_merge_and_keep_number_keys() {
         .eval()
         .unwrap();
     assert_eq!(got, "line dead x dead");
+}
+
+/// A reply to the DNS query `q`: an A and a TXT record for www.example,
+/// NXDOMAIN for anything else, and TC set over UDP for big.example (whose
+/// A record comes over TCP).
+fn dns_reply(q: &[u8], tcp: bool) -> Vec<u8> {
+    let mut pos = 12;
+    let mut labels = Vec::new();
+    while q[pos] != 0 {
+        let n = q[pos] as usize;
+        labels.push(String::from_utf8_lossy(&q[pos + 1..pos + 1 + n]).to_string());
+        pos += 1 + n;
+    }
+    let name = labels.join(".");
+    let qtype = u16::from_be_bytes([q[pos + 1], q[pos + 2]]);
+    let qend = pos + 5;
+    let mut r = q[..qend].to_vec();
+    r[2] = 0x80 | (q[2] & 0x01);
+    r[3] = 0x80;
+    r[10..12].copy_from_slice(&[0, 0]);
+    let mut answers: Vec<(u16, Vec<u8>)> = Vec::new();
+    match (name.as_str(), qtype) {
+        ("www.example", 1) => answers.push((1, vec![192, 0, 2, 1])),
+        ("www.example", 16) => {
+            answers.push((16, b"\x05hello\x05world".to_vec()));
+            answers.push((16, b"\x03bye".to_vec()));
+        }
+        ("_x._tcp.example", 33) => answers.push((
+            33,
+            b"\x00\x0a\x00\x05\x01\xbb\x03www\x07example\x00".to_vec(),
+        )),
+        ("big.example", 1) if tcp => answers.push((1, vec![192, 0, 2, 9])),
+        ("big.example", 1) => r[2] |= 0x02,
+        _ => r[3] |= 3,
+    }
+    r[6..8].copy_from_slice(&(answers.len() as u16).to_be_bytes());
+    for (t, data) in answers {
+        r.extend_from_slice(&[0xc0, 12]);
+        r.extend_from_slice(&t.to_be_bytes());
+        r.extend_from_slice(&[0, 1, 0, 0, 0x0e, 0x10]);
+        r.extend_from_slice(&(data.len() as u16).to_be_bytes());
+        r.extend_from_slice(&data);
+    }
+    r
+}
+
+/// A DNS server on UDP and TCP on one loopback port; the queries it got.
+async fn dns_server() -> (u16, Seen) {
+    let udp = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let port = udp.local_addr().unwrap().port();
+    let tcp = tokio::net::TcpListener::bind(("127.0.0.1", port))
+        .await
+        .unwrap();
+    let seen: Seen = Default::default();
+    let s = seen.clone();
+    tokio::spawn(async move {
+        let mut buf = [0u8; 1500];
+        while let Ok((n, from)) = udp.recv_from(&mut buf).await {
+            s.lock().unwrap().push(format!("udp {:02x?}", &buf[..n]));
+            let _ = udp.send_to(&dns_reply(&buf[..n], false), from).await;
+        }
+    });
+    let s = seen.clone();
+    tokio::spawn(async move {
+        while let Ok((mut c, _)) = tcp.accept().await {
+            let mut len = [0u8; 2];
+            if c.read_exact(&mut len).await.is_err() {
+                continue;
+            }
+            let mut q = vec![0u8; u16::from_be_bytes(len) as usize];
+            if c.read_exact(&mut q).await.is_err() {
+                continue;
+            }
+            s.lock().unwrap().push(format!("tcp {q:02x?}"));
+            let r = dns_reply(&q, true);
+            let mut out = (r.len() as u16).to_be_bytes().to_vec();
+            out.extend_from_slice(&r);
+            let _ = c.write_all(&out).await;
+        }
+    });
+    (port, seen)
+}
+
+#[tokio::test]
+async fn nse_dns_queries_the_resolvers_and_nothing_else() {
+    let (port, seen) = dns_server().await;
+    let src = format!(
+        r#"{NSE_HEAD}
+local dns = require "dns"
+local base32 = require "base32"
+prerule = function() return true end
+action = function()
+  local o = {{}}
+  local function q(name, opts)
+    local ok, r = dns.query(name, opts)
+    if type(r) == "table" then r = table.concat(r, ",") end
+    o[#o + 1] = tostring(ok) .. ":" .. tostring(r)
+  end
+  q("www.example")
+  q("www.example", {{ dtype = "TXT", retAll = true }})
+  q("www.example", {{ dtype = "TXT" }})
+  q("_x._tcp.example", {{ dtype = "SRV", retAll = true }})
+  q("nothing.example")
+  q("big.example")
+  q("www.example", {{ host = "127.0.0.2", port = 53 }})
+  local ok, pkt = dns.query("www.example", {{ dtype = "TXT", retPkt = true, norecurse = true }})
+  o[#o + 1] = pkt.answers[2].TXT.text[1] .. " " .. tostring(pkt.flags.RD) .. " " .. pkt.answers[1].dtype
+  o[#o + 1] = table.concat(nmap.get_dns_servers(), ",")
+  o[#o + 1] = dns.reverse("192.0.2.10") .. " " .. dns.reverse("2001:db8::1"):sub(1, 12)
+  local p = dns.newPacket()
+  dns.addQuestion(p, "a.example", "MX")
+  dns.addNSID(p, {{ DO = true }})
+  local d = dns.decode(dns.encode(p))
+  o[#o + 1] = d.questions[1].dname .. " " .. d.questions[1].dtype .. " " .. d.add[1].OPT.options[1].code
+    .. " " .. tostring(d.add[1].OPT.DO) .. " " .. select(2, dns.decStr("\3abc\0", 1))
+  o[#o + 1] = base32.enc("foobar") .. " " .. base32.enc("foobar", true) .. " " .. base32.dec("MZXW6YTBOI======")
+  return table.concat(o, "\n")
+end
+"#
+    );
+    let mut scan =
+        ScriptScan::new(vec![script("dnstest", &src)], ArgTable::default(), None).unwrap();
+    scan.set_dns_servers(vec![SocketAddr::from(([127, 0, 0, 1], port))]);
+    let r = scan.pre_scan().await;
+    let out: Vec<&str> = r[0].output.lines().collect();
+    assert_eq!(
+        out,
+        [
+            "true:192.0.2.1",
+            "true:hello,world,bye",
+            "true:hello",
+            "true:10:5:443:www.example",
+            "false:No Such Name",
+            "true:192.0.2.9",
+            "false:127.0.0.2:53 is outside this script's scope: scripts that run before or after the scan may only reach the run's DNS servers",
+            "bye false 16",
+            "127.0.0.1",
+            "10.2.0.192.in-addr.arpa 1.0.0.0.0.0.",
+            "a.example 15 3 true abc",
+            "MZXW6YTBOI====== CPNMUOJ1E8====== foobar",
+        ],
+        "{r:?}"
+    );
+    // Every query carries the transaction ID "FP"; recursion is asked for
+    // unless norecurse; the truncated one was asked again over TCP.
+    let seen = seen.lock().unwrap().clone();
+    assert!(seen.iter().all(|q| q.contains("[46, 50, ")), "{seen:?}");
+    assert!(
+        seen[0].starts_with("udp [46, 50, 01, 00, 00, 01"),
+        "{seen:?}"
+    );
+    assert!(
+        seen.last().unwrap().starts_with("udp [46, 50, 00, 00"),
+        "{seen:?}"
+    );
+    assert_eq!(seen.iter().filter(|q| q.starts_with("tcp")).count(), 1);
 }

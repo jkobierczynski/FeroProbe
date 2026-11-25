@@ -1289,7 +1289,13 @@ TLS) and UDP sockets exist. The HTTP library goes through the same check,
 and follows a redirect only when it points inside the scope; one that
 points elsewhere is not followed and is returned to the script as it
 came. Scripts with a `prerule` or `postrule`, which run without a host,
-have no network access at all, so nothing broadcasts. A connection the
+have no other network access, so nothing broadcasts. Every script may
+also reach the run's DNS servers on their DNS port (TCP and UDP): the
+`--dns-servers` you gave (unless `--system-dns`), else the `nameserver`
+lines of /etc/resolv.conf. `nmap.get_dns_servers()` lists them, and
+the `dns` module asks the first when a script names no server. A DNS
+server the script finds by itself (a zone's name servers, say) is
+refused unless it is the scanned host. A connection the
 script asks for outside the scope fails, quietly by default: the refusal
 is the scope working as meant. With `-v`, FeroProbe counts the refusals
 and, when the scripts of a phase are done, prints one warning per script
@@ -1727,14 +1733,15 @@ the scan probed there.
 | `geoip` | `add`, `empty`, `get_all_by_ip`, `get_all_by_gps`; kept in `nmap.registry` for the run |
 | `irc`, `knx` | `portrule`; `parseHeader`, `parseKnxAddress`, `query`, and the KNXnet/IP service family, medium and DIB type tables |
 | `lfs` | `get_path_separator`; `mkdir`, `rmdir` and `link` return false and a message, and `dir` raises an error, since scripts cannot touch the file system |
+| `dns`, `base32` | `query`, `update`, `reverse`, `encode`, `decode`, `decStr`, `newPacket`, `addQuestion`, `addZone`, `addUpdate`, `addOPT`, `addNSID`, `addClientSubnet`, `findNiceAnswer`, `findNiceAdditional`, `sendPackets`, `types`, `CLASS`; `enc`, `dec` (with the extended hex alphabet as the second argument). Queries go to the run's DNS servers unless the script names a server, and only where the scope allows (see below); referrals to other servers are not followed |
 | `target` | `ALLOW_NEW_TARGETS`, `add`: as in nmap, a script adds hosts to the scan only when you pass the `newtargets` script argument, and at most `max-newtargets` of them (0, the default, for no limit); see [Hosts that scripts add](#hosts-that-scripts-add) |
 | Lua's own | `string`, `table`, `math`, `coroutine`, `utf8`, `os` (the sandbox's), `_G` |
 
-Any other module (`packet`, `msrpc`, `dns`, ...)
+Any other module (`packet`, `msrpc`, `mysql`, ...)
 stops the script from loading with an error that names it; a function
 FeroProbe does not have in a module it offers (`nmap.new_dnet`,
 `openssl.encrypt`, ...) raises an error naming it when called. Of nmap
-7.94's 606 scripts, 302 load as they are. See
+7.94's 606 scripts, 319 load as they are. See
 [Brute-force scripts](#brute-force-scripts) for how a `brute` script must
 be chosen before it will run.
 

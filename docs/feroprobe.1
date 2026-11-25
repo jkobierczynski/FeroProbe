@@ -1868,7 +1868,15 @@ The HTTP library goes through the same check, and follows a redirect
 only when it points inside the scope; one that points elsewhere is not
 followed and is returned to the script as it came.
 Scripts with a \f[V]prerule\f[R] or \f[V]postrule\f[R], which run
-without a host, have no network access at all, so nothing broadcasts.
+without a host, have no other network access, so nothing broadcasts.
+Every script may also reach the run\[aq]s DNS servers on their DNS port
+(TCP and UDP): the \f[V]--dns-servers\f[R] you gave (unless
+\f[V]--system-dns\f[R]), else the \f[V]nameserver\f[R] lines of
+/etc/resolv.conf.
+\f[V]nmap.get_dns_servers()\f[R] lists them, and the \f[V]dns\f[R]
+module asks the first when a script names no server.
+A DNS server the script finds by itself (a zone\[aq]s name servers, say)
+is refused unless it is the scanned host.
 A connection the script asks for outside the scope fails, quietly by
 default: the refusal is the scope working as meant.
 With \f[V]-v\f[R], FeroProbe counts the refusals and, when the scripts
@@ -4151,6 +4159,20 @@ T}@T{
 error, since scripts cannot touch the file system
 T}
 T{
+\f[V]dns\f[R], \f[V]base32\f[R]
+T}@T{
+\f[V]query\f[R], \f[V]update\f[R], \f[V]reverse\f[R], \f[V]encode\f[R],
+\f[V]decode\f[R], \f[V]decStr\f[R], \f[V]newPacket\f[R],
+\f[V]addQuestion\f[R], \f[V]addZone\f[R], \f[V]addUpdate\f[R],
+\f[V]addOPT\f[R], \f[V]addNSID\f[R], \f[V]addClientSubnet\f[R],
+\f[V]findNiceAnswer\f[R], \f[V]findNiceAdditional\f[R],
+\f[V]sendPackets\f[R], \f[V]types\f[R], \f[V]CLASS\f[R]; \f[V]enc\f[R],
+\f[V]dec\f[R] (with the extended hex alphabet as the second argument).
+Queries go to the run\[aq]s DNS servers unless the script names a
+server, and only where the scope allows (see below); referrals to other
+servers are not followed
+T}
+T{
 \f[V]target\f[R]
 T}@T{
 \f[V]ALLOW_NEW_TARGETS\f[R], \f[V]add\f[R]: as in nmap, a script adds
@@ -4166,12 +4188,13 @@ T}@T{
 T}
 .TE
 .PP
-Any other module (\f[V]packet\f[R], \f[V]msrpc\f[R], \f[V]dns\f[R], ...)
+Any other module (\f[V]packet\f[R], \f[V]msrpc\f[R], \f[V]mysql\f[R],
+\&...)
 stops the script from loading with an error that names it; a function
 FeroProbe does not have in a module it offers (\f[V]nmap.new_dnet\f[R],
 \f[V]openssl.encrypt\f[R], ...)
 raises an error naming it when called.
-Of nmap 7.94\[aq]s 606 scripts, 302 load as they are.
+Of nmap 7.94\[aq]s 606 scripts, 319 load as they are.
 See Brute-force scripts for how a \f[V]brute\f[R] script must be chosen
 before it will run.
 .PP

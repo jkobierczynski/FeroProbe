@@ -217,6 +217,35 @@ async fn query_system(ip: IpAddr) -> Option<String> {
     (!name.is_empty() && name.parse::<IpAddr>().is_err()).then(|| name.to_string())
 }
 
+/// The system's DNS servers: the `nameserver` lines of /etc/resolv.conf,
+/// in order, on port 53. Empty where there is no such file.
+pub fn system_servers() -> Vec<SocketAddr> {
+    std::fs::read_to_string("/etc/resolv.conf")
+        .map(|text| parse_resolv_conf(&text))
+        .unwrap_or_default()
+}
+
+/// The `nameserver` addresses of a resolv.conf, each once. An IPv6 zone
+/// (`fe80::1%eth0`) is dropped with the address, as it cannot be used
+/// without its interface.
+fn parse_resolv_conf(text: &str) -> Vec<SocketAddr> {
+    let mut out: Vec<SocketAddr> = Vec::new();
+    for line in text.lines() {
+        let mut words = line.split_whitespace();
+        if words.next() != Some("nameserver") {
+            continue;
+        }
+        let Some(Ok(ip)) = words.next().map(str::parse::<IpAddr>) else {
+            continue;
+        };
+        let sa = SocketAddr::new(ip, 53);
+        if !out.contains(&sa) {
+            out.push(sa);
+        }
+    }
+    out
+}
+
 /// Look up the name of every address in `addrs`: with the system resolver,
 /// or with the DNS `servers` when any are given. Addresses without a name
 /// are left out.
@@ -247,6 +276,19 @@ pub async fn reverse_lookup(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolv_conf_nameservers() {
+        let text = "# comment\nsearch example\nnameserver 192.0.2.53\nnameserver  2001:db8::53\n\
+                    nameserver fe80::1%eth0\nnameserver 192.0.2.53\n;nameserver 192.0.2.1\n";
+        assert_eq!(
+            parse_resolv_conf(text),
+            vec![
+                "192.0.2.53:53".parse::<SocketAddr>().unwrap(),
+                "[2001:db8::53]:53".parse().unwrap()
+            ]
+        );
+    }
 
     #[test]
     fn ptr_names() {
