@@ -1561,6 +1561,27 @@ A port whose state is folded into the `Not shown` line still gets its own
 row when a script gave output for it, in every report, so the output is
 not lost; the `Not shown` count leaves it out. nmap drops such output.
 
+### Hosts that scripts add
+
+Some scripts find other hosts: `resolveall` the other addresses of a
+name, nmap's `targets-*` and `broadcast-*` scripts the hosts on a link,
+traceroute hops or DNS answers. As in nmap, such a script adds them to
+the scan only when you ask for it with the `newtargets` script argument:
+
+```
+feroprobe -sn --script resolveall --script-args 'newtargets,resolveall.hosts=example.com' 192.0.2.1
+```
+
+Without `newtargets` the script only reports what it found. With it, the
+added hosts are scanned like the command line's, with the same options,
+after them, and scripts that run on them may add more. Each target is
+added once per run; `max-newtargets=<n>` caps how many hosts scripts add
+in all. Postrule scripts cannot add hosts. An added host that
+`--exclude` names is left out, and so is one of an address family the
+scan was not planned for (an IPv6 address in a scan of IPv4 targets, or
+the other way round), with a warning. NSE scripts use `target.add`
+(and `nmap.add_targets`), FeroProbe's own `fero.add_targets`.
+
 ### Built-in scripts
 
 The scripts in the `default` category are the ones `-sC` and `-A` run.
@@ -1599,6 +1620,7 @@ compare, with the differences named below.
 | `ntp-info` | default, discovery, safe | 123/udp, `ntp` | One NTP client request (the server's receive time) and one control-message READVAR request (version, system, stratum, reference ID and the other system variables, which many servers refuse). The receive time is noted for `clock-skew`. Not the `monlist` request used for amplification |
 | `pop3-capabilities` | default, discovery, safe | 110, 995, `pop3`, `pop3s` | Sends CAPA and lists the capabilities, with their arguments in parentheses, plus APOP when the greeting offers it; logs in to nothing |
 | `pop3-ntlm-info` | default, discovery, safe | 110, 995, `pop3`, `pop3s` | Switches to TLS with STLS where the server allows it (else starts again in plain text), sends `AUTH NTLM` and the NEGOTIATE, then cancels the exchange (`*`) and says QUIT. Shows what the server's NTLM CHALLENGE says: target name, NetBIOS and DNS domain and computer names, DNS tree name and product version, in nmap's order and labels (see `fero.ntlm.info`); the server's clock is noted for `clock-skew`. The NTLM NEGOTIATE names no user and the workstation `FEROPROBE`; nothing logs in. Over TLS from the start on 995 and when `-sV` found TLS. Argument: `pop3-ntlm-info.timeout` (ms, default 10000) |
+| `resolveall` | discovery, safe | before the scan, the names in `resolveall.hosts`; each target given by name | Resolves names to all their addresses of the scan's family (IPv4, or IPv6 with `-6`) and lists them (`Host 'example.com' resolves to:`); on a target given by name, the addresses other than the one scanned (`also resolves to`). With `newtargets` it adds them to the scan (`Successfully added 2 new targets`), else says `Use the 'newtargets' script-arg to add the results as targets`. It connects to no host; it only asks the resolver. XML and JSON: `hosts` (a list per name) and `newtargets`. nmap's also suggests its `--resolve-all` option, which FeroProbe does not have. Arguments: `resolveall.hosts` (a name or `{name,...}`), `newtargets`, `max-newtargets` |
 | `rdp-ntlm-info` | default, discovery, safe | 3389, `ms-wbt-server` | Asks for TLS and CredSSP (Network Level Authentication) in the connection request, sends an NTLM NEGOTIATE (see `fero.ntlm.negotiate_message`) inside a CredSSP message over TLS and shows what the server's NTLM CHALLENGE says: target name, NetBIOS and DNS domain and computer names, DNS tree name, product version and system time (UTC), in that order, as nmap's; the system time is noted for `clock-skew`. No credentials are sent. A server that does not offer CredSSP gives no output. The connection request carries the routing cookie `Cookie: mstshash=FeroProbe`. TLS 1.2 and 1.3 only, as for all FeroProbe TLS, so old servers with TLS 1.0 only give no output. Argument: `rdp-ntlm-info.timeout` (ms, default 8000) |
 | `rpcinfo` | default, discovery, safe | 111/tcp and udp, `rpcbind` | Asks the portmapper for its registered RPC programs (DUMP, as `rpcinfo -p`) and lists program, versions, port and protocol, and service name. The ports it lists are not contacted |
 | `smb-os-discovery` | default, discovery, safe | hosts with 445 or 139 open | What an SMB1 server says about itself (see `fero.smb.os_info`): OS and LAN manager, OS CPE (for the Windows versions nmap knows), computer name, NetBIOS computer name, then for a domain member the domain, forest, FQDN and NetBIOS domain names, else the workgroup, and the system time in the server's time zone (`2026-01-02T04:04:05+01:00`), noted for `clock-skew`. Two connections; the NTLM challenge is never answered, so nothing logs in. No output from servers without SMB1 (Windows 10 and Server 2016 on, by default). Arguments: `smbport`, `smb-os-discovery.timeout` (ms, default 8000) |
@@ -1676,7 +1698,7 @@ the scan probed there.
 
 | Module | What it has |
 | --- | --- |
-| `nmap` | `new_socket` (`connect`, `send`, `sendto`, `receive`, `receive_bytes`, `receive_lines`, `receive_buf`, `set_timeout`, `close`, `get_info`, `reconnect_ssl`, `get_ssl_certificate`), `new_try`, `registry`, `verbosity`, `debugging`, `clock_ms`, `clock`, `address_family`, `get_port_state`, `have_ssl`, `is_privileged`, `timing_level`, `version_intensity`, `mutex`, `condvar`, `log_write`; `set_port_state` and `set_port_version` are accepted and do nothing |
+| `nmap` | `new_socket` (`connect`, `send`, `sendto`, `receive`, `receive_bytes`, `receive_lines`, `receive_buf`, `set_timeout`, `close`, `get_info`, `reconnect_ssl`, `get_ssl_certificate`), `new_try`, `registry`, `verbosity`, `debugging`, `clock_ms`, `clock`, `address_family`, `get_port_state`, `resolve`, `add_targets`, `new_targets_num`, `have_ssl`, `is_privileged`, `timing_level`, `version_intensity`, `mutex`, `condvar`, `log_write`; `set_port_state` and `set_port_version` are accepted and do nothing |
 | `stdnse` | `debug`, `debug0`-`debug9`, `print_debug`, `verbose`, `verbose0`-`verbose9`, `get_script_args`, `format_output`, `output_table`, `tohex`, `fromhex`, `parse_timespec`, `sleep`, `clock_ms`, `get_hostname`, `format_mac`, `get_timeout`, `new_thread`, `string_or_blank`, `make_buffer`, `registry_get`, `registry_add_table`, `registry_add_array`, `in_port_range`, `generate_random_string`, `silent_require`, and the old names `strsplit`, `keys`, `contains`, `format_time`, `format_timestamp` |
 | `shortport` | `portnumber`, `service`, `port_or_service`, `version_port_or_service`, `port_range`, `http`, `ssl`, `ssh`, `LIKELY_HTTP_PORTS`, `LIKELY_HTTP_SERVICES` (`http` and `ssl` are FeroProbe's own port rules) |
 | `comm` | `opencon`, `get_banner`, `exchange`, `tryssl` |
@@ -1704,7 +1726,7 @@ the scan probed there.
 | `geoip` | `add`, `empty`, `get_all_by_ip`, `get_all_by_gps`; kept in `nmap.registry` for the run |
 | `irc`, `knx` | `portrule`; `parseHeader`, `parseKnxAddress`, `query`, and the KNXnet/IP service family, medium and DIB type tables |
 | `lfs` | `get_path_separator`; `mkdir`, `rmdir` and `link` return false and a message, and `dir` raises an error, since scripts cannot touch the file system |
-| `target` | `ALLOW_NEW_TARGETS` (always false) and `add`, which refuses every host: FeroProbe never scans hosts a script discovers, even with `newtargets`, so a scan stays within the targets you gave. The scripts still report what they found |
+| `target` | `ALLOW_NEW_TARGETS`, `add`: as in nmap, a script adds hosts to the scan only when you pass the `newtargets` script argument, and at most `max-newtargets` of them (0, the default, for no limit); see [Hosts that scripts add](#hosts-that-scripts-add) |
 | Lua's own | `string`, `table`, `math`, `coroutine`, `utf8`, `os` (the sandbox's), `_G` |
 
 Any other module (`packet`, `msrpc`, `httpspider`, `dns`, ...)
@@ -1755,7 +1777,7 @@ What NSE scripts see differently:
   mode, gives `nil` and a message. Files are read whole, at most 16 MiB.
   `io.popen` and `io.tmpfile` raise an error. nmap's scripts can read and
   write any file the user can.
-- **No name lookups.** `nmap.resolve` fails.
+- **Name lookups.** `nmap.resolve(name [, family])` asks the system resolver, as nmap's does, and gives each address once (nmap's can repeat one, as the resolver lists it once per socket type).
 - **Big numbers** (`openssl.bignum_*`) are FeroProbe's own, with limits
   so one call stays short: numbers up to 65,536 bits; `bignum_mod_exp`
   and the prime tests up to 16,384 bits. Prime tests use Miller-Rabin with

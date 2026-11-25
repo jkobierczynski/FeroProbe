@@ -22,6 +22,7 @@ mod engine;
 mod files;
 mod http;
 mod keys;
+pub mod newtargets;
 pub mod output;
 mod pattern;
 mod refused;
@@ -132,6 +133,10 @@ const BUILT_IN: &[(&str, &str)] = &[
     (
         "rdp-ntlm-info",
         include_str!("../../lua-scripts/rdp-ntlm-info.lua"),
+    ),
+    (
+        "resolveall",
+        include_str!("../../lua-scripts/resolveall.lua"),
     ),
     ("rpcinfo", include_str!("../../lua-scripts/rpcinfo.lua")),
     (

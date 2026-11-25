@@ -6151,11 +6151,107 @@ end"#
         ),
         (
             "target",
-            "false true 0 false FeroProbe does not scan hosts that scripts add",
+            "false true 0 false to add targets run with --script-args=newtargets",
         ),
     ] {
         assert_eq!(text(named(d, k)), want, "{k}");
     }
+}
+
+#[tokio::test]
+async fn nse_scripts_add_targets_with_newtargets() {
+    let src = format!(
+        r#"{NSE_HEAD}
+local target = require "target"
+prerule = function() return true end
+postrule = function() return true end
+action = function()
+  local o = stdnse.output_table()
+  if SCRIPT_TYPE == "postrule" then
+    local ok, err = target.add("10.9.9.9")
+    o.post = tostring(ok) .. " " .. tostring(err)
+    o.num = nmap.new_targets_num()
+    return o
+  end
+  local ok, n = target.add("10.0.0.1", "10.0.0.2", "10.0.0.1", "10.0.0.3")
+  local ok2, n2 = target.add("10.0.0.4")
+  local _, queued = target.add()
+  local rok, addrs = nmap.resolve("127.0.0.1", "inet")
+  local bad = select(2, nmap.resolve("127.0.0.1", "inet6"))
+  o.pre = tostring(target.ALLOW_NEW_TARGETS) .. " " .. tostring(ok) .. " " .. n .. " " .. tostring(ok2)
+    .. " " .. tostring(n2) .. " " .. queued .. " " .. tostring(rok) .. " " .. table.concat(addrs, ",")
+    .. " " .. tostring(bad)
+  return o
+end"#
+    );
+    let args = args::parse("newtargets,max-newtargets=3").unwrap();
+    let scan = ScriptScan::new(vec![script("adder", &src)], args, None).unwrap();
+    let r = scan.pre_scan().await;
+    let d = r[0].data.as_ref().unwrap_or_else(|| panic!("{r:?}"));
+    // max-newtargets=3 cuts the first call to three (its repeat counts as
+    // added, as in nmap, but not as a new target), leaving room for one.
+    assert_eq!(
+        text(named(d, "pre")),
+        "true true 3 true 1 3 true 127.0.0.1 Failed to resolve"
+    );
+    assert_eq!(
+        scan.new_targets().take(),
+        vec!["10.0.0.1", "10.0.0.2", "10.0.0.4"]
+    );
+    // After the scan nothing can be added (a run without a maximum, so
+    // that is the reason given).
+    let scan = ScriptScan::new(
+        vec![script("adder", &src)],
+        args::parse("newtargets").unwrap(),
+        None,
+    )
+    .unwrap();
+    scan.pre_scan().await;
+    let r = scan.post_scan().await;
+    let d = r[0].data.as_ref().unwrap_or_else(|| panic!("{r:?}"));
+    assert_eq!(
+        text(named(d, "post")),
+        "false adding targets is disabled in the postrule phase"
+    );
+    assert_eq!(text(named(d, "num")), "4");
+}
+
+#[tokio::test]
+async fn resolveall_lists_and_adds_addresses() {
+    let src = include_str!("../../lua-scripts/resolveall.lua");
+    // Without newtargets: listed only.
+    let scan = ScriptScan::new(
+        vec![script("resolveall", src)],
+        args::parse("resolveall.hosts={localhost,nothing.invalid}").unwrap(),
+        None,
+    )
+    .unwrap();
+    let r = scan.pre_scan().await;
+    let out = &r[0].output;
+    assert!(
+        out.contains("Host 'localhost' resolves to:\n    127.0.0.1"),
+        "{out}"
+    );
+    assert!(
+        out.contains("Host 'nothing.invalid' could not be resolved"),
+        "{out}"
+    );
+    assert!(
+        out.ends_with("Use the 'newtargets' script-arg to add the results as targets"),
+        "{out}"
+    );
+    assert!(scan.new_targets().take().is_empty());
+    // With newtargets: added to the scan.
+    let scan = ScriptScan::new(
+        vec![script("resolveall", src)],
+        args::parse("resolveall.hosts=localhost,newtargets").unwrap(),
+        None,
+    )
+    .unwrap();
+    let r = scan.pre_scan().await;
+    let out = &r[0].output;
+    assert!(out.ends_with("Successfully added 1 new targets"), "{out}");
+    assert_eq!(scan.new_targets().take(), vec!["127.0.0.1"]);
 }
 
 #[tokio::test]

@@ -2754,6 +2754,31 @@ A port whose state is folded into the \f[V]Not shown\f[R] line still
 gets its own row when a script gave output for it, in every report, so
 the output is not lost; the \f[V]Not shown\f[R] count leaves it out.
 nmap drops such output.
+.SS Hosts that scripts add
+.PP
+Some scripts find other hosts: \f[V]resolveall\f[R] the other addresses
+of a name, nmap\[aq]s \f[V]targets-*\f[R] and \f[V]broadcast-*\f[R]
+scripts the hosts on a link, traceroute hops or DNS answers.
+As in nmap, such a script adds them to the scan only when you ask for it
+with the \f[V]newtargets\f[R] script argument:
+.IP
+.nf
+\f[C]
+feroprobe -sn --script resolveall --script-args \[aq]newtargets,resolveall.hosts=example.com\[aq] 192.0.2.1
+\f[R]
+.fi
+.PP
+Without \f[V]newtargets\f[R] the script only reports what it found.
+With it, the added hosts are scanned like the command line\[aq]s, with
+the same options, after them, and scripts that run on them may add more.
+Each target is added once per run; \f[V]max-newtargets=<n>\f[R] caps how
+many hosts scripts add in all.
+Postrule scripts cannot add hosts.
+An added host that \f[V]--exclude\f[R] names is left out, and so is one
+of an address family the scan was not planned for (an IPv6 address in a
+scan of IPv4 targets, or the other way round), with a warning.
+NSE scripts use \f[V]target.add\f[R] (and \f[V]nmap.add_targets\f[R]),
+FeroProbe\[aq]s own \f[V]fero.add_targets\f[R].
 .SS Built-in scripts
 .PP
 The scripts in the \f[V]default\f[R] category are the ones \f[V]-sC\f[R]
@@ -3269,6 +3294,30 @@ The NTLM NEGOTIATE names no user and the workstation
 \f[V]FEROPROBE\f[R]; nothing logs in.
 Over TLS from the start on 995 and when \f[V]-sV\f[R] found TLS.
 Argument: \f[V]pop3-ntlm-info.timeout\f[R] (ms, default 10000)
+T}
+T{
+\f[V]resolveall\f[R]
+T}@T{
+discovery, safe
+T}@T{
+before the scan, the names in \f[V]resolveall.hosts\f[R]; each target
+given by name
+T}@T{
+Resolves names to all their addresses of the scan\[aq]s family (IPv4, or
+IPv6 with \f[V]-6\f[R]) and lists them
+(\f[V]Host \[aq]example.com\[aq] resolves to:\f[R]); on a target given
+by name, the addresses other than the one scanned
+(\f[V]also resolves to\f[R]).
+With \f[V]newtargets\f[R] it adds them to the scan
+(\f[V]Successfully added 2 new targets\f[R]), else says
+\f[V]Use the \[aq]newtargets\[aq] script-arg to add the results as targets\f[R].
+It connects to no host; it only asks the resolver.
+XML and JSON: \f[V]hosts\f[R] (a list per name) and
+\f[V]newtargets\f[R].
+nmap\[aq]s also suggests its \f[V]--resolve-all\f[R] option, which
+FeroProbe does not have.
+Arguments: \f[V]resolveall.hosts\f[R] (a name or \f[V]{name,...}\f[R]),
+\f[V]newtargets\f[R], \f[V]max-newtargets\f[R]
 T}
 T{
 \f[V]rdp-ntlm-info\f[R]
@@ -3815,6 +3864,7 @@ T}@T{
 \f[V]get_ssl_certificate\f[R]), \f[V]new_try\f[R], \f[V]registry\f[R],
 \f[V]verbosity\f[R], \f[V]debugging\f[R], \f[V]clock_ms\f[R],
 \f[V]clock\f[R], \f[V]address_family\f[R], \f[V]get_port_state\f[R],
+\f[V]resolve\f[R], \f[V]add_targets\f[R], \f[V]new_targets_num\f[R],
 \f[V]have_ssl\f[R], \f[V]is_privileged\f[R], \f[V]timing_level\f[R],
 \f[V]version_intensity\f[R], \f[V]mutex\f[R], \f[V]condvar\f[R],
 \f[V]log_write\f[R]; \f[V]set_port_state\f[R] and
@@ -4079,10 +4129,10 @@ T}
 T{
 \f[V]target\f[R]
 T}@T{
-\f[V]ALLOW_NEW_TARGETS\f[R] (always false) and \f[V]add\f[R], which
-refuses every host: FeroProbe never scans hosts a script discovers, even
-with \f[V]newtargets\f[R], so a scan stays within the targets you gave.
-The scripts still report what they found
+\f[V]ALLOW_NEW_TARGETS\f[R], \f[V]add\f[R]: as in nmap, a script adds
+hosts to the scan only when you pass the \f[V]newtargets\f[R] script
+argument, and at most \f[V]max-newtargets\f[R] of them (0, the default,
+for no limit); see Hosts that scripts add
 T}
 T{
 Lua\[aq]s own
@@ -4158,7 +4208,10 @@ Files are read whole, at most 16 MiB.
 \f[V]io.popen\f[R] and \f[V]io.tmpfile\f[R] raise an error.
 nmap\[aq]s scripts can read and write any file the user can.
 .IP \[bu] 2
-\f[B]No name lookups.\f[R] \f[V]nmap.resolve\f[R] fails.
+\f[B]Name lookups.\f[R] \f[V]nmap.resolve(name [, family])\f[R] asks the
+system resolver, as nmap\[aq]s does, and gives each address once
+(nmap\[aq]s can repeat one, as the resolver lists it once per socket
+type).
 .IP \[bu] 2
 \f[B]Big numbers\f[R] (\f[V]openssl.bignum_*\f[R]) are FeroProbe\[aq]s
 own, with limits so one call stays short: numbers up to 65,536 bits;

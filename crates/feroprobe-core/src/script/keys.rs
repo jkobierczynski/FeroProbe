@@ -59,6 +59,10 @@ pub fn rule_keys(id: &str) -> Option<&'static str> {
             "TCP 110 or 995, or a TCP port named pop3 or pop3s"
         }
         "rdp-ntlm-info" => "TCP 3389, or a TCP port named ms-wbt-server",
+        "resolveall" => {
+            "the names in resolveall.hosts before the scan, and each target given by name; \
+             it connects to no host, it only asks the resolver"
+        }
         "rpcinfo" => "TCP or UDP 111, or a port named rpcbind or sunrpc",
         "smb-os-discovery" | "smb-protocols" | "smb-security-mode" | "smb2-capabilities"
         | "smb2-security-mode" | "smb2-time" => SMB,
@@ -93,7 +97,7 @@ pub enum Needs {
 pub fn rule_needs(id: &str) -> Option<Needs> {
     rule_keys(id)?;
     Some(match id {
-        "clock-skew" => Needs::Nothing,
+        "clock-skew" | "resolveall" => Needs::Nothing,
         "dns-nsid" | "rpcinfo" => Needs::TcpOrUdp,
         "nbstat" | "ntp-info" | "snmp-info" | "snmp-interfaces" | "snmp-sysdescr" => Needs::Udp,
         _ => Needs::Tcp,
@@ -144,7 +148,7 @@ mod tests {
             let keys = rule_keys(id).unwrap();
             let (tcp, udp) = (keys.contains("TCP"), keys.contains("UDP"));
             let want = match (tcp, udp) {
-                _ if *id == "clock-skew" => Needs::Nothing,
+                _ if *id == "clock-skew" || *id == "resolveall" => Needs::Nothing,
                 (true, true) => Needs::TcpOrUdp,
                 (false, true) => Needs::Udp,
                 _ => Needs::Tcp,

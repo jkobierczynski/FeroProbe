@@ -1117,6 +1117,11 @@ pub struct ScriptScan {
     /// Connections the scopes refused, told once per script at the end
     /// of each phase.
     refusals: Arc<Refusals>,
+    /// Hosts the scripts added to the scan (`newtargets`).
+    new_targets: Arc<super::newtargets::NewTargets>,
+    /// `-6`: prerule and postrule scripts see `inet6` as the address
+    /// family (host scripts see their host's).
+    pub ipv6: bool,
 }
 
 impl ScriptScan {
@@ -1136,11 +1141,19 @@ impl ScriptScan {
             timeout,
             parallel: DEFAULT_PARALLEL,
             refusals: Arc::default(),
+            new_targets: Arc::default(),
+            ipv6: false,
         })
     }
 
     pub fn scripts(&self) -> &[Arc<Script>] {
         &self.scripts
+    }
+
+    /// The hosts scripts added to the scan so far, for the CLI to scan
+    /// after the command line's targets.
+    pub fn new_targets(&self) -> &super::newtargets::NewTargets {
+        &self.new_targets
     }
 
     /// A fresh state with `script` loaded, for its rules or action.
@@ -1157,6 +1170,8 @@ impl ScriptScan {
             script.selection.raises_verbosity(),
         )
         .map_err(|e| e.to_string())?;
+        super::newtargets::install(&lua, &self.new_targets, on.kind(), self.ipv6)
+            .map_err(|e| e.to_string())?;
         if let Some(h) = on.host() {
             install_port_state(&lua, h).map_err(|e| e.to_string())?;
         }
