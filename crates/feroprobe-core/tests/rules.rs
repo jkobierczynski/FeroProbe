@@ -186,3 +186,36 @@ fn service_probe_rules_match_the_probes() {
         }
     }
 }
+
+/// The rules for the NSE dns module match its queries and updates, over
+/// UDP and TCP, and not a query with another transaction ID.
+#[test]
+fn nse_dns_rules_match_its_queries() {
+    let suricata = sids(&rules("feroprobe.rules"));
+    let pcre = |sid: u32| -> regex::bytes::Regex {
+        let rule = &suricata[&sid].1;
+        let start = rule.find("pcre:\"/").unwrap() + 7;
+        let end = rule[start..].find("/s\"").unwrap() + start;
+        regex::bytes::Regex::new(&format!("(?s-u){}", &rule[start..end])).unwrap()
+    };
+    // www.example A, with and without recursion; with an EDNS0 OPT record.
+    let q = |flags: u8, ar: u8| -> Vec<u8> {
+        let mut p = vec![b'F', b'P', flags, 0, 0, 1, 0, 0, 0, 0, 0, ar];
+        p.extend_from_slice(b"\x03www\x07example\x00\x00\x01\x00\x01");
+        p
+    };
+    // An update (opcode 5): zone example, one A record to add.
+    let mut update = vec![b'F', b'P', 0x28, 0, 0, 1, 0, 0, 0, 1, 0, 0];
+    update.extend_from_slice(b"\x07example\x00\x00\x06\x00\x01");
+    for pkt in [q(1, 0), q(0, 0), q(1, 1), update] {
+        let mut tcp = (pkt.len() as u16).to_be_bytes().to_vec();
+        tcp.extend_from_slice(&pkt);
+        assert!(content_match(&contents(&suricata[&9100032].1), &pkt));
+        assert!(pcre(9100032).is_match(&pkt), "{pkt:02x?}");
+        assert!(content_match(&contents(&suricata[&9100033].1), &tcp));
+        assert!(pcre(9100033).is_match(&tcp), "{tcp:02x?}");
+    }
+    let mut other = q(1, 0);
+    other[1] = b'Q';
+    assert!(!pcre(9100032).is_match(&other));
+}

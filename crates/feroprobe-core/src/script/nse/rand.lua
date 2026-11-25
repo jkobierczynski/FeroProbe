@@ -4,9 +4,12 @@
 local rand = {}
 
 -- The characters from left to right (one-character strings), as a list.
+-- left and right are characters or their byte values.
 rand.charset = function(left, right, charset)
   charset = charset or {}
-  for b = left:byte(), right:byte() do charset[#charset + 1] = string.char(b) end
+  local lo = type(left) == "number" and left or tostring(left):byte()
+  local hi = type(right) == "number" and right or tostring(right):byte()
+  for b = lo, hi do charset[#charset + 1] = string.char(b) end
   return charset
 end
 

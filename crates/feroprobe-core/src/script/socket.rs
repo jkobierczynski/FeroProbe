@@ -38,6 +38,10 @@ pub struct Scope {
     /// The ports the scan probed on it.
     pub tcp: BTreeSet<u16>,
     pub udp: BTreeSet<u16>,
+    /// The DNS servers of the run (`--dns-servers`, or the system's), which
+    /// any script may query on their DNS port, as nmap's `dns` library
+    /// does when no server is named.
+    pub resolvers: Arc<Vec<SocketAddr>>,
     /// The script, for messages.
     pub script: String,
     /// Where refused connections are counted, for one summary line per
@@ -61,13 +65,19 @@ impl Scope {
             none_probed,
             message,
         };
+        if matches!(proto, Protocol::Tcp | Protocol::Udp)
+            && let Ok(ip) = host.parse::<IpAddr>()
+            && self.resolvers.contains(&SocketAddr::new(ip, port))
+        {
+            return Ok(SocketAddr::new(ip, port));
+        }
         let Some(addr) = self.addr else {
             return Err(refusal(
                 Reason::NoNetwork,
                 false,
                 format!(
                     "{host}:{port} is outside this script's scope: scripts that run before or \
-                     after the scan have no network access"
+                     after the scan may only reach the run's DNS servers"
                 ),
             ));
         };
@@ -822,5 +832,24 @@ mod tests {
         assert!(s.check("192.0.2.7", 22, Protocol::Sctp).is_err());
         let none = Scope::default();
         assert!(none.check("192.0.2.7", 22, Protocol::Tcp).is_err());
+    }
+
+    #[test]
+    fn the_resolvers_on_their_port_in_every_phase() {
+        let resolvers = Arc::new(vec!["198.51.100.53:53".parse().unwrap()]);
+        let host = Scope {
+            resolvers: resolvers.clone(),
+            ..scope()
+        };
+        let prerule = Scope {
+            resolvers,
+            ..Scope::default()
+        };
+        for s in [&host, &prerule] {
+            assert!(s.check("198.51.100.53", 53, Protocol::Udp).is_ok());
+            assert!(s.check("198.51.100.53", 53, Protocol::Tcp).is_ok());
+            assert!(s.check("198.51.100.53", 80, Protocol::Tcp).is_err());
+            assert!(s.check("198.51.100.54", 53, Protocol::Udp).is_err());
+        }
     }
 }

@@ -231,6 +231,15 @@ which has no field for a client name. `clock-skew` sends nothing: it only
 sums up what the other scripts saw. None of them logs in with a
 password, and each stays within the ports the scan probed.
 
+NSE scripts run through the compatibility layer carry the marks of the
+libraries they use (the `http` module's `User-Agent`, the `tls` module's
+ClientHello random, ...). The `dns` module's queries and dynamic updates
+carry the DNS transaction ID `0x4650` ("FP") unless the script sets its
+own: rules 9100032 (UDP) and 9100033 (TCP) match it on port 53 with one
+question (or zone) and no answers, a weak 2-byte mark that `dns-nsid`'s
+queries match too. Besides the scanned host, those queries may reach only
+the run's DNS servers (`--dns-servers`, else the system's).
+
 ### Detection rules for defenders
 
 The repository ships Suricata and Snort rules that match the probe
