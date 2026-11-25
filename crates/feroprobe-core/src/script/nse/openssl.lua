@@ -5,7 +5,7 @@
 local fero = ...
 local openssl = {}
 
-local BLOCK = { md5 = 64, sha1 = 64, sha256 = 64, sha384 = 128, sha512 = 128 }
+local BLOCK = { md4 = 64, md5 = 64, sha1 = 64, sha256 = 64, sha384 = 128, sha512 = 128 }
 
 local function algo(name)
   name = tostring(name):lower():gsub("-", "")
@@ -14,10 +14,11 @@ local function algo(name)
 end
 
 openssl.digest = function(name, msg) return fero.crypto.digest(algo(name), msg) end
+openssl.md4 = function(msg) return fero.crypto.digest("md4", msg) end
 openssl.md5 = function(msg) return fero.crypto.digest("md5", msg) end
 openssl.sha1 = function(msg) return fero.crypto.digest("sha1", msg) end
 openssl.supported_digests = function()
-  return { "md5", "sha1", "sha256", "sha384", "sha512" }
+  return { "md4", "md5", "sha1", "sha256", "sha384", "sha512" }
 end
 
 -- RFC 2104.
