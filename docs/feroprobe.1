@@ -4206,6 +4206,16 @@ T}@T{
 \f[V]utf16to8\f[R], \f[V]utf8to16\f[R], \f[V]chardet\f[R]
 T}
 T{
+\f[V]smbauth\f[R]
+T}@T{
+\f[V]get_host_info_from_security_blob\f[R] (what a server\[aq]s NTLM
+challenge says about it: names, domain, clock and Windows version) and
+\f[V]get_security_blob\f[R] for the first message only, which is always
+FeroProbe\[aq]s own NTLM NEGOTIATE naming workstation FEROPROBE; the
+login functions raise an error, as FeroProbe\[aq]s NSE layer does not
+log in over NTLM
+T}
+T{
 \f[V]target\f[R]
 T}@T{
 \f[V]ALLOW_NEW_TARGETS\f[R], \f[V]add\f[R]: as in nmap, a script adds
@@ -4227,7 +4237,7 @@ stops the script from loading with an error that names it; a function
 FeroProbe does not have in a module it offers (\f[V]nmap.new_dnet\f[R],
 \f[V]openssl.encrypt\f[R], ...)
 raises an error naming it when called.
-Of nmap 7.94\[aq]s 606 scripts, 341 load as they are.
+Of nmap 7.94\[aq]s 606 scripts, 346 load as they are.
 See Brute-force scripts for how a \f[V]brute\f[R] script must be chosen
 before it will run.
 .PP
