@@ -4052,7 +4052,9 @@ T}@T{
 \f[V]getCertificate\f[R], \f[V]parse_ssl_certificate\f[R],
 \f[V]isPortSupported\f[R], \f[V]getPrepareTLSWithoutReconnect\f[R], over
 FeroProbe\[aq]s STARTTLS helper (SMTP, LMTP, IMAP, POP3, NNTP, FTP,
-LDAP, PostgreSQL, XMPP)
+LDAP, PostgreSQL, XMPP); an RSA key\[aq]s \f[V]modulus\f[R] and
+\f[V]exponent\f[R] are \f[V]openssl\f[R] bignums, as nmap\[aq]s
+\f[V]ssl-cert\f[R] reads them
 T}
 T{
 \f[V]tls\f[R]

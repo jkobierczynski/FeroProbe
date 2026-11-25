@@ -7557,3 +7557,29 @@ end
         "{r:?}"
     );
 }
+
+#[tokio::test]
+async fn nse_sslcert_rsa_key_as_bignums() {
+    // An RSA certificate (openssl req, CN café.example.test): nmap's
+    // ssl-cert reads the key's modulus and exponent as bignums.
+    let src = r#"
+local base64 = require "base64"
+local openssl = require "openssl"
+local sslcert = require "sslcert"
+description = "test"
+categories = { "safe" }
+prerule = function() return true end
+action = function()
+  local c = sslcert.parse_ssl_certificate(base64.dec("MIIDTTCCAjWgAwIBAgIUT4wLKSDd0mv/8XzRENONiwepVbkwDQYJKoZIhvcNAQELBQAwNjEbMBkGA1UEAwwSY2Fmw6kuZXhhbXBsZS50ZXN0MRcwFQYDVQQKDA5Tb2Npw6l0w6kgVGVzdDAeFw0yNjExMjUxNzE5MDlaFw0yNjEyMjUxNzE5MDlaMDYxGzAZBgNVBAMMEmNhZsOpLmV4YW1wbGUudGVzdDEXMBUGA1UECgwOU29jacOpdMOpIFRlc3QwggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQDQBRA6nYVKmv7TUX97jo5Twxn2H11mfWx780G6y0PQZikwWIq6GCmX3g/cwLKytRGQI9zCusAFDJBP3XF5rVVfFBin1drhq6KhPxjyihpAVHYzlf8M3QyyPytx40HN0IXEtIq0+npcZZcNnJeOXqZtTzYSqHNfkGBxL4ZSTmrKacSdw9GoyPUEROF5abI9pp0Mn4jkOHSYLn1Zp6tP5cFVFlF10wiCHqcUBoEYN38esUpQj1RxiHF71fx41H3WWZu7LgTOBEn6BR+B9nR9h3Z81tj9ofAmO9Hd9WJ3uorlEQc+KVc3Yikc+gKyHDHH/Zli1n6+d+Me0n9gsSRIx1yVAgMBAAGjUzBRMB0GA1UdDgQWBBSATybTojHooTTKP74DWb20tV1C+TAfBgNVHSMEGDAWgBSATybTojHooTTKP74DWb20tV1C+TAPBgNVHRMBAf8EBTADAQH/MA0GCSqGSIb3DQEBCwUAA4IBAQDCAYuo0BmgywgGd0Q2R4m0B12wQE93VQ+R5IP3GjQaW7CdIR8evAQEt3OPumV8cyebeo81R4vRBVcEgyuRhTsCsWt1QSF/sSF8STdkGphhLUiDHlDo0b17afgpbDi/r43VDvN2HZljPWkpUgi93rP1IAX/CKZtjYLP+v8IW/aQCtH71i1IbdiQ/tqDVpHleltOB2OSQcbhTFmv/BoXoAhSMuyTei8T+JNlSqhIQ6AKN9mzmy3AhYheH90Oi8q7D/y3EB3yFfbQjQju9YLwoSDKei3kvZ3JauE6Rbwjgs386PAhRrtN5kpXfRhIZ/OTvKXSvW7LngCl9N1JlnIpdXeg"))
+  return table.concat({ c.subject.commonName, c.pubkey.type, c.pubkey.bits,
+    openssl.bignum_bn2dec(c.pubkey.exponent), openssl.bignum_num_bits(c.pubkey.modulus),
+    openssl.bignum_bn2hex(c.pubkey.modulus):sub(1, 12) }, " ")
+end
+"#;
+    let scan = ScriptScan::new(vec![script("rsak", src)], ArgTable::default(), None).unwrap();
+    let r = scan.pre_scan().await;
+    assert_eq!(
+        r[0].output,
+        "caf\u{e9}.example.test rsa 2048 65537 2048 D005103A9D85"
+    );
+}

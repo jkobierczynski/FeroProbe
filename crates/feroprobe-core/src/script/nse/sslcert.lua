@@ -38,14 +38,19 @@ end
 -- (type "rsa", "ec", "dsa", "ed25519"...; bits; an EC key's curve also
 -- as ecdhparams.curve_params), validity (date tables), sig_algorithm,
 -- version, serial (hex), extensions (only subjectAltName, as text), pem,
--- der and the digest method. No key moduli or exponents (FeroProbe has
--- no big numbers).
+-- der and the digest method. An RSA key's modulus and exponent are
+-- openssl bignums, as in nmap.
 function sslcert.parse_ssl_certificate(der)
   if type(der) ~= "string" then return nil end
   local raw = fero.tls.parse_certificate(der)
   if not raw then return nil end
   local pubkey = {}
   for k, v in pairs(raw.pubkey) do pubkey[k] = v end
+  if pubkey.type == "rsa" and pubkey.modulus then
+    local openssl = require "openssl"
+    pubkey.modulus = openssl.bignum_bin2bn(pubkey.modulus)
+    pubkey.exponent = openssl.bignum_bin2bn(pubkey.exponent)
+  end
   if pubkey.type == "ec" and pubkey.curve then
     pubkey.ecdhparams = { curve_params = { ec_curve_type = "namedcurve", curve = pubkey.curve } }
   end
