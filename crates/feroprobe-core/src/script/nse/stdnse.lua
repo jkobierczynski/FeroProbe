@@ -81,7 +81,19 @@ stdnse.format_output = function(status, data, indent)
     if fero.debugging() > 0 then return "ERROR: " .. tostring(data) end
     return nil
   end
-  if type(data) ~= "table" then return data end
+  if type(data) ~= "table" then
+    -- Text of several lines becomes an indented block under the script's
+    -- name, as a table's lines do.
+    if type(data) == "string" and data:find("\n") then
+      local pad = string.rep("  ", (indent or 0) + 1)
+      local lines = {}
+      for line in (data:gsub("\n+$", "") .. "\n"):gmatch("([^\n]*)\n") do
+        lines[#lines + 1] = line == "" and "" or pad .. line
+      end
+      return "\n" .. table.concat(lines, "\n")
+    end
+    return data
+  end
   local lines = {}
   format_lines(data, (indent or 0) + 1, lines)
   if #lines == 0 then return nil end
