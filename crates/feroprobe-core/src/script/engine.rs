@@ -94,6 +94,7 @@ const NSE_MODULES: &[(&str, &str)] = &[
     ("ftp", include_str!("nse/ftp.lua")),
     ("geoip", include_str!("nse/geoip.lua")),
     ("http", include_str!("nse/http.lua")),
+    ("httpspider", include_str!("nse/httpspider.lua")),
     ("io", include_str!("nse/io.lua")),
     ("ipOps", include_str!("nse/ipOps.lua")),
     ("irc", include_str!("nse/irc.lua")),

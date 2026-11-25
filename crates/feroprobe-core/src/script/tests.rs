@@ -5962,6 +5962,7 @@ fn nse_modules_load_and_unknown_ones_are_named() {
         "bits",
         "formulas",
         "geoip",
+        "httpspider",
         "irc",
         "knx",
         "lfs",
@@ -6252,6 +6253,74 @@ async fn resolveall_lists_and_adds_addresses() {
     let out = &r[0].output;
     assert!(out.ends_with("Successfully added 1 new targets"), "{out}");
     assert_eq!(scan.new_targets().take(), vec!["127.0.0.1"]);
+}
+
+#[tokio::test]
+async fn nse_httpspider_crawls_within_its_limits() {
+    let (port, seen) = web(|req| {
+        let path = req.split_whitespace().nth(1).unwrap_or("/").to_string();
+        let page = match path.as_str() {
+            "/" => "<html><a href=\"a.html\">a</a> <A HREF='/img.png'>i</A> \
+                    <a href=\"http://other.example/x\">x</a> <a href=\"mailto:x@y\">m</a> \
+                    <link rel=stylesheet href=\"/s.css\"><a href=\"/sub/b.html#top\">b</a></html>",
+            "/a.html" => "<a href=\"/sub/d1/d2/d3/deep.html\">deep</a><a href=\"/\">home</a> \
+                          <form action=\"/sub/form.php?x=1&amp;y=2\"></form>",
+            "/sub/b.html" => "<base href=\"/sub/d1/\"><a href=\"c.html\">c</a>",
+            _ => "<p>leaf</p>",
+        };
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{page}",
+            page.len()
+        )
+        .into_bytes()
+    })
+    .await;
+    let src = r#"
+local httpspider = require "httpspider"
+local shortport = require "shortport"
+local stdnse = require "stdnse"
+categories = { "safe" }
+portrule = shortport.http
+action = function(host, port)
+  local crawler = httpspider.Crawler:new(host, port, nil, { scriptname = SCRIPT_NAME })
+  crawler:set_timeout(10000)
+  local got = {}
+  while true do
+    local ok, r = crawler:crawl()
+    if not ok then
+      if r.err then return r.reason end
+      break
+    end
+    got[#got + 1] = r.url.path .. (r.url.querystring and ("?" .. r.url.querystring) or "") .. "=" .. r.response.status
+  end
+  return table.concat(got, " ") .. " | " .. crawler:getLimitations() .. " | "
+    .. tostring(crawler:isresource("/x.js?v=1", "js")) .. " " .. tostring(crawler:isresource("/x.json", "js"))
+    .. " " .. tostring(crawler:iswithinhost("http://other.example/")) .. " "
+    .. tostring(httpspider.LinkExtractor.isAbsolute("//h/x"))
+end"#;
+    let out = nse_outputs(src, &[(port, "http")], "").await;
+    assert_eq!(
+        out[0].1,
+        "/=200 /a.html=200 /s.css=200 /sub/b.html=200 /sub/form.php?x=1&y=2=200 /sub/d1/c.html=200 \
+         | Spidering limited to: maxdepth=3; maxpagecount=20; withinhost=localhost | true false false true"
+    );
+    // Too deep (4 directories below /), an image, another host: not asked.
+    let asked = seen.lock().unwrap().join("\n");
+    assert!(
+        !asked.contains("deep.html") && !asked.contains("img.png"),
+        "{asked}"
+    );
+    // The page count and depth limits come from the arguments.
+    let out = nse_outputs(
+        src,
+        &[(port, "http")],
+        "httpspider.maxpagecount=2,nse.maxdepth=-1",
+    )
+    .await;
+    assert_eq!(
+        out[0].1,
+        "/=200 /a.html=200 | Spidering limited to: maxpagecount=2; withinhost=localhost | true false false true"
+    );
 }
 
 #[tokio::test]
