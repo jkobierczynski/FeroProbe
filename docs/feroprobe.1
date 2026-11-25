@@ -4186,6 +4186,24 @@ nmap\[aq]s mysql-info prints); the login names FeroProbe in its
 connection attributes
 T}
 T{
+\f[V]slaxml\f[R]
+T}@T{
+\f[V]parser:new\f[R] (callbacks \f[V]startElement\f[R],
+\f[V]attribute\f[R], \f[V]closeElement\f[R], \f[V]text\f[R],
+\f[V]comment\f[R], \f[V]pi\f[R], kept in \f[V]parser._call\f[R]),
+\f[V]parseSAX\f[R] (option \f[V]stripWhitespace\f[R]),
+\f[V]parser.unescape\f[R], \f[V]parseDOM\f[R]; lenient like nmap\[aq]s:
+it reports what it reads and does not check that elements nest
+T}
+T{
+\f[V]unicode\f[R]
+T}@T{
+\f[V]utf8_enc\f[R], \f[V]utf8_dec\f[R], \f[V]utf16_enc\f[R],
+\f[V]utf16_dec\f[R], \f[V]cp437_enc\f[R], \f[V]cp437_dec\f[R],
+\f[V]decode\f[R], \f[V]encode\f[R], \f[V]transcode\f[R],
+\f[V]utf16to8\f[R], \f[V]utf8to16\f[R], \f[V]chardet\f[R]
+T}
+T{
 \f[V]target\f[R]
 T}@T{
 \f[V]ALLOW_NEW_TARGETS\f[R], \f[V]add\f[R]: as in nmap, a script adds
@@ -4207,7 +4225,7 @@ stops the script from loading with an error that names it; a function
 FeroProbe does not have in a module it offers (\f[V]nmap.new_dnet\f[R],
 \f[V]openssl.encrypt\f[R], ...)
 raises an error naming it when called.
-Of nmap 7.94\[aq]s 606 scripts, 330 load as they are.
+Of nmap 7.94\[aq]s 606 scripts, 341 load as they are.
 See Brute-force scripts for how a \f[V]brute\f[R] script must be chosen
 before it will run.
 .PP

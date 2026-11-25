@@ -7482,3 +7482,78 @@ end
     let r = scan.pre_scan().await;
     assert_eq!(r[0].output, "\n  changed\n  x\n\n  end", "{r:?}");
 }
+
+#[tokio::test]
+async fn nse_slaxml_and_unicode() {
+    let src = r##"
+local stdnse = require "stdnse"
+local slaxml = require "slaxml"
+local unicode = require "unicode"
+description = "test"
+categories = { "safe" }
+prerule = function() return true end
+action = function()
+  local o = {}
+  local ev = {}
+  local p = slaxml.parser:new({
+    startElement = function(n, uri, pfx) ev[#ev + 1] = "<" .. n .. "|" .. tostring(uri) .. "|" .. tostring(pfx) end,
+    attribute = function(n, v, uri) ev[#ev + 1] = "@" .. n .. "=" .. v .. "|" .. tostring(uri) end,
+    closeElement = function(n) ev[#ev + 1] = "/" .. n end,
+    text = function(t) ev[#ev + 1] = "'" .. t .. "'" end,
+    comment = function(c) ev[#ev + 1] = "#" .. c end,
+    pi = function(t, c) ev[#ev + 1] = "?" .. t .. ":" .. c end,
+  })
+  p:parseSAX([==[<?xml version="1.0"?><!DOCTYPE x [<!ENTITY e "v">]><!-- hi -->
+<r xmlns="urn:a" xmlns:b="urn:b" k='1 &amp; 2'>  <b:i b:x="y"/> a &lt;&#65;&#x42; <![CDATA[<raw>]]> </r>]==], { stripWhitespace = true })
+  o[#o + 1] = table.concat(ev, " ")
+  -- Callbacks swapped while parsing, as nmap's svn and xmlrpc scripts do.
+  local got = {}
+  local q = slaxml.parser:new()
+  q._call = { startElement = function(name)
+    q._call.text = name == "string" and function(t) got[#got + 1] = q.unescape(t) end or nil
+  end, closeElement = function() q._call.text = nil end }
+  q:parseSAX("<a><string>one</string><int>2</int><string>t&amp;o</string></a>", { stripWhitespace = true })
+  o[#o + 1] = table.concat(got, ",")
+  -- A document fed in pieces that each end after a ">".
+  local n = 0
+  local c = slaxml.parser:new({ startElement = function(name) if name == "host" then n = n + 1 end end })
+  c:parseSAX("<run><host>")
+  c:parseSAX("</host><host/>")
+  c:parseSAX("</run>")
+  o[#o + 1] = tostring(n)
+  local doc = slaxml.parseDOM("<a x='1'><b>t</b><!--c--><b y='2'/></a>", { stripWhitespace = true })
+  o[#o + 1] = doc.type .. " " .. doc.root.name .. " " .. doc.root.attr.x .. " " .. doc.root.attr[1].name
+    .. " " .. #doc.root.kids .. " " .. #doc.root.el .. " " .. doc.root.el[1].kids[1].value
+    .. " " .. doc.root.el[2].attr.y .. " " .. tostring(doc.root.el[1].parent == doc.root)
+  -- unicode
+  local u16 = unicode.utf8to16("h\u{e9}\u{1F600}")
+  o[#o + 1] = stdnse.tohex(u16) .. " " .. unicode.utf16to8(u16) .. " "
+    .. unicode.transcode("\0h\0i", unicode.utf16_dec, unicode.utf8_enc, true, nil) .. " "
+    .. table.concat(unicode.decode("a\u{e9}", unicode.utf8_dec), ",") .. " "
+    .. stdnse.tohex(unicode.encode({ 0x41, 0x263a }, unicode.utf16_enc, true)) .. " "
+    .. tostring(select(1, unicode.utf8_dec("\xff", 1))) .. " "
+    .. unicode.transcode("\x82\xb0", unicode.cp437_dec, unicode.utf8_enc) .. " "
+    .. stdnse.tohex(unicode.cp437_enc(0x2591)) .. tostring(unicode.cp437_enc(0x4e00))
+  o[#o + 1] = table.concat({ unicode.chardet("abc"), unicode.chardet("\xef\xbb\xbfx"),
+    unicode.chardet("a\0b\0"), unicode.chardet("\0a\0b"), unicode.chardet("caf\xc3\xa9"),
+    unicode.chardet("caf\xe9 x"), unicode.chardet("caf\xe2\x82") }, ",")
+  return table.concat(o, "\n")
+end
+"##;
+    let scan = ScriptScan::new(vec![script("xmlu", src)], ArgTable::default(), None).unwrap();
+    let r = scan.pre_scan().await;
+    let out: Vec<&str> = r[0].output.lines().collect();
+    assert_eq!(
+        out,
+        [
+            "?xml:version=\"1.0\" # hi  <r|urn:a|nil @xmlns=urn:a|nil @b=urn:b|nil @k=1 & 2|nil \
+             <i|urn:b|b @x=y|urn:b /i 'a <AB' '<raw>' /r",
+            "one,t&o",
+            "2",
+            "document a 1 x 3 2 t 2 true",
+            "6800e9003dd800de h\u{e9}\u{1F600} hi 97,233 0041263a nil \u{e9}\u{2591} b0nil",
+            "ascii,utf-8,utf-16le,utf-16be,utf-8,other,utf-8",
+        ],
+        "{r:?}"
+    );
+}
