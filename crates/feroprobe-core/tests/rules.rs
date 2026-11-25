@@ -219,3 +219,18 @@ fn nse_dns_rules_match_its_queries() {
     other[1] = b'Q';
     assert!(!pcre(9100032).is_match(&other));
 }
+
+/// The rule for the NSE mysql module's login matches its connection
+/// attributes.
+#[test]
+fn nse_mysql_rule_matches_the_login() {
+    let suricata = sids(&rules("feroprobe.rules"));
+    let mut login = vec![0u8; 32];
+    login.extend_from_slice(b"fp\0\0mysql_native_password\0");
+    login.extend_from_slice(b"\x2c\x0c_client_name\x09FeroProbe\x0cprogram_name\x09FeroProbe");
+    assert!(content_match(&contents(&suricata[&9100034].1), &login));
+    assert!(!content_match(
+        &contents(&suricata[&9100034].1),
+        b"\x0cprogram_name\x05mysql"
+    ));
+}

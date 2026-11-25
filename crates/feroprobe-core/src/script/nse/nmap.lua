@@ -147,6 +147,20 @@ local function registry_view(reg)
 end
 
 nmap.registry = registry_view(fero.registry)
+-- nmap.registry.args: the script arguments (--script-args), as nmap keeps
+-- them there; a copy, so a script's changes stay its own.
+do
+  local mt = getmetatable(nmap.registry)
+  local index = mt.__index
+  local args
+  mt.__index = function(t, k)
+    if k == "args" then
+      args = args or deep_copy(fero.args and fero.args.table or {})
+      return args
+    end
+    return index(t, k)
+  end
+end
 
 fero.__nse_flush = function()
   local first_err

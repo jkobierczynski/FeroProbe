@@ -123,3 +123,7 @@ alert udp any any -> $HOME_NET any (msg:"FeroProbe -sV IAX2 POKE (call number FP
 # 9100015) match too.
 alert udp any any -> $HOME_NET 53 (msg:"FeroProbe DNS query from an NSE script (transaction ID FP)"; content:"FP"; depth:2; pcre:"/^FP[\x00\x01\x28]\x00\x00\x01\x00\x00\x00[\x00\x01]/s"; classtype:attempted-recon; sid:9100032; rev:1;)
 alert tcp any any -> $HOME_NET 53 (msg:"FeroProbe DNS query over TCP from an NSE script (transaction ID FP)"; flow:established,to_server; content:"FP"; offset:2; depth:2; pcre:"/^.{2}FP[\x00\x01\x28]\x00\x00\x01\x00\x00\x00[\x00\x01]/s"; classtype:attempted-recon; sid:9100033; rev:1;)
+# NSE mysql module (mysql.loginRequest): the login names the client in its
+# connection attributes, _client_name and program_name FeroProbe, when the
+# server takes them (MySQL 5.6+, MariaDB 10+).
+alert tcp any any -> $HOME_NET any (msg:"FeroProbe MySQL login from an NSE script (program_name FeroProbe)"; flow:established,to_server; content:"|0c|program_name|09|FeroProbe"; classtype:attempted-recon; sid:9100034; rev:1;)

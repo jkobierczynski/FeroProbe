@@ -7323,3 +7323,162 @@ end
     );
     assert_eq!(seen.iter().filter(|q| q.starts_with("tcp")).count(), 1);
 }
+
+/// A MySQL server speaking just enough of the protocol: a greeting that
+/// takes connection attributes and plugin auth, a login checked against
+/// the password "secret", and one result set; the login packet it got.
+async fn mysql_server() -> (u16, Seen) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let seen: Seen = Default::default();
+    let s = seen.clone();
+    tokio::spawn(async move {
+        let salt = b"abcdefghijklmnopqrst";
+        while let Ok((mut c, _)) = listener.accept().await {
+            let mut g = vec![10u8];
+            g.extend_from_slice(b"5.5.5-10.11.0-MariaDB\0");
+            g.extend_from_slice(&7u32.to_le_bytes());
+            g.extend_from_slice(&salt[..8]);
+            g.push(0);
+            g.extend_from_slice(&0xf7feu16.to_le_bytes());
+            g.push(33);
+            g.extend_from_slice(&2u16.to_le_bytes());
+            g.extend_from_slice(&0x001fu16.to_le_bytes());
+            g.push(21);
+            g.extend_from_slice(&[0; 10]);
+            g.extend_from_slice(&salt[8..]);
+            g.push(0);
+            g.extend_from_slice(b"mysql_native_password\0");
+            let packet = |seq: u8, p: &[u8]| {
+                let mut v = (p.len() as u32).to_le_bytes()[..3].to_vec();
+                v.push(seq);
+                v.extend_from_slice(p);
+                v
+            };
+            let _ = c.write_all(&packet(0, &g)).await;
+            let mut head = [0u8; 4];
+            if c.read_exact(&mut head).await.is_err() {
+                continue;
+            }
+            let mut login = vec![0u8; u32::from_le_bytes([head[0], head[1], head[2], 0]) as usize];
+            let _ = c.read_exact(&mut login).await;
+            s.lock()
+                .unwrap()
+                .push(String::from_utf8_lossy(&login).to_string());
+            // The scramble for "secret".
+            use ring::digest::{SHA1_FOR_LEGACY_USE_ONLY as SHA1, digest};
+            let h1 = digest(&SHA1, b"secret");
+            let h2 = digest(&SHA1, h1.as_ref());
+            let mut salted = salt.to_vec();
+            salted.extend_from_slice(h2.as_ref());
+            let h3 = digest(&SHA1, &salted);
+            let want: Vec<u8> = h1
+                .as_ref()
+                .iter()
+                .zip(h3.as_ref())
+                .map(|(a, b)| a ^ b)
+                .collect();
+            let user_end = 32 + login[32..].iter().position(|&b| b == 0).unwrap();
+            let n = login[user_end + 1] as usize;
+            let got = &login[user_end + 2..user_end + 2 + n];
+            if got != want.as_slice() {
+                let mut err = vec![0xff, 0x15, 0x04];
+                err.extend_from_slice(b"#28000Access denied for user");
+                let _ = c.write_all(&packet(2, &err)).await;
+                continue;
+            }
+            let _ = c.write_all(&packet(2, &[0, 0, 0, 2, 0, 0, 0])).await;
+            // One query: a column "Database" and two rows, one NULL.
+            if c.read_exact(&mut head).await.is_err() {
+                continue;
+            }
+            let mut q = vec![0u8; u32::from_le_bytes([head[0], head[1], head[2], 0]) as usize];
+            let _ = c.read_exact(&mut q).await;
+            let mut col = Vec::new();
+            for f in ["def", "", "", "", "Database", ""] {
+                col.push(f.len() as u8);
+                col.extend_from_slice(f.as_bytes());
+            }
+            col.extend_from_slice(&[0x0c, 33, 0, 0, 1, 0, 0, 253, 0, 0, 0, 0, 0]);
+            let mut out = packet(1, &[1]);
+            out.extend(packet(2, &col));
+            out.extend(packet(3, &[0xfe, 0, 0, 2, 0]));
+            out.extend(packet(4, b"\x05album"));
+            out.extend(packet(5, &[0xfb]));
+            out.extend(packet(6, &[0xfe, 0, 0, 2, 0]));
+            let _ = c.write_all(&out).await;
+        }
+    });
+    (port, seen)
+}
+
+#[tokio::test]
+async fn nse_mysql_logs_in_and_queries() {
+    let (port, seen) = mysql_server().await;
+    let src = r#"
+local mysql = require "mysql"
+local nmap = require "nmap"
+local shortport = require "shortport"
+description = "test"
+categories = { "safe" }
+portrule = shortport.port_or_service(3306, "mysql")
+action = function(host, port)
+  local o = {}
+  local function session(pass)
+    local s = nmap.new_socket()
+    s:connect(host, port)
+    local ok, g = mysql.receiveGreeting(s)
+    o[#o + 1] = g.proto .. " " .. g.version .. " " .. g.threadid .. " " .. #g.salt .. " "
+      .. g.status .. " " .. g.auth_plugin_name .. " " .. tostring(g.capabilities & mysql.Capabilities.PROTOCOL_41 ~= 0)
+    local lok, r = mysql.loginRequest(s, { authversion = "post41", charset = g.charset }, "fp", pass, g.salt)
+    o[#o + 1] = tostring(lok) .. " " .. (type(r) == "table" and tostring(r.errorcode) or r)
+    if lok then
+      local qok, rs = mysql.sqlQuery(s, "show databases")
+      o[#o + 1] = tostring(qok) .. " " .. rs.cols[1].name .. " " .. rs.rows[1][1] .. " " .. rs.rows[2][1]
+      o[#o + 1] = mysql.formatResultset(rs) .. mysql.formatResultset(rs, { noheaders = true })
+    end
+    s:close()
+  end
+  session("wrong")
+  session("secret")
+  return table.concat(o, "\n")
+end"#;
+    let out = nse_outputs(src, &[(port, "mysql")], "").await;
+    assert_eq!(
+        out[0].1,
+        "10 5.5.5-10.11.0-MariaDB 7 20 2 mysql_native_password true\n\
+         false Access denied for user\n\
+         10 5.5.5-10.11.0-MariaDB 7 20 2 mysql_native_password true\n\
+         true 0\n\
+         true Database album NULL\n\
+         Database\nalbum\nNULL\nalbum\nNULL\n"
+    );
+    // The login names FeroProbe in its connection attributes.
+    let logins = seen.lock().unwrap().clone();
+    assert!(
+        logins
+            .iter()
+            .all(|l| l.contains("\x0cprogram_name\x09FeroProbe")),
+        "{logins:?}"
+    );
+    assert!(logins[0].contains("fp\0") && logins[0].contains("mysql_native_password"));
+}
+
+#[tokio::test]
+async fn nse_registry_args_and_text_blocks() {
+    let src = r#"
+local stdnse = require "stdnse"
+description = "test"
+categories = { "safe" }
+prerule = function() return true end
+action = function()
+  local a = nmap.registry.args
+  a.user = "changed"
+  return stdnse.format_output(true, nmap.registry.args.user .. "\n" .. a.list[1] .. "\n\nend\n")
+end
+"#;
+    let table = crate::script::args::parse("user=fp,list={x,y}").unwrap();
+    let scan = ScriptScan::new(vec![script("regargs", src)], table, None).unwrap();
+    let r = scan.pre_scan().await;
+    assert_eq!(r[0].output, "\n  changed\n  x\n\n  end", "{r:?}");
+}

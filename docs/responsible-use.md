@@ -238,7 +238,11 @@ carry the DNS transaction ID `0x4650` ("FP") unless the script sets its
 own: rules 9100032 (UDP) and 9100033 (TCP) match it on port 53 with one
 question (or zone) and no answers, a weak 2-byte mark that `dns-nsid`'s
 queries match too. Besides the scanned host, those queries may reach only
-the run's DNS servers (`--dns-servers`, else the system's).
+the run's DNS servers (`--dns-servers`, else the system's). The `mysql`
+module's logins name the client `FeroProbe` in their connection
+attributes (`_client_name`, `program_name`), which a MySQL 5.6+ or
+MariaDB server keeps in `performance_schema.session_connect_attrs`;
+rule 9100034 matches them.
 
 ### Detection rules for defenders
 

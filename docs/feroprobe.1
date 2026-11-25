@@ -4173,6 +4173,19 @@ server, and only where the scope allows (see below); referrals to other
 servers are not followed
 T}
 T{
+\f[V]mysql\f[R]
+T}@T{
+\f[V]receiveGreeting\f[R], \f[V]loginRequest\f[R]
+(mysql_native_password; a server that asks for another plugin, such as
+MySQL 8\[aq]s default caching_sha2_password, refuses the login),
+\f[V]sqlQuery\f[R], \f[V]formatResultset\f[R],
+\f[V]decodeQueryResponse\f[R], \f[V]decodeField\f[R],
+\f[V]decodeFieldPackets\f[R], \f[V]decodeDataPackets\f[R],
+\f[V]Capabilities\f[R], \f[V]ExtCapabilities\f[R] (named as the
+protocol\[aq]s \f[V]CLIENT_\f[R] flags); the login names FeroProbe in
+its connection attributes
+T}
+T{
 \f[V]target\f[R]
 T}@T{
 \f[V]ALLOW_NEW_TARGETS\f[R], \f[V]add\f[R]: as in nmap, a script adds
@@ -4188,13 +4201,13 @@ T}@T{
 T}
 .TE
 .PP
-Any other module (\f[V]packet\f[R], \f[V]msrpc\f[R], \f[V]mysql\f[R],
+Any other module (\f[V]packet\f[R], \f[V]msrpc\f[R], \f[V]mssql\f[R],
 \&...)
 stops the script from loading with an error that names it; a function
 FeroProbe does not have in a module it offers (\f[V]nmap.new_dnet\f[R],
 \f[V]openssl.encrypt\f[R], ...)
 raises an error naming it when called.
-Of nmap 7.94\[aq]s 606 scripts, 319 load as they are.
+Of nmap 7.94\[aq]s 606 scripts, 330 load as they are.
 See Brute-force scripts for how a \f[V]brute\f[R] script must be chosen
 before it will run.
 .PP
@@ -4221,6 +4234,8 @@ Only plain data is kept (see The registry); top-level names must be
 strings, and \f[V]pairs(nmap.registry)\f[R] lists only the entries the
 script has touched.
 A script stopped by its timeout leaves no changes.
+\f[V]nmap.registry.args\f[R] holds the script arguments, as in nmap (a
+copy: changing it changes nothing for other scripts).
 .IP \[bu] 2
 \f[B]Threads.\f[R] \f[V]stdnse.new_thread\f[R] runs the function to
 completion before it returns (FeroProbe already runs many scripts at

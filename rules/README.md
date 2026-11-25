@@ -38,6 +38,7 @@ teams can flag FeroProbe scans without writing their own.
 | `-sV` mc-nmf probe (TCP 9389) | .NET Message Framing preamble with via `net.tcp://feroprobe.invalid/FeroProbe` (SID 9100026) |
 | `-sV` UDP probes | STUN transaction ID `FeroProbeSTN` (SID 9100027); IKEv2 SPI `FeroProb` and nonce `FeroProbeIKEv2NonceFeroProbeIKE2` on 500 and 4500 (SID 9100028); L2TP SCCRQ host `feroprobe`, vendor `FeroProbe` (SID 9100029); DNS-SD query ID `FP` (SID 9100030); IAX2 POKE call number `FP` (SID 9100031) |
 | NSE `dns` module (`dns.query`, `dns.update`) | DNS queries and updates to port 53 with transaction ID `0x4650` ("FP"), over UDP (SID 9100032) or TCP (SID 9100033); a weak 2-byte mark that `dns-nsid`'s queries also match |
+| NSE `mysql` module (`mysql.loginRequest`) | Login with connection attributes `_client_name` and `program_name` set to `FeroProbe`, when the server takes them (SID 9100034) |
 | `dns-nsid` (default script) | DNS CHAOS TXT queries (`id.server`, `version.bind`) with transaction ID `0x4650` ("FP") and only the RD flag set, over UDP (SID 9100014) or TCP (SID 9100015) |
 
 The TCP window of a scan probe is otherwise meaningless, because the scan
