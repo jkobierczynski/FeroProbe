@@ -7429,7 +7429,7 @@ action = function(host, port)
     s:connect(host, port)
     local ok, g = mysql.receiveGreeting(s)
     o[#o + 1] = g.proto .. " " .. g.version .. " " .. g.threadid .. " " .. #g.salt .. " "
-      .. g.status .. " " .. g.auth_plugin_name .. " " .. tostring(g.capabilities & mysql.Capabilities.PROTOCOL_41 ~= 0)
+      .. g.status .. " " .. g.auth_plugin_name .. " " .. tostring(g.capabilities & mysql.Capabilities.Speaks41ProtocolNew ~= 0)
     local lok, r = mysql.loginRequest(s, { authversion = "post41", charset = g.charset }, "fp", pass, g.salt)
     o[#o + 1] = tostring(lok) .. " " .. (type(r) == "table" and tostring(r.errorcode) or r)
     if lok then

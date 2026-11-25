@@ -11,19 +11,18 @@ local openssl = require "openssl"
 local tab = require "tab"
 local mysql = {}
 
--- Capability flags of the greeting's lower and upper 16 bits, named as
--- in the protocol documentation (CLIENT_...).
+-- Capability flags of the greeting's lower and upper 16 bits, under the
+-- names nmap's mysql-info shows (taken from its output, not its source).
 mysql.Capabilities = {
-  LONG_PASSWORD = 0x1, FOUND_ROWS = 0x2, LONG_FLAG = 0x4, CONNECT_WITH_DB = 0x8,
-  NO_SCHEMA = 0x10, COMPRESS = 0x20, ODBC = 0x40, LOCAL_FILES = 0x80,
-  IGNORE_SPACE = 0x100, PROTOCOL_41 = 0x200, INTERACTIVE = 0x400, SSL = 0x800,
-  IGNORE_SIGPIPE = 0x1000, TRANSACTIONS = 0x2000, RESERVED = 0x4000,
-  SECURE_CONNECTION = 0x8000,
+  LongPassword = 0x1, FoundRows = 0x2, LongColumnFlag = 0x4, ConnectWithDatabase = 0x8,
+  DontAllowDatabaseTableColumn = 0x10, SupportsCompression = 0x20, ODBCClient = 0x40,
+  SupportsLoadDataLocal = 0x80, IgnoreSpaceBeforeParenthesis = 0x100,
+  Speaks41ProtocolNew = 0x200, InteractiveClient = 0x400, SwitchToSSLAfterHandshake = 0x800,
+  IgnoreSigpipes = 0x1000, SupportsTransactions = 0x2000, Speaks41ProtocolOld = 0x4000,
+  Support41Auth = 0x8000,
 }
 mysql.ExtCapabilities = {
-  MULTI_STATEMENTS = 0x1, MULTI_RESULTS = 0x2, PS_MULTI_RESULTS = 0x4, PLUGIN_AUTH = 0x8,
-  CONNECT_ATTRS = 0x10, PLUGIN_AUTH_LENENC_CLIENT_DATA = 0x20,
-  CAN_HANDLE_EXPIRED_PASSWORDS = 0x40, SESSION_TRACK = 0x80, DEPRECATE_EOF = 0x100,
+  SupportsMultipleStatments = 0x1, SupportsMultipleResults = 0x2, SupportsAuthPlugins = 0x8,
 }
 
 local CLIENT_PROTOCOL_41 = 0x200
