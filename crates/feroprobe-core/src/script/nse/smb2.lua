@@ -32,8 +32,10 @@ function smb2.dialect_name(dialect)
   return nil
 end
 
+-- A time (Unix seconds) as nmap's scripts print it, or "N/A" when the server gives
+-- none (as nmap's smb2-time prints a missing start time).
 local function when(t)
-  if not t or t == 0 then return nil end
+  if not t or t == 0 then return "N/A" end
   return os.date("!%Y-%m-%dT%H:%M:%S", t)
 end
 
@@ -41,7 +43,8 @@ end
 -- smb2.negotiate_v2(smb, overrides): NEGOTIATE on the state from
 -- smb.start, offering every dialect or overrides.Dialects. Fills the
 -- state's dialect, security_mode, capabilities, server_guid, time and
--- date, start_time (0 when the server does not say) and start_date.
+-- date, start_time (0 when the server does not say) and start_date
+-- ("N/A" for a time the server does not give).
 -- Returns true and the dialect, or false and a message.
 function smb2.negotiate_v2(smb, overrides)
   if type(smb) ~= "table" or not smb.port_table then

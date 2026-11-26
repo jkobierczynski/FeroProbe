@@ -7741,7 +7741,7 @@ end
     scan.scan_hosts(&mut hosts).await;
     assert_eq!(
         hosts[0].scripts[0].output,
-        "true 3:1:1 nil 1 2026-01-02T03:04:05 0 nil 5 false false smb2.smb2_send is not available"
+        "true 3:1:1 nil 1 2026-01-02T03:04:05 0 N/A 5 false false smb2.smb2_send is not available"
     );
     assert!(seen.lock().unwrap()[0].contains("FeroProbeSMBScan"));
 }
