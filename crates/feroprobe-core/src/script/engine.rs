@@ -104,6 +104,7 @@ const NSE_MODULES: &[(&str, &str)] = &[
     ("irc", include_str!("nse/irc.lua")),
     ("json", include_str!("nse/json.lua")),
     ("knx", include_str!("nse/knx.lua")),
+    ("ldap", include_str!("nse/ldap.lua")),
     ("lfs", include_str!("nse/lfs.lua")),
     ("listop", include_str!("nse/listop.lua")),
     ("ls", include_str!("nse/ls.lua")),

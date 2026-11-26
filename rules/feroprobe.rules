@@ -141,3 +141,10 @@ alert udp any any -> $HOME_NET 137 (msg:"FeroProbe NetBIOS NAME QUERY from an NS
 # (rpc-grind) is not matched; the -sV RPC probe (XID FPRO) is.
 alert udp any any -> $HOME_NET any (msg:"FeroProbe ONC RPC call from an NSE script (XID FP)"; content:"FP"; depth:2; content:"|00 00 00 00 00 00 00 02|"; distance:2; within:8; classtype:attempted-recon; metadata:tool FeroProbe; sid:9100036; rev:1;)
 alert tcp any any -> $HOME_NET any (msg:"FeroProbe ONC RPC call over TCP from an NSE script (XID FP)"; flow:established,to_server; content:"FP"; offset:4; depth:2; content:"|00 00 00 00 00 00 00 02|"; distance:2; within:8; classtype:attempted-recon; metadata:tool FeroProbe; sid:9100037; rev:1;)
+
+# LDAP (NSE ldap module): FeroProbe numbers its LDAP messages 0x4650nnnn
+# ("FP" then a counter), right after the outer SEQUENCE and its length.
+# Over UDP (CLDAP) only searches are sent, so the rule also wants the
+# SearchRequest tag; a server's replies carry other tags.
+alert tcp any any -> $HOME_NET any (msg:"FeroProbe LDAP request from an NSE script (message ID FP)"; flow:established,to_server; content:"|30|"; depth:1; content:"|02 04 46 50|"; distance:1; within:7; classtype:attempted-recon; metadata:tool FeroProbe; sid:9100038; rev:1;)
+alert udp any any -> $HOME_NET any (msg:"FeroProbe CLDAP search from an NSE script (message ID FP)"; content:"|30|"; depth:1; content:"|02 04 46 50|"; distance:1; within:7; content:"|63|"; distance:2; within:1; classtype:attempted-recon; metadata:tool FeroProbe; sid:9100039; rev:1;)

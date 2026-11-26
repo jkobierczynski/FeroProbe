@@ -4284,6 +4284,26 @@ FeroProbe does not bind a reserved source port, so a server exporting
 with the Linux \f[V]secure\f[R] option refuses to mount
 T}
 T{
+\f[V]ldap\f[R]
+T}@T{
+LDAPv3 searches over TCP and CLDAP over UDP: \f[V]searchRequest\f[R],
+\f[V]udpSearchRequest\f[R], \f[V]bindRequest\f[R],
+\f[V]unbindRequest\f[R], \f[V]extractAttribute\f[R],
+\f[V]searchResultToTable\f[R], \f[V]searchResultToFile\f[R] (CSV),
+\f[V]createFilter\f[R], \f[V]encode\f[R], \f[V]decode\f[R] (BER),
+\f[V]convertADTimeStamp\f[R], \f[V]convertZuluTimeStamp\f[R],
+\f[V]convertObjectSid\f[R], \f[V]copyTable\f[R] and the \f[V]SCOPE\f[R],
+\f[V]DEREFPOLICY\f[R], \f[V]FILTER\f[R], \f[V]APPNO\f[R] and
+\f[V]ERRORS\f[R] tables.
+Only anonymous binds: a bind with a user name or password sends nothing
+and fails with \[dq]Binding with credentials is not supported by
+FeroProbe\[dq], so ldap-search with \f[V]ldap.username\f[R], ldap-brute
+and ldap-novell-getpass find nothing (ldap-rootdse and an anonymous
+ldap-search give nmap\[aq]s output).
+Messages carry message IDs starting \f[V]FP\f[R] (\f[V]0x4650\f[R], IDS
+rules 9100038 TCP and 9100039 UDP)
+T}
+T{
 \f[V]ls\f[R]
 T}@T{
 \f[V]new_listing\f[R], \f[V]new_vol\f[R], \f[V]add_file\f[R],
@@ -4315,7 +4335,7 @@ stops the script from loading with an error that names it; a function
 FeroProbe does not have in a module it offers (\f[V]nmap.new_dnet\f[R],
 \f[V]openssl.encrypt\f[R], ...)
 raises an error naming it when called.
-Of nmap 7.94\[aq]s 606 scripts, 372 load as they are.
+Of nmap 7.94\[aq]s 606 scripts, 376 load as they are.
 See Brute-force scripts for how a \f[V]brute\f[R] script must be chosen
 before it will run.
 .PP
