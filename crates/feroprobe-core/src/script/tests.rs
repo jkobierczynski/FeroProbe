@@ -8302,3 +8302,134 @@ end
          TGHT NOTUNNEL 0|STDV VNCAUTH_ 2"
     );
 }
+
+/// A BSON document around the encoded elements.
+fn bson_doc(elems: &[u8]) -> Vec<u8> {
+    let mut d = ((elems.len() + 5) as i32).to_le_bytes().to_vec();
+    d.extend_from_slice(elems);
+    d.push(0);
+    d
+}
+
+/// A BSON string element.
+fn bson_str(name: &str, v: &str) -> Vec<u8> {
+    let mut e = vec![0x02];
+    e.extend_from_slice(name.as_bytes());
+    e.push(0);
+    e.extend(((v.len() + 1) as i32).to_le_bytes());
+    e.extend_from_slice(v.as_bytes());
+    e.push(0);
+    e
+}
+
+#[tokio::test]
+async fn nse_mongodb_queries_and_bson() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let seen: Seen = Default::default();
+    let keep = seen.clone();
+    let port = tcp_server(move |mut s| {
+        let keep = keep.clone();
+        async move {
+            loop {
+                let mut head = [0u8; 16];
+                if s.read_exact(&mut head).await.is_err() {
+                    return;
+                }
+                let len = i32::from_le_bytes(head[0..4].try_into().unwrap()) as usize;
+                let mut body = vec![0u8; len - 16];
+                if s.read_exact(&mut body).await.is_err() {
+                    return;
+                }
+                let z = body[4..].iter().position(|&b| b == 0).unwrap();
+                let coll = String::from_utf8_lossy(&body[4..4 + z]).to_string();
+                let cmd_at = 4 + z + 1 + 8;
+                let cmd = String::from_utf8_lossy(&body[cmd_at + 5..]).to_string();
+                let cmd = cmd.split('\0').next().unwrap().to_string();
+                keep.lock().unwrap().push(format!(
+                    "{}{} {} {} {}",
+                    head[4] as char,
+                    head[5] as char,
+                    i32::from_le_bytes(head[12..16].try_into().unwrap()),
+                    coll,
+                    cmd
+                ));
+                let (flags, doc) = if coll == "admin.$cmd" {
+                    let mut e = vec![0x01];
+                    e.extend(b"ok\0");
+                    e.extend(1.0f64.to_le_bytes());
+                    e.extend(bson_str("version", "6.0.1"));
+                    e.push(0x03);
+                    e.extend(b"nested\0");
+                    let mut inner = vec![0x10];
+                    inner.extend(b"a\0");
+                    inner.extend(5i32.to_le_bytes());
+                    e.extend(bson_doc(&inner));
+                    e.push(0x04);
+                    e.extend(b"arr\0");
+                    let mut arr = bson_str("0", "x");
+                    arr.extend(bson_str("1", "y"));
+                    e.extend(bson_doc(&arr));
+                    e.extend(b"\x0an\0");
+                    e.extend(b"\x08flag\0\x01");
+                    e.extend(b"\x11ts\0");
+                    e.extend(2u32.to_le_bytes());
+                    e.extend(1_700_000_000u32.to_le_bytes());
+                    (0i32, bson_doc(&e))
+                } else {
+                    (2i32, bson_doc(&bson_str("$err", "not authorized")))
+                };
+                let mut reply = Vec::new();
+                reply.extend(flags.to_le_bytes());
+                reply.extend(0i64.to_le_bytes());
+                reply.extend(0i32.to_le_bytes());
+                reply.extend(1i32.to_le_bytes());
+                reply.extend(doc);
+                let mut msg = ((reply.len() + 16) as i32).to_le_bytes().to_vec();
+                msg.extend(7i32.to_le_bytes());
+                msg.extend_from_slice(&head[4..8]);
+                msg.extend(1i32.to_le_bytes());
+                msg.extend(reply);
+                let _ = s.write_all(&msg).await;
+            }
+        }
+    })
+    .await;
+    let src = r#"
+local mongodb = require "mongodb"
+local nmap = require "nmap"
+local stdnse = require "stdnse"
+description = "test"
+categories = { "safe" }
+portrule = function() return true end
+action = function(host, port)
+  local socket = nmap.new_socket()
+  assert(socket:connect(host, port))
+  local ok, err = mongodb.login(socket, "admin", "root", "secret")
+  local _, q = mongodb.buildInfoQuery()
+  local ok2, doc = mongodb.query(socket, q)
+  local _, s = mongodb.serverStatusQuery()
+  local ok3, err3 = mongodb.query(socket, s)
+  socket:close()
+  return table.concat({ tostring(ok), err, tostring(ok2), tostring(doc.arr[1]),
+    tostring(ok3), err3 }, "|") .. stdnse.format_output(true, mongodb.queryResultToTable(doc))
+end
+"#;
+    let scan = ScriptScan::new(vec![script("mongot", src)], ArgTable::default(), None).unwrap();
+    let mut hosts = vec![host_with_services(&[(port, "mongodb")])];
+    scan.scan_hosts(&mut hosts).await;
+    // Document order kept, null left out, an array's elements from 0.
+    assert_eq!(
+        hosts[0].ports[0].scripts[0].output,
+        "false|MongoDB logins are not supported by FeroProbe|true|y|false|not authorized\n  \
+         ok = 1.0\n  version = 6.0.1\n  nested\n    a = 5\n  arr\n    0 = x\n    1 = y\n  \
+         flag = true\n  ts = Timestamp(1700000000, 2)"
+    );
+    // The refused login sent nothing; both queries carry "FP".
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![
+            "FP 2004 admin.$cmd buildinfo",
+            "FP 2004 test.$cmd serverStatus"
+        ]
+    );
+}

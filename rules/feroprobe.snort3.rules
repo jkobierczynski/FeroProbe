@@ -143,3 +143,7 @@ alert tcp any any -> $HOME_NET any (msg:"FeroProbe ONC RPC call over TCP from an
 # SearchRequest tag; a server's replies carry other tags.
 alert tcp any any -> $HOME_NET any (msg:"FeroProbe LDAP request from an NSE script (message ID FP)"; flow:established,to_server; content:"|30|", depth 1; content:"|02 04 46 50|", distance 1, within 7; classtype:attempted-recon; sid:9100038; rev:1;)
 alert udp any any -> $HOME_NET any (msg:"FeroProbe CLDAP search from an NSE script (message ID FP)"; content:"|30|", depth 1; content:"|02 04 46 50|", distance 1, within 7; content:"|63|", distance 2, within 1; classtype:attempted-recon; sid:9100039; rev:1;)
+
+# MongoDB (NSE mongodb module): the OP_QUERY request ID's first two bytes
+# on the wire are "FP"; responseTo is 0 and the opcode is 2004 (OP_QUERY).
+alert tcp any any -> $HOME_NET any (msg:"FeroProbe MongoDB OP_QUERY from an NSE script (request ID FP)"; flow:established,to_server; content:"FP", offset 4, depth 2; content:"|00 00 00 00 D4 07 00 00|", distance 2, within 8; classtype:attempted-recon; sid:9100040; rev:1;)

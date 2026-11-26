@@ -255,7 +255,9 @@ were scanned. The `ldap` module's messages carry message IDs `0x4650nnnn`
 over UDP); it binds only anonymously, so it never sends a password. The `vnc` module
 logs in to no VNC server: it reads the handshake and, only where the
 server asks for no authentication, the desktop's name and size; the RFB
-handshake has no field it could mark.
+handshake has no field it could mark. The `mongodb` module's queries carry
+a request ID whose first two bytes are `FP` (rule 9100040); it logs in to
+no MongoDB server, so it never sends a password.
 
 ### Detection rules for defenders
 

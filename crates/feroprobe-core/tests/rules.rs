@@ -297,3 +297,22 @@ fn nse_ldap_rules_match_its_requests() {
     entry[8] = 0x64;
     assert!(!content_match(&contents(&suricata[&9100039].1), &entry));
 }
+
+/// The mongodb rule matches FeroProbe's OP_QUERY and not a server's reply.
+#[test]
+fn nse_mongodb_rule_matches_its_queries() {
+    let suricata = sids(&rules("feroprobe.rules"));
+    let rule = contents(&suricata[&9100040].1);
+    // Header: length, request ID 0x00015046 ("FP" first), responseTo 0, OP_QUERY.
+    let mut query = b"\x3a\x00\x00\x00FP\x01\x00\x00\x00\x00\x00\xd4\x07\x00\x00".to_vec();
+    query.extend_from_slice(b"\x00\x00\x00\x00admin.$cmd\x00");
+    assert!(content_match(&rule, &query));
+    // Another client's request ID, and an OP_REPLY.
+    let mut other = query.clone();
+    other[4] = b'X';
+    assert!(!content_match(&rule, &other));
+    let mut reply = query.clone();
+    reply[12] = 0x01;
+    reply[13] = 0x00;
+    assert!(!content_match(&rule, &reply));
+}

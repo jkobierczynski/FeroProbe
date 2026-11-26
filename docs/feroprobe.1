@@ -4328,6 +4328,22 @@ over anonymous TLS and over server-authenticated TLS), which nmap 7.94
 swaps
 T}
 T{
+\f[V]mongodb\f[R]
+T}@T{
+MongoDB commands over the legacy OP_QUERY message:
+\f[V]serverStatusQuery\f[R], \f[V]buildInfoQuery\f[R],
+\f[V]listDbQuery\f[R] (each gives true and the message), \f[V]query\f[R]
+(sends it and gives the reply\[aq]s first document as a table, nested
+documents and arrays as tables), \f[V]queryResultToTable\f[R] (for
+\f[V]stdnse.format_output\f[R], in the server\[aq]s key order where
+nmap\[aq]s order is random), \f[V]testBson\f[R].
+No logins: \f[V]login\f[R] fails with \[dq]MongoDB logins are not
+supported by FeroProbe\[dq] before anything is sent, so mongodb-brute
+finds nothing.
+MongoDB 5.1 and later answer OP_QUERY only for the handshake, so
+mongodb-info and mongodb-databases get an error from them, as with nmap
+T}
+T{
 \f[V]ls\f[R]
 T}@T{
 \f[V]new_listing\f[R], \f[V]new_vol\f[R], \f[V]add_file\f[R],
@@ -4359,7 +4375,7 @@ stops the script from loading with an error that names it; a function
 FeroProbe does not have in a module it offers (\f[V]nmap.new_dnet\f[R],
 \f[V]openssl.encrypt\f[R], ...)
 raises an error naming it when called.
-Of nmap 7.94\[aq]s 606 scripts, 379 load as they are.
+Of nmap 7.94\[aq]s 606 scripts, 382 load as they are.
 See Brute-force scripts for how a \f[V]brute\f[R] script must be chosen
 before it will run.
 .PP
