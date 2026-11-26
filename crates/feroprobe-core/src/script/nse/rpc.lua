@@ -958,6 +958,9 @@ local function dir_entries(comm, data, pos, plus, limit)
       e.cookie_raw = data:sub(pos - 8, pos - 1)
       if plus then
         pos, e.attributes = post_op_attr(data, pos)
+        -- An entry the server sends no attributes for (Linux does so for
+        -- "..") gets an empty table, so nfs-ls lists it with "?", as nmap.
+        e.attributes = e.attributes or {}
         local fh
         pos, fh = boolean(data, pos)
         if fh then pos, e.fhandle = vopaque(data, pos) end
