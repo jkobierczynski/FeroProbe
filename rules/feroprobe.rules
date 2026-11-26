@@ -135,3 +135,9 @@ alert tcp any any -> $HOME_NET 53 (msg:"FeroProbe DNS query over TCP from an NSE
 # server takes them (MySQL 5.6+, MariaDB 10+).
 alert tcp any any -> $HOME_NET any (msg:"FeroProbe MySQL login from an NSE script (program_name FeroProbe)"; flow:established,to_server; content:"|0c|program_name|09|FeroProbe"; classtype:attempted-recon; metadata:tool FeroProbe; sid:9100034; rev:1;)
 alert udp any any -> $HOME_NET 137 (msg:"FeroProbe NetBIOS NAME QUERY from an NSE script (transaction ID FP)"; content:"FP"; depth:2; pcre:"/^FP\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x20[A-P]{32}\x00\x00\x20\x00\x01/s"; classtype:attempted-recon; metadata:tool FeroProbe; sid:9100035; rev:1;)
+# NSE rpc module: ONC RPC calls (portmapper, mountd, NFS and the calls of
+# scripts such as rusers) whose XID FeroProbe chose: "FP" and 16 random
+# bits, then CALL and RPC version 2. A script that passes its own XID
+# (rpc-grind) is not matched; the -sV RPC probe (XID FPRO) is.
+alert udp any any -> $HOME_NET any (msg:"FeroProbe ONC RPC call from an NSE script (XID FP)"; content:"FP"; depth:2; content:"|00 00 00 00 00 00 00 02|"; distance:2; within:8; classtype:attempted-recon; metadata:tool FeroProbe; sid:9100036; rev:1;)
+alert tcp any any -> $HOME_NET any (msg:"FeroProbe ONC RPC call over TCP from an NSE script (XID FP)"; flow:established,to_server; content:"FP"; offset:4; depth:2; content:"|00 00 00 00 00 00 00 02|"; distance:2; within:8; classtype:attempted-recon; metadata:tool FeroProbe; sid:9100037; rev:1;)

@@ -7745,3 +7745,192 @@ end
     );
     assert!(seen.lock().unwrap()[0].contains("FeroProbeSMBScan"));
 }
+
+#[tokio::test]
+async fn nse_rpc_util_conversions() {
+    let src = r#"
+local rpc = require "rpc"
+description = "test"
+categories = { "safe" }
+prerule = function() return true end
+action = function()
+  local U = rpc.Util
+  local fs = U.calc_fsstat_table({ block_size = 1024, total_blocks = 5542276,
+    free_blocks = 5542276 - 2732012, available_blocks = 2528728 }, 2)
+  local data = string.pack(">I4I4s4", 7, 0xffffffff, "abcde") .. "\0\0\0"
+  local p1, a = U.unmarshall_uint32(data, 1)
+  local p2, b = U.unmarshall_uint32(data, p1)
+  local p3, len = U.unmarshall_uint32(data, p2)
+  local p4, s = U.unmarshall_vopaque(len, data, p3)
+  return table.concat({ U.SizeToHuman(1024), U.SizeToHuman(926548776), U.SizeToHuman(246548, 1000),
+    U.FtypeToChar(0x41ed) .. U.FpermToString(0x41ed), U.FpermToString(0x8fed), U.FtypeToString(0xa1ff),
+    U.format_access(0x03, 3), fs.size, fs.used, fs.available, fs.use, fs.bsize,
+    a, b, s, p4, U.ProgNameToNumber("mountd"), U.ProgNumberToName(100003),
+    U.TimeToString(1276777680), rpc.Portmap.AcceptState.PROG_MISMATCH }, " ")
+end
+"#;
+    let scan = ScriptScan::new(vec![script("rpcu", src)], ArgTable::default(), None).unwrap();
+    let r = scan.pre_scan().await;
+    assert_eq!(
+        r[0].output,
+        "1024.0B 883.6M 246.5K drwxr-xr-x rwsr-sr-t symlink Read Lookup NoModify NoExtend \
+         NoDelete NoExecute 5542276 2732012 2528728 52% 1024 7 4294967295 abcde 21 100005 nfs \
+         2010-06-17T12:28:00 2"
+    );
+}
+
+#[tokio::test]
+async fn nse_ls_checksum_totals_and_human_sizes() {
+    let src = r#"
+local ls = require "ls"
+description = "test"
+categories = { "safe" }
+prerule = function() return true end
+action = function()
+  local out = ls.new_listing()
+  ls.new_vol(out, "/v", false)
+  ls.add_file(out, { 2048, "t1", "a" })
+  ls.add_file(out, { "1.0K", "t2", "b", "c0ffee" })
+  ls.end_vol(out)
+  local structured, text = ls.end_listing(out)
+  return tostring(structured.total.bytes) .. "|" .. structured.volumes[1].files[2].checksum .. "|" .. text
+end
+"#;
+    let args = args::parse("ls.human").unwrap();
+    let scan = ScriptScan::new(vec![script("lst", src)], args, None).unwrap();
+    let r = scan.pre_scan().await;
+    let out = &r[0].output;
+    // 2048 + 1.0K, the second row's positional checksum gives the
+    // column, and ls.human shows 2048 as 2.0K.
+    assert!(out.starts_with("3072|c0ffee|"), "{out}");
+    assert!(out.contains("CHECKSUM"), "{out}");
+    assert!(out.contains("2.0K") && !out.contains("2048"), "{out}");
+}
+
+/// A stand-in portmapper and mountd on one TCP port: DUMP names mountd
+/// v3 on this port, EXPORT lists two exports. Keeps each call's XID and
+/// program.
+async fn rpc_server() -> (u16, Seen) {
+    use std::sync::atomic::{AtomicU16, Ordering};
+    let seen: Seen = Default::default();
+    let keep = seen.clone();
+    let me = std::sync::Arc::new(AtomicU16::new(0));
+    let me2 = me.clone();
+    let port = tcp_server(move |mut s| {
+        let keep = keep.clone();
+        let me = me2.clone();
+        async move {
+            loop {
+                let mut mark = [0u8; 4];
+                if s.read_exact(&mut mark).await.is_err() {
+                    return;
+                }
+                let mut call = vec![0u8; (u32::from_be_bytes(mark) & 0x7fff_ffff) as usize];
+                if s.read_exact(&mut call).await.is_err() {
+                    return;
+                }
+                let word =
+                    |i: usize| u32::from_be_bytes(call[i * 4..i * 4 + 4].try_into().unwrap());
+                let (xid, prog, vers, proc_) = (word(0), word(3), word(4), word(5));
+                // The credentials' flavor and, for AUTH_UNIX, the user claimed.
+                let flavor = word(6);
+                let uid = if flavor == 1 {
+                    word(10 + word(9).div_ceil(4) as usize)
+                } else {
+                    0
+                };
+                keep.lock()
+                    .unwrap()
+                    .push(format!("{xid:08x} {prog} {vers} {proc_} {flavor} {uid}"));
+                let mut r = Vec::new();
+                for w in [xid, 1, 0, 0, 0, 0] {
+                    r.extend(w.to_be_bytes());
+                }
+                let string = |r: &mut Vec<u8>, v: &[u8]| {
+                    r.extend((v.len() as u32).to_be_bytes());
+                    r.extend(v);
+                    r.extend(vec![0u8; (4 - v.len() % 4) % 4]);
+                };
+                match (prog, proc_) {
+                    // An old portmapper: version 2 only.
+                    (100000, _) if vers != 2 => {
+                        r.truncate(20);
+                        for w in [2u32, 2, 2] {
+                            r.extend(w.to_be_bytes());
+                        }
+                    }
+                    (100000, 4) => {
+                        let port = me.load(Ordering::SeqCst) as u32;
+                        for w in [1, 100005, 3, 6, port, 1, 100005, 1, 6, port, 0] {
+                            r.extend(w.to_be_bytes());
+                        }
+                    }
+                    (100005, 5) => {
+                        r.extend(1u32.to_be_bytes());
+                        string(&mut r, b"/srv/data");
+                        r.extend(1u32.to_be_bytes());
+                        string(&mut r, b"10.0.0.0/8");
+                        r.extend(0u32.to_be_bytes());
+                        r.extend(1u32.to_be_bytes());
+                        string(&mut r, b"/home");
+                        r.extend(0u32.to_be_bytes());
+                        r.extend(0u32.to_be_bytes());
+                    }
+                    _ => {
+                        // PROG_UNAVAIL
+                        r.truncate(20);
+                        r.extend(1u32.to_be_bytes());
+                    }
+                }
+                let mut out = (0x8000_0000u32 | r.len() as u32).to_be_bytes().to_vec();
+                out.extend(r);
+                if s.write_all(&out).await.is_err() {
+                    return;
+                }
+            }
+        }
+    })
+    .await;
+    me.store(port, std::sync::atomic::Ordering::SeqCst);
+    (port, seen)
+}
+
+#[tokio::test]
+async fn nse_rpc_portmapper_and_mountd() {
+    let (port, seen) = rpc_server().await;
+    let src = r#"
+local rpc = require "rpc"
+description = "test"
+categories = { "safe" }
+portrule = function() return true end
+action = function(host, port)
+  local ok, info = rpc.Helper.RpcInfo(host, port)
+  local ok2, mounts = rpc.Helper.ShowMounts(host, port)
+  local out = {}
+  for _, m in ipairs(mounts) do out[#out + 1] = m.name .. "=" .. table.concat(m, ",") end
+  local comm = rpc.Comm:new("nfs", 3)
+  comm:Connect(host, port)
+  local ok3, err = rpc.NFS:new():GetAttr(comm, "fh")
+  comm:Disconnect()
+  return table.concat({ tostring(ok), table.concat(info[100005].tcp.version, ","),
+    tostring(ok2), table.concat(out, " "), tostring(ok3), err }, " ")
+end
+"#;
+    let scan = ScriptScan::new(vec![script("rpct", src)], ArgTable::default(), None).unwrap();
+    let mut hosts = vec![host_with_services(&[(port, "rpcbind")])];
+    scan.scan_hosts(&mut hosts).await;
+    assert_eq!(
+        hosts[0].ports[0].scripts[0].output,
+        "true 1,3 true /srv/data=10.0.0.0/8 /home= false Program unavailable"
+    );
+    let seen = seen.lock().unwrap();
+    // DUMP over rpcbind 3 (refused), then 2, EXPORT to mountd v3, then
+    // the NFS call; each XID starts "FP".
+    assert_eq!(seen.len(), 4);
+    assert!(seen.iter().all(|s| s.starts_with("4650")));
+    // The portmapper gets AUTH_NULL; mountd and NFS AUTH_UNIX as nobody.
+    assert!(seen[0].ends_with(" 100000 3 4 0 0"), "{seen:?}");
+    assert!(seen[1].ends_with(" 100000 2 4 0 0"), "{seen:?}");
+    assert!(seen[2].ends_with(" 100005 3 5 1 65534"), "{seen:?}");
+    assert!(seen[3].ends_with(" 100003 3 1 1 65534"), "{seen:?}");
+}
