@@ -135,6 +135,7 @@ const NSE_MODULES: &[(&str, &str)] = &[
     ("unicode", include_str!("nse/unicode.lua")),
     ("unpwdb", include_str!("nse/unpwdb.lua")),
     ("url", include_str!("nse/url.lua")),
+    ("vnc", include_str!("nse/vnc.lua")),
     ("vulns", include_str!("nse/vulns.lua")),
 ];
 
