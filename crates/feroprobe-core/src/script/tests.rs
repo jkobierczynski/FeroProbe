@@ -6875,7 +6875,8 @@ action = function(host, port)
       tostring(found) .. "/" .. tostring(word), tostring(post.status))
   end
   local status, banner = comm.get_banner(host, port, {{ lines = 1 }})
-  local ok, echo = comm.exchange(host, port, "ping\n")
+  -- The greeting and the echo can arrive apart: wait for both lines.
+  local ok, echo = comm.exchange(host, port, "ping\n", {{ lines = 2 }})
   local s = nmap.new_socket()
   local try = nmap.new_try(function() s:close() end)
   try(s:connect(host, port))
