@@ -109,6 +109,7 @@ const NSE_MODULES: &[(&str, &str)] = &[
     ("listop", include_str!("nse/listop.lua")),
     ("ls", include_str!("nse/ls.lua")),
     ("match", include_str!("nse/match.lua")),
+    ("mongodb", include_str!("nse/mongodb.lua")),
     ("mysql", include_str!("nse/mysql.lua")),
     ("netbios", include_str!("nse/netbios.lua")),
     ("nmap", include_str!("nse/nmap.lua")),
