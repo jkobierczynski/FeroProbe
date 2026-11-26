@@ -8433,3 +8433,134 @@ end
         ]
     );
 }
+
+/// An AJP13 packet from the container.
+fn ajp_reply(payload: &[u8]) -> Vec<u8> {
+    let mut p = b"AB".to_vec();
+    p.extend((payload.len() as u16).to_be_bytes());
+    p.extend_from_slice(payload);
+    p
+}
+
+/// An AJP13 string.
+fn ajp_str(s: &str) -> Vec<u8> {
+    let mut v = (s.len() as u16).to_be_bytes().to_vec();
+    v.extend_from_slice(s.as_bytes());
+    v.push(0);
+    v
+}
+
+#[tokio::test]
+async fn nse_ajp_requests_bodies_and_refused_logins() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    async fn packet(s: &mut tokio::net::TcpStream) -> Option<Vec<u8>> {
+        let mut head = [0u8; 4];
+        s.read_exact(&mut head).await.ok()?;
+        assert_eq!(&head[..2], b"\x12\x34");
+        let mut p = vec![0u8; u16::from_be_bytes([head[2], head[3]]) as usize];
+        s.read_exact(&mut p).await.ok()?;
+        Some(p)
+    }
+    fn string_at(p: &[u8], at: usize) -> (String, usize) {
+        let n = u16::from_be_bytes([p[at], p[at + 1]]) as usize;
+        (
+            String::from_utf8_lossy(&p[at + 2..at + 2 + n]).into(),
+            at + 3 + n,
+        )
+    }
+    let seen: Seen = Default::default();
+    let keep = seen.clone();
+    let port = tcp_server(move |mut s| {
+        let keep = keep.clone();
+        async move {
+            while let Some(p) = packet(&mut s).await {
+                let (_, at) = string_at(&p, 2);
+                let (uri, _) = string_at(&p, at);
+                let ua = p.windows(26).any(|w| w == b"FeroProbe Scripting Engine");
+                let query = p.windows(6).any(|w| w == b"\x05\x00\x03x=1");
+                let mut line = format!("method {} {uri} ua={ua} query={query}", p[1]);
+                if uri == "/put" {
+                    let mut got = 0;
+                    loop {
+                        let chunk = packet(&mut s).await.unwrap();
+                        if chunk.is_empty() {
+                            break;
+                        }
+                        got += u16::from_be_bytes([chunk[0], chunk[1]]) as usize;
+                        let _ = s.write_all(&ajp_reply(b"\x06\x1f\xfa")).await;
+                    }
+                    line.push_str(&format!(" body={got}"));
+                }
+                keep.lock().unwrap().push(line);
+                let mut head = vec![4];
+                if uri == "/secret" {
+                    head.extend(401u16.to_be_bytes());
+                    head.extend(ajp_str("Unauthorized"));
+                    head.extend(1u16.to_be_bytes());
+                    head.extend(b"\xa0\x0b");
+                    head.extend(ajp_str("Basic realm=\"Lab\""));
+                    let _ = s.write_all(&ajp_reply(&head)).await;
+                } else {
+                    head.extend(200u16.to_be_bytes());
+                    head.extend(ajp_str("OK"));
+                    head.extend(2u16.to_be_bytes());
+                    head.extend(b"\xa0\x01");
+                    head.extend(ajp_str("text/plain"));
+                    head.extend(ajp_str("X-Test"));
+                    head.extend(ajp_str("yes"));
+                    let _ = s.write_all(&ajp_reply(&head)).await;
+                    for part in [&b"hel"[..], b"lo"] {
+                        let mut c = vec![3];
+                        c.extend((part.len() as u16).to_be_bytes());
+                        c.extend_from_slice(part);
+                        c.push(0);
+                        let _ = s.write_all(&ajp_reply(&c)).await;
+                    }
+                }
+                let _ = s.write_all(&ajp_reply(b"\x05\x01")).await;
+            }
+        }
+    })
+    .await;
+    let src = r#"
+local ajp = require "ajp"
+description = "test"
+categories = { "safe" }
+portrule = function() return true end
+action = function(host, port)
+  local h = ajp.Helper:new(host, port)
+  assert(h:connect())
+  local ok, r = h:get("/a?x=1")
+  local ok2, r2 = h:get("/secret")
+  local ok3, e3 = h:get("/x", { Authorization = "Basic Zm9vOmJhcg==" })
+  local ok4, e4 = h:request("GET", "/", nil, nil, { auth = { username = "u", password = "p" } })
+  local ok5, r5 = h:request("GET", "/", nil, nil, { auth = {} })
+  local ok6, r6 = h:put("/put", nil, nil, nil, string.rep("a", 9000))
+  h:close()
+  return table.concat({ tostring(ok), r.status_line, r.headers["content-type"],
+    table.concat(r.rawheaders, ";"), r.body, tostring(ok2), tostring(r2.status),
+    r2.headers["www-authenticate"], tostring(r2.body), tostring(ok3), e3, tostring(ok4),
+    tostring(ok5), tostring(ok6), r6.body }, "|")
+end
+"#;
+    let scan = ScriptScan::new(vec![script("ajpt", src)], ArgTable::default(), None).unwrap();
+    let mut hosts = vec![host_with_services(&[(port, "ajp13")])];
+    scan.scan_hosts(&mut hosts).await;
+    assert_eq!(
+        hosts[0].ports[0].scripts[0].output,
+        "true|AJP/1.3 200 OK|text/plain|Content-Type: text/plain;X-Test: yes|hello|true|401|\
+         Basic realm=\"Lab\"|nil|false|AJP logins are not supported by FeroProbe|false|true|\
+         true|hello"
+    );
+    // The refused logins sent nothing; the query went as an attribute; the
+    // 9,000-byte body came in two chunks.
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![
+            "method 2 /a ua=true query=true",
+            "method 2 /secret ua=true query=false",
+            "method 2 / ua=true query=false",
+            "method 5 /put ua=true query=false body=9000",
+        ]
+    );
+}

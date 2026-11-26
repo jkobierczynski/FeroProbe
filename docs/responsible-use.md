@@ -257,7 +257,9 @@ logs in to no VNC server: it reads the handshake and, only where the
 server asks for no authentication, the desktop's name and size; the RFB
 handshake has no field it could mark. The `mongodb` module's queries carry
 a request ID whose first two bytes are `FP` (rule 9100040); it logs in to
-no MongoDB server, so it never sends a password.
+no MongoDB server, so it never sends a password. The `ajp` module's AJP13
+requests carry FeroProbe's User-Agent (rule 9100041) unless a script sets
+its own; it sends no credentials, so it logs in nowhere.
 
 ### Detection rules for defenders
 

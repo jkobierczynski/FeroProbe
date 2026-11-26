@@ -4328,6 +4328,24 @@ over anonymous TLS and over server-authenticated TLS), which nmap 7.94
 swaps
 T}
 T{
+\f[V]ajp\f[R]
+T}@T{
+Requests over the Apache JServ Protocol 1.3 (AJP13, Tomcat\[aq]s port
+8009): \f[V]Helper:new\f[R], \f[V]connect\f[R], \f[V]close\f[R],
+\f[V]request\f[R], \f[V]get\f[R], \f[V]head\f[R], \f[V]options\f[R],
+\f[V]trace\f[R], \f[V]put\f[R], \f[V]delete\f[R].
+A response has \f[V]status\f[R], \f[V]status_line\f[R],
+\f[V]headers\f[R] (lower-case names), \f[V]rawheaders\f[R] and
+\f[V]body\f[R].
+Requests carry FeroProbe\[aq]s User-Agent unless a script sets its own.
+No logins: a request with a user name or password, an Authorization
+header or the \f[V]secret\f[R] attribute fails with \[dq]AJP logins are
+not supported by FeroProbe\[dq] before anything is sent, so ajp-brute
+finds nothing.
+Unlike nmap 7.94, which keeps only the last part of a body sent in
+several parts, the whole body is returned
+T}
+T{
 \f[V]mongodb\f[R]
 T}@T{
 MongoDB commands over the legacy OP_QUERY message:
@@ -4375,7 +4393,7 @@ stops the script from loading with an error that names it; a function
 FeroProbe does not have in a module it offers (\f[V]nmap.new_dnet\f[R],
 \f[V]openssl.encrypt\f[R], ...)
 raises an error naming it when called.
-Of nmap 7.94\[aq]s 606 scripts, 382 load as they are.
+Of nmap 7.94\[aq]s 606 scripts, 387 load as they are.
 See Brute-force scripts for how a \f[V]brute\f[R] script must be chosen
 before it will run.
 .PP
