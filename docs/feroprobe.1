@@ -3872,10 +3872,10 @@ T}@T{
 \f[V]get_ssl_certificate\f[R]), \f[V]new_try\f[R], \f[V]registry\f[R],
 \f[V]verbosity\f[R], \f[V]debugging\f[R], \f[V]clock_ms\f[R],
 \f[V]clock\f[R], \f[V]address_family\f[R], \f[V]get_port_state\f[R],
-\f[V]resolve\f[R], \f[V]add_targets\f[R], \f[V]new_targets_num\f[R],
-\f[V]have_ssl\f[R], \f[V]is_privileged\f[R], \f[V]timing_level\f[R],
-\f[V]version_intensity\f[R], \f[V]mutex\f[R], \f[V]condvar\f[R],
-\f[V]log_write\f[R]; \f[V]set_port_state\f[R] and
+\f[V]get_ports\f[R], \f[V]resolve\f[R], \f[V]add_targets\f[R],
+\f[V]new_targets_num\f[R], \f[V]have_ssl\f[R], \f[V]is_privileged\f[R],
+\f[V]timing_level\f[R], \f[V]version_intensity\f[R], \f[V]mutex\f[R],
+\f[V]condvar\f[R], \f[V]log_write\f[R]; \f[V]set_port_state\f[R] and
 \f[V]set_port_version\f[R] are accepted and do nothing
 T}
 T{
@@ -4216,6 +4216,22 @@ login functions raise an error, as FeroProbe\[aq]s NSE layer does not
 log in over NTLM
 T}
 T{
+\f[V]datafiles\f[R]
+T}@T{
+\f[V]parse_services\f[R], \f[V]parse_protocols\f[R],
+\f[V]parse_rpc\f[R], \f[V]parse_mac_prefixes\f[R] (a whole MAC works as
+a key too), \f[V]parse_file\f[R], \f[V]parse_lines\f[R],
+\f[V]read_from_file\f[R], \f[V]get_array\f[R],
+\f[V]get_assoc_array\f[R]; the files are found as
+\f[V]nmap.fetchfile\f[R] finds them, so an installed nmap\[aq]s
+\f[V]nmap-services\f[R], \f[V]nmap-protocols\f[R], \f[V]nmap-rpc\f[R],
+\f[V]nmap-mac-prefixes\f[R] and word lists are used.
+Without them, \f[V]parse_services\f[R] and \f[V]parse_protocols\f[R]
+give FeroProbe\[aq]s own port and protocol names (the ones its reports
+show), \f[V]parse_mac_prefixes\f[R] the OUI list FeroProbe reports
+vendors from, and \f[V]parse_rpc\f[R] and other files an error
+T}
+T{
 \f[V]target\f[R]
 T}@T{
 \f[V]ALLOW_NEW_TARGETS\f[R], \f[V]add\f[R]: as in nmap, a script adds
@@ -4237,7 +4253,7 @@ stops the script from loading with an error that names it; a function
 FeroProbe does not have in a module it offers (\f[V]nmap.new_dnet\f[R],
 \f[V]openssl.encrypt\f[R], ...)
 raises an error naming it when called.
-Of nmap 7.94\[aq]s 606 scripts, 346 load as they are.
+Of nmap 7.94\[aq]s 606 scripts, 355 load as they are.
 See Brute-force scripts for how a \f[V]brute\f[R] script must be chosen
 before it will run.
 .PP
@@ -4276,6 +4292,17 @@ once; \f[V]nmap.mutex\f[R] and \f[V]nmap.condvar\f[R] never wait.
 is \f[V]false\f[R], so scripts take their unprivileged path;
 \f[V]new_dnet\f[R], \f[V]pcap_open\f[R] and the interface functions are
 not available.
+.IP \[bu] 2
+\f[B]Ports.\f[R] A port table\[aq]s \f[V]version.name_confidence\f[R] is
+10 when version detection named the service and 3 when the name comes
+from the port number, nmap\[aq]s scale.
+\f[V]nmap.get_port_state\f[R] and \f[V]nmap.get_ports\f[R] know only the
+ports that may be open (open, open|filtered, unfiltered), the ones a
+portrule is asked about.
+A script\[aq]s portrule or hostrule runs again in the action\[aq]s own
+state just before the action, so what the rule keeps in the script\[aq]s
+variables is there for the action, as in nmap, where rule and action
+share one instance.
 .IP \[bu] 2
 \f[B]Scripts do not change results.\f[R] \f[V]nmap.set_port_state\f[R]
 and \f[V]nmap.set_port_version\f[R] are accepted and ignored (shown with

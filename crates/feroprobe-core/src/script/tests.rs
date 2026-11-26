@@ -7617,3 +7617,76 @@ end
          smbauth.ntlm_create_hash is not available"
     );
 }
+
+#[tokio::test]
+async fn nse_datafiles_parses_lines_and_names_services() {
+    let src = r##"
+local datafiles = require "datafiles"
+description = "test"
+categories = { "safe" }
+prerule = function() return true end
+action = function()
+  local lines = { "http 80/tcp 0.1 # web", "domain 53/udp 0.2", "ssh 22/tcp 0.3" }
+  local t = datafiles.parse_lines(lines, {
+    [function(l) return tonumber(l:match("(%d+)/tcp")) end] = "^(%S+)",
+  })
+  local arr = datafiles.parse_lines(lines, { "^(%S+) %d+/udp" })
+  local nested = datafiles.parse_lines(lines, { names = { ["^(%S+)"] = "/(%a+)" } })
+  local same = datafiles.parse_lines(lines, {})
+  local ok, svc = datafiles.parse_services()
+  local ok2, tcp = datafiles.parse_services("tcp")
+  local bad = datafiles.parse_services("icmp")
+  local ok3, macs = datafiles.parse_mac_prefixes()
+  local ok4, err = datafiles.parse_file("feroprobe-no-such-file.lst", {})
+  local ok5, protos = datafiles.parse_protocols()
+  return table.concat({ t[80], t[22], tostring(t[53]), arr[1][1], nested.names.domain, #same,
+    tostring(ok), svc.tcp[22], svc.udp[53], tostring(ok2), tcp[80], tostring(bad),
+    tostring(ok3), tostring(macs["000C29"] == macs["00:0c:29:01:02:03"]), tostring(macs.zz),
+    tostring(ok4), tostring(err ~= nil), tostring(ok5), protos[6] }, " ")
+end
+"##;
+    let scan = ScriptScan::new(vec![script("dataf", src)], ArgTable::default(), None).unwrap();
+    let r = scan.pre_scan().await;
+    assert_eq!(
+        r[0].output,
+        "http ssh nil domain udp 3 true ssh domain true http false true true nil false true true tcp"
+    );
+}
+
+#[tokio::test]
+async fn nse_rule_variables_reach_the_action_and_get_ports() {
+    // nmap runs a script's rule and action in one instance, so a value the
+    // portrule keeps is there for the action (unusual-port relies on it).
+    let src = r#"
+local nmap = require "nmap"
+description = "test"
+categories = { "safe" }
+local seen
+portrule = function(host, port) seen = port.version.name_confidence return true end
+action = function(host, port)
+  local list, p = {}, nil
+  repeat
+    p = nmap.get_ports(host, p, "tcp", "open")
+    if p then list[#list + 1] = p.number .. "=" .. p.version.name_confidence end
+  until not p
+  return port.number .. " " .. tostring(seen) .. " " .. table.concat(list, ",")
+end"#;
+    let scan = ScriptScan::new(vec![script("rv", src)], ArgTable::default(), None).unwrap();
+    let mut hosts = vec![host_with_services(&[(80, "http"), (22, "ssh")])];
+    hosts[0].ports[1].service = None;
+    hosts[0].ports.push(PortResult {
+        port: 25,
+        protocol: Protocol::Tcp,
+        state: PortState::Closed,
+        reason: reason::SYN_ACK,
+        rtt_ms: None,
+        service: None,
+        scripts: Vec::new(),
+    });
+    scan.scan_hosts(&mut hosts).await;
+    let out: Vec<&str> = hosts[0].ports[..2]
+        .iter()
+        .map(|p| p.scripts[0].output.as_str())
+        .collect();
+    assert_eq!(out, ["80 10 22=3,80=10", "22 3 22=3,80=10"]);
+}

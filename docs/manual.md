@@ -1704,7 +1704,7 @@ the scan probed there.
 
 | Module | What it has |
 | --- | --- |
-| `nmap` | `new_socket` (`connect`, `send`, `sendto`, `receive`, `receive_bytes`, `receive_lines`, `receive_buf`, `set_timeout`, `close`, `get_info`, `reconnect_ssl`, `get_ssl_certificate`), `new_try`, `registry`, `verbosity`, `debugging`, `clock_ms`, `clock`, `address_family`, `get_port_state`, `resolve`, `add_targets`, `new_targets_num`, `have_ssl`, `is_privileged`, `timing_level`, `version_intensity`, `mutex`, `condvar`, `log_write`; `set_port_state` and `set_port_version` are accepted and do nothing |
+| `nmap` | `new_socket` (`connect`, `send`, `sendto`, `receive`, `receive_bytes`, `receive_lines`, `receive_buf`, `set_timeout`, `close`, `get_info`, `reconnect_ssl`, `get_ssl_certificate`), `new_try`, `registry`, `verbosity`, `debugging`, `clock_ms`, `clock`, `address_family`, `get_port_state`, `get_ports`, `resolve`, `add_targets`, `new_targets_num`, `have_ssl`, `is_privileged`, `timing_level`, `version_intensity`, `mutex`, `condvar`, `log_write`; `set_port_state` and `set_port_version` are accepted and do nothing |
 | `stdnse` | `debug`, `debug0`-`debug9`, `print_debug`, `verbose`, `verbose0`-`verbose9`, `get_script_args`, `format_output`, `output_table`, `tohex`, `fromhex`, `parse_timespec`, `sleep`, `clock_ms`, `get_hostname`, `format_mac`, `get_timeout`, `new_thread`, `string_or_blank`, `make_buffer`, `registry_get`, `registry_add_table`, `registry_add_array`, `in_port_range`, `generate_random_string`, `silent_require`, and the old names `strsplit`, `keys`, `contains`, `format_time`, `format_timestamp` |
 | `shortport` | `portnumber`, `service`, `port_or_service`, `version_port_or_service`, `port_range`, `http`, `ssl`, `ssh`, `LIKELY_HTTP_PORTS`, `LIKELY_HTTP_SERVICES` (`http` and `ssl` are FeroProbe's own port rules) |
 | `comm` | `opencon`, `get_banner`, `exchange`, `tryssl` |
@@ -1738,6 +1738,7 @@ the scan probed there.
 | `slaxml` | `parser:new` (callbacks `startElement`, `attribute`, `closeElement`, `text`, `comment`, `pi`, kept in `parser._call`), `parseSAX` (option `stripWhitespace`), `parser.unescape`, `parseDOM`; lenient like nmap's: it reports what it reads and does not check that elements nest |
 | `unicode` | `utf8_enc`, `utf8_dec`, `utf16_enc`, `utf16_dec`, `cp437_enc`, `cp437_dec`, `decode`, `encode`, `transcode`, `utf16to8`, `utf8to16`, `chardet` |
 | `smbauth` | `get_host_info_from_security_blob` (what a server's NTLM challenge says about it: names, domain, clock and Windows version) and `get_security_blob` for the first message only, which is always FeroProbe's own NTLM NEGOTIATE naming workstation FEROPROBE; the login functions raise an error, as FeroProbe's NSE layer does not log in over NTLM |
+| `datafiles` | `parse_services`, `parse_protocols`, `parse_rpc`, `parse_mac_prefixes` (a whole MAC works as a key too), `parse_file`, `parse_lines`, `read_from_file`, `get_array`, `get_assoc_array`; the files are found as `nmap.fetchfile` finds them, so an installed nmap's `nmap-services`, `nmap-protocols`, `nmap-rpc`, `nmap-mac-prefixes` and word lists are used. Without them, `parse_services` and `parse_protocols` give FeroProbe's own port and protocol names (the ones its reports show), `parse_mac_prefixes` the OUI list FeroProbe reports vendors from, and `parse_rpc` and other files an error |
 | `target` | `ALLOW_NEW_TARGETS`, `add`: as in nmap, a script adds hosts to the scan only when you pass the `newtargets` script argument, and at most `max-newtargets` of them (0, the default, for no limit); see [Hosts that scripts add](#hosts-that-scripts-add) |
 | Lua's own | `string`, `table`, `math`, `coroutine`, `utf8`, `os` (the sandbox's), `_G` |
 
@@ -1745,7 +1746,7 @@ Any other module (`packet`, `msrpc`, `mssql`, ...)
 stops the script from loading with an error that names it; a function
 FeroProbe does not have in a module it offers (`nmap.new_dnet`,
 `openssl.encrypt`, ...) raises an error naming it when called. Of nmap
-7.94's 606 scripts, 346 load as they are. See
+7.94's 606 scripts, 355 load as they are. See
 [Brute-force scripts](#brute-force-scripts) for how a `brute` script must
 be chosen before it will run.
 
@@ -1776,6 +1777,14 @@ What NSE scripts see differently:
 - **No raw packets or privileges.** `nmap.is_privileged()` is `false`, so
   scripts take their unprivileged path; `new_dnet`, `pcap_open` and the
   interface functions are not available.
+- **Ports.** A port table's `version.name_confidence` is 10 when version
+  detection named the service and 3 when the name comes from the port
+  number, nmap's scale. `nmap.get_port_state` and `nmap.get_ports` know
+  only the ports that may be open (open, open|filtered, unfiltered), the
+  ones a portrule is asked about. A script's portrule or hostrule runs
+  again in the action's own state just before the action, so what the
+  rule keeps in the script's variables is there for the action, as in
+  nmap, where rule and action share one instance.
 - **Scripts do not change results.** `nmap.set_port_state` and
   `nmap.set_port_version` are accepted and ignored (shown with `-d2`).
 - **Files are read-only, and only some.** FeroProbe ships none of nmap's

@@ -218,7 +218,7 @@ else
     total=$(ls "$NMAP_SCRIPTS"/*.nse 2>/dev/null | wc -l | tr -d ' ')
     OUT=$(XDG_DATA_HOME="$XDG" "$FERO" --script-updatedb 2>&1)
     loaded=$(printf '%s\n' "$OUT" | sed -n 's/.*Script database updated: \([0-9]*\) scripts.*/\1/p')
-    echo "     $loaded of $total nmap scripts load (for reference, 346 of 606 with nmap 7.94)"
+    echo "     $loaded of $total nmap scripts load (for reference, 355 of 606 with nmap 7.94)"
     # The real guard: nothing is skipped for a missing io or openssl module,
     # and ssl-dh-params (needs openssl.bignum_*) is one of the loaded scripts.
     if printf '%s\n' "$OUT" | grep -q "module 'io'"; then
