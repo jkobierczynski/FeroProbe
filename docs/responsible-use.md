@@ -250,7 +250,9 @@ module's ONC RPC calls (portmapper, mountd, NFS) carry transaction ID
 unless a script gives its own XID, as rpc-grind does; mountd and NFS
 calls claim user and group nobody (65534) from machine `feroprobe`
 (AUTH_UNIX), the portmapper gets no credentials; they reach the mountd and NFS ports only when those
-were scanned.
+were scanned. The `ldap` module's messages carry message IDs `0x4650nnnn`
+(`FP` and a counter; rules 9100038 over TCP, 9100039 for CLDAP searches
+over UDP); it binds only anonymously, so it never sends a password.
 
 ### Detection rules for defenders
 

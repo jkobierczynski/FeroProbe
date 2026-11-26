@@ -95,6 +95,9 @@ stdnse.format_output = function(status, data, indent)
     return data
   end
   local lines = {}
+  -- A name on the top table is a heading above the entries, as nmap
+  -- prints it (ldap.searchResultToTable's "LDAP Results").
+  if data.name then lines[1] = string.rep("  ", indent or 0) .. tostring(data.name) end
   format_lines(data, (indent or 0) + 1, lines)
   if #lines == 0 then return nil end
   return "\n" .. table.concat(lines, "\n")

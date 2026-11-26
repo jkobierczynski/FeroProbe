@@ -7934,3 +7934,220 @@ end
     assert!(seen[2].ends_with(" 100005 3 5 1 65534"), "{seen:?}");
     assert!(seen[3].ends_with(" 100003 3 1 1 65534"), "{seen:?}");
 }
+
+#[tokio::test]
+async fn nse_ldap_ber_filters_and_conversions() {
+    let src = r#"
+local ldap = require "ldap"
+local stdnse = require "stdnse"
+description = "test"
+categories = { "safe" }
+prerule = function() return true end
+action = function()
+  local h = stdnse.tohex
+  local F = ldap.FILTER
+  local d, pos = ldap.decode(stdnse.fromhex("300602010504016100"))
+  local sid = stdnse.fromhex("01050000000000051500000015c65b20ad1d0baf1c405eecf4010000")
+  return table.concat({
+    h(ldap.encode(5)), h(ldap.encode(-1)), h(ldap.encode(128)), h(ldap.encode(true)),
+    h(ldap.encode("ab")), h(ldap.encode({ _ldaptype = "30", "\2\1\1", "x" })),
+    h(ldap.encode(string.rep("a", 200))):sub(1, 8),
+    d._ldaptype .. ":" .. d[1] .. ":" .. d[2] .. ":" .. pos,
+    h(ldap.createFilter({ op = F.substrings, obj = "cn", val = "a*b*c" })),
+    h(ldap.createFilter({ op = F.substrings, obj = "cn", val = "*b*" })),
+    h(ldap.createFilter({ op = F._or, val = { { op = F.equalityMatch, obj = "o", val = "x" },
+      { op = F.present, obj = "uid" } } })),
+    h(ldap.createFilter({ op = F.extensibleMatch, obj = "uac", val = "1.2:=8" })),
+    h(ldap.createFilter({})),
+    ldap.convertZuluTimeStamp("20110904003302.0Z"), ldap.convertADTimeStamp("129283338000000000"),
+    ldap.convertADTimeStamp("0"), ldap.convertObjectSid(sid),
+  }, "|")
+end
+"#;
+    let scan = ScriptScan::new(vec![script("ldapu", src)], ArgTable::default(), None).unwrap();
+    let r = scan.pre_scan().await;
+    assert_eq!(
+        r[0].output,
+        "020105|0201ff|02020080|0101ff|04026162|300402010178|0481c861|30:5:a:9|\
+         a40f0402636e3009800161810162820163|a4090402636e3003810162|\
+         a10da30604016f0401788703756964|a90d8103312e328203756163830138|\
+         870b6f626a656374436c617373|2011/09/04 00:33:02 UTC|2010/09/07 11:50:00 UTC|0|\
+         1-5-21-542885397-2936741293-3965599772-500"
+    );
+}
+
+fn ldap_ber(tag: u8, content: &[u8]) -> Vec<u8> {
+    let mut v = vec![tag];
+    if content.len() < 0x80 {
+        v.push(content.len() as u8);
+    } else {
+        v.push(0x82);
+        v.extend((content.len() as u16).to_be_bytes());
+    }
+    v.extend(content);
+    v
+}
+
+/// The replies of a stand-in LDAP server to the request `req`: for a
+/// search, the root DSE entry and SearchResultDone; nothing otherwise.
+/// Keeps each request's message ID (hex) and operation tag.
+fn ldap_replies(req: &[u8], seen: &Seen) -> Vec<Vec<u8>> {
+    // 30 len 02 idlen id... op
+    let mut pos = 2;
+    if req[1] & 0x80 != 0 {
+        pos += (req[1] & 0x7f) as usize;
+    }
+    let idlen = req[pos + 1] as usize;
+    let id = &req[pos..pos + 2 + idlen];
+    let op = req[pos + 2 + idlen];
+    seen.lock().unwrap().push(format!(
+        "{} {op:02x}",
+        id[2..]
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
+    ));
+    if op != 0x63 {
+        return vec![];
+    }
+    let attr = |name: &str, vals: &[&str]| {
+        let mut set = Vec::new();
+        for v in vals {
+            set.extend(ldap_ber(0x04, v.as_bytes()));
+        }
+        let mut a = ldap_ber(0x04, name.as_bytes());
+        a.extend(ldap_ber(0x31, &set));
+        ldap_ber(0x30, &a)
+    };
+    let mut attrs = attr("namingContexts", &["dc=lab", "dc=other"]);
+    attrs.extend(attr("supportedLDAPVersion", &["3"]));
+    let mut entry = ldap_ber(0x04, b"");
+    entry.extend(ldap_ber(0x30, &attrs));
+    let mut m1 = id.to_vec();
+    m1.extend(ldap_ber(0x64, &entry));
+    let mut m2 = id.to_vec();
+    m2.extend(ldap_ber(0x65, &[0x0a, 1, 0, 4, 0, 4, 0]));
+    vec![ldap_ber(0x30, &m1), ldap_ber(0x30, &m2)]
+}
+
+const LDAP_SEARCH: &str = r#"
+local ldap = require "ldap"
+local nmap = require "nmap"
+local stdnse = require "stdnse"
+description = "test"
+categories = { "safe" }
+portrule = function() return true end
+action = function(host, port)
+  local req = { baseObject = "", scope = ldap.SCOPE.base, derefPolicy = ldap.DEREFPOLICY.default }
+  local ok, res, bind, berr
+  if port.protocol == "udp" then
+    ok, res = ldap.udpSearchRequest(host, port, req)
+  else
+    local socket = nmap.new_socket()
+    socket:connect(host, port)
+    bind, berr = ldap.bindRequest(socket, { version = 3, username = "cn=x", password = "y" })
+    ok, res = ldap.searchRequest(socket, req)
+    ldap.unbindRequest(socket)
+    socket:close()
+  end
+  return stdnse.format_output(true, ldap.searchResultToTable(res)) .. "|"
+    .. table.concat(ldap.extractAttribute(res, "NAMINGCONTEXTS"), ",") .. "|"
+    .. tostring(res.resultCode) .. "|" .. tostring(bind) .. " " .. tostring(berr)
+end
+"#;
+
+#[tokio::test]
+async fn nse_ldap_search_over_tcp() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let seen: Seen = Default::default();
+    let keep = seen.clone();
+    let port = tcp_server(move |mut s| {
+        let keep = keep.clone();
+        async move {
+            let mut buf = vec![0u8; 4096];
+            let mut have = Vec::new();
+            loop {
+                let n = match s.read(&mut buf).await {
+                    Ok(0) | Err(_) => return,
+                    Ok(n) => n,
+                };
+                have.extend(&buf[..n]);
+                while have.len() >= 2 && have.len() >= 2 + have[1] as usize {
+                    let len = 2 + have[1] as usize;
+                    let req: Vec<u8> = have.drain(..len).collect();
+                    for r in ldap_replies(&req, &keep) {
+                        // Each reply in two writes, to test reassembly.
+                        let (a, b) = r.split_at(3);
+                        let _ = s.write_all(a).await;
+                        let _ = s.flush().await;
+                        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                        let _ = s.write_all(b).await;
+                    }
+                }
+            }
+        }
+    })
+    .await;
+    let scan = ScriptScan::new(
+        vec![script("ldapt", LDAP_SEARCH)],
+        ArgTable::default(),
+        None,
+    )
+    .unwrap();
+    let mut hosts = vec![host_with_services(&[(port, "ldap")])];
+    scan.scan_hosts(&mut hosts).await;
+    assert_eq!(
+        hosts[0].ports[0].scripts[0].output,
+        "\nLDAP Results\n  <ROOT>\n      namingContexts: dc=lab\n      namingContexts: dc=other\n      \
+         supportedLDAPVersion: 3|dc=lab,dc=other|0|false Binding with credentials is not \
+         supported by FeroProbe (anonymous binds only)"
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let seen = seen.lock().unwrap();
+    // No bind went out: the search, then the unbind, each ID "FP" + n.
+    assert_eq!(seen.len(), 2, "{seen:?}");
+    assert!(
+        seen[0].starts_with("4650") && seen[0].ends_with(" 63"),
+        "{seen:?}"
+    );
+    assert!(
+        seen[1].starts_with("4650") && seen[1].ends_with(" 42"),
+        "{seen:?}"
+    );
+}
+
+#[tokio::test]
+async fn nse_ldap_search_over_udp() {
+    let server = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let port = server.local_addr().unwrap().port();
+    let seen: Seen = Default::default();
+    let keep = seen.clone();
+    tokio::spawn(async move {
+        let mut buf = [0u8; 2048];
+        while let Ok((n, from)) = server.recv_from(&mut buf).await {
+            // Both replies in one datagram, as CLDAP servers send them.
+            let all: Vec<u8> = ldap_replies(&buf[..n], &keep).concat();
+            let _ = server.send_to(&all, from).await;
+        }
+    });
+    let scan = ScriptScan::new(
+        vec![script("ldapu2", LDAP_SEARCH)],
+        ArgTable::default(),
+        None,
+    )
+    .unwrap();
+    let mut host = host_with_services(&[(port, "ldap")]);
+    host.ports[0].protocol = Protocol::Udp;
+    let mut hosts = vec![host];
+    scan.scan_hosts(&mut hosts).await;
+    assert!(
+        hosts[0].ports[0].scripts[0]
+            .output
+            .ends_with("|dc=lab,dc=other|0|nil nil"),
+        "{}",
+        hosts[0].ports[0].scripts[0].output
+    );
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.len(), 1);
+    assert!(seen[0].starts_with("4650") && seen[0].ends_with(" 63"));
+}

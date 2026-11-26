@@ -275,3 +275,25 @@ fn nse_rpc_rules_match_its_calls() {
     reply[7] = 1;
     assert!(!content_match(&contents(&suricata[&9100036].1), &reply));
 }
+
+#[test]
+fn nse_ldap_rules_match_its_requests() {
+    let suricata = sids(&rules("feroprobe.rules"));
+    // A search for the root DSE with message ID 0x46500001.
+    let search =
+        b"\x30\x25\x02\x04\x46\x50\x00\x01\x63\x1d\x04\x00\x0a\x01\x00\x0a\x01\x00\x02\x01\x00\
+                   \x02\x01\x00\x01\x01\x00\x87\x0bobjectClass\x30\x00";
+    assert!(content_match(&contents(&suricata[&9100038].1), search));
+    assert!(content_match(&contents(&suricata[&9100039].1), search));
+    // A long length form still matches.
+    let mut long = b"\x30\x82\x00\x25".to_vec();
+    long.extend_from_slice(&search[2..]);
+    assert!(content_match(&contents(&suricata[&9100038].1), &long));
+    // Another client's message ID, and a server's entry (tag 0x64).
+    let mut other = search.to_vec();
+    other[4] = 0x00;
+    assert!(!content_match(&contents(&suricata[&9100038].1), &other));
+    let mut entry = search.to_vec();
+    entry[8] = 0x64;
+    assert!(!content_match(&contents(&suricata[&9100039].1), &entry));
+}
