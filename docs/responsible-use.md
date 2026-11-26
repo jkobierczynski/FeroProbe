@@ -252,7 +252,10 @@ calls claim user and group nobody (65534) from machine `feroprobe`
 (AUTH_UNIX), the portmapper gets no credentials; they reach the mountd and NFS ports only when those
 were scanned. The `ldap` module's messages carry message IDs `0x4650nnnn`
 (`FP` and a counter; rules 9100038 over TCP, 9100039 for CLDAP searches
-over UDP); it binds only anonymously, so it never sends a password.
+over UDP); it binds only anonymously, so it never sends a password. The `vnc` module
+logs in to no VNC server: it reads the handshake and, only where the
+server asks for no authentication, the desktop's name and size; the RFB
+handshake has no field it could mark.
 
 ### Detection rules for defenders
 

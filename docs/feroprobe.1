@@ -4304,6 +4304,30 @@ Messages carry message IDs starting \f[V]FP\f[R] (\f[V]0x4650\f[R], IDS
 rules 9100038 TCP and 9100039 UDP)
 T}
 T{
+\f[V]vnc\f[R]
+T}@T{
+The RFB (VNC) handshake: \f[V]VNC:new\f[R], \f[V]connect\f[R],
+\f[V]handshake\f[R] (protocol 3.3, 3.7 and 3.8),
+\f[V]getProtocolVersion\f[R], \f[V]getSecTypesAsTable\f[R],
+\f[V]supportsSecType\f[R], \f[V]sendSecType\f[R],
+\f[V]handshake_vencrypt\f[R] and \f[V]getVencryptTypesAsTable\f[R],
+\f[V]handshake_tight\f[R] (\f[V]tight.tunnels\f[R],
+\f[V]tight.types\f[R]), \f[V]login_none\f[R], \f[V]client_init\f[R] (the
+desktop name, size and colour depth), \f[V]disconnect\f[R], the
+\f[V]VNC.sectypes\f[R] and \f[V]VENCRYPT_SUBTYPES\f[R] tables.
+No logins: \f[V]login\f[R] chooses None on a server that asks for no
+authentication and otherwise fails before a password is sent,
+\f[V]login_vncauth\f[R] always fails, and the DES helpers raise an
+error; so vnc-title shows a desktop only where no password is needed,
+and vnc-brute finds nothing.
+\f[V]handshake_tls\f[R] fails, as FeroProbe\[aq]s TLS has no anonymous
+Diffie-Hellman.
+The RFB handshake has no field FeroProbe could mark.
+vnc-info names VeNCrypt sub-types 263 and 264 the right way round (SASL
+over anonymous TLS and over server-authenticated TLS), which nmap 7.94
+swaps
+T}
+T{
 \f[V]ls\f[R]
 T}@T{
 \f[V]new_listing\f[R], \f[V]new_vol\f[R], \f[V]add_file\f[R],
@@ -4335,7 +4359,7 @@ stops the script from loading with an error that names it; a function
 FeroProbe does not have in a module it offers (\f[V]nmap.new_dnet\f[R],
 \f[V]openssl.encrypt\f[R], ...)
 raises an error naming it when called.
-Of nmap 7.94\[aq]s 606 scripts, 376 load as they are.
+Of nmap 7.94\[aq]s 606 scripts, 379 load as they are.
 See Brute-force scripts for how a \f[V]brute\f[R] script must be chosen
 before it will run.
 .PP

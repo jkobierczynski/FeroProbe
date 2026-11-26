@@ -8151,3 +8151,153 @@ async fn nse_ldap_search_over_udp() {
     assert_eq!(seen.len(), 1);
     assert!(seen[0].starts_with("4650") && seen[0].ends_with(" 63"));
 }
+
+#[tokio::test]
+async fn nse_vnc_handshake_none_login_and_server_init() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let seen: Seen = Default::default();
+    let keep = seen.clone();
+    let port = tcp_server(move |mut s| {
+        let keep = keep.clone();
+        async move {
+            let _ = s.write_all(b"RFB 003.008\n").await;
+            let mut ver = [0u8; 12];
+            if s.read_exact(&mut ver).await.is_err() {
+                return;
+            }
+            keep.lock()
+                .unwrap()
+                .push(String::from_utf8_lossy(&ver).trim().to_string());
+            // VNC Authentication and None.
+            let _ = s.write_all(&[2, 2, 1]).await;
+            let mut choice = [0u8; 1];
+            if s.read_exact(&mut choice).await.is_err() {
+                keep.lock().unwrap().push("closed".into());
+                return;
+            }
+            keep.lock().unwrap().push(format!("chose {}", choice[0]));
+            if choice[0] != 1 {
+                return;
+            }
+            let _ = s.write_all(&0u32.to_be_bytes()).await;
+            let mut shared = [0u8; 1];
+            let _ = s.read_exact(&mut shared).await;
+            let name = b"Lab Desk";
+            let mut init = Vec::new();
+            init.extend(800u16.to_be_bytes());
+            init.extend(600u16.to_be_bytes());
+            init.extend([32, 24, 0, 1]);
+            init.extend([0, 255, 0, 255, 0, 255, 16, 8, 0, 0, 0, 0]);
+            init.extend((name.len() as u32).to_be_bytes());
+            init.extend(name);
+            let _ = s.write_all(&init).await;
+        }
+    })
+    .await;
+    let src = r#"
+local vnc = require "vnc"
+description = "test"
+categories = { "safe" }
+portrule = function() return true end
+action = function(host, port)
+  local v = vnc.VNC:new(host, port)
+  assert(v:connect())
+  assert(v:handshake())
+  local types = {}
+  for _, t in ipairs(v:getSecTypesAsTable()) do types[#types + 1] = tostring(t) end
+  local ok, err = v:login("user", "secret", vnc.VNC.sectypes.VNCAUTH)
+  local ok2 = v:login_vncauth("user", "secret")
+  v:disconnect()
+  assert(v:connect())
+  assert(v:handshake())
+  local ok3 = v:login("", "")
+  local ok4, init = v:client_init(true)
+  v:disconnect()
+  return table.concat({ v:getProtocolVersion(), table.concat(types, ","),
+    tostring(v:supportsSecType(vnc.VNC.sectypes.NONE)), tostring(ok), err, tostring(ok2),
+    tostring(ok3), tostring(ok4), init.name, init.width .. "x" .. init.height, init.depth }, "|")
+end
+"#;
+    let scan = ScriptScan::new(vec![script("vnct", src)], ArgTable::default(), None).unwrap();
+    let mut hosts = vec![host_with_services(&[(port, "vnc")])];
+    scan.scan_hosts(&mut hosts).await;
+    assert_eq!(
+        hosts[0].ports[0].scripts[0].output,
+        "3.8|VNC Authentication (2),None (1)|true|false|VNC logins are not supported by \
+         FeroProbe (only servers that ask for no authentication)|false|true|true|Lab Desk|\
+         800x600|24"
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    // The refused login sent no security type; the second connection chose None.
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec!["RFB 003.008", "closed", "RFB 003.008", "chose 1"]
+    );
+}
+
+#[tokio::test]
+async fn nse_vnc_vencrypt_and_tight_lists() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let port = tcp_server(|mut s| async move {
+        let _ = s.write_all(b"RFB 003.008\n").await;
+        let mut buf = [0u8; 12];
+        let _ = s.read_exact(&mut buf).await;
+        let _ = s.write_all(&[2, 19, 16]).await;
+        let mut c = [0u8; 1];
+        let _ = s.read_exact(&mut c).await;
+        if c[0] == 19 {
+            let _ = s.write_all(&[0, 2]).await;
+            let mut v = [0u8; 2];
+            let _ = s.read_exact(&mut v).await;
+            let mut r = vec![0, 3];
+            for t in [257u32, 263, 999] {
+                r.extend(t.to_be_bytes());
+            }
+            let _ = s.write_all(&r).await;
+        } else {
+            let mut r = 1u32.to_be_bytes().to_vec();
+            r.extend(0u32.to_be_bytes());
+            r.extend(b"TGHTNOTUNNEL");
+            let _ = s.write_all(&r).await;
+            let mut t = [0u8; 4];
+            let _ = s.read_exact(&mut t).await;
+            let mut a = 1u32.to_be_bytes().to_vec();
+            a.extend(2u32.to_be_bytes());
+            a.extend(b"STDVVNCAUTH_");
+            let _ = s.write_all(&a).await;
+        }
+        let _ = s.read(&mut buf).await;
+    })
+    .await;
+    let src = r#"
+local vnc = require "vnc"
+description = "test"
+categories = { "safe" }
+portrule = function() return true end
+action = function(host, port)
+  local v = vnc.VNC:new(host, port)
+  v:connect(); v:handshake()
+  v:sendSecType(vnc.VNC.sectypes.VENCRYPT)
+  assert(v:handshake_vencrypt())
+  local out = {}
+  for _, t in ipairs(v:getVencryptTypesAsTable()) do out[#out + 1] = tostring(t) end
+  v:disconnect()
+  v:connect(); v:handshake()
+  v:sendSecType(vnc.VNC.sectypes.TIGHT)
+  assert(v:handshake_tight())
+  local t, a = v.tight.tunnels[1], v.tight.types[1]
+  v:disconnect()
+  return table.concat(out, ",") .. "|" .. v.vencrypt.count .. "|" .. t.vendor .. " " .. t.signature
+    .. " " .. t.code .. "|" .. a.vendor .. " " .. a.signature .. " " .. a.code
+end
+"#;
+    let scan = ScriptScan::new(vec![script("vncv", src)], ArgTable::default(), None).unwrap();
+    let mut hosts = vec![host_with_services(&[(port, "vnc")])];
+    scan.scan_hosts(&mut hosts).await;
+    // 263 is SASL over anonymous TLS (nmap 7.94 swaps 263 and 264).
+    assert_eq!(
+        hosts[0].ports[0].scripts[0].output,
+        "None, Anonymous TLS (257),SASL, Anonymous TLS (263),Unknown security type (999)|3|\
+         TGHT NOTUNNEL 0|STDV VNCAUTH_ 2"
+    );
+}
