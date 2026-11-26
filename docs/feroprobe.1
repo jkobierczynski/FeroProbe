@@ -4267,13 +4267,19 @@ headers), \f[V]Portmap\f[R] (\f[V]Dump\f[R], \f[V]GetPort\f[R],
 \f[V]GetProgramInfo\f[R], \f[V]ShowMounts\f[R], \f[V]MountPath\f[R],
 \f[V]UnmountPath\f[R], \f[V]NfsOpen\f[R], \f[V]NfsClose\f[R],
 \f[V]ExportStats\f[R], \f[V]GetAttributes\f[R], \f[V]Dir\f[R]) and
-\f[V]Util\f[R]; arguments \f[V]rpc.protocol\f[R],
+\f[V]Util\f[R].
+Differences from nmap 7.95: nfs-ls shows the file type letter
+(\f[V]d\f[R], \f[V]-\f[R], \f[V]l\f[R]) that nmap leaves out for NFSv3,
+and nfs-statfs prints whole numbers where nmap prints
+\f[V]105230096.0\f[R]; arguments \f[V]rpc.protocol\f[R],
 \f[V]mount.version\f[R], \f[V]nfs.version\f[R].
 Calls carry transaction ID \f[V]FP\f[R] (IDS rules 9100036 and 9100037)
-unless the script picks its own, use no credentials (AUTH_NULL), and
-reach mountd and NFS only on ports you scanned: scan them too (for
-example \f[V]-p 111,2049,<mountd port>\f[R]; \f[V]rpcinfo\f[R] lists
-them).
+unless the script picks its own, send no credentials to the portmapper
+and AUTH_UNIX as user and group nobody (65534), machine name
+\f[V]feroprobe\f[R], to mountd and NFS (so you see what an unknown user
+may see; never root), and reach mountd and NFS only on ports you
+scanned: scan them too (for example \f[V]-p 111,2049,<mountd port>\f[R];
+\f[V]rpcinfo\f[R] lists them).
 FeroProbe does not bind a reserved source port, so a server exporting
 with the Linux \f[V]secure\f[R] option refuses to mount
 T}

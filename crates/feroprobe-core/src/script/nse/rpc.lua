@@ -7,7 +7,9 @@
 --
 -- A call FeroProbe numbers itself has transaction ID "FP" and 16 random
 -- bits (0x4650xxxx, IDS rules 9100036 UDP and 9100037 TCP); a script that
--- passes its own XID sends that one. Only AUTH_NULL credentials are sent.
+-- passes its own XID sends that one. Portmapper calls carry no
+-- credentials (AUTH_NULL); mountd and NFS calls carry AUTH_UNIX as user
+-- and group nobody (65534) from machine "feroprobe", never root.
 -- Every connection goes through nmap.new_socket, so the mountd and NFS
 -- ports the portmapper names are reached only when they were scanned. No
 -- reserved source port is bound, so a server that insists on one (the
@@ -224,9 +226,9 @@ end
 
 ---
 -- Util.TimeToString(seconds): a file time as nfs-ls shows it
--- ("2010-06-17 12:28", UTC).
+-- ("2026-11-26T13:54:24", UTC, as nmap 7.95's nfs-ls prints it).
 function Util.TimeToString(seconds)
-  return os.date("!%Y-%m-%d %H:%M", math.floor(tonumber(seconds) or 0))
+  return os.date("!%Y-%m-%dT%H:%M:%S", math.floor(tonumber(seconds) or 0))
 end
 
 -- NFSv3 ACCESS bits (RFC 1813 3.3.4).
@@ -358,7 +360,7 @@ end
 ---
 -- Util.calc_fsinfo_table(fsinfo, nfsversion, human): the FSINFO (v3)
 -- values as text: rtmax, rtpref, rtmult, wtmax, wtpref, wtmult, dtpref,
--- maxfilesize (with a suffix when human), properties.
+-- maxfilesize (always with a suffix), properties.
 function Util.calc_fsinfo_table(fsinfo, nfsversion, human)
   if type(fsinfo) ~= "table" then return nil, "No file system information" end
   if tonumber(nfsversion) ~= 3 then return nil, "FSINFO needs NFS version 3" end
@@ -367,7 +369,8 @@ function Util.calc_fsinfo_table(fsinfo, nfsversion, human)
     if fsinfo[k] then fs[k] = num2str(fsinfo[k]) end
   end
   if fsinfo.maxfilesize then
-    fs.maxfilesize = human and Util.SizeToHuman(fsinfo.maxfilesize) or num2str(fsinfo.maxfilesize)
+    -- Always with a suffix ("16.0T"), as nmap 7.95's nfs-statfs prints it.
+    fs.maxfilesize = Util.SizeToHuman(fsinfo.maxfilesize)
   end
   return fs
 end
@@ -490,18 +493,39 @@ local function new_xid()
   return (XID_MARK << 16) | (string.unpack(">I2", fero.crypto.random_bytes(2)))
 end
 
+-- FeroProbe's AUTH_UNIX machine name, and the user and group it claims
+-- by default: nobody (65534), never root.
+local UNIX_MACHINE = "feroprobe"
+local NOBODY = 65534
+
+-- The credentials: AUTH_NULL, or AUTH_UNIX with uid, gid and gids from
+-- auth (nobody by default) and the machine name "feroprobe".
+local function credentials(auth)
+  local t = auth and auth.type or Portmap.AuthType.NULL
+  if t == Portmap.AuthType.NULL then return string.pack(">I4I4", 0, 0) end
+  if t ~= Portmap.AuthType.UNIX then return nil, "Only AUTH_NULL and AUTH_UNIX are available in FeroProbe" end
+  local gids = type(auth.gids) == "table" and auth.gids or {}
+  local body = { string.pack(">I4", os.time() & 0xffffffff), Util.marshall_vopaque(UNIX_MACHINE),
+    string.pack(">I4I4", (tonumber(auth.uid) or NOBODY) & 0xffffffff, (tonumber(auth.gid) or NOBODY) & 0xffffffff),
+    string.pack(">I4", math.min(#gids, 16)) }
+  for i = 1, math.min(#gids, 16) do body[#body + 1] = string.pack(">I4", tonumber(gids[i]) & 0xffffffff) end
+  body = table.concat(body)
+  return string.pack(">I4I4", t, #body) .. body
+end
+
 ---
 -- Comm:CreateHeader(xid, procedure, auth): true and a CALL header for
--- this program and version (AUTH_NULL credentials), or false and an error.
+-- this program and version, or false and an error. auth.type is
+-- AuthType.NULL (the default) or AuthType.UNIX (uid, gid, gids; nobody,
+-- 65534, unless given; machine name "feroprobe").
 function Comm:CreateHeader(xid, procedure, auth)
-  if auth and auth.type and auth.type ~= Portmap.AuthType.NULL then
-    return false, "Only AUTH_NULL is available in FeroProbe"
-  end
+  local cred, err = credentials(auth)
+  if not cred then return false, err end
   if not self.program_id then return false, "No RPC program number" end
   xid = xid or new_xid()
-  return true, string.pack(">I4I4I4I4I4I4I4I4I4I4", xid & 0xffffffff, Portmap.MessageType.CALL, 2,
-    self.program_id & 0xffffffff, (self.version or 0) & 0xffffffff, (procedure or 0) & 0xffffffff,
-    0, 0, 0, 0)
+  return true, string.pack(">I4I4I4I4I4I4", xid & 0xffffffff, Portmap.MessageType.CALL, 2,
+    self.program_id & 0xffffffff, (self.version or 0) & 0xffffffff, (procedure or 0) & 0xffffffff)
+    .. cred .. string.pack(">I4I4", 0, 0)
 end
 
 ---
@@ -616,7 +640,11 @@ end
 -- sent twice at most.
 local function call(comm, proc, data)
   local xid = new_xid()
-  local packet, err = comm:EncodePacket(xid, proc, { type = Portmap.AuthType.NULL }, data)
+  -- mountd and NFS servers that export with sec=sys refuse AUTH_NULL, so
+  -- those calls go as AUTH_UNIX user nobody.
+  local auth = { type = Portmap.AuthType.NULL }
+  if comm.program == "mountd" or comm.program == "nfs" then auth = { type = Portmap.AuthType.UNIX } end
+  local packet, err = comm:EncodePacket(xid, proc, auth, data)
   if not packet then return false, err end
   local tries = comm.proto == "udp" and 2 or 1
   for _ = 1, tries do
@@ -676,6 +704,8 @@ function Portmap:Dump(comm)
       pos, owner = vopaque(reply, pos)
       if owner == nil then break end
       proto, port = netid, uaddr_port(addr)
+      -- Entries without a port (the "local" netid's socket path) are left out.
+      if port == nil then prog = nil end
     else
       local prot
       pos, prog = Util.unmarshall_uint32(reply, pos)
@@ -685,6 +715,7 @@ function Portmap:Dump(comm)
       if port == nil then break end
       proto = PROTO_NAME[prot] or tostring(prot)
     end
+    if prog == nil then goto continue end
     out[prog] = out[prog] or {}
     local e = out[prog][proto]
     if not e then
@@ -695,6 +726,7 @@ function Portmap:Dump(comm)
     for _, v in ipairs(e.version) do if v == vers then seen = true end end
     if not seen then e.version[#e.version + 1] = vers end
     table.sort(e.version)
+    ::continue::
   end
   return true, out
 end
@@ -1107,17 +1139,23 @@ end
 
 ---
 -- Helper.RpcInfo(host, port): true and the portmapper's DUMP table (see
--- Portmap:Dump), or false and an error. One answer per host and
+-- Portmap:Dump; rpcbind version 3, else 2), or false and an error. One answer per host and
 -- protocol is kept for the run.
 function Helper.RpcInfo(host, port)
   local key = "rpcinfo_" .. tostring(type(host) == "table" and host.ip or host) .. "_" .. tostring(port and port.protocol)
   local cached = nmap.registry[key]
   if type(cached) == "table" then return true, cached end
-  local comm = Comm:new("rpcbind", 2)
-  local ok, err = comm:Connect(host, port)
-  if not ok then return false, err end
-  local status, result = Portmap:new():Dump(comm)
-  comm:Disconnect()
+  -- rpcbind version 3 first, which lists IPv6 (tcp6, udp6) as well, as
+  -- nmap 7.95's rpcinfo shows; version 2 when the server has no other.
+  local status, result
+  for _, v in ipairs({ 3, 2 }) do
+    local comm = Comm:new("rpcbind", v)
+    local ok, err = comm:Connect(host, port)
+    if not ok then return false, err end
+    status, result = Portmap:new():Dump(comm)
+    comm:Disconnect()
+    if status then break end
+  end
   if not status then return false, result end
   nmap.registry[key] = result
   return true, result

@@ -122,7 +122,7 @@ local function vol_text(vol, lines)
   if #vol.files > 0 then
     local t = tab.new()
     local checksum = vol.files[1].checksum ~= nil
-    local head = vol.hasperms and { "PERMISSION", "UID", "GID", "SIZE", "MODIFICATION TIME", "FILENAME" }
+    local head = vol.hasperms and { "PERMISSION", "UID", "GID", "SIZE", "TIME", "FILENAME" }
       or { "SIZE", "TIME", "FILENAME" }
     if checksum then head[#head + 1] = "CHECKSUM" end
     tab.addrow(t, table.unpack(head))

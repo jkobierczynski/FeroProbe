@@ -247,8 +247,9 @@ rule 9100034 matches them. The `netbios` module's NODE STATUS is
 `FP` as well (rule 9100035); both go only to a scanned UDP 137. The `rpc`
 module's ONC RPC calls (portmapper, mountd, NFS) carry transaction ID
 `FP` and 16 random bits (rules 9100036 over UDP, 9100037 over TCP),
-unless a script gives its own XID, as rpc-grind does; they send only
-AUTH_NULL credentials and reach the mountd and NFS ports only when those
+unless a script gives its own XID, as rpc-grind does; mountd and NFS
+calls claim user and group nobody (65534) from machine `feroprobe`
+(AUTH_UNIX), the portmapper gets no credentials; they reach the mountd and NFS ports only when those
 were scanned.
 
 ### Detection rules for defenders

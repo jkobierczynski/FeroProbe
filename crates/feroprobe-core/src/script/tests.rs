@@ -7775,7 +7775,7 @@ end
         r[0].output,
         "1024.0B 883.6M 246.5K drwxr-xr-x rwsr-sr-t symlink Read Lookup NoModify NoExtend \
          NoDelete NoExecute 5542276 2732012 2528728 52% 1024 7 4294967295 abcde 21 100005 nfs \
-         2010-06-17 12:28 2"
+         2010-06-17T12:28:00 2"
     );
 }
 
@@ -7803,10 +7803,17 @@ async fn rpc_server() -> (u16, Seen) {
                 }
                 let word =
                     |i: usize| u32::from_be_bytes(call[i * 4..i * 4 + 4].try_into().unwrap());
-                let (xid, prog, proc_) = (word(0), word(3), word(5));
+                let (xid, prog, vers, proc_) = (word(0), word(3), word(4), word(5));
+                // The credentials' flavor and, for AUTH_UNIX, the user claimed.
+                let flavor = word(6);
+                let uid = if flavor == 1 {
+                    word(10 + word(9).div_ceil(4) as usize)
+                } else {
+                    0
+                };
                 keep.lock()
                     .unwrap()
-                    .push(format!("{xid:08x} {prog} {proc_}"));
+                    .push(format!("{xid:08x} {prog} {proc_} {flavor} {uid}"));
                 let mut r = Vec::new();
                 for w in [xid, 1, 0, 0, 0, 0] {
                     r.extend(w.to_be_bytes());
@@ -7817,6 +7824,13 @@ async fn rpc_server() -> (u16, Seen) {
                     r.extend(vec![0u8; (4 - v.len() % 4) % 4]);
                 };
                 match (prog, proc_) {
+                    // An old portmapper: version 2 only.
+                    (100000, _) if vers != 2 => {
+                        r.truncate(20);
+                        for w in [2u32, 2, 2] {
+                            r.extend(w.to_be_bytes());
+                        }
+                    }
                     (100000, 4) => {
                         let port = me.load(Ordering::SeqCst) as u32;
                         for w in [1, 100005, 3, 6, port, 1, 100005, 1, 6, port, 0] {
@@ -7882,8 +7896,11 @@ end
         "true 1,3 true /srv/data=10.0.0.0/8 /home= false Program unavailable"
     );
     let seen = seen.lock().unwrap();
-    // DUMP, EXPORT to mountd v3, then the NFS call; each XID starts "FP".
-    assert_eq!(seen.len(), 3);
+    // DUMP over rpcbind 3 (refused), then 2, EXPORT to mountd v3, then
+    // the NFS call; each XID starts "FP".
+    assert_eq!(seen.len(), 4);
     assert!(seen.iter().all(|s| s.starts_with("4650")));
-    assert!(seen[0].ends_with(" 100000 4") && seen[1].ends_with(" 100005 5"));
+    // The portmapper gets AUTH_NULL; mountd and NFS AUTH_UNIX as nobody.
+    assert!(seen[0].ends_with(" 100000 4 0 0") && seen[1].ends_with(" 100000 4 0 0"));
+    assert!(seen[2].ends_with(" 100005 5 1 65534") && seen[3].ends_with(" 1 65534"));
 }
