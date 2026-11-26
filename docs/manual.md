@@ -1741,6 +1741,8 @@ the scan probed there.
 | `datafiles` | `parse_services`, `parse_protocols`, `parse_rpc`, `parse_mac_prefixes` (a whole MAC works as a key too), `parse_file`, `parse_lines`, `read_from_file`, `get_array`, `get_assoc_array`; the files are found as `nmap.fetchfile` finds them, so an installed nmap's `nmap-services`, `nmap-protocols`, `nmap-rpc`, `nmap-mac-prefixes` and word lists are used. Without them, `parse_services` and `parse_protocols` give FeroProbe's own port and protocol names (the ones its reports show), `parse_mac_prefixes` the OUI list FeroProbe reports vendors from, and `parse_rpc` and other files an error |
 | `smb2` | `negotiate_v2` (a NEGOTIATE carrying FeroProbe's client GUID; it fills the state from `smb.start` with the dialect, security mode, capabilities, server GUID and the server's clock and start time), `dialects`, `dialect_name` (nmap's `3:1:1` form); `smb2_encode_header_sync`, `smb2_send` and `smb2_read` raise an error, as FeroProbe does not keep an SMB connection open between calls |
 | `netbios` | `name_encode`, `name_decode`, `flags_to_string`, `do_nbstat` (the same NODE STATUS request as the `nbstat` script, asked once per host), `get_server_name`, `get_workstation_name`, `get_user_name`, `get_names`, and `nbquery` (a NAME QUERY with transaction ID `FP`, IDS rule 9100035); both go to UDP 137, only when it was scanned |
+| `rpc` | ONC RPC over TCP and UDP: `Comm` (connections, packets, reply headers), `Portmap` (`Dump`, `GetPort`, `Callit` and the RPC constants), `Mount` (`Export`, `Mount`, `Unmount`, versions 1 to 3), `NFS` versions 2 and 3 (`GetAttr`, `LookUp`, `Access`, `ReadDir`, `ReadDirPlus`, `StatFs`, `FsStat`, `FsInfo`, `PathConf`), `Helper` (`RpcInfo`, `GetProgramInfo`, `ShowMounts`, `MountPath`, `UnmountPath`, `NfsOpen`, `NfsClose`, `ExportStats`, `GetAttributes`, `Dir`) and `Util`; arguments `rpc.protocol`, `mount.version`, `nfs.version`. Calls carry transaction ID `FP` (IDS rules 9100036 and 9100037) unless the script picks its own, use no credentials (AUTH_NULL), and reach mountd and NFS only on ports you scanned: scan them too (for example `-p 111,2049,<mountd port>`; `rpcinfo` lists them). FeroProbe does not bind a reserved source port, so a server exporting with the Linux `secure` option refuses to mount |
+| `ls` | `new_listing`, `new_vol`, `add_file`, `end_vol`, `end_listing`, `report_error`, `report_info`, `config`; arguments `ls.maxfiles` (10), `ls.maxdepth` (0), `ls.human`, `ls.errors`, `ls.empty`, `ls.checksum`, each also under the script's name |
 | `target` | `ALLOW_NEW_TARGETS`, `add`: as in nmap, a script adds hosts to the scan only when you pass the `newtargets` script argument, and at most `max-newtargets` of them (0, the default, for no limit); see [Hosts that scripts add](#hosts-that-scripts-add) |
 | Lua's own | `string`, `table`, `math`, `coroutine`, `utf8`, `os` (the sandbox's), `_G` |
 
@@ -1748,7 +1750,7 @@ Any other module (`packet`, `msrpc`, `mssql`, ...)
 stops the script from loading with an error that names it; a function
 FeroProbe does not have in a module it offers (`nmap.new_dnet`,
 `openssl.encrypt`, ...) raises an error naming it when called. Of nmap
-7.94's 606 scripts, 362 load as they are. See
+7.94's 606 scripts, 372 load as they are. See
 [Brute-force scripts](#brute-force-scripts) for how a `brute` script must
 be chosen before it will run.
 

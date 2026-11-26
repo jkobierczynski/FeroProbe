@@ -257,3 +257,21 @@ fn nse_netbios_rule_matches_the_name_query() {
     other[0] = b'Q';
     assert!(!pcre.is_match(&other));
 }
+
+/// The NSE rpc module's calls: XID "FP" + 16 bits, CALL, RPC version 2;
+/// over TCP after the record mark.
+#[test]
+fn nse_rpc_rules_match_its_calls() {
+    let suricata = sids(&rules("feroprobe.rules"));
+    let call = b"FP\x12\x34\x00\x00\x00\x00\x00\x00\x00\x02\x00\x01\x86\xa0\x00\x00\x00\x02\x00\x00\x00\x04\
+                 \x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00";
+    assert!(content_match(&contents(&suricata[&9100036].1), call));
+    let mut tcp = (0x8000_0000u32 | call.len() as u32).to_be_bytes().to_vec();
+    tcp.extend_from_slice(call);
+    assert!(content_match(&contents(&suricata[&9100037].1), &tcp));
+    assert!(!content_match(&contents(&suricata[&9100037].1), call));
+    // A reply (message type 1) is not a call.
+    let mut reply = call.to_vec();
+    reply[7] = 1;
+    assert!(!content_match(&contents(&suricata[&9100036].1), &reply));
+}

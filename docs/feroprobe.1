@@ -4254,6 +4254,40 @@ NAME QUERY with transaction ID \f[V]FP\f[R], IDS rule 9100035); both go
 to UDP 137, only when it was scanned
 T}
 T{
+\f[V]rpc\f[R]
+T}@T{
+ONC RPC over TCP and UDP: \f[V]Comm\f[R] (connections, packets, reply
+headers), \f[V]Portmap\f[R] (\f[V]Dump\f[R], \f[V]GetPort\f[R],
+\f[V]Callit\f[R] and the RPC constants), \f[V]Mount\f[R]
+(\f[V]Export\f[R], \f[V]Mount\f[R], \f[V]Unmount\f[R], versions 1 to 3),
+\f[V]NFS\f[R] versions 2 and 3 (\f[V]GetAttr\f[R], \f[V]LookUp\f[R],
+\f[V]Access\f[R], \f[V]ReadDir\f[R], \f[V]ReadDirPlus\f[R],
+\f[V]StatFs\f[R], \f[V]FsStat\f[R], \f[V]FsInfo\f[R],
+\f[V]PathConf\f[R]), \f[V]Helper\f[R] (\f[V]RpcInfo\f[R],
+\f[V]GetProgramInfo\f[R], \f[V]ShowMounts\f[R], \f[V]MountPath\f[R],
+\f[V]UnmountPath\f[R], \f[V]NfsOpen\f[R], \f[V]NfsClose\f[R],
+\f[V]ExportStats\f[R], \f[V]GetAttributes\f[R], \f[V]Dir\f[R]) and
+\f[V]Util\f[R]; arguments \f[V]rpc.protocol\f[R],
+\f[V]mount.version\f[R], \f[V]nfs.version\f[R].
+Calls carry transaction ID \f[V]FP\f[R] (IDS rules 9100036 and 9100037)
+unless the script picks its own, use no credentials (AUTH_NULL), and
+reach mountd and NFS only on ports you scanned: scan them too (for
+example \f[V]-p 111,2049,<mountd port>\f[R]; \f[V]rpcinfo\f[R] lists
+them).
+FeroProbe does not bind a reserved source port, so a server exporting
+with the Linux \f[V]secure\f[R] option refuses to mount
+T}
+T{
+\f[V]ls\f[R]
+T}@T{
+\f[V]new_listing\f[R], \f[V]new_vol\f[R], \f[V]add_file\f[R],
+\f[V]end_vol\f[R], \f[V]end_listing\f[R], \f[V]report_error\f[R],
+\f[V]report_info\f[R], \f[V]config\f[R]; arguments \f[V]ls.maxfiles\f[R]
+(10), \f[V]ls.maxdepth\f[R] (0), \f[V]ls.human\f[R],
+\f[V]ls.errors\f[R], \f[V]ls.empty\f[R], \f[V]ls.checksum\f[R], each
+also under the script\[aq]s name
+T}
+T{
 \f[V]target\f[R]
 T}@T{
 \f[V]ALLOW_NEW_TARGETS\f[R], \f[V]add\f[R]: as in nmap, a script adds
@@ -4275,7 +4309,7 @@ stops the script from loading with an error that names it; a function
 FeroProbe does not have in a module it offers (\f[V]nmap.new_dnet\f[R],
 \f[V]openssl.encrypt\f[R], ...)
 raises an error naming it when called.
-Of nmap 7.94\[aq]s 606 scripts, 362 load as they are.
+Of nmap 7.94\[aq]s 606 scripts, 372 load as they are.
 See Brute-force scripts for how a \f[V]brute\f[R] script must be chosen
 before it will run.
 .PP

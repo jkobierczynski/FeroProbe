@@ -106,6 +106,7 @@ const NSE_MODULES: &[(&str, &str)] = &[
     ("knx", include_str!("nse/knx.lua")),
     ("lfs", include_str!("nse/lfs.lua")),
     ("listop", include_str!("nse/listop.lua")),
+    ("ls", include_str!("nse/ls.lua")),
     ("match", include_str!("nse/match.lua")),
     ("mysql", include_str!("nse/mysql.lua")),
     ("netbios", include_str!("nse/netbios.lua")),
@@ -114,6 +115,7 @@ const NSE_MODULES: &[(&str, &str)] = &[
     ("openssl", include_str!("nse/openssl.lua")),
     ("outlib", include_str!("nse/outlib.lua")),
     ("rand", include_str!("nse/rand.lua")),
+    ("rpc", include_str!("nse/rpc.lua")),
     ("shortport", include_str!("nse/shortport.lua")),
     ("slaxml", include_str!("nse/slaxml.lua")),
     ("smb", include_str!("nse/smb.lua")),
@@ -882,6 +884,9 @@ fn port_table(lua: &Lua, p: &PortResult) -> mlua::Result<Table> {
             // nmap's scale: 10 for a name version detection found, 3 for
             // one from the port-number table.
             v.raw_set("name_confidence", 10)?;
+            // nmap's service_dtype: "probed" when version detection named
+            // it, "table" when the name comes from the port number.
+            v.raw_set("service_dtype", "probed")?;
             let cpe = lua.create_table()?;
             for (i, c) in s.cpe.iter().enumerate() {
                 cpe.raw_set(i + 1, c.as_str())?;
@@ -894,6 +899,7 @@ fn port_table(lua: &Lua, p: &PortResult) -> mlua::Result<Table> {
             v.raw_set("name", name)?;
             v.raw_set("service_tunnel", "none")?;
             v.raw_set("name_confidence", 3)?;
+            v.raw_set("service_dtype", "table")?;
         }
     }
     t.raw_set("version", v)?;
