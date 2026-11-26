@@ -129,3 +129,4 @@ alert tcp any any -> $HOME_NET 53 (msg:"FeroProbe DNS query over TCP from an NSE
 # connection attributes, _client_name and program_name FeroProbe, when the
 # server takes them (MySQL 5.6+, MariaDB 10+).
 alert tcp any any -> $HOME_NET any (msg:"FeroProbe MySQL login from an NSE script (program_name FeroProbe)"; flow:established,to_server; content:"|0c|program_name|09|FeroProbe"; classtype:attempted-recon; sid:9100034; rev:1;)
+alert udp any any -> $HOME_NET 137 (msg:"FeroProbe NetBIOS NAME QUERY from an NSE script (transaction ID FP)"; content:"FP", depth 2; pcre:"/^FP\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x20[A-P]{32}\x00\x00\x20\x00\x01/s"; classtype:attempted-recon; sid:9100035; rev:1;)

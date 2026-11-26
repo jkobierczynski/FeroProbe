@@ -234,3 +234,26 @@ fn nse_mysql_rule_matches_the_login() {
         b"\x0cprogram_name\x05mysql"
     ));
 }
+
+/// The rule for the NSE netbios module's NAME QUERY matches it, and not a
+/// query with another transaction ID.
+#[test]
+fn nse_netbios_rule_matches_the_name_query() {
+    let suricata = sids(&rules("feroprobe.rules"));
+    let rule = &suricata[&9100035].1;
+    let start = rule.find("pcre:\"/").unwrap() + 7;
+    let end = rule[start..].find("/s\"").unwrap() + start;
+    let pcre = regex::bytes::Regex::new(&format!("(?s-u){}", &rule[start..end])).unwrap();
+    // "VM" padded with spaces (suffix 0x20), first-level encoded.
+    let mut q = b"FP\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x20".to_vec();
+    for b in b"VM              " {
+        q.push(b'A' + (b >> 4));
+        q.push(b'A' + (b & 0xf));
+    }
+    q.extend_from_slice(b"\x00\x00\x20\x00\x01");
+    assert!(content_match(&contents(rule), &q));
+    assert!(pcre.is_match(&q), "{q:02x?}");
+    let mut other = q.clone();
+    other[0] = b'Q';
+    assert!(!pcre.is_match(&other));
+}
