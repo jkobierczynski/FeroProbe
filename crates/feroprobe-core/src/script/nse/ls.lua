@@ -21,6 +21,30 @@ local function as_bool(v)
   return not (v == "false" or v == "0" or v == "no" or v == "")
 end
 
+local UNITS = { B = 1, K = 1024, M = 1024 ^ 2, G = 1024 ^ 3, T = 1024 ^ 4, P = 1024 ^ 5 }
+
+-- A size in bytes: a number, or a human size such as "883.6M".
+local function bytes_of(size)
+  local n = tonumber(size)
+  if n then return n end
+  if type(size) ~= "string" then return nil end
+  local num, unit = size:match("^%s*([%d%.]+)%s*([BKMGTP])%s*$")
+  num = tonumber(num)
+  if not num then return nil end
+  return num * UNITS[unit]
+end
+
+-- A byte count as "883.6M" (steps of 1024).
+local function human(n)
+  local units = { "B", "K", "M", "G", "T", "P" }
+  local i = 1
+  while n > 1024 and i < #units do
+    n = n / 1024
+    i = i + 1
+  end
+  return string.format("%.1f%s", n, units[i])
+end
+
 ---
 -- ls.config(argname): the <script>.argname argument, else ls.argname,
 -- else the default (maxfiles 10, maxdepth 0, the flags false).
@@ -41,7 +65,7 @@ function ls.new_listing()
   return {
     volumes = {}, errors = {}, info = {},
     maxfiles = ls.config("maxfiles"), showerrors = ls.config("errors"),
-    showempty = ls.config("empty"), total = { files = 0, bytes = 0 },
+    showempty = ls.config("empty"), human = ls.config("human"), total = { files = 0, bytes = 0 },
   }
 end
 
@@ -55,8 +79,8 @@ end
 ---
 -- ls.add_file(output, file): adds a file to the volume: an array
 -- { permission, uid, gid, size, time, filename } (with permissions) or
--- { size, time, filename }, or a table with those names. False once
--- maxfiles files are listed.
+-- { size, time, filename }, each with an optional checksum after it, or
+-- a table with those names. False once maxfiles files are listed.
 function ls.add_file(output, file)
   local vol = output.cur
   if not vol then return false end
@@ -71,12 +95,14 @@ function ls.add_file(output, file)
   else
     f = { size = file.size or file[1], time = file.time or file[2], filename = file.filename or file[3] }
   end
-  if file.checksum then f.checksum = file.checksum end
+  local checksum = file.checksum
+  if checksum == nil then checksum = file[vol.hasperms and 7 or 4] end
+  if checksum ~= nil then f.checksum = checksum end
   vol.files[#vol.files + 1] = f
   vol.count = vol.count + 1
   output.total.files = output.total.files + 1
-  local n = tonumber(f.size)
-  if n then output.total.bytes = output.total.bytes + n end
+  local n = bytes_of(f.size)
+  if n then output.total.bytes = math.tointeger(output.total.bytes + n) or (output.total.bytes + n) end
   if output.maxfiles and output.maxfiles > 0 and vol.count >= output.maxfiles then
     vol.truncated = true
     return false
@@ -115,13 +141,16 @@ function ls.report_info(output, info, level)
   t[#t + 1] = tostring(info)
 end
 
-local function vol_text(vol, lines)
+local function vol_text(vol, lines, human_sizes)
   lines[#lines + 1] = "Volume " .. tostring(vol.name)
   for _, s in ipairs(vol.info) do lines[#lines + 1] = s end
   for _, s in ipairs(vol.errors) do lines[#lines + 1] = "ERROR: " .. s end
   if #vol.files > 0 then
     local t = tab.new()
-    local checksum = vol.files[1].checksum ~= nil
+    local checksum = false
+    for _, f in ipairs(vol.files) do
+      if f.checksum ~= nil then checksum = true break end
+    end
     local head = vol.hasperms and { "PERMISSION", "UID", "GID", "SIZE", "TIME", "FILENAME" }
       or { "SIZE", "TIME", "FILENAME" }
     if checksum then head[#head + 1] = "CHECKSUM" end
@@ -129,6 +158,9 @@ local function vol_text(vol, lines)
     for _, f in ipairs(vol.files) do
       local row = vol.hasperms and { f.permission, f.uid, f.gid, f.size, f.time, f.filename }
         or { f.size, f.time, f.filename }
+      local si = vol.hasperms and 4 or 1
+      local n = human_sizes and tonumber(row[si])
+      if n then row[si] = human(n) end
       if checksum then row[#row + 1] = f.checksum or "" end
       for i = 1, #head do row[i] = tostring(row[i] == nil and "" or row[i]) end
       tab.addrow(t, table.unpack(row, 1, #head))
@@ -149,7 +181,7 @@ function ls.end_listing(output)
   for _, s in ipairs(output.errors) do lines[#lines + 1] = "ERROR: " .. s end
   local structured = { volumes = {}, total = output.total }
   for _, vol in ipairs(output.volumes) do
-    vol_text(vol, lines)
+    vol_text(vol, lines, output.human)
     structured.volumes[#structured.volumes + 1] = {
       volume = vol.name, files = vol.files, info = vol.info, errors = vol.errors,
     }

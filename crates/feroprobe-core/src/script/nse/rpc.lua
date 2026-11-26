@@ -22,6 +22,7 @@ local datafiles = require "datafiles"
 local rpc = {}
 
 local MAX_RECORD = 4 * 1024 * 1024
+local MAX_FRAGMENTS = 1024
 local XID_MARK = 0x4650
 
 ---------------------------------------------------------------------------
@@ -323,7 +324,8 @@ end
 local function pct(used, avail)
   local total = used + avail
   if total <= 0 then return "0%" end
-  return string.format("%d%%", math.ceil(used * 100 / total))
+  -- The ratio first, in floating point, so huge sizes cannot overflow.
+  return string.format("%d%%", math.ceil((used / total) * 100 - 1e-9))
 end
 
 ---
@@ -567,21 +569,29 @@ function Comm:ReceivePacket()
   if self.proto == "udp" then
     return self.socket:receive()
   end
+  -- A record that breaks off (or is too long) leaves the stream in the
+  -- middle of a record, so the connection is closed.
+  local function fail(err)
+    self:Disconnect()
+    return false, err
+  end
   local parts, total = {}, 0
-  while true do
+  for _ = 1, MAX_FRAGMENTS do
     local mark, err = read_exact(self, 4)
-    if not mark then return false, err end
+    if not mark then return fail(err) end
     local n = string.unpack(">I4", mark)
     local len = n & 0x7fffffff
     total = total + len
-    if total > MAX_RECORD then return false, "RPC record too long" end
-    local frag
-    frag, err = read_exact(self, len)
-    if not frag then return false, err end
-    parts[#parts + 1] = frag
-    if n & 0x80000000 ~= 0 then break end
+    if total > MAX_RECORD then return fail("RPC record too long") end
+    if len > 0 then
+      local frag
+      frag, err = read_exact(self, len)
+      if not frag then return fail(err) end
+      parts[#parts + 1] = frag
+    end
+    if n & 0x80000000 ~= 0 then return true, table.concat(parts) end
   end
-  return true, table.concat(parts)
+  return fail("RPC record in too many fragments")
 end
 
 ---
@@ -687,65 +697,73 @@ end
 function Portmap:Dump(comm)
   local ok, reply, pos = call(comm, Portmap.Procedure.DUMP)
   if not ok then return false, reply end
+  local short = "Short DUMP reply"
   local out, count = {}, 0
   while true do
     local follows
     pos, follows = boolean(reply, pos)
+    if follows == nil then return false, short end
     if not follows then break end
     count = count + 1
-    if count > 10000 then break end
+    if count > 10000 then return false, "Too many DUMP entries" end
     local prog, vers, proto, port, addr
     if (comm.version or 2) >= 3 then
       local netid, owner
       pos, prog = Util.unmarshall_uint32(reply, pos)
       pos, vers = Util.unmarshall_uint32(reply, pos)
+      if vers == nil then return false, short end
       pos, netid = vopaque(reply, pos)
+      if netid == nil then return false, short end
       pos, addr = vopaque(reply, pos)
+      if addr == nil then return false, short end
       pos, owner = vopaque(reply, pos)
-      if owner == nil then break end
+      if owner == nil then return false, short end
       proto, port = netid, uaddr_port(addr)
-      -- Entries without a port (the "local" netid's socket path) are left out.
-      if port == nil then prog = nil end
     else
       local prot
       pos, prog = Util.unmarshall_uint32(reply, pos)
       pos, vers = Util.unmarshall_uint32(reply, pos)
       pos, prot = Util.unmarshall_uint32(reply, pos)
       pos, port = Util.unmarshall_uint32(reply, pos)
-      if port == nil then break end
+      if port == nil then return false, short end
       proto = PROTO_NAME[prot] or tostring(prot)
     end
-    if prog == nil then goto continue end
-    out[prog] = out[prog] or {}
-    local e = out[prog][proto]
-    if not e then
-      e = { port = port, version = {}, addr = addr }
-      out[prog][proto] = e
+    -- Entries without a port (the "local" netid's socket path) are left out.
+    if port ~= nil then
+      out[prog] = out[prog] or {}
+      local e = out[prog][proto]
+      if not e then
+        e = { port = port, version = {}, addr = addr, ports = {} }
+        out[prog][proto] = e
+      end
+      -- Each version keeps its own port (they may differ); `port` is the
+      -- first one listed.
+      if e.ports[vers] == nil then
+        e.ports[vers] = port
+        e.version[#e.version + 1] = vers
+        table.sort(e.version)
+      end
     end
-    local seen = false
-    for _, v in ipairs(e.version) do if v == vers then seen = true end end
-    if not seen then e.version[#e.version + 1] = vers end
-    table.sort(e.version)
-    ::continue::
   end
   return true, out
 end
 
 ---
--- Portmap:GetPort(comm, program, protocol, version): true and the port
--- the portmapper gives (0 when the program is not registered), or false
--- and an error.
+-- Portmap:GetPort(comm, program, protocol, version): the port the
+-- portmapper (version 2) gives, 0 when the program is not registered;
+-- nil and an error when the call fails.
 function Portmap:GetPort(comm, program, protocol, version)
+  if (comm.version or 2) ~= 2 then return nil, "GetPort needs portmapper version 2" end
   local prog = Util.ProgNameToNumber(program) or tonumber(program)
-  if not prog then return false, "Unknown RPC program: " .. tostring(program) end
+  if not prog then return nil, "Unknown RPC program: " .. tostring(program) end
   local prot = Portmap.Protocol[protocol]
-  if not prot then return false, "Unsupported protocol: " .. tostring(protocol) end
+  if not prot then return nil, "Unsupported protocol: " .. tostring(protocol) end
   local ok, reply, pos = call(comm, Portmap.Procedure.GETPORT,
     string.pack(">I4I4I4I4", prog, version or 0, prot, 0))
-  if not ok then return false, reply end
+  if not ok then return nil, reply end
   local _, port = Util.unmarshall_uint32(reply, pos)
-  if port == nil then return false, "Short GETPORT reply" end
-  return true, port
+  if port == nil then return nil, "Short GETPORT reply" end
+  return port
 end
 
 ---
@@ -783,21 +801,26 @@ function Mount:new() return setmetatable({}, self) end
 function Mount:Export(comm)
   local ok, reply, pos = call(comm, Mount.Procedure.EXPORT)
   if not ok then return false, reply end
+  local short = "Short EXPORT reply"
   local out = {}
-  while #out < 10000 do
+  while true do
     local follows
     pos, follows = boolean(reply, pos)
+    if follows == nil then return false, short end
     if not follows then break end
+    if #out >= 10000 then return false, "Too many exports" end
     local entry = {}
     pos, entry.name = vopaque(reply, pos)
-    if entry.name == nil then break end
-    while #entry < 10000 do
+    if entry.name == nil then return false, short end
+    while true do
       local g
       pos, g = boolean(reply, pos)
+      if g == nil then return false, short end
       if not g then break end
+      if #entry >= 10000 then return false, "Too many export groups" end
       local name
       pos, name = vopaque(reply, pos)
-      if name == nil then break end
+      if name == nil then return false, short end
       entry[#entry + 1] = name
     end
     out[#out + 1] = entry
@@ -918,9 +941,11 @@ function NFS:LookUp(comm, dir_handle, name)
   local out = {}
   if comm.version == 3 then
     pos, out.fhandle = vopaque(reply, pos)
+    if out.fhandle == nil then return false, "Short LOOKUP reply" end
     pos, out.attributes = post_op_attr(reply, pos)
     pos, out.dir_attributes = post_op_attr(reply, pos)
   else
+    if #reply < pos + 31 then return false, "Short LOOKUP reply" end
     out.fhandle = reply:sub(pos, pos + 31)
     pos, out.attributes = Util.unmarshall_nfsattr(reply, pos + 32, 2)
   end
@@ -941,44 +966,55 @@ function NFS:Access(comm, file_handle, access)
 end
 
 -- Directory entries of one READDIR or READDIRPLUS reply from pos:
--- position, entries, the last cookie and whether the list ended.
+-- position, entries, the last cookie and whether the list ended; or
+-- nil and an error when the reply is cut short.
 local function dir_entries(comm, data, pos, plus, limit)
+  local short = "Short directory reply"
   local entries, cookie = {}, nil
   while #entries < limit do
     local follows
     pos, follows = boolean(data, pos)
-    if follows == nil then return pos, entries, cookie, true end
+    if follows == nil then return nil, short end
     if not follows then break end
     local e = {}
     if comm.version == 3 then
       pos, e.file_id = Util.unmarshall_uint64(data, pos)
       pos, e.name = vopaque(data, pos)
       pos, e.cookie = Util.unmarshall_uint64(data, pos)
-      if e.cookie == nil then return pos, entries, cookie, true end
+      if e.name == nil or e.cookie == nil then return nil, short end
       e.cookie_raw = data:sub(pos - 8, pos - 1)
       if plus then
+        local _, flag = boolean(data, pos)
+        if flag == nil then return nil, short end
         pos, e.attributes = post_op_attr(data, pos)
+        if flag and e.attributes == nil then return nil, short end
         -- An entry the server sends no attributes for (Linux does so for
         -- "..") gets an empty table, so nfs-ls lists it with "?", as nmap.
         e.attributes = e.attributes or {}
         local fh
         pos, fh = boolean(data, pos)
-        if fh then pos, e.fhandle = vopaque(data, pos) end
+        if fh == nil then return nil, short end
+        if fh then
+          pos, e.fhandle = vopaque(data, pos)
+          if e.fhandle == nil then return nil, short end
+        end
       end
     else
       pos, e.file_id = Util.unmarshall_uint32(data, pos)
       pos, e.name = vopaque(data, pos)
       pos, e.cookie = Util.unmarshall_uint32(data, pos)
-      if e.cookie == nil then return pos, entries, cookie, true end
+      if e.name == nil or e.cookie == nil then return nil, short end
       e.cookie_raw = data:sub(pos - 4, pos - 1)
     end
     e.fileid = e.file_id
     entries[#entries + 1] = e
     cookie = e.cookie_raw
   end
+  if #entries >= limit then return pos, entries, cookie, false, true end
   local eof
   pos, eof = boolean(data, pos)
-  return pos, entries, cookie, eof ~= false
+  if eof == nil then return nil, short end
+  return pos, entries, cookie, eof
 end
 
 ---
@@ -992,9 +1028,10 @@ function NFS:ReadDirDecode(comm, data, pos)
     out.cookieverf = data:sub(pos, pos + 7)
     pos = pos + 8
   end
-  local cookie
-  pos, out.entries, cookie, out.eof = dir_entries(comm, data, pos, false, 100000)
-  out.cookie = cookie
+  local cookie, entries
+  pos, entries, cookie, out.eof = dir_entries(comm, data, pos, false, 100000)
+  if not pos then return nil, entries end
+  out.entries, out.cookie = entries, cookie
   return pos, out
 end
 
@@ -1018,10 +1055,7 @@ local function read_dir(self, comm, file_handle, plus)
       args = fh_arg(comm, file_handle) .. (cookie or "\0\0\0\0") .. Util.marshall_uint32(count)
     end
     local ok, reply, pos = nfs_call(comm, name, args)
-    if not ok then
-      if #result.entries > 0 then break end
-      return false, reply
-    end
+    if not ok then return false, reply end
     if comm.version == 3 then
       local attrs
       pos, attrs = post_op_attr(reply, pos)
@@ -1031,10 +1065,20 @@ local function read_dir(self, comm, file_handle, plus)
     end
     local entries, last, eof
     pos, entries, last, eof = dir_entries(comm, reply, pos, plus, MAX_ENTRIES - #result.entries)
+    if not pos then return false, entries end
     for _, e in ipairs(entries) do result.entries[#result.entries + 1] = e end
-    if eof or not last or #result.entries >= MAX_ENTRIES then break end
+    if eof then
+      result.eof = true
+      return true, result
+    end
+    -- Not at the end, but no cookie to go on from, or the entry cap.
+    if not last or #result.entries >= MAX_ENTRIES then break end
     cookie = last
   end
+  -- Stopped on the round or entry cap, or without a cookie: the listing
+  -- holds what was read and says it is incomplete.
+  result.eof = false
+  result.incomplete = true
   return true, result
 end
 
@@ -1145,7 +1189,8 @@ end
 -- Portmap:Dump; rpcbind version 3, else 2), or false and an error. One answer per host and
 -- protocol is kept for the run.
 function Helper.RpcInfo(host, port)
-  local key = "rpcinfo_" .. tostring(type(host) == "table" and host.ip or host) .. "_" .. tostring(port and port.protocol)
+  local key = "rpcinfo_" .. tostring(type(host) == "table" and host.ip or host) .. "_"
+    .. tostring(port and port.number) .. "_" .. tostring(port and port.protocol)
   local cached = nmap.registry[key]
   if type(cached) == "table" then return true, cached end
   -- rpcbind version 3 first, which lists IPv6 (tcp6, udp6) as well, as
@@ -1177,47 +1222,83 @@ function Helper.GetPortForProgram(host, port, program, protocol)
   return true, e
 end
 
+-- Whether host is an IPv6 address.
+local function is_ipv6(host)
+  local ip = type(host) == "table" and host.ip or host
+  return type(ip) == "string" and ip:find(":", 1, true) ~= nil
+end
+
+-- The program's usable registrations, best first: { port = { number,
+-- protocol }, version } for each protocol in protocols() order, with the
+-- highest version from min_version to max_version (the program's range
+-- and the <program>.version argument also apply); or nil and an error.
+local function candidates(host, port, program, max_version, min_version)
+  local ok, info = Helper.RpcInfo(host, port)
+  if not ok then return nil, info end
+  local num = Util.ProgNameToNumber(program)
+  local reg = num and info[num]
+  if not reg then return nil, string.format("No %s registered with the portmapper", tostring(program)) end
+  local limits = rpc.RPC_version[program]
+  local function usable(v)
+    return (not limits or (v >= limits.min and v <= limits.max))
+      and (not max_version or v <= max_version)
+      and (not min_version or v >= min_version)
+  end
+  local wanted = tonumber(stdnse.get_script_args((program == "mountd" and "mount" or program) .. ".version"))
+  if wanted and not usable(wanted) then
+    return nil, string.format("Version %d of %s is not supported here", wanted, tostring(program))
+  end
+  local out = {}
+  for _, proto in ipairs(protocols()) do
+    -- An IPv6 host is reached over the tcp6/udp6 registration where the
+    -- portmapper lists one (rpcbind version 3), else the plain one.
+    local e = (is_ipv6(host) and reg[proto .. "6"]) or reg[proto]
+    if e then
+      local best
+      for _, v in ipairs(e.version) do
+        if wanted then
+          if v == wanted then best = v end
+        elseif usable(v) and (not best or v > best) then
+          best = v
+        end
+      end
+      if best then
+        local number = (e.ports and e.ports[best]) or e.port
+        out[#out + 1] = { port = { number = number, protocol = proto }, version = best }
+      end
+    end
+  end
+  if #out == 0 then
+    if wanted then return nil, string.format("Version %d of %s is not registered", wanted, tostring(program)) end
+    return nil, string.format("No supported version of %s registered", tostring(program))
+  end
+  return out
+end
+
 ---
 -- Helper.GetProgramInfo(host, port, program, max_version): true and
 -- { port = { number, protocol }, version } for the program's highest
 -- version up to max_version (or the <program>.version argument), on the
 -- first protocol it is registered for; or false and an error.
 function Helper.GetProgramInfo(host, port, program, max_version)
-  local ok, info = Helper.RpcInfo(host, port)
-  if not ok then return false, info end
-  local num = Util.ProgNameToNumber(program)
-  local reg = num and info[num]
-  if not reg then return false, string.format("No %s registered with the portmapper", tostring(program)) end
-  local wanted = tonumber(stdnse.get_script_args((program == "mountd" and "mount" or program) .. ".version"))
-  local limits = rpc.RPC_version[program]
-  for _, proto in ipairs(protocols()) do
-    local e = reg[proto]
-    if e then
-      local best
-      for _, v in ipairs(e.version) do
-        local in_range = (not limits or (v >= limits.min and v <= limits.max))
-          and (not max_version or v <= max_version)
-        if wanted then
-          if v == wanted then best = v end
-        elseif in_range and (not best or v > best) then
-          best = v
-        end
-      end
-      if best then
-        return true, { port = { number = e.port, protocol = proto }, version = best }
-      end
-    end
-  end
-  return false, string.format("No supported version of %s registered", tostring(program))
+  local list, err = candidates(host, port, program, max_version)
+  if not list then return false, err end
+  return true, list[1]
 end
 
-local function open(host, port, program, max_version)
-  local ok, info = Helper.GetProgramInfo(host, port, program, max_version)
-  if not ok then return nil, info end
-  local comm = Comm:new(program, info.version)
-  local status, err = comm:Connect(host, info.port)
-  if not status then return nil, err end
-  return comm
+-- A connection to the program: each registration in turn until one
+-- connects; or nil and the last error.
+local function open(host, port, program, max_version, min_version)
+  local list, err = candidates(host, port, program, max_version, min_version)
+  if not list then return nil, err end
+  for _, info in ipairs(list) do
+    local comm = Comm:new(program, info.version)
+    local status
+    status, err = comm:Connect(host, info.port)
+    if status then return comm end
+    stdnse.debug1("%s over %s: %s", program, info.port.protocol, tostring(err))
+  end
+  return nil, err
 end
 
 ---
@@ -1234,8 +1315,8 @@ end
 ---
 -- Helper.MountPath(host, port, path): the mountd connection and the
 -- export's file handle, or nil and an error. UnmountPath closes it.
-function Helper.MountPath(host, port, path, max_version)
-  local comm, err = open(host, port, "mountd", max_version)
+function Helper.MountPath(host, port, path, max_version, min_version)
+  local comm, err = open(host, port, "mountd", max_version, min_version)
   if not comm then return nil, err end
   local ok, fh = Mount:new():Mount(comm, path)
   if not ok then
@@ -1272,19 +1353,38 @@ function Helper.NfsClose(nfs_comm)
 end
 
 -- Mounts path with the mount version that goes with the NFS version
--- (3 with 3, 1 or 2 with 2), runs fn(nfs, nfs_comm, fhandle), unmounts.
+-- (NFS 3 with mount 3, else NFS 2 with mount 1 or 2), runs fn(nfs,
+-- nfs_comm, fhandle), unmounts. A server without that pair for version
+-- 3 is tried with version 2; a MOUNT or NFS error is returned as it is.
 local function with_export(host, port, path, fn)
-  local nfs_comm, err = Helper.NfsOpen(host, port)
-  if not nfs_comm then return false, err end
-  local mnt_comm, fh = Helper.MountPath(host, port, path, nfs_comm.version == 3 and 3 or 2)
-  if not mnt_comm then
-    Helper.NfsClose(nfs_comm)
-    return false, fh
+  local last_err
+  for _, plan in ipairs({ { nfs = 3, min = 3, max = 3 }, { nfs = 2, min = 1, max = 2 } }) do
+    local nfs_comm, err = open(host, port, "nfs", plan.nfs, plan.nfs)
+    local mnt_comm
+    if nfs_comm then
+      mnt_comm, err = open(host, port, "mountd", plan.max, plan.min)
+      if not mnt_comm then Helper.NfsClose(nfs_comm) end
+    end
+    if mnt_comm then
+      local ok, fh = Mount:new():Mount(mnt_comm, path)
+      if not ok then
+        mnt_comm:Disconnect()
+        Helper.NfsClose(nfs_comm)
+        return false, fh
+      end
+      local status, result = fn(NFS:new(), nfs_comm, fh)
+      local unmounted, uerr = Helper.UnmountPath(mnt_comm, path)
+      Helper.NfsClose(nfs_comm)
+      if not unmounted then
+        -- The NFS answer (or its error) is what the script asked for;
+        -- the UNMOUNT failure is only reported.
+        stdnse.debug1("UNMOUNT %s failed: %s", tostring(path), tostring(uerr))
+      end
+      return status, result
+    end
+    last_err = err
   end
-  local ok, result = fn(NFS:new(), nfs_comm, fh)
-  Helper.UnmountPath(mnt_comm, path)
-  Helper.NfsClose(nfs_comm)
-  return ok, result
+  return false, last_err
 end
 
 ---

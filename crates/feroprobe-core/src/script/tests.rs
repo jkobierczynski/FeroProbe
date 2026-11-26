@@ -7779,6 +7779,34 @@ end
     );
 }
 
+#[tokio::test]
+async fn nse_ls_checksum_totals_and_human_sizes() {
+    let src = r#"
+local ls = require "ls"
+description = "test"
+categories = { "safe" }
+prerule = function() return true end
+action = function()
+  local out = ls.new_listing()
+  ls.new_vol(out, "/v", false)
+  ls.add_file(out, { 2048, "t1", "a" })
+  ls.add_file(out, { "1.0K", "t2", "b", "c0ffee" })
+  ls.end_vol(out)
+  local structured, text = ls.end_listing(out)
+  return tostring(structured.total.bytes) .. "|" .. structured.volumes[1].files[2].checksum .. "|" .. text
+end
+"#;
+    let args = args::parse("ls.human").unwrap();
+    let scan = ScriptScan::new(vec![script("lst", src)], args, None).unwrap();
+    let r = scan.pre_scan().await;
+    let out = &r[0].output;
+    // 2048 + 1.0K, the second row's positional checksum gives the
+    // column, and ls.human shows 2048 as 2.0K.
+    assert!(out.starts_with("3072|c0ffee|"), "{out}");
+    assert!(out.contains("CHECKSUM"), "{out}");
+    assert!(out.contains("2.0K") && !out.contains("2048"), "{out}");
+}
+
 /// A stand-in portmapper and mountd on one TCP port: DUMP names mountd
 /// v3 on this port, EXPORT lists two exports. Keeps each call's XID and
 /// program.
@@ -7813,7 +7841,7 @@ async fn rpc_server() -> (u16, Seen) {
                 };
                 keep.lock()
                     .unwrap()
-                    .push(format!("{xid:08x} {prog} {proc_} {flavor} {uid}"));
+                    .push(format!("{xid:08x} {prog} {vers} {proc_} {flavor} {uid}"));
                 let mut r = Vec::new();
                 for w in [xid, 1, 0, 0, 0, 0] {
                     r.extend(w.to_be_bytes());
@@ -7901,6 +7929,8 @@ end
     assert_eq!(seen.len(), 4);
     assert!(seen.iter().all(|s| s.starts_with("4650")));
     // The portmapper gets AUTH_NULL; mountd and NFS AUTH_UNIX as nobody.
-    assert!(seen[0].ends_with(" 100000 4 0 0") && seen[1].ends_with(" 100000 4 0 0"));
-    assert!(seen[2].ends_with(" 100005 5 1 65534") && seen[3].ends_with(" 1 65534"));
+    assert!(seen[0].ends_with(" 100000 3 4 0 0"), "{seen:?}");
+    assert!(seen[1].ends_with(" 100000 2 4 0 0"), "{seen:?}");
+    assert!(seen[2].ends_with(" 100005 3 5 1 65534"), "{seen:?}");
+    assert!(seen[3].ends_with(" 100003 3 1 1 65534"), "{seen:?}");
 }
