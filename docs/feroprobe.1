@@ -4232,6 +4232,28 @@ show), \f[V]parse_mac_prefixes\f[R] the OUI list FeroProbe reports
 vendors from, and \f[V]parse_rpc\f[R] and other files an error
 T}
 T{
+\f[V]smb2\f[R]
+T}@T{
+\f[V]negotiate_v2\f[R] (a NEGOTIATE carrying FeroProbe\[aq]s client
+GUID; it fills the state from \f[V]smb.start\f[R] with the dialect,
+security mode, capabilities, server GUID and the server\[aq]s clock and
+start time), \f[V]dialects\f[R], \f[V]dialect_name\f[R] (nmap\[aq]s
+\f[V]3:1:1\f[R] form); \f[V]smb2_encode_header_sync\f[R],
+\f[V]smb2_send\f[R] and \f[V]smb2_read\f[R] raise an error, as FeroProbe
+does not keep an SMB connection open between calls
+T}
+T{
+\f[V]netbios\f[R]
+T}@T{
+\f[V]name_encode\f[R], \f[V]name_decode\f[R], \f[V]flags_to_string\f[R],
+\f[V]do_nbstat\f[R] (the same NODE STATUS request as the
+\f[V]nbstat\f[R] script, asked once per host),
+\f[V]get_server_name\f[R], \f[V]get_workstation_name\f[R],
+\f[V]get_user_name\f[R], \f[V]get_names\f[R], and \f[V]nbquery\f[R] (a
+NAME QUERY with transaction ID \f[V]FP\f[R], IDS rule 9100035); both go
+to UDP 137, only when it was scanned
+T}
+T{
 \f[V]target\f[R]
 T}@T{
 \f[V]ALLOW_NEW_TARGETS\f[R], \f[V]add\f[R]: as in nmap, a script adds
@@ -4253,7 +4275,7 @@ stops the script from loading with an error that names it; a function
 FeroProbe does not have in a module it offers (\f[V]nmap.new_dnet\f[R],
 \f[V]openssl.encrypt\f[R], ...)
 raises an error naming it when called.
-Of nmap 7.94\[aq]s 606 scripts, 355 load as they are.
+Of nmap 7.94\[aq]s 606 scripts, 362 load as they are.
 See Brute-force scripts for how a \f[V]brute\f[R] script must be chosen
 before it will run.
 .PP

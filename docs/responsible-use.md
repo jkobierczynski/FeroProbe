@@ -242,7 +242,9 @@ the run's DNS servers (`--dns-servers`, else the system's). The `mysql`
 module's logins name the client `FeroProbe` in their connection
 attributes (`_client_name`, `program_name`), which a MySQL 5.6+ or
 MariaDB server keeps in `performance_schema.session_connect_attrs`;
-rule 9100034 matches them.
+rule 9100034 matches them. The `netbios` module's NODE STATUS is
+`nbstat`'s (rule 9100013) and its NAME QUERY carries transaction ID
+`FP` as well (rule 9100035); both go only to a scanned UDP 137.
 
 ### Detection rules for defenders
 

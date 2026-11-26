@@ -7690,3 +7690,58 @@ end"#;
         .collect();
     assert_eq!(out, ["80 10 22=3,80=10", "22 3 22=3,80=10"]);
 }
+
+#[tokio::test]
+async fn nse_netbios_names_and_flags() {
+    let src = r#"
+local netbios = require "netbios"
+description = "test"
+categories = { "safe" }
+prerule = function() return true end
+action = function()
+  local enc = netbios.name_encode("fero", "lab.local")
+  local name, scope = netbios.name_decode(enc)
+  local star = netbios.name_encode("*")
+  return table.concat({ enc:sub(1, 5), #enc, name:gsub(" +$", ""), scope,
+    star:sub(2, 5), netbios.flags_to_string(0x0400), netbios.flags_to_string(0x8600) }, " ")
+end
+"#;
+    let scan = ScriptScan::new(vec![script("nbt", src)], ArgTable::default(), None).unwrap();
+    let r = scan.pre_scan().await;
+    assert_eq!(
+        r[0].output,
+        " EGEF 43 FERO lab.local CKAA <unique><active> <group><active><permanent>"
+    );
+}
+
+#[tokio::test]
+async fn nse_smb2_negotiates_over_fero_smb() {
+    let now = 1_767_323_045;
+    let (port, seen) = smb_server(1, now, false).await;
+    let src = r#"
+local smb = require "smb"
+local smb2 = require "smb2"
+description = "test"
+categories = { "safe" }
+hostrule = function() return true end
+action = function(host)
+  local _, state = smb.start(host)
+  local ok, dialect = smb2.negotiate_v2(state)
+  local bad = smb2.negotiate_v2({})
+  local raw, err = pcall(smb2.smb2_send)
+  return table.concat({ tostring(ok), smb2.dialect_name(dialect), tostring(smb2.dialect_name(0x9999)),
+    state.security_mode, state.date, state.start_time, tostring(state.start_date), #smb2.dialects(),
+    tostring(bad), tostring(raw), err:match("smb2%.smb2_send is not available") }, " ")
+end
+"#;
+    let arg = format!("smbport={port}");
+    let scan =
+        ScriptScan::new(vec![script("smb2t", src)], args::parse(&arg).unwrap(), None).unwrap();
+    let mut hosts = vec![host_with_services(&[(port, "microsoft-ds")])];
+    scan.scan_hosts(&mut hosts).await;
+    assert_eq!(
+        hosts[0].scripts[0].output,
+        "true 3:1:1 nil 1 2026-01-02T03:04:05 0 N/A 5 false false smb2.smb2_send is not available"
+    );
+    assert!(seen.lock().unwrap()[0].contains("FeroProbeSMBScan"));
+}
