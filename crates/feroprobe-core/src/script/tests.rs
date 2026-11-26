@@ -8536,11 +8536,20 @@ action = function(host, port)
   local ok4, e4 = h:request("GET", "/", nil, nil, { auth = { username = "u", password = "p" } })
   local ok5, r5 = h:request("GET", "/", nil, nil, { auth = {} })
   local ok6, r6 = h:put("/put", nil, nil, nil, string.rep("a", 9000))
+  local ok7 = h:get("/", nil, { remote_user = "admin" })
+  local ok8, e8 = h:get("/", { ["X-A"] = string.rep("a", 40000), ["X-B"] = string.rep("b", 40000) })
+  local ok9, e9 = h:get("/", nil, { ssl_key_size = "big" })
   h:close()
+  local h2 = ajp.Helper:new(host, port, { auth = { username = "u", password = "p" } })
+  assert(h2:connect())
+  local ok10 = h2:get("/")
+  local ok11 = h2:get("/kept", nil, nil, { auth = {} })
+  h2:close()
   return table.concat({ tostring(ok), r.status_line, r.headers["content-type"],
     table.concat(r.rawheaders, ";"), r.body, tostring(ok2), tostring(r2.status),
     r2.headers["www-authenticate"], tostring(r2.body), tostring(ok3), e3, tostring(ok4),
-    tostring(ok5), tostring(ok6), r6.body }, "|")
+    tostring(ok5), tostring(ok6), r6.body, tostring(ok7), tostring(ok8), e8, tostring(ok9), e9,
+    tostring(ok10), tostring(ok11) }, "|")
 end
 "#;
     let scan = ScriptScan::new(vec![script("ajpt", src)], ArgTable::default(), None).unwrap();
@@ -8550,7 +8559,7 @@ end
         hosts[0].ports[0].scripts[0].output,
         "true|AJP/1.3 200 OK|text/plain|Content-Type: text/plain;X-Test: yes|hello|true|401|\
          Basic realm=\"Lab\"|nil|false|AJP logins are not supported by FeroProbe|false|true|\
-         true|hello"
+         true|hello|false|false|AJP request too large|false|Invalid AJP ssl_key_size|false|true"
     );
     // The refused logins sent nothing; the query went as an attribute; the
     // 9,000-byte body came in two chunks.
@@ -8561,6 +8570,7 @@ end
             "method 2 /secret ua=true query=false",
             "method 2 / ua=true query=false",
             "method 5 /put ua=true query=false body=9000",
+            "method 2 /kept ua=true query=false",
         ]
     );
 }

@@ -4339,9 +4339,10 @@ A response has \f[V]status\f[R], \f[V]status_line\f[R],
 \f[V]body\f[R].
 Requests carry FeroProbe\[aq]s User-Agent unless a script sets its own.
 No logins: a request with a user name or password, an Authorization
-header or the \f[V]secret\f[R] attribute fails with \[dq]AJP logins are
-not supported by FeroProbe\[dq] before anything is sent, so ajp-brute
-finds nothing.
+header or the \f[V]secret\f[R] or \f[V]remote_user\f[R] attribute (also
+as \f[V]Helper:new\f[R] defaults) fails with \[dq]AJP logins are not
+supported by FeroProbe\[dq] before anything is sent, so ajp-brute finds
+nothing.
 Unlike nmap 7.94, which keeps only the last part of a body sent in
 several parts, the whole body is returned
 T}

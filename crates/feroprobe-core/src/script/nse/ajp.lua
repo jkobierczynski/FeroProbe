@@ -5,9 +5,9 @@
 --
 -- Every request carries FeroProbe's User-Agent unless the script gives
 -- its own (IDS rule 9100041). No logins: a request with a user name or
--- password, an Authorization header or the `secret` attribute fails
--- before anything is sent, as logins stay unbuilt in the compatibility
--- layer (maintainer's choice for ldap, 2026-11-26).
+-- password, an Authorization header or the `secret` or `remote_user`
+-- attribute fails before anything is sent, as logins stay unbuilt in the
+-- compatibility layer (maintainer's choice for ldap, 2026-11-26).
 local fero = ...
 local nmap = require "nmap"
 local stdnse = require "stdnse"
@@ -51,6 +51,7 @@ local ATTRIBUTES = {
 local function str(s)
   if s == nil then return "\xff\xff" end
   s = tostring(s)
+  if #s >= 0xFFFF then error("AJP request too large", 0) end
   return string.pack(">s2", s) .. "\0"
 end
 
@@ -159,14 +160,20 @@ local function parse_headers(p)
   return resp
 end
 
-local function has_login(headers, attributes, options)
-  local auth = type(options) == "table" and options.auth
+-- A request option, else the helper's own (Helper:new's opt).
+local function option(self, options, name)
+  if type(options) == "table" and options[name] ~= nil then return options[name] end
+  return self.opt[name]
+end
+
+local function has_login(auth, headers, attributes)
   if type(auth) == "table" and (auth.username ~= nil or auth.password ~= nil) then return true end
   for k in pairs(headers or {}) do
     if tostring(k):lower() == "authorization" then return true end
   end
   for k in pairs(attributes or {}) do
-    if tostring(k):lower() == "secret" then return true end
+    local name = tostring(k):lower()
+    if name == "secret" or name == "remote_user" then return true end
   end
   return false
 end
@@ -186,9 +193,9 @@ function ajp.Helper:request(method, url, headers, attributes, options, body)
   method = tostring(method or "GET"):upper()
   local code = METHODS[method]
   if not code then return false, ("Unsupported AJP method: %s"):format(method) end
-  if has_login(headers, attributes, options) then return false, NOT_SUPPORTED end
+  if has_login(option(self, options, "auth"), headers, attributes) then return false, NOT_SUPPORTED end
   if not self.socket then return false, "Not connected" end
-  if type(options) == "table" and options.timeout then self.socket:set_timeout(options.timeout) end
+  self.socket:set_timeout(option(self, options, "timeout") or 5000)
   url = tostring(url or "/")
   local path, query = url:match("^([^?]*)%?(.*)$")
   path = path or url
@@ -211,28 +218,37 @@ function ajp.Helper:request(method, url, headers, attributes, options, body)
   end
   for _, k in ipairs(sorted_keys(given)) do list[#list + 1] = { given[k][1], given[k][2] } end
 
-  local parts = {
-    "\x02", string.char(code), str("HTTP/1.1"), str(path), str(self.host.ip), str(nil),
-    str(self.host.ip), string.pack(">I2", self.port.number), "\0", string.pack(">I2", #list),
-  }
-  for _, h in ipairs(list) do
-    local hc = REQUEST_HEADERS[h[1]:lower()]
-    parts[#parts + 1] = (hc and string.pack(">I2", hc) or str(h[1])) .. str(h[2])
-  end
-  local attrs = {}
-  for k, v in pairs(attributes or {}) do attrs[tostring(k)] = tostring(v) end
-  if query and not attrs.query_string then attrs.query_string = query end
-  for _, k in ipairs(sorted_keys(attrs)) do
-    local ac = ATTRIBUTES[k]
-    if ac then
-      parts[#parts + 1] = string.char(ac) .. str(attrs[k])
-    else
-      parts[#parts + 1] = "\x0a" .. str(k) .. str(attrs[k])
+  local function build()
+    local parts = {
+      "\x02", string.char(code), str("HTTP/1.1"), str(path), str(self.host.ip), str(nil),
+      str(self.host.ip), string.pack(">I2", self.port.number), "\0", string.pack(">I2", #list),
+    }
+    for _, h in ipairs(list) do
+      local hc = REQUEST_HEADERS[h[1]:lower()]
+      parts[#parts + 1] = (hc and string.pack(">I2", hc) or str(h[1])) .. str(h[2])
     end
+    local attrs = {}
+    for k, v in pairs(attributes or {}) do attrs[tostring(k)] = tostring(v) end
+    if query and not attrs.query_string then attrs.query_string = query end
+    for _, k in ipairs(sorted_keys(attrs)) do
+      local ac = ATTRIBUTES[k]
+      if ac == 0x0B then
+        local n = math.tointeger(tonumber(attrs[k]))
+        if not n or n < 0 or n > 0xFFFF then error("Invalid AJP ssl_key_size", 0) end
+        parts[#parts + 1] = "\x0b" .. string.pack(">I2", n)
+      elseif ac then
+        parts[#parts + 1] = string.char(ac) .. str(attrs[k])
+      else
+        parts[#parts + 1] = "\x0a" .. str(k) .. str(attrs[k])
+      end
+    end
+    parts[#parts + 1] = "\xff"
+    local payload = table.concat(parts)
+    if #payload > 0xFFFF - 4 then error("AJP request too large", 0) end
+    return to_container(payload)
   end
-  parts[#parts + 1] = "\xff"
-  local packet = to_container(table.concat(parts))
-  if #packet > 0xFFFF then return false, "AJP request too large" end
+  local built, packet = pcall(build)
+  if not built then return false, tostring(packet) end
 
   local sent = 0
   local function next_chunk(want)
