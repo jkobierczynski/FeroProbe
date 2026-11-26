@@ -91,6 +91,7 @@ const NSE_MODULES: &[(&str, &str)] = &[
     ("brute", include_str!("nse/brute.lua")),
     ("comm", include_str!("nse/comm.lua")),
     ("creds", include_str!("nse/creds.lua")),
+    ("datafiles", include_str!("nse/datafiles.lua")),
     ("datetime", include_str!("nse/datetime.lua")),
     ("dns", include_str!("nse/dns.lua")),
     ("formulas", include_str!("nse/formulas.lua")),
@@ -711,6 +712,31 @@ pub(crate) fn install_library(
             Ok(crate::oui::lookup(crate::arp::MacAddr(b)).map(str::to_string))
         })?,
     )?;
+    // fero.__service_names(proto): FeroProbe's own port-to-service names
+    // ("tcp", "udp", "sctp"; "ip" for protocol numbers), the ones scan
+    // reports show; the NSE `datafiles` module's fallback when no
+    // nmap-services or nmap-protocols file is installed.
+    fero.raw_set(
+        "__service_names",
+        lua.create_function(|lua, proto: String| {
+            use crate::model::Protocol;
+            let t = lua.create_table()?;
+            let (p, last) = match proto.as_str() {
+                "tcp" => (Protocol::Tcp, u16::MAX),
+                "udp" => (Protocol::Udp, u16::MAX),
+                "sctp" => (Protocol::Sctp, u16::MAX),
+                "ip" => (Protocol::Ip, 255),
+                _ => return Ok(t),
+            };
+            for port in 0..=last {
+                let name = crate::ports::service_name(p, port);
+                if name != "unknown" {
+                    t.raw_set(port, name)?;
+                }
+            }
+            Ok(t)
+        })?,
+    )?;
     // fero.clock_ms(): milliseconds on a monotonic clock, for deadlines
     // finer than os.time's whole seconds.
     let start = std::time::Instant::now();
@@ -851,6 +877,9 @@ fn port_table(lua: &Lua, p: &PortResult) -> mlua::Result<Table> {
                 }
             }
             v.raw_set("service_tunnel", s.tunnel.unwrap_or("none"))?;
+            // nmap's scale: 10 for a name version detection found, 3 for
+            // one from the port-number table.
+            v.raw_set("name_confidence", 10)?;
             let cpe = lua.create_table()?;
             for (i, c) in s.cpe.iter().enumerate() {
                 cpe.raw_set(i + 1, c.as_str())?;
@@ -862,6 +891,7 @@ fn port_table(lua: &Lua, p: &PortResult) -> mlua::Result<Table> {
             t.raw_set("service", name)?;
             v.raw_set("name", name)?;
             v.raw_set("service_tunnel", "none")?;
+            v.raw_set("name_confidence", 3)?;
         }
     }
     t.raw_set("version", v)?;
@@ -873,8 +903,34 @@ fn port_table(lua: &Lua, p: &PortResult) -> mlua::Result<Table> {
 /// may be open, else `nil`. Hostrule scripts use it to find the service
 /// they need, as nmap's `nmap.get_port_state`; only the ports a portrule
 /// would be asked about are known, so a closed or filtered port is `nil`.
+///
+/// `fero.get_ports(host, port, proto, state)`: the port after `port` (the
+/// first with `nil`) of protocol `proto` in state `state` (any state when
+/// `nil`), in port order, as nmap's `nmap.get_ports`; again only the ports
+/// that may be open are known.
 fn install_port_state(lua: &Lua, h: &HostResult) -> mlua::Result<()> {
     let ports: Vec<PortResult> = h.ports.iter().filter(|p| rule_port(p)).cloned().collect();
+    let mut sorted = ports.clone();
+    sorted.sort_by_key(|p| p.port);
+    let next = lua.create_function(
+        move |lua, (_host, port, proto, state): (Value, Option<Table>, String, Option<String>)| {
+            let after: i64 = match &port {
+                Some(t) => t.get::<Option<i64>>("number")?.unwrap_or(-1),
+                None => -1,
+            };
+            match sorted.iter().find(|p| {
+                i64::from(p.port) > after
+                    && p.protocol.to_string() == proto
+                    && state.as_deref().is_none_or(|s| p.state.to_string() == s)
+            }) {
+                Some(p) => Ok(Value::Table(port_table(lua, p)?)),
+                None => Ok(Value::Nil),
+            }
+        },
+    )?;
+    lua.globals()
+        .get::<Table>("fero")?
+        .raw_set("get_ports", next)?;
     let f = lua.create_function(move |lua, (_host, port): (Value, Table)| {
         let number: i64 = port.get("number")?;
         let proto: Option<String> = port.get("protocol")?;
@@ -1293,6 +1349,30 @@ impl ScriptScan {
         crate::debug::debug(2, || format!("Starting {what}"));
         let run = async {
             let lua = self.state(script, on, &budget)?;
+            // nmap runs an NSE script's rule and action in one instance,
+            // so what the rule leaves in the script's own variables (a
+            // table it read, say) is there for the action: run the rule in
+            // the action's state first.
+            let per_target = matches!(on, Against::Host(_) | Against::Port(..));
+            if per_target
+                && lua.app_data_ref::<NseScript>().is_some()
+                && !script.forced
+                && let Ok(rule) = lua.globals().raw_get::<Function>(on.kind())
+            {
+                let r = match on {
+                    Against::Host(h) => host_table(&lua, h).and_then(|t| rule.call::<Value>(t)),
+                    Against::Port(h, p) => host_table(&lua, h).and_then(|ht| {
+                        port_table(&lua, p).and_then(|pt| rule.call::<Value>((ht, pt)))
+                    }),
+                    Against::Pre | Against::Post => Ok(Value::Nil),
+                };
+                if let Err(e) = r {
+                    crate::debug::debug(2, || {
+                        format!("{what}: {} again before the action failed: {e}", on.kind())
+                    });
+                }
+                nse_flush(&lua, &script.id);
+            }
             let action: Function = lua.globals().raw_get("action").map_err(|e| e.to_string())?;
             let args = match on {
                 Against::Pre | Against::Post => MultiValue::new(),

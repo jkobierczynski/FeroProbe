@@ -225,6 +225,14 @@ nmap.get_port_state = function(host, port)
   return fero.get_port_state(host, port)
 end
 
+-- nmap.get_ports(host, port, proto, state): the next scanned port after
+-- port (nil for the first) of that protocol and state; only ports that
+-- may be open are known, as with nmap.get_port_state.
+nmap.get_ports = function(host, port, proto, state)
+  if fero.get_ports == nil then return nil end
+  return fero.get_ports(host, port, proto or "tcp", state)
+end
+
 -- Scripts cannot change port results in FeroProbe.
 nmap.set_port_state = function(_, port, state)
   fero.debug(2, string.format("nmap.set_port_state(%s, %s) ignored: scripts do not change port results",
@@ -274,7 +282,7 @@ end
 nmap.get_payload_length = function() return 0 end
 
 for _, name in ipairs({ "new_dnet", "pcap_open", "get_interface_info", "list_interfaces",
-  "get_interface", "get_ports", "get_ttl" }) do
+  "get_interface", "get_ttl" }) do
   nmap[name] = unsupported(name)
 end
 
