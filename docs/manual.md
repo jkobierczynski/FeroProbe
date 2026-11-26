@@ -1737,6 +1737,7 @@ the scan probed there.
 | `mysql` | `receiveGreeting`, `loginRequest` (mysql_native_password; a server that asks for another plugin, such as MySQL 8's default caching_sha2_password, refuses the login), `sqlQuery`, `formatResultset`, `decodeQueryResponse`, `decodeField`, `decodeFieldPackets`, `decodeDataPackets`, `Capabilities`, `ExtCapabilities` (under the names nmap's mysql-info prints); the login names FeroProbe in its connection attributes |
 | `slaxml` | `parser:new` (callbacks `startElement`, `attribute`, `closeElement`, `text`, `comment`, `pi`, kept in `parser._call`), `parseSAX` (option `stripWhitespace`), `parser.unescape`, `parseDOM`; lenient like nmap's: it reports what it reads and does not check that elements nest |
 | `unicode` | `utf8_enc`, `utf8_dec`, `utf16_enc`, `utf16_dec`, `cp437_enc`, `cp437_dec`, `decode`, `encode`, `transcode`, `utf16to8`, `utf8to16`, `chardet` |
+| `smbauth` | `get_host_info_from_security_blob` (what a server's NTLM challenge says about it: names, domain, clock and Windows version) and `get_security_blob` for the first message only, which is always FeroProbe's own NTLM NEGOTIATE naming workstation FEROPROBE; the login functions raise an error, as FeroProbe's NSE layer does not log in over NTLM |
 | `target` | `ALLOW_NEW_TARGETS`, `add`: as in nmap, a script adds hosts to the scan only when you pass the `newtargets` script argument, and at most `max-newtargets` of them (0, the default, for no limit); see [Hosts that scripts add](#hosts-that-scripts-add) |
 | Lua's own | `string`, `table`, `math`, `coroutine`, `utf8`, `os` (the sandbox's), `_G` |
 
@@ -1744,7 +1745,7 @@ Any other module (`packet`, `msrpc`, `mssql`, ...)
 stops the script from loading with an error that names it; a function
 FeroProbe does not have in a module it offers (`nmap.new_dnet`,
 `openssl.encrypt`, ...) raises an error naming it when called. Of nmap
-7.94's 606 scripts, 341 load as they are. See
+7.94's 606 scripts, 346 load as they are. See
 [Brute-force scripts](#brute-force-scripts) for how a `brute` script must
 be chosen before it will run.
 

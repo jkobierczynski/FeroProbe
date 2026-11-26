@@ -7583,3 +7583,37 @@ end
         "caf\u{e9}.example.test rsa 2048 65537 2048 D005103A9D85"
     );
 }
+
+#[tokio::test]
+async fn nse_smbauth_reads_the_ntlm_challenge() {
+    let hex: String = ntlm_challenge(1_700_000_000)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let src = format!(
+        r#"
+local smbauth = require "smbauth"
+description = "test"
+categories = {{ "safe" }}
+prerule = function() return true end
+action = function()
+  local blob = ("{hex}"):gsub("..", function(h) return string.char(tonumber(h, 16)) end)
+  local i = smbauth.get_host_info_from_security_blob("junk" .. blob)
+  local _, neg = smbauth.get_security_blob(nil, nil, nil, nil, nil, nil, nil, 0x207)
+  local ok, err = pcall(smbauth.ntlm_create_hash, "x")
+  return table.concat({{ i.target_realm, i.netbios_computer_name, i.netbios_domain_name, i.fqdn,
+    i.dns_domain_name, i.dns_forest_name, i.timestamp // 10000000 - 11644473600,
+    i.os_major_version, i.os_minor_version, i.os_build,
+    tostring(neg:find("FEROPROBE", 1, true) ~= nil), tostring(smbauth.get_host_info_from_security_blob("x")),
+    tostring(ok), err:match("smbauth%.%S+ is not available") }}, " ")
+end
+"#
+    );
+    let scan = ScriptScan::new(vec![script("smba", &src)], ArgTable::default(), None).unwrap();
+    let r = scan.pre_scan().await;
+    assert_eq!(
+        r[0].output,
+        "LAB SRV01 LAB srv01.lab.local lab.local lab.local 1700000000 10 0 14393 true nil false \
+         smbauth.ntlm_create_hash is not available"
+    );
+}

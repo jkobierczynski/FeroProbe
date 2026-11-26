@@ -115,6 +115,7 @@ const NSE_MODULES: &[(&str, &str)] = &[
     ("shortport", include_str!("nse/shortport.lua")),
     ("slaxml", include_str!("nse/slaxml.lua")),
     ("smb", include_str!("nse/smb.lua")),
+    ("smbauth", include_str!("nse/smbauth.lua")),
     ("snmp", include_str!("nse/snmp.lua")),
     ("ssh2", include_str!("nse/ssh2.lua")),
     ("sslcert", include_str!("nse/sslcert.lua")),
