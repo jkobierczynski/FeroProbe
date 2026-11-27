@@ -203,14 +203,21 @@ pub fn escape_for_screen(text: &str) -> String {
 }
 
 /// A script result as the normal report shows it: `|_id: output` for one
-/// line; for more, `| ` before every line but the last, which gets `|_`.
+/// line; for more, `| ` before every line but the last, which gets `|_`
+/// (a final newline adds no empty line).
 /// `None` when the output is empty.
 pub fn normal_lines(r: &ScriptResult) -> Option<String> {
     let text = escape_for_screen(&r.output);
     if text.is_empty() {
         return None;
     }
-    let lines: Vec<&str> = text.split('\n').collect();
+    // One trailing newline ends the last line rather than adding an empty
+    // one, as in nmap.
+    let lines: Vec<&str> = text
+        .strip_suffix('\n')
+        .unwrap_or(&text)
+        .split('\n')
+        .collect();
     let mut out = String::new();
     for (i, line) in lines.iter().enumerate() {
         out.push_str(if i + 1 < lines.len() { "| " } else { "|_" });
@@ -283,6 +290,13 @@ mod tests {
             data: None,
         };
         assert_eq!(normal_lines(&r).unwrap(), "|_banner: SSH-2.0\\x0D\\x1B[2J");
+        // One final newline adds no line; a second one does, as in nmap.
+        let r = ScriptResult {
+            id: "body".into(),
+            output: "\nlo \n\n".into(),
+            data: None,
+        };
+        assert_eq!(normal_lines(&r).unwrap(), "| body: \n| lo \n|_");
         assert_eq!(bytes_to_text(b"ok\xff\xfe"), "ok\\xFF\\xFE");
         assert_eq!(bytes_to_text("é".as_bytes()), "é");
         assert_eq!(bytes_to_text_max(b"\xff\xff\xff\xff", 5), "\\xFF\\xFF");

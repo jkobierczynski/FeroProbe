@@ -316,3 +316,30 @@ fn nse_mongodb_rule_matches_its_queries() {
     reply[13] = 0x00;
     assert!(!content_match(&rule, &reply));
 }
+
+/// The ajp rule matches FeroProbe's AJP13 requests and not a custom User-Agent.
+#[test]
+fn nse_ajp_rule_matches_its_requests() {
+    let suricata = sids(&rules("feroprobe.rules"));
+    let rule = contents(&suricata[&9100041].1);
+    let ua = b"Mozilla/5.0 (compatible; FeroProbe Scripting Engine; https://github.com/jkobierczynski/FeroProbe)";
+    let request = |ua: &[u8]| {
+        let mut p =
+            b"\x02\x02\x00\x08HTTP/1.1\x00\x00\x01/\x00\x00\x09127.0.0.1\x00\xff\xff".to_vec();
+        p.extend_from_slice(b"\x00\x09127.0.0.1\x00\x1f\x49\x00\x00\x02");
+        p.extend_from_slice(b"\xa0\x0b\x00\x09localhost\x00\xa0\x0e");
+        p.extend_from_slice(&(ua.len() as u16).to_be_bytes());
+        p.extend_from_slice(ua);
+        p.extend_from_slice(b"\x00\xff");
+        let mut out = b"\x12\x34".to_vec();
+        out.extend_from_slice(&(p.len() as u16).to_be_bytes());
+        out.extend(p);
+        out
+    };
+    assert!(content_match(&rule, &request(ua)));
+    assert!(!content_match(&rule, &request(b"curl/8.5.0")));
+    // A body packet to the container is not a request.
+    let mut body = request(ua);
+    body[4] = 0x00;
+    assert!(!content_match(&rule, &body));
+}
