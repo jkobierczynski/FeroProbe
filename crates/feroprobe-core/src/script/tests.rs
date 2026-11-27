@@ -8574,3 +8574,169 @@ end
         ]
     );
 }
+
+/// One AFP directory entry for the stand-in server: a file (with a size)
+/// or a directory, with its Unix privileges and name.
+fn afp_entry(name: &str, node: u32, dir: bool, mode: u32) -> Vec<u8> {
+    let fixed = if dir { 34u16 } else { 42 };
+    let mut p = 2u32.to_be_bytes().to_vec(); // parent
+    p.extend(0i32.to_be_bytes()); // created 2000-01-01
+    p.extend(86400i32.to_be_bytes()); // modified a day later
+    p.extend(fixed.to_be_bytes()); // name offset
+    p.extend(node.to_be_bytes());
+    if !dir {
+        p.extend(1234u64.to_be_bytes());
+    }
+    p.extend(1000u32.to_be_bytes());
+    p.extend(100u32.to_be_bytes());
+    p.extend(mode.to_be_bytes());
+    p.extend(0u32.to_be_bytes()); // access rights
+    p.push(name.len() as u8);
+    p.extend_from_slice(name.as_bytes());
+    if p.len() % 2 == 1 {
+        p.push(0);
+    }
+    let mut e = ((p.len() + 4) as u16).to_be_bytes().to_vec();
+    e.push(if dir { 0x80 } else { 0 });
+    e.push(0);
+    e.extend(p);
+    e
+}
+
+#[tokio::test]
+async fn nse_afp_server_info_shares_and_listing() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    // FPGetSrvrInfo: offsets, flags (CopyFile, UUIDs), name "vm" padded to
+    // an even offset, then signature, addresses and UTF-8 name offsets.
+    let mut info = vec![0, 22, 0, 27, 0, 35, 0, 0, 0x04, 0x01, 2, b'v', b'm', 0];
+    info.extend([0, 52, 0, 68, 0, 0, 0, 75]);
+    info.extend(b"\x04Test\x01\x06AFP3.1\x01\x0fNo User Authent");
+    info.extend([0xab; 16]);
+    info.extend(b"\x01\x06\x01\x7f\x00\x00\x01\x00\x02vm");
+    let seen: Seen = Default::default();
+    let keep = seen.clone();
+    let port = tcp_server(move |mut s| {
+        let keep = keep.clone();
+        let info = info.clone();
+        async move {
+            let mut head = [0u8; 16];
+            while s.read_exact(&mut head).await.is_ok() {
+                let id = u16::from_be_bytes([head[2], head[3]]);
+                let len = u32::from_be_bytes([head[8], head[9], head[10], head[11]]) as usize;
+                let mut p = vec![0u8; len];
+                if s.read_exact(&mut p).await.is_err() {
+                    break;
+                }
+                let (code, data): (i32, Vec<u8>) = match (head[1], p.first()) {
+                    (3, _) => (0, info.clone()),
+                    (4, _) => (0, vec![]),
+                    (2, Some(16)) => (0, b"\0\0\0\0\x01\x00\x08LabShare".to_vec()),
+                    (2, Some(24)) => (0, vec![0, 0x20, 0, 1]),
+                    (2, Some(34)) => (0, b"\0\0\x10\0\x80\0\x87\x01\x03\x07".to_vec()),
+                    (2, Some(68)) => {
+                        let did = u32::from_be_bytes([p[4], p[5], p[6], p[7]]);
+                        let start = u32::from_be_bytes([p[14], p[15], p[16], p[17]]);
+                        let entries: Vec<Vec<u8>> = match (did, start) {
+                            (2, 1) => vec![
+                                afp_entry("readme.txt", 16, false, 0o100644),
+                                afp_entry("sub", 17, true, 0o40755),
+                            ],
+                            (17, 1) => vec![afp_entry("deep.txt", 18, false, 0o100600)],
+                            _ => vec![],
+                        };
+                        if entries.is_empty() {
+                            (-5018, vec![])
+                        } else {
+                            // The file and directory bitmaps, then the count.
+                            let mut d = vec![0x89, 0x4e, 0x81, 0x4e];
+                            d.extend((entries.len() as u16).to_be_bytes());
+                            for e in entries {
+                                d.extend(e);
+                            }
+                            (0, d)
+                        }
+                    }
+                    (2, _) => (0, vec![]),
+                    _ => break,
+                };
+                let what = match head[1] {
+                    2 => format!("command {}", p[0]),
+                    c => format!("dsi {c}"),
+                };
+                keep.lock().unwrap().push(format!("{id:#06x} {what}"));
+                let mut reply = vec![1, head[1]];
+                reply.extend(id.to_be_bytes());
+                reply.extend(code.to_be_bytes());
+                reply.extend((data.len() as u32).to_be_bytes());
+                reply.extend([0; 4]);
+                reply.extend(data);
+                let _ = s.write_all(&reply).await;
+            }
+        }
+    })
+    .await;
+    let src = r#"
+local afp = require "afp"
+local nmap = require "nmap"
+description = "test"
+categories = { "safe" }
+portrule = function() return true end
+action = function(host, port)
+  local s = nmap.new_socket()
+  assert(s:connect(host, port))
+  local info = afp.Proto:new({ socket = s }):fp_get_server_info()
+  s:close()
+  local r = info.result
+  local h = afp.Helper:new()
+  assert(h:OpenSession(host, port))
+  local okc, ec = h:Login("admin", "secret")
+  assert(h:Login())
+  local _, shares = h:ListShares()
+  local _, perms = h:GetSharePermissions(shares[1])
+  local _, list = h:Dir(shares[1], { max_depth = 2 })
+  local okd, ed = h:Dir("LabShare/../etc")
+  h:Logout()
+  h:CloseSession()
+  local l = list[1]
+  return table.concat({ tostring(info.status), r.server_name, r.machine_type, r.afp_versions[1],
+    r.uams[1], tostring(r.flags.CopyFile), tostring(r.flags.UUIDs), tostring(r.flags.Reconnect),
+    r.network_addresses[1], r.utf8_server_name, #r.server_signature, tostring(okc), ec,
+    table.concat(shares, ","), table.concat(perms, ";"), l[1].name, l[1].fsize, l[1].privs,
+    l[1].create, l[1].modify, l[2].name, l[2].type, l[2].privs, l[3][1].name, l[3][1].privs,
+    tostring(okd), ed }, "|")
+end
+"#;
+    let scan = ScriptScan::new(vec![script("afpt", src)], ArgTable::default(), None).unwrap();
+    let mut hosts = vec![host_with_services(&[(port, "afp")])];
+    scan.scan_hosts(&mut hosts).await;
+    assert_eq!(
+        hosts[0].ports[0].scripts[0].output,
+        "true|vm|Test|AFP3.1|No User Authent|true|true|false|127.0.0.1|vm|16|false|\
+         AFP logins are not supported by FeroProbe (guest only)|LabShare|\
+         Owner: Search,Read,Write;Group: Search,Read;Everyone: Search;User: Search,Read,Write;\
+         Options: IsOwner|readme.txt|1234|-rw-r--r--|2000-01-01T00:00:00|2000-01-02T00:00:00|\
+         sub|128|drwxr-xr-x|deep.txt|-rw-------|false|\
+         Paths outside a share are not supported by FeroProbe"
+    );
+    // Each connection's first request carries ID "FP"; the refused login
+    // and the ".." path sent nothing.
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![
+            "0x4650 dsi 3",
+            "0x4650 dsi 4",
+            "0x4651 command 18",
+            "0x4652 command 16",
+            "0x4653 command 24",
+            "0x4654 command 34",
+            "0x4655 command 2",
+            "0x4656 command 24",
+            "0x4657 command 68",
+            "0x4658 command 68",
+            "0x4659 command 68",
+            "0x465a command 68",
+            "0x465b command 2",
+            "0x465c command 20",
+        ]
+    );
+}

@@ -85,6 +85,7 @@ const SNMP_LIBRARY: &str = include_str!("snmp.lua");
 /// public API documentation (never from nselib). `require` loads one the
 /// first time a script asks for it, so scripts that never ask pay nothing.
 const NSE_MODULES: &[(&str, &str)] = &[
+    ("afp", include_str!("nse/afp.lua")),
     ("ajp", include_str!("nse/ajp.lua")),
     ("base32", include_str!("nse/base32.lua")),
     ("base64", include_str!("nse/base64.lua")),
