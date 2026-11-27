@@ -4328,6 +4328,21 @@ over anonymous TLS and over server-authenticated TLS), which nmap 7.94
 swaps
 T}
 T{
+\f[V]afp\f[R]
+T}@T{
+The Apple Filing Protocol over DSI (TCP 548): \f[V]Proto:new\f[R] and
+\f[V]fp_get_server_info\f[R] (flags, server name, machine type, AFP
+versions, UAMs, signature, network addresses, directory names, UTF-8
+name), and \f[V]Helper\f[R] with \f[V]OpenSession\f[R], \f[V]Login\f[R],
+\f[V]Logout\f[R], \f[V]CloseSession\f[R], \f[V]ListShares\f[R],
+\f[V]GetSharePermissions\f[R] and \f[V]Dir\f[R].
+Guest logins only: \f[V]Login\f[R] with a user name or password fails
+with \[dq]AFP logins are not supported by FeroProbe (guest only)\[dq]
+before anything is sent, so afp-brute finds nothing.
+\f[V]Dir\f[R] refuses a path with \f[V]..\f[R], so afp-path-vuln always
+reports NOT VULNERABLE
+T}
+T{
 \f[V]ajp\f[R]
 T}@T{
 Requests over the Apache JServ Protocol 1.3 (AJP13, Tomcat\[aq]s port
@@ -4394,7 +4409,7 @@ stops the script from loading with an error that names it; a function
 FeroProbe does not have in a module it offers (\f[V]nmap.new_dnet\f[R],
 \f[V]openssl.encrypt\f[R], ...)
 raises an error naming it when called.
-Of nmap 7.94\[aq]s 606 scripts, 387 load as they are.
+Of nmap 7.94\[aq]s 606 scripts, 392 load as they are.
 See Brute-force scripts for how a \f[V]brute\f[R] script must be chosen
 before it will run.
 .PP

@@ -189,9 +189,9 @@ function ls.end_listing(output)
   if #output.info > 0 then structured.info = output.info end
   if #output.errors > 0 then structured.errors = output.errors end
   if #lines == 0 then return nil end
-  while lines[#lines] == "" do lines[#lines] = nil end
-  for i, l in ipairs(lines) do lines[i] = l == "" and "" or ("  " .. l) end
-  return structured, "\n" .. table.concat(lines, "\n")
+  -- Unindented, each line (a volume's closing empty one too) ending in a
+  -- newline: the text nmap 7.94 prints (black-box, afp-ls on netatalk).
+  return structured, table.concat(lines, "\n") .. "\n"
 end
 
 return ls

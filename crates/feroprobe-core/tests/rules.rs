@@ -343,3 +343,32 @@ fn nse_ajp_rule_matches_its_requests() {
     body[4] = 0x00;
     assert!(!content_match(&rule, &body));
 }
+
+/// The afp rule matches the first DSI request of FeroProbe's sessions
+/// (GetStatus or OpenSession, request ID "FP") and not a reply or another ID.
+#[test]
+fn nse_afp_rule_matches_its_requests() {
+    let suricata = sids(&rules("feroprobe.rules"));
+    let rule = &suricata[&9100042].1;
+    let start = rule.find("pcre:\"/").unwrap() + 7;
+    let end = rule[start..].find("/s\"").unwrap() + start;
+    let pcre = regex::bytes::Regex::new(&format!("(?s-u){}", &rule[start..end])).unwrap();
+    // DSI header: flags, command, request ID, offset, length, reserved.
+    let get_status = b"\x00\x03FP\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00";
+    let open_session =
+        b"\x00\x04FP\x00\x00\x00\x00\x00\x00\x00\x06\x00\x00\x00\x00\x01\x04\x00\x00\x04\x00";
+    for pkt in [&get_status[..], &open_session[..]] {
+        assert!(content_match(&contents(rule), pkt));
+        assert!(pcre.is_match(pkt), "{pkt:02x?}");
+    }
+    let mut other = get_status.to_vec();
+    other[2] = 0x00;
+    assert!(!content_match(&contents(rule), &other));
+    let mut reply = get_status.to_vec();
+    reply[0] = 0x01;
+    assert!(!pcre.is_match(&reply));
+    // A later command (FPLogin in a DSICommand) is not the session start.
+    let mut command = get_status.to_vec();
+    command[1] = 0x02;
+    assert!(!pcre.is_match(&command));
+}

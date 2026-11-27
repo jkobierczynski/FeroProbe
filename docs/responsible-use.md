@@ -262,7 +262,10 @@ requests carry FeroProbe's User-Agent (rule 9100041) unless a script sets
 its own. It adds no credentials of its own and refuses requests that
 carry a user name, a password, an Authorization header or the `secret` or
 `remote_user` attribute, so it logs in nowhere; a Cookie header or query
-string that a script supplies is sent as given.
+string that a script supplies is sent as given. The `afp` module's first
+DSI request on each connection carries request ID `FP` (rule 9100042); it
+logs in as a guest only, so it never sends a password, and it lists only
+inside a share, never a path with `..`.
 
 ### Detection rules for defenders
 

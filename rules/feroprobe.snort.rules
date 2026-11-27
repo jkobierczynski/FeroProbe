@@ -149,3 +149,7 @@ alert tcp any any -> $HOME_NET any (msg:"FeroProbe MongoDB OP_QUERY from an NSE 
 # AJP13 (NSE ajp module): a FORWARD_REQUEST (magic 0x1234, type 2) whose
 # coded User-Agent header (0xA00E) is FeroProbe's.
 alert tcp any any -> $HOME_NET any (msg:"FeroProbe AJP13 request from an NSE script (User-Agent)"; flow:established,to_server; content:"|12 34|"; depth:2; content:"|02|"; offset:4; depth:1; content:"|A0 0E|"; distance:0; content:"FeroProbe Scripting Engine"; distance:2; within:60; classtype:attempted-recon; sid:9100041; rev:1;)
+
+# AFP (NSE afp module): the first DSI request on a connection, a
+# DSIGetStatus (3) or DSIOpenSession (4), carries request ID 0x4650 ("FP").
+alert tcp any any -> $HOME_NET any (msg:"FeroProbe AFP DSI session from an NSE script (request ID FP)"; flow:established,to_server; content:"|46 50|"; offset:2; depth:2; pcre:"/^\x00[\x03\x04]\x46\x50/s"; classtype:attempted-recon; sid:9100042; rev:1;)
