@@ -372,3 +372,27 @@ fn nse_afp_rule_matches_its_requests() {
     command[1] = 0x02;
     assert!(!pcre.is_match(&command));
 }
+
+/// The dnssd rule matches FeroProbe's unicast mDNS queries (with or
+/// without RD), and not another ID or a responder's answer.
+#[test]
+fn nse_dnssd_rule_matches_its_queries() {
+    let suricata = sids(&rules("feroprobe.rules"));
+    let rule = &suricata[&9100043].1;
+    let start = rule.find("pcre:\"/").unwrap() + 7;
+    let end = rule[start..].find("/s\"").unwrap() + start;
+    let pcre = regex::bytes::Regex::new(&format!("(?s-u){}", &rule[start..end])).unwrap();
+    let q = |flags: u8| -> Vec<u8> {
+        let mut p = vec![b'F', b'P', flags, 0, 0, 1, 0, 0, 0, 0, 0, 0];
+        p.extend_from_slice(b"\x09_services\x07_dns-sd\x04_udp\x05local\x00\x00\x0c\x00\x01");
+        p
+    };
+    for pkt in [q(1), q(0)] {
+        assert!(content_match(&contents(rule), &pkt));
+        assert!(pcre.is_match(&pkt), "{pkt:02x?}");
+    }
+    let mut other = q(1);
+    other[0] = 0;
+    assert!(!content_match(&contents(rule), &other));
+    assert!(!pcre.is_match(&q(0x84)));
+}

@@ -160,3 +160,6 @@ alert tcp any any -> $HOME_NET any (msg:"FeroProbe AJP13 request from an NSE scr
 # AFP (NSE afp module): the first DSI request on a connection, a
 # DSIGetStatus (3) or DSIOpenSession (4), carries request ID 0x4650 ("FP").
 alert tcp any any -> $HOME_NET any (msg:"FeroProbe AFP DSI session from an NSE script (request ID FP)"; flow:established,to_server; content:"|46 50|"; offset:2; depth:2; pcre:"/^\x00[\x03\x04]\x46\x50/s"; classtype:attempted-recon; metadata:tool FeroProbe; sid:9100042; rev:1;)
+# DNS-SD (NSE dnssd module, dns-service-discovery): unicast mDNS queries
+# to UDP 5353 with transaction ID 0x4650 ("FP"), one question.
+alert udp any any -> $HOME_NET 5353 (msg:"FeroProbe DNS-SD query from an NSE script (transaction ID FP)"; content:"FP"; depth:2; pcre:"/^FP[\x00\x01]\x00\x00\x01\x00\x00\x00\x00\x00\x00/s"; classtype:attempted-recon; metadata:tool FeroProbe; sid:9100043; rev:1;)

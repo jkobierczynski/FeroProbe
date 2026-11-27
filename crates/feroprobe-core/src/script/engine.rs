@@ -96,6 +96,7 @@ const NSE_MODULES: &[(&str, &str)] = &[
     ("datafiles", include_str!("nse/datafiles.lua")),
     ("datetime", include_str!("nse/datetime.lua")),
     ("dns", include_str!("nse/dns.lua")),
+    ("dnssd", include_str!("nse/dnssd.lua")),
     ("formulas", include_str!("nse/formulas.lua")),
     ("ftp", include_str!("nse/ftp.lua")),
     ("geoip", include_str!("nse/geoip.lua")),
