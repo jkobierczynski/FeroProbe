@@ -140,7 +140,7 @@ can tell FeroProbe traffic apart from other traffic. The marks are:
   IKE_SA_INIT to 500 and 4500 has initiator SPI `FeroProb` and nonce
   `FeroProbeIKEv2NonceFeroProbeIKE2` (9100028); the L2TP SCCRQ comes from
   the host `feroprobe`, vendor `FeroProbe` (9100029); the DNS-SD query to
-  5353 and the IAX2 POKE carry ID `FP` (9100030, 9100031; weak 2-byte
+  5353 (also `-sU`'s payload for that port) and the IAX2 POKE carry ID `FP` (9100030, 9100031; weak 2-byte
   marks, as for the NetBIOS query). Older probes carry
   marks too (ONC RPC transaction ID `FPRO`, PPTP host `feroprobe` and vendor
   `FeroProbe`, OpenVPN session ID `FEROPROB`, MQTT client `feroprobe`,
@@ -265,7 +265,9 @@ carry a user name, a password, an Authorization header or the `secret` or
 string that a script supplies is sent as given. The `afp` module's first
 DSI request on each connection carries request ID `FP` (rule 9100042); it
 logs in as a guest only, so it never sends a password, and it lists only
-inside a share, never a path with `..`.
+inside a share, never a path with `..`. The `dnssd` module's mDNS queries
+carry transaction ID `FP` (rule 9100043) and go only to the scanned host;
+it sends no multicast query, so the broadcast DNS-SD scripts do nothing.
 
 ### Detection rules for defenders
 

@@ -35,8 +35,12 @@ use crate::timing::pace;
 /// A payload likely to make the service on `port` reply, or empty.
 pub fn payload_for(port: u16) -> &'static [u8] {
     match port {
+        // mDNS: a DNS-SD service type list query (RFC 6763 9), the -sV
+        // probe (transaction ID "FP", IDS rule 9100030); a responder
+        // ignores the root query below.
+        5353 => &MDNS_SERVICES_QUERY,
         // DNS: standard query for the root NS records.
-        53 | 5353 => &[
+        53 => &[
             0x13, 0x37, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
             0x02, 0x00, 0x01,
         ],
@@ -59,6 +63,11 @@ pub fn payload_for(port: u16) -> &'static [u8] {
         _ => crate::packet::UDP_MARKER,
     }
 }
+
+/// DNS-SD query: ID "FP", one question, PTR
+/// _services._dns-sd._udp.local, class IN.
+const MDNS_SERVICES_QUERY: [u8; 46] =
+    *b"FP\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x09_services\x07_dns-sd\x04_udp\x05local\x00\x00\x0c\x00\x01";
 
 /// NetBIOS NODE STATUS request: header (ID "FP", one question), the name
 /// "*" padded with NULs, first-level encoded ("CK" then "AA" x 15), type

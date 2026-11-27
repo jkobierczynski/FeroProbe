@@ -8740,3 +8740,147 @@ end
         ]
     );
 }
+
+/// A DNS name in wire form, uncompressed.
+fn dns_name(name: &str) -> Vec<u8> {
+    let mut v = Vec::new();
+    for label in name.split('.').filter(|l| !l.is_empty()) {
+        v.push(label.len() as u8);
+        v.extend_from_slice(label.as_bytes());
+    }
+    v.push(0);
+    v
+}
+
+/// One resource record of class IN.
+fn dns_rr(name: &str, dtype: u16, rdata: &[u8]) -> Vec<u8> {
+    let mut v = dns_name(name);
+    v.extend(dtype.to_be_bytes());
+    v.extend(1u16.to_be_bytes());
+    v.extend(120u32.to_be_bytes());
+    v.extend((rdata.len() as u16).to_be_bytes());
+    v.extend_from_slice(rdata);
+    v
+}
+
+#[tokio::test]
+async fn nse_dnssd_lists_services_from_unicast_replies() {
+    let sock = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let port = sock.local_addr().unwrap().port();
+    let seen: Seen = Default::default();
+    let keep = seen.clone();
+    tokio::spawn(async move {
+        let mut buf = [0u8; 1500];
+        while let Ok((n, peer)) = sock.recv_from(&mut buf).await {
+            let q = &buf[..n];
+            // The question name, as dotted text.
+            let (mut pos, mut labels) = (12, Vec::new());
+            while q[pos] != 0 {
+                let l = q[pos] as usize;
+                labels.push(String::from_utf8_lossy(&q[pos + 1..pos + 1 + l]).into_owned());
+                pos += 1 + l;
+            }
+            let name = labels.join(".");
+            keep.lock()
+                .unwrap()
+                .push(format!("{:02x?} {name}", &q[..4]));
+            let srv = |port: u16, target: &str| {
+                let mut r = vec![0, 0, 0, 0];
+                r.extend(port.to_be_bytes());
+                r.extend(dns_name(target));
+                r
+            };
+            let (answers, add): (Vec<Vec<u8>>, Vec<Vec<u8>>) = match name.as_str() {
+                "_services._dns-sd._udp.local" => (
+                    [
+                        "_http._tcp.local",
+                        "_device-info._tcp.local",
+                        "_http._tcp.local",
+                        "_ipp._tcp.local",
+                    ]
+                    .iter()
+                    .map(|t| dns_rr(&name, 12, &dns_name(t)))
+                    .collect(),
+                    vec![],
+                ),
+                "_http._tcp.local" => (
+                    vec![dns_rr(&name, 12, &dns_name("Web._http._tcp.local"))],
+                    vec![
+                        dns_rr("Web._http._tcp.local", 16, b"\x06path=/\x00"),
+                        dns_rr("Web._http._tcp.local", 33, &srv(8080, "h.local")),
+                        dns_rr(
+                            "h.local",
+                            28,
+                            &[0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+                        ),
+                        dns_rr("h.local", 1, &[192, 0, 2, 7]),
+                        dns_rr("h.local", 1, &[192, 0, 2, 8]),
+                        dns_rr("Two._http._tcp.local", 33, &srv(80, "h.local")),
+                        dns_rr("Two._http._tcp.local", 16, b"\x03x=1"),
+                    ],
+                ),
+                "_device-info._tcp.local" => (
+                    vec![dns_rr(
+                        "Web._device-info._tcp.local",
+                        16,
+                        b"\x0cmodel=Xserve",
+                    )],
+                    vec![],
+                ),
+                // A type with no SRV record: left out.
+                _ => (
+                    vec![dns_rr(&name, 12, &dns_name("X._ipp._tcp.local"))],
+                    vec![],
+                ),
+            };
+            let mut r = q[..2].to_vec();
+            r.extend([0x84, 0, 0, 0]);
+            r.extend((answers.len() as u16).to_be_bytes());
+            r.extend([0, 0]);
+            r.extend((add.len() as u16).to_be_bytes());
+            for rr in answers.iter().chain(&add) {
+                r.extend(rr);
+            }
+            let _ = sock.send_to(&r, peer).await;
+        }
+    });
+    let src = r#"
+local dnssd = require "dnssd"
+description = "test"
+categories = { "safe" }
+portrule = function() return true end
+action = function(host, port)
+  local h = dnssd.Helper:new(host, port)
+  h:setTimeout(2000)
+  local ok, r = h:queryServices()
+  local o = { tostring(ok) }
+  for _, e in ipairs(r) do o[#o + 1] = e.name .. ": " .. table.concat(e, "; ") end
+  local m = dnssd.Helper:new()
+  m:setMulticast(true)
+  local okm, em = m:queryServices()
+  o[#o + 1] = tostring(okm) .. " " .. em
+  return table.concat(o, "\n")
+end
+"#;
+    let scan = ScriptScan::new(vec![script("dnssdt", src)], ArgTable::default(), None).unwrap();
+    let mut hosts = vec![host_with_services(&[(port, "zeroconf")])];
+    hosts[0].ports[0].protocol = Protocol::Udp;
+    scan.scan_hosts(&mut hosts).await;
+    assert_eq!(
+        hosts[0].ports[0].scripts[0].output,
+        "true\n8080/tcp http: path=/; x=1; Address=192.0.2.7 2001:db8::1\n\
+         Device Information: model=Xserve\n\
+         false Multicast DNS-SD queries are not supported by FeroProbe (outside the scan's scope)"
+    );
+    // One query per service type (the repeated one asked once), each with
+    // transaction ID "FP" and recursion desired.
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![
+            "[46, 50, 01, 00] _services._dns-sd._udp.local",
+            "[46, 50, 01, 00] _http._tcp.local",
+            "[46, 50, 01, 00] _device-info._tcp.local",
+            "[46, 50, 01, 00] _ipp._tcp.local",
+        ]
+    );
+}
